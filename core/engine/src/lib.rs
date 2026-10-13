@@ -157,6 +157,7 @@ fn slots_of(cmd: &Command) -> Option<Vec<Slot>> {
         Command::SetSwatches { .. } => Some(vec![Slot::Page("swatches")]),
         Command::SetStyles { .. } => Some(vec![Slot::Page("styles")]),
         Command::SetRegions { .. } => Some(vec![Slot::Page("regions")]),
+        Command::SetComps { .. } => Some(vec![Slot::Page("comps")]),
         Command::SetSelection { .. } => Some(vec![Slot::Page("selection")]),
         Command::Batch(cmds) => {
             let mut all = Vec::new();
@@ -436,6 +437,9 @@ impl Session {
             // Nor the regions kept by name: a region put away is not on
             // the page any more than a colour in the palette is.
             | Command::SetRegions { .. }
+            // Nor the states of the page kept by name, until one is put
+            // back — which is commands to the layers it names.
+            | Command::SetComps { .. }
             // Nor the looks kept by name, until one is given to a layer.
             | Command::SetStyles { .. }
             // Nor what is picked out of the page. The marching ants are
@@ -853,6 +857,13 @@ impl Session {
                     "Forget the kept regions".into()
                 } else {
                     format!("{} regions kept", regions.len())
+                }
+            }
+            Command::SetComps { comps } => {
+                if comps.is_empty() {
+                    "Forget the layer comps".into()
+                } else {
+                    format!("{} layer comps kept", comps.len())
                 }
             }
             Command::ResizeCanvas { width, height, .. } => {
@@ -5732,6 +5743,153 @@ impl Session {
         )
     }
 
+    /// Keep the state of the page under `name`: which layers are
+    /// showing, where, and how strongly. A comp of that name already
+    /// kept is brought up to date rather than kept twice.
+    pub fn keep_comp(&mut self, name: &str) -> Result<(), EngineError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::BadCommand("a comp needs a name".into()));
+        }
+        let root = self.doc.root();
+        let mut layers: Vec<chitrakar_doc::CompLayer> = self
+            .doc
+            .nodes()
+            .filter(|(id, _)| **id != root)
+            .map(|(id, n)| chitrakar_doc::CompLayer {
+                id: *id,
+                visible: n.visible,
+                opacity: n.opacity,
+                transform: n.transform,
+            })
+            .collect();
+        // In order, so the same page kept twice is the same comp twice.
+        layers.sort_by_key(|l| l.id.0);
+        let mut comps = self.doc.comps().to_vec();
+        let kept = chitrakar_doc::LayerComp {
+            name: name.to_string(),
+            layers,
+        };
+        let label = match comps.iter_mut().find(|c| c.name == name) {
+            Some(had) => {
+                *had = kept;
+                format!("Update the comp {name}")
+            }
+            None => {
+                comps.push(kept);
+                format!("Keep the comp {name}")
+            }
+        };
+        self.apply_labeled(Command::SetComps { comps }, Some(label))
+    }
+
+    /// Put the page back as the comp `name` kept it, in one entry: each
+    /// layer it knows shown or hidden, placed and faded as it was. A
+    /// layer added since is left as it is, and one taken away is passed
+    /// over. Nothing to change is no entry at all.
+    pub fn apply_comp(&mut self, name: &str) -> Result<bool, EngineError> {
+        let comp = self
+            .doc
+            .comps()
+            .iter()
+            .find(|c| c.name == name)
+            .cloned()
+            .ok_or_else(|| EngineError::BadCommand(format!("no comp called {name}")))?;
+        let mut cmds = Vec::new();
+        for kept in &comp.layers {
+            let Ok(node) = self.doc.node(kept.id) else {
+                continue;
+            };
+            if node.visible != kept.visible {
+                cmds.push(Command::SetVisible {
+                    id: kept.id,
+                    visible: kept.visible,
+                });
+            }
+            if node.opacity != kept.opacity {
+                cmds.push(Command::SetOpacity {
+                    id: kept.id,
+                    opacity: kept.opacity,
+                });
+            }
+            if node.transform != kept.transform {
+                cmds.push(Command::SetTransform {
+                    id: kept.id,
+                    transform: kept.transform,
+                });
+            }
+        }
+        if cmds.is_empty() {
+            return Ok(false);
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Show the comp {name}")))?;
+        Ok(true)
+    }
+
+    /// Whether the page is, for every layer the comp knows that is still
+    /// here, what the comp kept — which is the comp that is showing.
+    pub fn comp_showing(&self, name: &str) -> bool {
+        self.doc
+            .comps()
+            .iter()
+            .find(|c| c.name == name)
+            .is_some_and(|comp| {
+                comp.layers.iter().all(|kept| match self.doc.node(kept.id) {
+                    Ok(n) => {
+                        n.visible == kept.visible
+                            && n.opacity == kept.opacity
+                            && n.transform == kept.transform
+                    }
+                    Err(_) => true,
+                })
+            })
+    }
+
+    /// Take a kept comp out of the document. The page stays as it is.
+    pub fn forget_comp(&mut self, name: &str) -> Result<(), EngineError> {
+        let comps: Vec<_> = self
+            .doc
+            .comps()
+            .iter()
+            .filter(|c| c.name != name)
+            .cloned()
+            .collect();
+        if comps.len() == self.doc.comps().len() {
+            return Err(EngineError::BadCommand(format!("no comp called {name}")));
+        }
+        self.apply_labeled(
+            Command::SetComps { comps },
+            Some(format!("Forget the comp {name}")),
+        )
+    }
+
+    /// Call a kept comp by another name — refused where that name is
+    /// already a comp's, since a name is how one is found.
+    pub fn rename_comp(&mut self, from: &str, to: &str) -> Result<(), EngineError> {
+        let to = to.trim();
+        if to.is_empty() {
+            return Err(EngineError::BadCommand("a comp needs a name".into()));
+        }
+        if from == to {
+            return Ok(());
+        }
+        if self.doc.comps().iter().any(|c| c.name == to) {
+            return Err(EngineError::BadCommand(format!(
+                "there is already a comp called {to}"
+            )));
+        }
+        let mut comps = self.doc.comps().to_vec();
+        let comp = comps
+            .iter_mut()
+            .find(|c| c.name == from)
+            .ok_or_else(|| EngineError::BadCommand(format!("no comp called {from}")))?;
+        comp.name = to.to_string();
+        self.apply_labeled(
+            Command::SetComps { comps },
+            Some(format!("Call the comp {from} {to}")),
+        )
+    }
+
     /// Give that look to every layer named, in one entry.
     ///
     /// A layer takes what it can carry: a shape takes the fill, the
@@ -8050,6 +8208,103 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A comp keeps where each layer was, shown or not and how strongly,
+    /// and puts the page back that way in one step; a layer added since
+    /// is left alone, one taken away is passed over, and a page turned
+    /// after keeping a comp stays turned when the comp is put back.
+    #[test]
+    fn a_comp_puts_the_page_back_as_it_was_kept() {
+        let mut session = Session::new(100, 80, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 20.0, 10.0);
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        session.keep_comp("first").unwrap();
+        assert!(session.comp_showing("first"));
+        // Another arrangement: a moved and faded, b hidden.
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(40.0, 30.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetOpacity {
+                id: a,
+                opacity: 0.4,
+            })
+            .unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: b,
+                visible: false,
+            })
+            .unwrap();
+        session.keep_comp("second").unwrap();
+        assert!(!session.comp_showing("first") && session.comp_showing("second"));
+        // And a layer arriving after both.
+        let c = add_rect(&mut session, "c", 5.0, 5.0);
+        session
+            .apply(Command::SetTransform {
+                id: c,
+                transform: Transform::translation(70.0, 60.0),
+            })
+            .unwrap();
+
+        let entries = session.history_labels().0.len();
+        assert!(session.apply_comp("first").unwrap());
+        assert_eq!(session.history_labels().0.len(), entries + 1, "one step");
+        let doc = session.document();
+        assert_eq!(doc.node(a).unwrap().transform, Transform::default());
+        assert_eq!(doc.node(a).unwrap().opacity, 1.0);
+        assert!(doc.node(b).unwrap().visible);
+        assert_eq!(
+            doc.node(c).unwrap().transform,
+            Transform::translation(70.0, 60.0),
+            "a layer the comp never knew is left where it is"
+        );
+        assert!(session.comp_showing("first"));
+        assert!(
+            !session.apply_comp("first").unwrap(),
+            "already showing: no step"
+        );
+        session.undo().unwrap();
+        assert!(
+            session.comp_showing("second"),
+            "one undo, and the other comp is back"
+        );
+
+        // A layer taken away is passed over.
+        session.apply(Command::RemoveNode { id: b }).unwrap();
+        assert!(session.apply_comp("first").unwrap());
+        assert_eq!(session.document().node(a).unwrap().opacity, 1.0);
+
+        // A quarter turn after keeping: put back, the layers sit where the
+        // turned page has them, not where the unturned one did.
+        session.apply_comp("second").unwrap();
+        session.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
+        let turned = session.document().node(a).unwrap().transform;
+        session.apply_comp("first").unwrap();
+        session.apply_comp("second").unwrap();
+        assert_eq!(
+            session.document().node(a).unwrap().transform,
+            turned,
+            "the comp turned with the page"
+        );
+
+        // Renamed, forgotten, and a name is not taken twice.
+        session.rename_comp("first", "opening").unwrap();
+        assert!(session.rename_comp("second", "opening").is_err());
+        assert!(session.apply_comp("first").is_err());
+        session.forget_comp("opening").unwrap();
+        assert_eq!(session.document().comps().len(), 1);
+        assert!(session.keep_comp("  ").is_err());
+
+        // A file written before comps reads with none.
+        let mut json: serde_json::Value = serde_json::to_value(session.document()).unwrap();
+        json.as_object_mut().unwrap().remove("comps");
+        let back: chitrakar_doc::Document = serde_json::from_value(json).unwrap();
+        assert!(back.comps().is_empty());
     }
 
     #[test]

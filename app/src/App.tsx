@@ -1404,6 +1404,10 @@ export function App() {
    * expensive thing on a page — a sky wanded out between branches — and
    * the only place to put one used to be the layer it was handed to. */
   const [kept, setKept] = useState<string[]>([]);
+  /** The states of the page kept by name, and whether each is the one
+   * showing now — read back from the engine on every refresh, since any
+   * edit can make the page stop being one or start being one again. */
+  const [comps, setComps] = useState<{ name: string; layers: number; showing: boolean }[]>([]);
   /** A wash over what is *not* picked, for when the ants cannot say
    * enough: a softened edge is neither in nor out, an inverted region
    * is everything but its rings, and a hundred rings is a thicket. Kept
@@ -1489,6 +1493,11 @@ export function App() {
         setKept(JSON.parse(s.kept_regions_json()) as string[]);
       } catch {
         setKept([]);
+      }
+      try {
+        setComps(JSON.parse(s.comps_json()));
+      } catch {
+        setComps([]);
       }
       // Read back rather than remembered: a layer being looked at on
       // its own can go — by an undo as readily as by a delete — and the
@@ -1720,6 +1729,48 @@ export function App() {
    * can be picked up again — and put back exactly as it was kept,
    * softness and inside-out included, rather than as an outline that
    * lost both. */
+  /** Keep the page as it is under a name: which layers show, where, and
+   * how strongly. */
+  const keepComp = () => {
+    if (!session) return;
+    const name = window.prompt("Keep the page as it is now as:", `Comp ${comps.length + 1}`);
+    if (name === null) return;
+    try {
+      session.keep_comp(name);
+      refresh(session);
+    } catch (err) {
+      alert(`Comp: ${err}`);
+    }
+  };
+  /** A comp chip pressed: shown; with shift, brought up to the page as
+   * it is; with ctrl, forgotten. */
+  const onComp = (name: string, e: React.MouseEvent) => {
+    if (!session) return;
+    try {
+      if (e.ctrlKey || e.metaKey) {
+        session.forget_comp(name);
+      } else if (e.shiftKey) {
+        session.keep_comp(name);
+      } else {
+        session.apply_comp(name);
+      }
+      refresh(session);
+    } catch (err) {
+      alert(`Comp: ${err}`);
+    }
+  };
+  const renameComp = (name: string) => {
+    if (!session) return;
+    const to = window.prompt("Call the comp:", name);
+    if (to === null || to === name) return;
+    try {
+      session.rename_comp(name, to);
+      refresh(session);
+    } catch (err) {
+      alert(`Comp: ${err}`);
+    }
+  };
+
   const keepSelection = () => {
     if (!session) return;
     const name = window.prompt("Keep what is picked out as:", "");
@@ -9817,6 +9868,31 @@ export function App() {
               aria-label="Delete selected layer"
             >
               <Icon name="trash" size={16} />
+            </button>
+          </div>
+          {/* Layer comps: states of the page kept by name. The one the
+              page is showing now is marked; a press shows another. */}
+          <div className="palette comps" role="group" aria-label="Layer comps">
+            {comps.map((c) => (
+              <button
+                key={c.name}
+                className={`comp-chip${c.showing ? " active" : ""}`}
+                aria-pressed={c.showing}
+                aria-label={`Comp ${c.name}`}
+                title={`${c.name} — shift-click keeps the page as it is now under this name, double-click renames, ctrl-click forgets`}
+                onClick={(e) => onComp(c.name, e)}
+                onDoubleClick={() => renameComp(c.name)}
+              >
+                {c.name}
+              </button>
+            ))}
+            <button
+              className="swatch add"
+              onClick={keepComp}
+              title="Keep the page as it is now: which layers show, where, and how strongly"
+              aria-label="Keep a layer comp"
+            >
+              +
             </button>
           </div>
           {selectionSet.length >= 1 && (

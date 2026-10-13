@@ -1122,6 +1122,43 @@ impl WasmSession {
         self.inner.apply_style(name, &ids).map_err(to_js)
     }
 
+    /// The comps kept by name, as JSON: each one's name, how many layers
+    /// it knows, and whether the page is showing it now.
+    pub fn comps_json(&self) -> String {
+        let list: Vec<serde_json::Value> = self
+            .inner
+            .document()
+            .comps()
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "layers": c.layers.len(),
+                    "showing": self.inner.comp_showing(&c.name),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(list).to_string()
+    }
+
+    /// Keep the page as it is now under `name`.
+    pub fn keep_comp(&mut self, name: &str) -> Result<(), JsError> {
+        self.inner.keep_comp(name).map_err(to_js)
+    }
+
+    /// Put the page back as `name` kept it; false where nothing changed.
+    pub fn apply_comp(&mut self, name: &str) -> Result<bool, JsError> {
+        self.inner.apply_comp(name).map_err(to_js)
+    }
+
+    pub fn forget_comp(&mut self, name: &str) -> Result<(), JsError> {
+        self.inner.forget_comp(name).map_err(to_js)
+    }
+
+    pub fn rename_comp(&mut self, from: &str, to: &str) -> Result<(), JsError> {
+        self.inner.rename_comp(from, to).map_err(to_js)
+    }
+
     /// Take a kept style out of the document.
     pub fn forget_style(&mut self, name: &str) -> Result<(), JsError> {
         self.inner.forget_style(name).map_err(to_js)

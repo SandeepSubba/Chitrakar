@@ -7563,6 +7563,84 @@ assert(
   assert(near(await white(), [0xec, 0x8a, 0x00]), "undo puts the warming glass back");
 }
 
+// 9o15. Layer comps: the page kept as it is, by name, and put back with
+// a press. One arrangement with the bar on the left, another with it
+// moved, faded and the square hidden; each comes back in one step, the
+// one showing is marked, and a forgotten one is gone.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#2040c0", 20, 20, 120, 80);
+  await rect("#c04020", 200, 150, 260, 210);
+  await pickTool("Move");
+  const chips = () => page.locator('[aria-label="Layer comps"] .comp-chip');
+  promptAnswer = "Left";
+  await page.locator('[aria-label="Keep a layer comp"]').click();
+  await page.waitForTimeout(250);
+  assert((await chips().count()) === 1 && (await chips().first().textContent()) === "Left", "a comp kept by the name given");
+  assert((await chips().first().getAttribute("aria-pressed")) === "true", "and marked as the one showing");
+
+  // Another arrangement: the bar moved over and faded, the square hidden.
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
+  await page.waitForTimeout(150);
+  const x = page.locator('input[aria-label="X position"]');
+  await x.fill("250");
+  await x.press("Enter");
+  await page.waitForTimeout(200);
+  const eye = page.locator(".panel ul li", { hasText: "Rect 2" }).locator("button.visibility");
+  await eye.click();
+  await page.waitForTimeout(200);
+  const blue = async (px, py) => {
+    const p = await canvasPixel(px, py);
+    return p[2] > 150 && p[0] < 80;
+  };
+  const red = async (px, py) => {
+    const p = await canvasPixel(px, py);
+    return p[0] > 150 && p[2] < 80;
+  };
+  assert((await blue(300, 50)) && !(await blue(70, 50)) && !(await red(230, 180)), "the page rearranged");
+  assert((await chips().first().getAttribute("aria-pressed")) === "false", "and no longer the comp it was");
+  promptAnswer = "Right";
+  await page.locator('[aria-label="Keep a layer comp"]').click();
+  await page.waitForTimeout(250);
+
+  await chips().filter({ hasText: "Left" }).click();
+  await page.waitForTimeout(300);
+  assert(
+    (await blue(70, 50)) && !(await blue(300, 50)) && (await red(230, 180)),
+    "Left puts the bar back and shows the square again",
+  );
+  assert(
+    (await chips().filter({ hasText: "Left" }).getAttribute("aria-pressed")) === "true" &&
+      (await chips().filter({ hasText: "Right" }).getAttribute("aria-pressed")) === "false",
+    "and Left is the one marked",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await blue(300, 50)) && !(await red(230, 180)) &&
+      (await chips().filter({ hasText: "Right" }).getAttribute("aria-pressed")) === "true",
+    "one undo and it is the other comp again",
+  );
+
+  // Forgotten with ctrl-click; the page stays as it is.
+  await chips().filter({ hasText: "Left" }).click({ modifiers: [MOD] });
+  await page.waitForTimeout(250);
+  assert((await chips().count()) === 1 && (await blue(300, 50)), "a forgotten comp is gone, and the page untouched");
+  promptAnswer = "";
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

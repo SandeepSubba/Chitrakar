@@ -1428,6 +1428,32 @@ without reading anything else.*
   - **How it was found.** By hiding the other layers of the fixture one
     at a time: the group alone agreed, and the difference appeared with
     the clone layer whose heal lifts from the shadow.
+- **Layer comps.** States of the page kept by name, Photoshop's layer
+  comps: which layers are showing, where, and how strongly. Three
+  versions of a poster, or a before and an after, live in one file a
+  click apart (`Document::comps`, `Command::SetComps`, `LayerComp`;
+  additive, so an older file reads with none).
+  - **What a comp holds.** Where each layer was, not the layers, so
+    nothing is copied and an edit to a layer's content shows in every
+    comp. A layer added since is left alone; one taken away is passed
+    over.
+  - **Putting one back** is one step (`Session::apply_comp`, a `Batch`
+    of only what differs). Where nothing differs it is no step at all.
+    `comp_showing` says which comp the page is now, and the chip for it
+    is marked.
+  - **A page turned, mirrored, rescaled or resized after keeping a
+    comp** carries the comp's top-level transforms with it (`map_page`).
+    Otherwise putting the comp back would turn every layer back and
+    leave the page turned (tested, and caught with the carry taken
+    out).
+  - **The panel.** A row of chips under the Layers header: a press
+    shows a comp, shift-click keeps the page as it is under that name,
+    double-click renames (a name already used is refused), ctrl-click
+    forgets, and "+" keeps a new one.
+  - **Tests.** `a_comp_puts_the_page_back_as_it_was_kept`, and smoke
+    9o15: two arrangements, each back in a press, the mark following,
+    one undo, ctrl-click forgetting. Without visibility in the comp,
+    the hidden square stays hidden and the block catches it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

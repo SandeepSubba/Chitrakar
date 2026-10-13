@@ -3460,6 +3460,27 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 feather: 2.5,
             })),
         },
+        // A comp keeping the group hidden and the shape moved and faded,
+        // so applying one is asked of the layers it names.
+        Command::SetComps {
+            comps: vec![crate::LayerComp {
+                name: "quiet".into(),
+                layers: vec![
+                    crate::CompLayer {
+                        id: f.group,
+                        visible: false,
+                        opacity: 1.0,
+                        transform: Transform::default(),
+                    },
+                    crate::CompLayer {
+                        id: f.under,
+                        visible: true,
+                        opacity: 0.5,
+                        transform: Transform::translation(3.0, 2.0),
+                    },
+                ],
+            }],
+        },
         Command::SetRegions {
             regions: vec![crate::KeptRegion {
                 name: "the sky".into(),
@@ -3671,6 +3692,7 @@ pub fn variant_name(cmd: &Command) -> &'static str {
         Command::SetStyles { .. } => "SetStyles",
         Command::SetSelection { .. } => "SetSelection",
         Command::SetRegions { .. } => "SetRegions",
+        Command::SetComps { .. } => "SetComps",
         Command::ResizeCanvas { .. } => "ResizeCanvas",
         Command::TurnCanvas { .. } => "TurnCanvas",
         Command::ScaleCanvas { .. } => "ScaleCanvas",
@@ -3711,6 +3733,7 @@ pub const EVERY_VARIANT: &[&str] = &[
     "SetStyles",
     "SetSelection",
     "SetRegions",
+    "SetComps",
     "ResizeCanvas",
     "TurnCanvas",
     "ScaleCanvas",

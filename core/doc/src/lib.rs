@@ -242,6 +242,10 @@ pub struct Document {
     /// conversion. Additive, like the guides and the swatches.
     #[serde(default)]
     regions: Vec<KeptRegion>,
+    /// States of the page kept by name ([`LayerComp`]). Not artwork, and
+    /// additive like the regions.
+    #[serde(default)]
+    comps: Vec<LayerComp>,
 }
 
 /// Which of a document's colours a command can have left disagreeing
@@ -281,6 +285,31 @@ fn settle_color(
 pub struct KeptRegion {
     pub name: String,
     pub mask: Mask,
+}
+
+/// A state of the page kept by name: which layers were showing, where,
+/// and how strongly — Photoshop's layer comps. Three versions of a
+/// poster, the same artwork laid out for a phone and for a wall, a
+/// before and an after: one file, and each a click away, rather than
+/// three files that drift apart.
+///
+/// It holds where each layer *was*, not the layers themselves, so the
+/// artwork is never copied and an edit to a layer's content shows in
+/// every comp. A layer added since is left as it is by every comp that
+/// does not know it, and one taken away is passed over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayerComp {
+    pub name: String,
+    pub layers: Vec<CompLayer>,
+}
+
+/// One layer as a comp keeps it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompLayer {
+    pub id: NodeId,
+    pub visible: bool,
+    pub opacity: f32,
+    pub transform: Transform,
 }
 
 /// One colour in the document's palette. Authored like any other colour,
@@ -354,6 +383,7 @@ impl Document {
             swatches: Vec::new(),
             styles: Vec::new(),
             regions: Vec::new(),
+            comps: Vec::new(),
             selection: None,
         }
     }
@@ -498,6 +528,10 @@ impl Document {
         &self.regions
     }
 
+    pub fn comps(&self) -> &[LayerComp] {
+        &self.comps
+    }
+
     /// The region picked out of the page, if any.
     pub fn selection(&self) -> Option<&Mask> {
         self.selection.as_deref()
@@ -615,6 +649,21 @@ impl Document {
         // the day it is picked up.
         for kept in &mut self.regions {
             kept.mask = kept.mask.carried_through(m);
+        }
+        // And where a comp keeps a layer on the page, the page has moved
+        // under it as it moved under the layer: applied after a quarter
+        // turn, a comp that remembered the old places would turn every
+        // layer back and leave the page turned.
+        for comp in &mut self.comps {
+            for kept in &mut comp.layers {
+                if self
+                    .children
+                    .get(&self.root)
+                    .is_some_and(|c| c.contains(&kept.id))
+                {
+                    kept.transform = m.compose(kept.transform);
+                }
+            }
         }
         let at = |x: f32, y: f32| (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
         let (w, h) = (self.meta.width as f32 / 2.0, self.meta.height as f32 / 2.0);
@@ -754,6 +803,8 @@ impl Document {
             | Command::SetBlendMode { .. }
             | Command::SetTransform { .. }
             | Command::SetGuides { .. }
+            // A comp keeps where layers were, and no colour.
+            | Command::SetComps { .. }
             // A kept style holds its colours flat, so a palette change
             // does not reach it and it cannot disagree with one.
             | Command::SetStyles { .. }
@@ -1146,6 +1197,10 @@ impl Document {
             Command::SetRegions { regions } => {
                 let prev = std::mem::replace(&mut self.regions, regions);
                 Ok(Command::SetRegions { regions: prev })
+            }
+            Command::SetComps { comps } => {
+                let prev = std::mem::replace(&mut self.comps, comps);
+                Ok(Command::SetComps { comps: prev })
             }
             Command::SetStyles { styles } => {
                 let prev = std::mem::replace(&mut self.styles, styles);
@@ -1643,6 +1698,11 @@ pub enum Command {
     /// command with the same obvious inverse.
     SetRegions {
         regions: Vec<KeptRegion>,
+    },
+    /// Replace the states of the page kept by name, the same whole-list
+    /// way.
+    SetComps {
+        comps: Vec<LayerComp>,
     },
     /// Replace the region picked out of the page — `None` for nothing
     /// picked out. Whole-value, so picking, adding to, taking from and
