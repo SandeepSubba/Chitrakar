@@ -10127,10 +10127,51 @@ mod tests {
         );
         layer(&mut framed, frame, heal(None));
 
+        // The band it lifts from solid over the left half and all but
+        // gone over the right: a pixel counts in both averages by how
+        // much there is of it on *both* sides, so the right half, with
+        // next to nothing to lift, is next to none of what the heal
+        // takes towards — where counting it whole pulled the left half's
+        // heal towards the right half's colour.
+        let mut lift = Document::new(80, 48, ColorMode::Rgb);
+        add(
+            &mut lift,
+            filled(
+                "left",
+                rect(40.0, 48.0),
+                ink(left[0], left[1], left[2], 1.0),
+            ),
+            Transform::default(),
+        );
+        // The right half starts below the band, so what is lifted there
+        // is the faint trace and nothing else.
+        add(
+            &mut lift,
+            filled(
+                "right",
+                rect(40.0, 32.0),
+                ink(right[0], right[1], right[2], 1.0),
+            ),
+            Transform::translation(40.0, 16.0),
+        );
+        add(
+            &mut lift,
+            filled("band", rect(40.0, 12.0), ink(0.25, 0.2, 0.2, 1.0)),
+            Transform::translation(0.0, 2.0),
+        );
+        add(
+            &mut lift,
+            filled("trace", rect(40.0, 12.0), ink(0.25, 0.2, 0.2, 0.001)),
+            Transform::translation(40.0, 2.0),
+        );
+        let root = lift.root();
+        layer(&mut lift, root, heal(None));
+
         for (what, doc, at, like) in [
             ("a region", &held, (60u32, 32u32), (60u32, 44u32)),
             ("a faint wash", &faint, (20, 32), (20, 44)),
             ("a frame", &framed, (20, 32), (20, 44)),
+            ("a faint lift", &lift, (20, 32), (20, 44)),
         ] {
             assert!(GpuRenderer::can_render(doc), "{what} is drawn");
             let mine = gpu.render(doc).unwrap();

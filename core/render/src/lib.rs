@@ -8261,16 +8261,27 @@ fn draw_clone(
             for py in bbox.y0..bbox.y1 {
                 for px in bbox.x0..bbox.x1 {
                     let c = cover[((py - bbox.y0) * w + (px - bbox.x0)) as usize];
-                    let from = at_source(px, py);
-                    let to = dst.pixels[(py * dst.width + px) as usize];
-                    if c <= 0.0 || from.a <= 0.0 || to.a <= 0.0 {
+                    if c <= 0.0 {
                         continue;
                     }
-                    for (sum, p) in [(&mut lifted, from), (&mut under, to)] {
-                        sum[0] += p.r * c;
-                        sum[1] += p.g * c;
-                        sum[2] += p.b * c;
-                        sum[3] += p.a * c;
+                    let from = at_source(px, py);
+                    let to = dst.pixels[(py * dst.width + px) as usize];
+                    // A pixel counts in both averages by how much there is
+                    // of it on *both* sides: each side weighed by the
+                    // other's alpha. It counted whole in both, or not at
+                    // all, by whether either side had any alpha — so the
+                    // last tail of a shadow, there in one composition and
+                    // spent in another, took a solid pixel of what lay
+                    // under the stroke into its average or left it out,
+                    // and a heal moved by a hundredth over a difference
+                    // of nothing. Weighed, a side with next to no alpha is
+                    // next to no part of either average.
+                    for (sum, p, k) in [(&mut lifted, from, to.a), (&mut under, to, from.a)] {
+                        let k = c * k;
+                        sum[0] += p.r * k;
+                        sum[1] += p.g * k;
+                        sum[2] += p.b * k;
+                        sum[3] += p.a * k;
                     }
                 }
             }
@@ -13203,6 +13214,78 @@ mod tests {
         assert!(
             (healed[0] as i32 - around[0] as i32).abs() < 8,
             "and the grey it was dropped into ({healed:?} against {around:?})"
+        );
+    }
+
+    /// Nor does a pixel that is barely there decide *which* pixels the
+    /// average is over. A pixel counted whole in both averages, or not at
+    /// all, by whether what it lifts had any alpha: the last tail of a
+    /// shadow, a millionth there in one composition and spent in another,
+    /// took a solid pixel of what lay under the stroke into the average
+    /// or left it out — and a heal moved by a hundredth over a difference
+    /// of nothing, found by a shadowed shape wrapped in a turned group and
+    /// let out again, under a heal lifting from its shadow.
+    #[test]
+    fn a_heal_does_not_turn_on_whether_a_faint_pixel_is_there() {
+        let srgb = |v: [f32; 4]| AuthoredColor::Srgb {
+            r: v[0],
+            g: v[1],
+            b: v[2],
+            a: v[3],
+        };
+        let page = |faint: bool| {
+            let mut doc = Document::new(80, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let mut parts = vec![
+                // Under the stroke: grey on the left, blue on the right.
+                (0.0f32, 20.0f32, 40.0f32, 20.0f32, [0.7, 0.7, 0.7, 1.0]),
+                (40.0, 20.0, 40.0, 20.0, [0.1, 0.2, 0.9, 1.0]),
+                // What is lifted: dark grey on the left only.
+                (0.0, 2.0, 40.0, 14.0, [0.3, 0.3, 0.3, 1.0]),
+            ];
+            if faint {
+                // And on the right, next to nothing.
+                parts.push((40.0, 2.0, 40.0, 14.0, [1.0, 1.0, 1.0, 1e-6]));
+            }
+            for (i, (x, y, w, h, c)) in parts.into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: filled_rect("part", w, h, srgb(c)),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+            }
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(Node::clone_layer("heal")),
+            })
+            .unwrap();
+            let heal = doc.children_of(root).unwrap()[index];
+            let mut s = stroke(&[[8.0, 30.0], [72.0, 30.0]], 4.0, RED);
+            s.source = [0.0, -22.0];
+            s.heal = true;
+            doc.apply(Command::AddStroke {
+                id: heal,
+                index: 0,
+                stroke: Box::new(s),
+                on_mask: false,
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let (bare, faint) = (page(false), page(true));
+        let (a, b) = (bare.get(20, 30).to_srgb8(), faint.get(20, 30).to_srgb8());
+        assert!(
+            (0..3).all(|k| a[k].abs_diff(b[k]) <= 1),
+            "a millionth of a layer moved the heal from {a:?} to {b:?}"
         );
     }
 

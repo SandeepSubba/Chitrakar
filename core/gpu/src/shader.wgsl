@@ -1342,10 +1342,10 @@ struct Sums {
 // starts on the surface and `params.zw` the offset the stroke reads at,
 // `grad` the box of the stroke's own region on the mask slot.
 //
-// A pixel counts where the stroke covers it and both what it lifts and
-// what it lands on are there at all — the reference renderer's rule,
-// read the way `fs_clone` reads, so the two agree on which pixel is
-// lifted.
+// A pixel counts where the stroke covers it, by how much there is of
+// both what it lifts and what it lands on — the reference renderer's
+// rule, read the way `fs_clone` reads, so the two agree on which pixel
+// is lifted.
 @fragment
 fn fs_heal_terms(in: ImageOut) -> Sums {
     var out: Sums;
@@ -1362,11 +1362,11 @@ fn fs_heal_terms(in: ImageOut) -> Sums {
     }
     let lifted = textureLoad(backdrop, vec2i(source), 0);
     let under = textureLoad(backdrop, at, 0);
-    if lifted.a <= 0.0 || under.a <= 0.0 {
-        return out;
-    }
-    out.lifted = lifted * c;
-    out.under = under * c;
+    // Each side weighed by the other's alpha, as the reference renderer
+    // weighs them: a side with next to no alpha is next to no part of
+    // either average, rather than all or nothing of it.
+    out.lifted = lifted * (c * under.a);
+    out.under = under * (c * lifted.a);
     return out;
 }
 
@@ -1388,11 +1388,11 @@ fn fs_heal_terms_aside(in: ImageOut) -> Sums {
     }
     let lifted = seen(vec2i(source));
     let under = seen(at);
-    if lifted.a <= 0.0 || under.a <= 0.0 {
-        return out;
-    }
-    out.lifted = lifted * c;
-    out.under = under * c;
+    // Each side weighed by the other's alpha, as the reference renderer
+    // weighs them: a side with next to no alpha is next to no part of
+    // either average, rather than all or nothing of it.
+    out.lifted = lifted * (c * under.a);
+    out.under = under * (c * lifted.a);
     return out;
 }
 

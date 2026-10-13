@@ -1381,13 +1381,37 @@ without reading anything else.*
     and unwrapping it then moved the page by up to 0.009, and the wrap
     audit caught it.
   - **Still open.**
-    - That audit's configuration is not alone: a plain shadowed shape in
-      a group, wrapped and unwrapped near the page's edge, already
-      differs by 0.009 with the old rule. The page's edge is the world's
-      edge for effects today, consistently or not quite.
+    - (A plain shadowed shape in a group, wrapped and unwrapped, also
+      differed by 0.009 under the old rule. That turned out not to be
+      the edge at all but a heal's average; see the next entry. Fixed.)
     - Making every surface reach past it together, and an SVG export
       that clips an effected layer to the page so readers agree in the
       meantime, is the follow-up.
+- **A heal's average no longer turns on a pixel that is barely there.**
+  The 0.009 a shadowed shape moved the page by, wrapped in a turned
+  group and let out again, was a healing stroke lifting from the
+  shadow's last tail, not an edge.
+  - **The cause.** A heal takes the average of what it lifts and of what
+    it lands on. A pixel counted in both averages whole, or not at all,
+    by whether either side had any alpha. A tail pixel a millionth there
+    in one composition and spent in the other took a solid pixel from
+    under the stroke into the average, or left it out.
+  - **The fix.** Each side is now weighed by the other's alpha, so a
+    side with next to no alpha is next to no part of either average.
+    The same change is in both renderers: the CPU's sums, and the GPU's
+    `fs_heal_terms` and `fs_heal_terms_aside`.
+  - **Tests.**
+    - `a_heal_does_not_turn_on_whether_a_faint_pixel_is_there`: a
+      millionth of a layer over half the source moved the old heal from
+      grey (179, 179, 179) to (132, 135, 206).
+    - `a_shadowed_shape_wrapped_and_let_out_leaves_a_heal_where_it_was`:
+      the bisected case, at the 0.009295 it found.
+    - The GPU heal audit gains a faint lift. Its old scenes were opaque,
+      so the shader's weighting went unasked, and without it the GPU is
+      0.377 from the CPU.
+  - **How it was found.** By hiding the other layers of the fixture one
+    at a time: the group alone agreed, and the difference appeared with
+    the clone layer whose heal lifts from the shadow.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

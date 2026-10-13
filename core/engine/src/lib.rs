@@ -10855,6 +10855,78 @@ mod tests {
     /// reading what is under them are asked the same question
     /// structurally instead, since leaving their group is what changes
     /// what they read.
+    /// A shape wearing nothing but a shadow, wrapped in a turned group and
+    /// let out again, leaves the page as it was — with the copies of the
+    /// group it is in put away, which is what let a heal lifting from the
+    /// shadow's last tail decide the page: a pixel there in one
+    /// composition and spent in the other took a solid pixel under the
+    /// heal into its average or left it out, a hundredth either way
+    /// (`a_heal_does_not_turn_on_whether_a_faint_pixel_is_there`). The
+    /// audit below wears a mask and an outline too, and keeps the copies,
+    /// and between them they had hidden it.
+    #[test]
+    fn a_shadowed_shape_wrapped_and_let_out_leaves_a_heal_where_it_was() {
+        let f = chitrakar_doc::fixture::everything();
+        let (c, sn) = (0.4f32.cos(), 0.4f32.sin());
+        let moved = Transform::translation(9.0, 5.0).compose(Transform {
+            a: 1.25 * c,
+            b: 1.25 * sn,
+            c: -1.25 * sn,
+            d: 1.25 * c,
+            e: 0.0,
+            f: 0.0,
+        });
+        let mut s = Session::from_document(f.doc.clone());
+        // The copies of the group it is in, and the copy of the copy.
+        for (id, n) in f.doc.nodes() {
+            if matches!(n.kind, NodeKind::Instance { .. }) {
+                s.apply(Command::SetVisible {
+                    id: *id,
+                    visible: false,
+                })
+                .unwrap();
+            }
+        }
+        s.apply(Command::SetEffects {
+            id: f.under,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 4.0,
+                dy: 0.0,
+                blur: 3.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.9,
+            }],
+        })
+        .unwrap();
+        let g = s.group_nodes(&[f.under], "wrap").unwrap();
+        s.apply(Command::SetTransform {
+            id: g,
+            transform: moved,
+        })
+        .unwrap();
+        let before = s.render().unwrap();
+        s.ungroup_node(g).unwrap();
+        let after = s.render().unwrap();
+        let worst = before
+            .pixels
+            .iter()
+            .zip(&after.pixels)
+            .map(|(p, q)| {
+                (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+                    .max((p.a - q.a).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-4, "the page moved by {worst} on being let out");
+    }
+
     #[test]
     fn a_dissolved_group_brings_its_children_masks_with_it() {
         let f = chitrakar_doc::fixture::everything();
