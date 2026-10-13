@@ -1199,6 +1199,48 @@ without reading anything else.*
   widened by how far a filter among them spreads (leaving that out cuts
   a merged blur at the shape's edge, which the test catches). A hidden
   picked layer is left as it was (smoke 9o10).
+- **GPU on screen (desktop shell, opt-in).** Preferences › General ›
+  "Draw the page with the graphics card", offered only in the desktop
+  app, has the shell draw the page's frames on the card. The route is
+  (b) from "Next up" item 1, as a readback, so nothing about how the
+  page is handed pixels changes. The engine in the webview stays the
+  one the document lives in. The shell keeps a *mirror*: a new crate,
+  `core/present` (`Presenter`), reached through five commands in
+  `shells/tauri/src-tauri/src/gpu.rs`, and fed by `app/src/gpuFrames.ts`.
+  - **How the mirror is fed.** When the document's JSON has changed it
+    is sent over (`gpu_sync`). The mirror answers with the pictures and
+    faces it lacks, and those go across once each as raw bytes:
+    `gpu_picture` checks a picture's bytes against its content id before
+    believing them, and `gpu_font` takes a face. The frame comes back
+    as raw sRGB bytes for the engine's own viewport (`gpu_frame`).
+  - **When the page draws instead.** The page draws the frame itself
+    whenever the card would not draw it exactly as the processor does:
+    - something the backend declines (`can_render_view`);
+    - a CMYK page, a soft proof or a display profile
+      (`frame_is_plain_srgb`);
+    - anything still outstanding;
+    - any error at all.
+    So turning it on can only change how fast the page is drawn.
+  - **A real bug found on the way.** At the identity view on a surface
+    larger than the page, the GPU did not clip the artwork to the
+    page's edge. The page bound was keyed on "is there a view" rather
+    than "does the page cover the surface". It is fixed in `gather()`,
+    and the witness gains that case and a layer over the far edge (the
+    old rule fails it).
+  - **Tests.**
+    - Presenter tests run on llvmpipe: frames at 1× and at 2.5× panned
+      match `engine_frame` byte for byte to within rounding; wrong
+      picture bytes are refused; an edit resyncs without asking again;
+      what is declined is declined.
+    - Smoke 9ca's stand-in shell gains a stand-in card. Checked: the
+      card's frame is shown, the picture is sent once with its size,
+      and an edit resyncs without sending it again. When the card
+      declines, the canvas is exactly the page's own frame — drawing
+      only the dirty region there leaves the card's frame showing, and
+      the check catches it. Turned off, the card is not asked.
+  - **Why it is off by default.** It stays off until it has been timed
+    in a real shell on a real card. This container has neither, and
+    the IPC copy of a frame is the cost nobody has measured.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -2895,11 +2937,17 @@ without reading anything else.*
      first and does not need WebGPU anywhere.
      The spike's ~3ms round trip at 1280×720 on *software* Vulkan says a
      readback design would be fast enough, so (b) need not mean giving up
-     the pixels-over-the-boundary shape all at once. Until one of those
-     is chosen the backend is a validated second opinion and nothing
-     else, which is a fine thing to be — holding it against the CPU
-     renderer has turned up real defects on both sides, the clone
-     stroke's lost region among them — but it is not on screen. The
+     the pixels-over-the-boundary shape all at once. **(b) was taken,
+     as a readback** — see "GPU on screen" in the list above: the shell
+     keeps a mirror of the document (`core/present`) and draws the frame
+     the engine would have, opt-in, and the page draws its own wherever
+     the mirror declines. What is left on this item is *measuring* it in
+     a real shell on a real card (the container has neither), then
+     presenting to a surface the shell owns rather than reading back, if
+     the measurement says the copy is what costs; and (a) for the
+     browser, still open. Holding the backend against the CPU renderer
+     has turned up real defects on both sides — the clone stroke's lost
+     region, and now the page's edge at the identity view — and the
      fixture audit
      (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_does`) is
      what to run while doing any of it. See docs/spikes/gpu-rendering.md.

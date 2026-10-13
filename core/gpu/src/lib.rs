@@ -2547,7 +2547,13 @@ fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) ->
     out.size = [doc.meta.width as f32, doc.meta.height as f32];
     // The page's own edge is what clips the artwork, and with the surface
     // no longer being the page that has to be said rather than assumed.
-    let bound = (view != Transform::default()).then_some(page);
+    // Said whenever the page does not cover the whole surface — not
+    // whenever the view is something other than the identity, which is
+    // what this asked first: a viewport wider than a small page at one
+    // to one is the identity, and the artwork hanging off that page was
+    // drawn beside it, where the CPU renderer draws nothing.
+    let whole = page.x0 == 0 && page.y0 == 0 && page.x1 == size.0 && page.y1 == size.1;
+    let bound = (!whole).then_some(page);
     collect(doc, doc.root(), view, 1.0, bound, out)
 }
 
@@ -10976,6 +10982,26 @@ mod tests {
             ),
             Transform::translation(-11.0, -7.0),
         );
+        // And one off the far corner, which only the page's own edge can
+        // cut: past the near corner the surface's edge cuts it anyway.
+        add(
+            &mut doc,
+            filled(
+                "over the far edge",
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 14.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.6,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(50.0, 32.0),
+        );
         // And a vignette over all of it. A pointwise filter is the one
         // thing on a page that is a function of *where a pixel is*, so
         // it is the one thing a view can put in the wrong place — and
@@ -11015,6 +11041,16 @@ mod tests {
                 (60u32, 40u32),
             ),
             ("twice as big", at(2.0, 0.0, 0.0), (120, 80)),
+            // One to one on a surface wider and taller than the page —
+            // an editor window bigger than a small page. The view is the
+            // identity, and the page's edge still has to be said: it
+            // was assumed, and the layer off the far corner was drawn
+            // beside the page.
+            (
+                "one to one, with room past the page",
+                at(1.0, 0.0, 0.0),
+                (90, 70),
+            ),
             // Small enough that the page is a patch in the middle, which
             // is what makes the page's own edge something to say rather
             // than something to assume.

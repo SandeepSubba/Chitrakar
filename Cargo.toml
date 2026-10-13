@@ -7,6 +7,7 @@ members = [
     "core/codecs",
     "core/engine",
     "core/gpu",
+    "core/present",
 ]
 # The Tauri shell is its own workspace: it needs platform system libraries
 # (webkit2gtk on Linux, etc.) that the core workspace must not depend on.

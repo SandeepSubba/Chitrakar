@@ -44,6 +44,7 @@ import {
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
 import { enginePicture } from "./picture";
+import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import {
   Adjustment,
@@ -1412,6 +1413,52 @@ export function App() {
   const [antRings, setAntRings] = useState<[number, number][][]>([]);
   const groupCount = useRef(0);
 
+  /** The engine's own frame laid on the canvas: what changed since the
+   * last one, or — after a frame the graphics card drew, which the
+   * engine's buffer never saw — all of it. */
+  const cpuFrame = (s: WasmSession, whole: boolean) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    const dirty = s.render_frame();
+    if (
+      !imgDataRef.current ||
+      imgDataRef.current.width !== s.frame_width() ||
+      imgDataRef.current.height !== s.frame_height()
+    ) {
+      imgDataRef.current = new ImageData(s.frame_width(), s.frame_height());
+    }
+    if (dirty.length === 4 || whole) {
+      // Zero-copy view into wasm memory; ImageData needs its own buffer.
+      const view = new Uint8ClampedArray(
+        getWasmMemory().buffer,
+        s.frame_ptr(),
+        s.frame_len(),
+      );
+      imgDataRef.current.data.set(view);
+      const [x, y, w, h] = whole
+        ? [0, 0, s.frame_width(), s.frame_height()]
+        : [dirty[0], dirty[1], dirty[2], dirty[3]];
+      ctx.putImageData(imgDataRef.current, 0, 0, x, y, w, h);
+    }
+  };
+  /** A frame of straight sRGB bytes from the graphics card, laid whole. */
+  const gpuRef = useRef(
+    new GpuFrames((bytes, width, height) => {
+      const ctx = canvasRef.current?.getContext("2d");
+      if (!ctx || bytes.length !== width * height * 4) return;
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(bytes), width, height), 0, 0);
+      // The engine's buffer did not draw this one: the next frame it
+      // draws is laid whole.
+      cpuStaleRef.current = true;
+    }),
+  );
+  const gpuOnRef = useRef(false);
+  const cpuStaleRef = useRef(false);
+  /** The view the engine was last told, for a frame drawn elsewhere. */
+  const viewArgsRef = useRef({ scale: 1, x: 0, y: 0 });
+  gpuOnRef.current = isTauri() && prefs.gpuFrames;
+
   const refresh = useCallback(
     (s: WasmSession) => {
       setSaveTick((n) => n + 1);
@@ -1456,34 +1503,22 @@ export function App() {
         }
       });
       const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext("2d")!;
-        const dirty = s.render_frame();
-        if (
-          !imgDataRef.current ||
-          imgDataRef.current.width !== s.frame_width() ||
-          imgDataRef.current.height !== s.frame_height()
-        ) {
-          imgDataRef.current = new ImageData(s.frame_width(), s.frame_height());
-        }
-        if (dirty.length === 4) {
-          // Zero-copy view into wasm memory; ImageData needs its own buffer.
-          const view = new Uint8ClampedArray(
-            getWasmMemory().buffer,
-            s.frame_ptr(),
-            s.frame_len(),
-          );
-          imgDataRef.current.data.set(view);
-          ctx.putImageData(
-            imgDataRef.current,
-            0,
-            0,
-            dirty[0],
-            dirty[1],
-            dirty[2],
-            dirty[3],
-          );
-        }
+      // The frame, from the desktop shell's graphics card when that is
+      // asked for and the card can draw it exactly, and otherwise from
+      // the engine here, as it always was.
+      if (canvas && gpuOnRef.current) {
+        gpuRef.current.request(
+          s,
+          () => ({
+            ...viewArgsRef.current,
+            width: s.frame_width(),
+            height: s.frame_height(),
+          }),
+          () => cpuFrame(s, true),
+        );
+      } else if (canvas) {
+        cpuFrame(s, cpuStaleRef.current);
+        cpuStaleRef.current = false;
       }
       setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
       setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
@@ -2126,6 +2161,14 @@ export function App() {
     return () => observer.disconnect();
   }, []);
 
+  // Turned on or off, the page is drawn again the other way: whole,
+  // since the canvas holds the other one's last frame.
+  useEffect(() => {
+    if (!session) return;
+    cpuStaleRef.current = true;
+    refresh(session);
+  }, [prefs.gpuFrames]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Tell the engine what the canvas is looking at, then repaint. The
   // canvas is a window onto the page now, so its backing store follows the
   // viewport rather than the document, and every pan or zoom is a fresh
@@ -2139,6 +2182,11 @@ export function App() {
       Math.round(viewport[0] * dpr),
       Math.round(viewport[1] * dpr),
     );
+    viewArgsRef.current = {
+      scale: Math.min(64, Math.max(0.01, view.zoom * dpr)),
+      x: view.x * dpr,
+      y: view.y * dpr,
+    };
     // Resizing the element clears its backing store, and the engine tracks
     // what it has already presented, so it has to be told.
     session.invalidate();

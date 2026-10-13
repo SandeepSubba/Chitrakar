@@ -59,6 +59,13 @@ browser or the shell; the shell's commands are in
 `shells/tauri/src-tauri/src/lib.rs`, and smoke block 9ca drives all of
 it through a stand-in bridge.
 
+The shell can also draw the page's frames on the graphics card
+(`prefs.gpuFrames`, off by default): `core/present` keeps a mirror of
+the document there, fed by `app/src/gpuFrames.ts` through the commands
+in `shells/tauri/src-tauri/src/gpu.rs`. The webview's engine stays the
+source of truth. The mirror only answers when its frame would be the
+processor's, and in every other case the page draws its own.
+
 CMYK-profile tests self-skip unless `CHITRAKAR_TEST_CMYK_ICC` points at a
 real CMYK .icc (e.g. ghostscript's default_cmyk.icc) — profiles aren't
 license-clean to commit.

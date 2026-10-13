@@ -24,6 +24,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
+import { isTauri } from "./nativeMenu";
 import {
   COMMANDS,
   COMMAND_GROUPS,
@@ -350,6 +351,15 @@ export function PreferencesDialog({
                   (v) => setPrefs({ keepDraft: v }),
                   "offered back next visit",
                 )}
+                {/* Only the desktop app has a graphics card of its own to
+                    draw with: the browser's engine draws on the processor. */}
+                {isTauri() &&
+                  check(
+                    "Draw the page with the graphics card",
+                    prefs.gpuFrames,
+                    (v) => setPrefs({ gpuFrames: v }),
+                    "falls back to the processor wherever the card cannot draw a frame exactly",
+                  )}
               </>
             )}
 

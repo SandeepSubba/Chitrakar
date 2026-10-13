@@ -13595,7 +13595,12 @@ assert(
         await callbacks.get(l.handler)?.({ event, id: l.id, payload });
       }
     };
-    window.__shell = { fs, answers, calls, emit, opened, title: "", closed: false };
+    // The graphics card, standing in: no adapter until a test gives it
+    // one; it says which pictures it lacks, keeps what it is given, and
+    // draws every frame solid magenta — or nothing, to be drawn by the
+    // page — so whose frame is on the canvas can be told at a glance.
+    const gpu = { adapter: null, answer: "paint", pictures: new Map(), synced: 0, frames: 0 };
+    window.__shell = { fs, answers, calls, emit, opened, gpu, title: "", closed: false };
     window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
       unregisterListener: (event, id) => {
         const at = listeners.findIndex((l) => l.event === event && l.id === id);
@@ -13655,6 +13660,31 @@ assert(
           case "write_path":
             fs.set(decodeURIComponent(options.headers.path), args.slice());
             return null;
+          case "gpu_start":
+            if (!gpu.adapter) throw "no graphics card";
+            return gpu.adapter;
+          case "gpu_sync": {
+            gpu.synced += 1;
+            const doc = JSON.parse(args.manifest);
+            return {
+              resources: Object.keys(doc.resources ?? {}).filter((id) => !gpu.pictures.has(id)),
+              fonts: [],
+            };
+          }
+          case "gpu_picture":
+            gpu.pictures.set(options.headers.id, {
+              bytes: args.length,
+              width: Number(options.headers.width),
+              height: Number(options.headers.height),
+            });
+            return null;
+          case "gpu_frame": {
+            gpu.frames += 1;
+            if (gpu.answer !== "paint") return new ArrayBuffer(0);
+            const out = new Uint8Array(args.width * args.height * 4);
+            for (let i = 0; i < out.length; i += 4) out.set([255, 0, 255, 255], i);
+            return out.buffer;
+          }
           default:
             // The menu bar and anything else: refused, as a shell too
             // old to have them would, so the menu comes back in the
@@ -14079,6 +14109,90 @@ assert(
   assert(
     (await launchedLayers()) === before2,
     "and a nudge with nothing waiting opens nothing — each file is opened once",
+  );
+
+  // Drawn by the graphics card: asked for in the preferences, the page's
+  // frames come from the shell — the document handed over as JSON and
+  // the picture in it as its bytes, once — and wherever the shell will
+  // not draw a frame, the page draws it itself.
+  const middle = () =>
+    launched.evaluate(() => {
+      const c = document.getElementById("engine-canvas");
+      return Array.from(
+        c.getContext("2d").getImageData(c.width >> 1, c.height >> 1, 1, 1).data,
+      );
+    });
+  const gpuState = () =>
+    launched.evaluate(() => ({
+      synced: window.__shell.gpu.synced,
+      frames: window.__shell.gpu.frames,
+      pictures: [...window.__shell.gpu.pictures.values()],
+    }));
+  // The whole canvas, summed: the page's own frame of this document.
+  const canvasSum = () =>
+    launched.evaluate(() => {
+      const c = document.getElementById("engine-canvas");
+      const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+      let lit = 0;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3]) lit += 1;
+        sum = (sum + d[i] * 3 + d[i + 1] * 5 + d[i + 2] * 7 + d[i + 3]) % 1e9;
+      }
+      return { lit, sum };
+    });
+  const ownFrame = await canvasSum();
+  await launched.evaluate(() => {
+    window.__shell.gpu.adapter = "Stand-in adapter";
+  });
+  await launched.keyboard.press("Control+,");
+  await launched.waitForTimeout(300);
+  const toggle = launched.locator("label", { hasText: "Draw the page with the graphics card" }).locator("input");
+  assert((await toggle.count()) === 1, "the desktop app offers to draw with the graphics card");
+  await toggle.check();
+  await launched.keyboard.press("Escape");
+  await launched.waitForTimeout(600);
+  let g = await gpuState();
+  const magenta = (p) => p[0] === 255 && p[1] === 0 && p[2] === 255;
+  assert(
+    magenta(await middle()) && g.synced >= 1 && g.frames >= 1,
+    `turned on, the frame on the canvas is the card's (${await middle()}, ${JSON.stringify(g)})`,
+  );
+  assert(
+    g.pictures.length === 1 && g.pictures[0].bytes === g.pictures[0].width * g.pictures[0].height * 4,
+    `the picture went over as its bytes, its size with it (${JSON.stringify(g.pictures)})`,
+  );
+  // An edit: synced again, the picture not sent twice.
+  const synced = g.synced;
+  await launched.keyboard.press("Control+z");
+  await launched.waitForTimeout(500);
+  g = await gpuState();
+  assert(g.synced > synced && g.pictures.length === 1, `an edit is synced, and the picture not sent again (${JSON.stringify(g)})`);
+  // The card declining: the page draws the frame itself.
+  await launched.evaluate(() => {
+    window.__shell.gpu.answer = "none";
+  });
+  await launched.keyboard.press("Control+Shift+z");
+  await launched.waitForTimeout(500);
+  assert(
+    ownFrame.lit > 0 && JSON.stringify(await canvasSum()) === JSON.stringify(ownFrame),
+    `where the card will not draw a frame, the page does (${JSON.stringify(await canvasSum())} vs ${JSON.stringify(ownFrame)})`,
+  );
+  // And turned off, the card is not asked at all.
+  await launched.evaluate(() => {
+    window.__shell.gpu.answer = "paint";
+  });
+  await launched.keyboard.press("Control+,");
+  await launched.waitForTimeout(300);
+  await toggle.uncheck();
+  await launched.keyboard.press("Escape");
+  await launched.waitForTimeout(400);
+  const framesAsked = (await gpuState()).frames;
+  await launched.keyboard.press("Control+z");
+  await launched.waitForTimeout(500);
+  assert(
+    (await gpuState()).frames === framesAsked && !magenta(await middle()),
+    "turned off, the card is not asked and the page draws its own frames",
   );
   assert(launchedErrors.length === 0, `nothing went wrong (${launchedErrors.join(" | ")})`);
   await launched.close();

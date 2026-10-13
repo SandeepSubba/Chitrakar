@@ -1499,7 +1499,7 @@ impl Document {
 /// Content id of a resource: FNV-1a over dimensions and bytes, hex-encoded.
 /// Stable across sessions so identical placements dedupe in the pool and in
 /// saved containers.
-fn content_id(width: u32, height: u32, rgba8: &[u8]) -> String {
+pub fn content_id(width: u32, height: u32, rgba8: &[u8]) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |b: u8| {
         hash ^= b as u64;

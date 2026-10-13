@@ -6997,6 +6997,14 @@ impl Session {
         true
     }
 
+    /// Whether what is presented is the composite's own sRGB and no
+    /// more: no soft proof over it and no screen profile after it. Only
+    /// then is a frame drawn elsewhere from the document alone the frame
+    /// this would present.
+    pub fn frame_is_plain_srgb(&self) -> bool {
+        !self.soft_proof && self.display_cms.is_none()
+    }
+
     pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), EngineError> {
         if proof && self.proof_cms.is_none() {
             let Some(bytes) = self.doc.cmyk_profile_bytes() else {

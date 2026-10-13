@@ -218,6 +218,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "chitrakar-present"
+version = "0.1.0"
+dependencies = [
+ "chitrakar-codecs",
+ "chitrakar-color",
+ "chitrakar-doc",
+ "chitrakar-engine",
+ "chitrakar-gpu",
+ "chitrakar-render",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chitrakar-render"
 version = "0.1.0"
 dependencies = [

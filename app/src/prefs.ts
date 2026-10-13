@@ -61,6 +61,11 @@ export type Prefs = {
   /** The chrome's colours: the system's choice, or one of the two
    * outright. The page is the page under either. */
   theme: Theme;
+  /** In the desktop app, draw the page with the graphics card: the
+   * shell keeps a mirror of the document and draws each frame there,
+   * and the webview draws a frame itself whenever the card cannot draw
+   * it exactly (`app/src/gpuFrames.ts`). About the machine, so here. */
+  gpuFrames: boolean;
   /** How far apart the grid's lines are, in document pixels; 0 for none. */
   grid: number;
   /** Whether guides are drawn. */
@@ -140,6 +145,7 @@ export const withRecent = (recent: string[], path: string): string[] =>
 export const DEFAULTS: Prefs = {
   units: "px",
   theme: "system",
+  gpuFrames: false,
   grid: 0,
   showGuides: true,
   snap: 6,

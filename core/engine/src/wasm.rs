@@ -150,6 +150,43 @@ impl WasmSession {
         self.frame.len()
     }
 
+    /// The document as JSON — what a `.chitra` manifest holds, its
+    /// pictures' bytes and its faces left out — for a mirror drawn
+    /// elsewhere (the desktop shell's GPU presenter). Pictures travel by
+    /// [`resource_rgba`](Self::resource_rgba), faces by
+    /// [`font_file`](Self::font_file), each once.
+    pub fn document_json(&self) -> String {
+        serde_json::to_string(self.inner.document()).unwrap_or_default()
+    }
+
+    /// A picture's straight sRGB bytes by its content id; empty when the
+    /// document holds no picture by that id.
+    pub fn resource_rgba(&self, id: &str) -> Vec<u8> {
+        self.inner
+            .document()
+            .resource(id)
+            .map(|r| r.rgba8.clone())
+            .unwrap_or_default()
+    }
+
+    /// A picture's `[width, height]` by its content id; empty when there
+    /// is none.
+    pub fn resource_size(&self, id: &str) -> Vec<u32> {
+        self.inner
+            .document()
+            .resource(id)
+            .map(|r| vec![r.width, r.height])
+            .unwrap_or_default()
+    }
+
+    /// The file behind a face registered by name; empty for one that is
+    /// not (the bundled face every build has is not handed over).
+    pub fn font_file(&self, name: &str) -> Vec<u8> {
+        chitrakar_render::text::font_bytes(name)
+            .map(<[u8]>::to_vec)
+            .unwrap_or_default()
+    }
+
     /// Layers panel data: JSON array of `LayerInfo`, topmost first.
     pub fn layers_json(&self) -> String {
         serde_json::to_string(&self.inner.layers()).unwrap_or_else(|_| "[]".into())
@@ -1137,6 +1174,12 @@ impl WasmSession {
 
     /// Toggle display soft-proofing (and gamut warning) through the press
     /// profile.
+    /// Whether the frame is the composite's own sRGB, with no soft proof
+    /// over it and no screen profile after it.
+    pub fn frame_is_plain_srgb(&self) -> bool {
+        self.inner.frame_is_plain_srgb()
+    }
+
     pub fn set_proofing(&mut self, proof: bool, gamut_warn: bool) -> Result<(), JsError> {
         self.inner.set_proofing(proof, gamut_warn).map_err(to_js)
     }

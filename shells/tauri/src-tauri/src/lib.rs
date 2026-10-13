@@ -9,6 +9,7 @@
 use chitrakar_engine::{ColorMode, Session};
 
 mod files;
+mod gpu;
 mod onnx;
 mod opening;
 mod subject;
@@ -252,9 +253,15 @@ pub fn run() {
             write_path,
             join_path,
             already_there,
-            opened_files
+            opened_files,
+            gpu::gpu_start,
+            gpu::gpu_sync,
+            gpu::gpu_picture,
+            gpu::gpu_font,
+            gpu::gpu_frame
         ])
         .manage(opening::Waiting::default())
+        .manage(gpu::Gpu::default())
         .setup(|app| {
             // Windows and Linux: a file double-clicked starts the app with
             // its path on the command line.
