@@ -1386,7 +1386,23 @@ without reading anything else.*
       the edge at all but a heal's average; see the next entry. Fixed.)
     - Making every surface reach past it together, and an SVG export
       that clips an effected layer to the page so readers agree in the
-      meantime, is the follow-up.
+      meantime, is the follow-up. A second attempt, made after the heal
+      fix below, drew every region on one surface reaching past it by
+      twice the effects' reach and cut back (`region_at`, and `render`
+      through it). Every nested surface then shares the same room.
+      - It passes a page-against-larger-page test for a shape alone, in
+        an effected group, as a copy of one parked off the page, and
+        under a mask that hides nothing.
+      - It fails the wrap audit (shadow-only shape in `fixture::
+        everything()`'s group, copies hidden) by 0.037, at a blob inside
+        the page along the shape's lower edge. With no room it agrees to
+        1e-7, and the same with any room size (40 or 60).
+      - Translating the whole page by whole pixels changes nothing. What
+        differs is the windows. Wrapped, the shape draws into its group's
+        surface with clip `{0,4,89,98}` and extent from −8.9. Unwrapped,
+        the clip is `{0,0,107,96}` and the extent from −1.6. The group's
+        own surface origin moves a pixel (−19 against −18 on the page).
+      - Start there: which of those cuts reaches the shape's shadow.
 - **A heal's average no longer turns on a pixel that is barely there.**
   The 0.009 a shadowed shape moved the page by, wrapped in a turned
   group and let out again, was a healing stroke lifting from the
