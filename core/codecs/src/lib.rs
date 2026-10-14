@@ -6,6 +6,7 @@
 //! treated as sRGB, which matches the naive pipeline in `chitrakar-color`.
 
 pub mod container;
+pub mod cube;
 pub mod pdf;
 mod strokes;
 mod subset;

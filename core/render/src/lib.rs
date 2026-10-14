@@ -9531,6 +9531,9 @@ pub enum Prepared {
     /// its press profile, which is the one place the document is still
     /// to hand.
     Ramp(RampLut),
+    /// A colour lookup's table, read out of its resource: the grid's
+    /// size and its entries (`chitrakar_doc::lut`).
+    Table(u32, Vec<[f32; 3]>),
 }
 
 /// How finely a gradient map's ramp is read off before the pass.
@@ -9598,6 +9601,10 @@ pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
             let (glass, k) = photo_filter_glass(resolve_color(doc, color), *density);
             Some(Prepared::Glass(glass, k))
         }
+        Adjustment::ColorLookup { table, size, .. } => doc
+            .resource(table)
+            .and_then(|r| chitrakar_doc::lut::decode(*size, r.width, r.height, &r.rgba8))
+            .map(|t| Prepared::Table(*size, t)),
         _ => None,
     }
 }
@@ -10154,6 +10161,20 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 }
             }
         }
+        // A table read on the values a device shows, between its grid
+        // points; above white is held at white, as any table holds it.
+        // Its entries are only in the resource, which only a pass has to
+        // hand: asked without one — or with a resource that is missing or
+        // the wrong shape — the picture is left as it is.
+        Adjustment::ColorLookup { .. } => match ready {
+            Some(Prepared::Table(size, table)) => {
+                let shown = [r, g, b].map(|v| chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0)));
+                let [nr, ng, nb] = chitrakar_doc::lut::trilinear(*size, table, shown)
+                    .map(chitrakar_color::srgb_to_linear);
+                (nr, ng, nb)
+            }
+            _ => (r, g, b),
+        },
         Adjustment::ChannelMixer {
             red,
             green,
@@ -15306,6 +15327,116 @@ mod tests {
             blue: 0.0,
         };
         assert!((grey(&nothing, sky) - by_luma).abs() < 1e-5);
+    }
+
+    /// A colour lookup sends each colour where its table says, read on
+    /// the values a device shows — a table that swaps red and blue turns
+    /// a shown blue-ish into a shown orange-ish, exactly — and a layer
+    /// whose table is not there leaves the picture alone rather than
+    /// guessing.
+    #[test]
+    fn a_colour_lookup_sends_a_colour_where_its_table_says() {
+        let page = |table: &str, size: u32, opacity: f32| {
+            let mut doc = Document::new(4, 4, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect(
+                    "under",
+                    4.0,
+                    4.0,
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.5,
+                        b: 0.8,
+                        a: 1.0,
+                    },
+                ),
+            })
+            .unwrap();
+            let mut node = Node::adjustment(
+                "look",
+                Adjustment::ColorLookup {
+                    table: table.into(),
+                    size,
+                    name: String::new(),
+                },
+            );
+            node.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc
+        };
+        // Red and blue swapped and green halved, on a grid too coarse to
+        // hit 0.2 or 0.8 exactly: the answer has to come from between
+        // grid points.
+        let swap: Vec<[f32; 3]> = chitrakar_doc::lut::identity(6)
+            .into_iter()
+            .map(|[r, g, b]| [b, g * 0.5, r])
+            .collect();
+        let (w, h, bytes) = chitrakar_doc::lut::encode(6, &swap);
+        let mut doc = page("", 6, 1.0);
+        let table = doc.add_resource(w, h, bytes.clone());
+        let id = doc.children_of(doc.root()).unwrap()[1];
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Adjustment(Adjustment::ColorLookup {
+                table: table.clone(),
+                size: 6,
+                name: "swap".into(),
+            })),
+        })
+        .unwrap();
+        let shown = |doc: &Document| {
+            let p = render(doc).unwrap().get(1, 1);
+            [p.r, p.g, p.b].map(chitrakar_color::linear_to_srgb)
+        };
+        let got = shown(&doc);
+        for (g, want) in got.iter().zip([0.8, 0.25, 0.2]) {
+            assert!((g - want).abs() < 2e-3, "swapped: {got:?}");
+        }
+        // Half the layer is half the change, mixed as any adjustment is.
+        let mut half = doc.clone();
+        half.apply(Command::SetOpacity { id, opacity: 0.5 })
+            .unwrap();
+        let was = to_working(&AuthoredColor::Srgb {
+            r: 0.2,
+            g: 0.5,
+            b: 0.8,
+            a: 1.0,
+        });
+        let full = render(&doc).unwrap().get(1, 1);
+        let mid = render(&half).unwrap().get(1, 1);
+        assert!(
+            (mid.r - (was.r + full.r) * 0.5).abs() < 1e-4,
+            "half the layer: {mid:?}"
+        );
+        // A table that is not there, or the wrong size for what is.
+        let bare = render(&page("", 6, 1.0)).unwrap().get(1, 1);
+        let mut wrong = doc.clone();
+        wrong
+            .apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Adjustment(Adjustment::ColorLookup {
+                    table,
+                    size: 5,
+                    name: String::new(),
+                })),
+            })
+            .unwrap();
+        for (what, doc) in [("missing", page("nothing", 6, 1.0)), ("misread", wrong)] {
+            let p = render(&doc).unwrap().get(1, 1);
+            assert!(
+                (p.r - bare.r).abs() < 1e-6 && (p.b - bare.b).abs() < 1e-6,
+                "{what}: the picture is left alone: {p:?} against {bare:?}"
+            );
+        }
+        assert!((bare.b - was.b).abs() < 1e-5);
     }
 
     /// A gradient map replaces every tone with the colour at its own

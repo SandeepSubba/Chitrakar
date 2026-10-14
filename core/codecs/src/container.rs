@@ -1140,6 +1140,9 @@ mod tests {
             "/document/nodes/*/kind/Vector/shape/Path:points",
             "/document/nodes/*/kind/Raster:height",
             "/document/nodes/*/kind/Raster:resource_id",
+            // A colour lookup cannot be missing its table or its grid.
+            "/document/nodes/*/kind/Adjustment/ColorLookup:size",
+            "/document/nodes/*/kind/Adjustment/ColorLookup:table",
             "/document/nodes/*/kind/Raster:width",
             // A guide text is set along: the two fields a path cannot be
             // missing, the same two its own path wants.
@@ -2072,16 +2075,7 @@ mod tests {
         // What the document refers to, reference by reference.
         let mut refs: Vec<String> = Vec::new();
         for (_, node) in doc.nodes() {
-            if let chitrakar_doc::NodeKind::Raster(r) = &node.kind {
-                refs.push(r.resource_id.clone());
-            }
-            if let Some(chitrakar_doc::Mask {
-                kind: chitrakar_doc::MaskKind::Raster { resource_id, .. },
-                ..
-            }) = node.mask.as_ref()
-            {
-                refs.push(resource_id.clone());
-            }
+            node.each_resource(&mut |id| refs.push(id.to_string()));
         }
         let mut distinct = refs.clone();
         distinct.sort();
@@ -2120,16 +2114,7 @@ mod tests {
         let back = load_chitra(&bytes).unwrap();
         let mut theirs: Vec<String> = Vec::new();
         for (_, node) in back.nodes() {
-            if let chitrakar_doc::NodeKind::Raster(r) = &node.kind {
-                theirs.push(r.resource_id.clone());
-            }
-            if let Some(chitrakar_doc::Mask {
-                kind: chitrakar_doc::MaskKind::Raster { resource_id, .. },
-                ..
-            }) = node.mask.as_ref()
-            {
-                theirs.push(resource_id.clone());
-            }
+            node.each_resource(&mut |id| theirs.push(id.to_string()));
         }
         theirs.sort();
         let mut want = refs.clone();

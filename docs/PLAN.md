@@ -1523,6 +1523,47 @@ without reading anything else.*
   that comp hid the group. `a_comp_follows_a_layer_into_another_group_and_out_of_one`;
   each of the three carries taken out fails it. Grouping adds an
   identity group, so it moves nothing and needs no carry.
+- **Colour lookup ✅** (Adjust › Colour lookup…, or "+FX"): a `.cube`
+  file's 3D table as an adjustment layer, the thing a grade made in
+  Resolve, a film emulation or a camera's log conversion is handed over
+  in (`Adjustment::ColorLookup { table, size, name }`).
+  - **The file** (`chitrakar_codecs::cube`): 3D tables read red-fastest;
+    1D tables spread over a 33-point grid; `DOMAIN_MIN/MAX` and Resolve's
+    `LUT_*_INPUT_RANGE` resampled onto nought to one; grids past 65
+    resampled down. Anything else is refused with a sentence saying
+    what, which the app shows.
+  - **The table** is a *resource*, like a picture's pixels: immutable,
+    content-addressed, written into a `.chitra` as a PNG, so the
+    container learnt nothing new. A resource is 8 bits a channel, so
+    each entry is kept as 16: high bytes in the top half of the image,
+    low in the bottom (`chitrakar_doc::lut`). Loading a table is not a
+    history entry; the layer is.
+  - **Both renderers** read it on the values a device shows, trilinearly,
+    red then green then blue. A table that is missing or the wrong shape
+    leaves the picture alone. The GPU lays the blue slices as a square
+    of tiles (a row of 65 slices of 65 would be wider than a texture
+    goes) and reads the eight entries by hand.
+  - **Carried:** into a file, and on the clipboard into another
+    document (`collect_resources` takes the table, or the paste is a
+    layer that silently does nothing; the sabotage confirms it). The
+    shared fixture holds one, gently warm at half strength, so every
+    audit carries a table. Putting it there stopped two audits holding.
+    The format's inventory wanted the table and the grid, rightly. The
+    other was the file audit's own list of what a document refers to,
+    walked by hand (pictures, picture masks) exactly as the clipboard
+    walked it, and both were blind to a table the day it became a
+    resource. So there is one walk now, `Node::each_resource`,
+    exhaustive over every kind, adjustment and filter the way
+    `each_color_mut` is, and both read it. With the table's arm taken
+    out, the clipboard test and the file audit each fail.
+  - **Tests.** Five on the parser, two on the resource, one CPU render
+    (exact swap between grid points; half opacity; missing and misread
+    tables), one GPU against the CPU at grids of 2, 17 and 65 (fails
+    with r/g swapped in a tile, one row of slices, read in light,
+    nearest instead of trilinear), one engine (file and clipboard), and
+    smoke 9o18: a swap table through the +FX list, the panel naming it,
+    "Load another" in place and undone, and a file that is not a table
+    refused with nothing added.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

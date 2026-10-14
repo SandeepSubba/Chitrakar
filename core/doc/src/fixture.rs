@@ -1818,6 +1818,35 @@ pub fn everything() -> Fixture {
         }],
     })
     .unwrap();
+    // A colour lookup, gently warm and at half strength, over the whole
+    // page: an adjustment whose numbers are not in the document at all
+    // but in a resource beside it, so every audit that carries a layer
+    // somewhere — a file, a clipboard, another renderer — is asked to
+    // carry its table too.
+    {
+        let warm: Vec<[f32; 3]> = crate::lut::identity(3)
+            .into_iter()
+            .map(|[r, g, b]| [r * 0.92 + 0.08, g * 0.97 + 0.01, b * 0.88])
+            .collect();
+        let (w, h, bytes) = crate::lut::encode(3, &warm);
+        let table = doc.add_resource(w, h, bytes);
+        let mut node = Node::adjustment(
+            "warm look",
+            Adjustment::ColorLookup {
+                table,
+                size: 3,
+                name: "Warm".into(),
+            },
+        );
+        node.opacity = 0.5;
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(node),
+        })
+        .unwrap();
+    }
     // And a comp: the page kept as it stands, but for the pair hidden and
     // the loose shape faded and somewhere else. Every layer is in it, as
     // `Session::keep_comp` keeps them, so a command that renumbers,

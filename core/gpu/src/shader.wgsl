@@ -981,10 +981,40 @@ fn adjusted_from_table(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec
             }
             return vec3f(to_light(out.r), to_light(out.g), to_light(out.b));
         }
+        // A colour lookup: a 3D table of `p.y` points a side, its blue
+        // slices laid `p.z` to a row of tiles, read on the values a device
+        // shows between its eight nearest entries — red mixed first, then
+        // green, then blue, the CPU renderer's own order.
+        case 24: {
+            let n = i32(p.y);
+            let k = i32(p.z);
+            let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+            let x = shown * f32(n - 1);
+            let i = min(vec3i(floor(x)), vec3i(n - 2));
+            let f = x - vec3f(i);
+            let c00 = mix_line(lut_at(i.x, i.y, i.z, n, k), lut_at(i.x + 1, i.y, i.z, n, k), f.x);
+            let c10 = mix_line(lut_at(i.x, i.y + 1, i.z, n, k), lut_at(i.x + 1, i.y + 1, i.z, n, k), f.x);
+            let c01 = mix_line(lut_at(i.x, i.y, i.z + 1, n, k), lut_at(i.x + 1, i.y, i.z + 1, n, k), f.x);
+            let c11 = mix_line(lut_at(i.x, i.y + 1, i.z + 1, n, k), lut_at(i.x + 1, i.y + 1, i.z + 1, n, k), f.x);
+            let out = mix_line(mix_line(c00, c10, f.y), mix_line(c01, c11, f.y), f.z);
+            return vec3f(to_light(out.r), to_light(out.g), to_light(out.b));
+        }
         default: {
             return c;
         }
     }
+}
+
+// One entry of a colour lookup's table: slice `b` is tile `b % k` across
+// and `b / k` down.
+fn lut_at(r: i32, g: i32, b: i32, n: i32, k: i32) -> vec3f {
+    return textureLoad(image, vec2i((b % k) * n + r, (b / k) * n + g), 0).rgb;
+}
+
+// `a + (b - a)·t`, the CPU renderer's own lerp, rather than `mix`, which
+// rounds the other way round.
+fn mix_line(a: vec3f, b: vec3f, t: f32) -> vec3f {
+    return a + (b - a) * t;
 }
 
 @fragment
@@ -1005,7 +1035,7 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     // adjustments are stated.
     let straight = was.rgb / was.a;
     var out = adjusted(kind, in.params, in.grad, in.extra, straight);
-    if kind >= 10 && kind < 14 {
+    if (kind >= 10 && kind < 14) || kind == 24 {
         out = adjusted_from_table(kind, in.params, in.grad, in.extra, straight);
     }
     return vec4f(mix(was.rgb, out * was.a, weight), was.a);

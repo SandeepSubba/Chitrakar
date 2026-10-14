@@ -3405,14 +3405,7 @@ impl Session {
                 }
             }
         };
-        if let NodeKind::Raster(r) = &clip.node.kind {
-            take(&r.resource_id);
-        }
-        if let Some(m) = &clip.node.mask {
-            if let chitrakar_doc::MaskKind::Raster { resource_id, .. } = &m.kind {
-                take(resource_id);
-            }
-        }
+        clip.node.each_resource(&mut take);
         for child in &clip.children {
             self.collect_resources(child, out);
         }
@@ -6896,6 +6889,29 @@ impl Session {
 
     /// Decode image bytes, pool them as a resource, and add a raster object
     /// referencing them at the top of the root group (one undo step).
+    /// Read a `.cube` file's table into the document, and answer the
+    /// kind of layer that reads it: a colour lookup named for what the
+    /// file calls itself, or for `name` where it calls itself nothing.
+    ///
+    /// The table goes in as a resource, as a picture's pixels do, and like
+    /// them it is not an entry in the history: it is content, immutable
+    /// and addressed by what it holds, so loading one file twice is one
+    /// table. The layer is the edit, and whoever puts it on the page puts
+    /// it there as one.
+    pub fn color_lookup_kind(&mut self, cube: &str, name: &str) -> Result<NodeKind, EngineError> {
+        let read = chitrakar_codecs::cube::parse_cube(cube).map_err(EngineError::BadCommand)?;
+        let (w, h, bytes) = chitrakar_doc::lut::encode(read.size, &read.table);
+        let table = self.doc.add_resource(w, h, bytes);
+        let title = read.title.trim();
+        Ok(NodeKind::Adjustment(
+            chitrakar_doc::Adjustment::ColorLookup {
+                table,
+                size: read.size,
+                name: if title.is_empty() { name.trim() } else { title }.to_string(),
+            },
+        ))
+    }
+
     pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
         let img =
             chitrakar_codecs::decode(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
@@ -8263,6 +8279,82 @@ mod tests {
     /// strong zoom streaks across the page, and the repaint that follows
     /// is the page drawn whole — a reach of the dot's own box would leave
     /// the old streak standing.
+    /// A colour lookup's table is a resource beside the document, not a
+    /// field in it, so the two places a layer leaves its document by are
+    /// asked to take it along: a file saved and opened, and a copy pasted
+    /// into another document — which, without the table, would be a
+    /// layer that silently does nothing.
+    #[test]
+    fn a_colour_lookup_takes_its_table_into_a_file_and_another_document() {
+        let mut session = Session::new(8, 8, ColorMode::Rgb);
+        add_rect(&mut session, "under", 8.0, 8.0);
+        let mut cube = String::from("TITLE \"Cold\"\nLUT_3D_SIZE 2\n");
+        for b in 0..2 {
+            for g in 0..2 {
+                for r in 0..2 {
+                    // Red pulled down, blue lifted.
+                    cube.push_str(&format!(
+                        "{} {} {}\n",
+                        r as f32 * 0.4,
+                        g,
+                        0.3 + b as f32 * 0.7
+                    ));
+                }
+            }
+        }
+        let kind = session.color_lookup_kind(&cube, "cold.cube").unwrap();
+        let NodeKind::Adjustment(chitrakar_doc::Adjustment::ColorLookup { name, size, .. }) = &kind
+        else {
+            panic!("a colour lookup: {kind:?}");
+        };
+        assert_eq!(
+            (name.as_str(), *size),
+            ("Cold", 2),
+            "named for what the file says"
+        );
+        let mut node = Node::adjustment(
+            "Colour lookup",
+            chitrakar_doc::Adjustment::Invert { amount: 0.0 },
+        );
+        node.kind = kind;
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+        let look = session.document().children_of(root).unwrap()[1];
+        let graded = session.render().unwrap().get(4, 4);
+        let bare = {
+            let mut s = Session::new(8, 8, ColorMode::Rgb);
+            add_rect(&mut s, "under", 8.0, 8.0);
+            s.render().unwrap().get(4, 4)
+        };
+        assert!(
+            (graded.r - bare.r).abs() > 0.05,
+            "the table changes the picture: {graded:?} against {bare:?}"
+        );
+
+        let opened = Session::load(&session.save().unwrap()).unwrap();
+        assert_eq!(
+            opened.render().unwrap().get(4, 4),
+            graded,
+            "the table comes back with the file"
+        );
+
+        session.copy_nodes(&[look]).unwrap();
+        let mut other = Session::new(8, 8, ColorMode::Rgb);
+        add_rect(&mut other, "under", 8.0, 8.0);
+        other.paste(None).unwrap();
+        assert_eq!(
+            other.render().unwrap().get(4, 4),
+            graded,
+            "and with a copy into another document"
+        );
+    }
+
     #[test]
     fn a_dot_moved_under_a_radial_blur_repaints_its_whole_streak() {
         // On a clear page, so the dot's streak is all there is.

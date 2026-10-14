@@ -111,6 +111,10 @@ export type Adjustment =
   /** A coloured glass: every colour multiplied by `color` in light and
    * mixed back in by `density` (0..=1); with `preserve_luminosity` each
    * pixel keeps its brightness. */
+  /** Every colour sent where a 3D table says, read on the values a
+   * device shows: `table` names the resource it is kept in, `size` its
+   * grid, `name` what the `.cube` file called itself. */
+  | { ColorLookup: { table: string; size: number; name: string } }
   | {
       PhotoFilter: {
         color: AuthoredColor;

@@ -1151,6 +1151,14 @@ impl WasmSession {
         self.inner.apply_comp(name).map_err(to_js)
     }
 
+    /// Read a `.cube` file into the document and answer the kind of
+    /// layer that reads it, as JSON — for the panel to put where it is
+    /// putting any adjustment.
+    pub fn color_lookup_kind(&mut self, cube: &str, name: &str) -> Result<String, JsError> {
+        let kind = self.inner.color_lookup_kind(cube, name).map_err(to_js)?;
+        serde_json::to_string(&kind).map_err(|e| JsError::new(&e.to_string()))
+    }
+
     pub fn forget_comp(&mut self, name: &str) -> Result<(), JsError> {
         self.inner.forget_comp(name).map_err(to_js)
     }

@@ -868,6 +868,23 @@ pub enum Adjustment {
         #[serde(default)]
         preserve_luminosity: bool,
     },
+    /// Every colour sent where a 3D table says: a grade made in another
+    /// program, a film emulation, a camera's log turned into a picture —
+    /// the thing a `.cube` file holds.
+    ///
+    /// The table is a resource (`table`, read by [`crate::lut`]), so it is
+    /// as immutable and as shared as a picture's pixels; `size` is its
+    /// grid, `size`³ entries over nought to one. It is read on the values
+    /// a device shows, which is the space every `.cube` that grades a
+    /// picture is made in; what is above white is held at white, as it
+    /// is for any table. `name` is what the file called itself, for the
+    /// panel.
+    ColorLookup {
+        table: String,
+        size: u32,
+        #[serde(default)]
+        name: String,
+    },
 }
 
 /// How much each channel contributes to brightness — the Rec. 709
@@ -1537,7 +1554,8 @@ impl Adjustment {
             | Adjustment::ColorBalance { .. }
             | Adjustment::Posterize { .. }
             | Adjustment::Threshold { .. }
-            | Adjustment::ChannelMixer { .. } => {}
+            | Adjustment::ChannelMixer { .. }
+            | Adjustment::ColorLookup { .. } => {}
         }
     }
 }
@@ -1888,6 +1906,65 @@ impl Node {
         }
         if let Some(mask) = &mut self.mask {
             mask.each_color_mut(f);
+        }
+    }
+
+    /// Every resource the layer names — the bytes it is drawn from that
+    /// live beside the document rather than in it: a picture's pixels, a
+    /// picture mask's, a colour lookup's table.
+    ///
+    /// Exhaustive for the same reason `each_color_mut` is: anything that
+    /// carries a layer somewhere else (a clipboard into another document,
+    /// an audit of what a file holds) is only as good as this walk is
+    /// complete, and the walks that stood in for it were written out by
+    /// hand in each place, knew about pictures and picture masks, and
+    /// were silently wrong the day a table became a resource too.
+    pub fn each_resource(&self, f: &mut impl FnMut(&str)) {
+        match &self.kind {
+            NodeKind::Raster(r) => f(&r.resource_id),
+            NodeKind::Adjustment(adjustment) => match adjustment {
+                Adjustment::ColorLookup { table, .. } => f(table),
+                Adjustment::BrightnessContrast { .. }
+                | Adjustment::Exposure { .. }
+                | Adjustment::HueSaturation { .. }
+                | Adjustment::Levels { .. }
+                | Adjustment::Curves { .. }
+                | Adjustment::WhiteBalance { .. }
+                | Adjustment::Vibrance { .. }
+                | Adjustment::BlackAndWhite { .. }
+                | Adjustment::GradientMap { .. }
+                | Adjustment::Invert { .. }
+                | Adjustment::SelectiveHsl { .. }
+                | Adjustment::ShadowsHighlights { .. }
+                | Adjustment::ColorBalance { .. }
+                | Adjustment::Posterize { .. }
+                | Adjustment::Threshold { .. }
+                | Adjustment::ChannelMixer { .. }
+                | Adjustment::PhotoFilter { .. } => {}
+            },
+            NodeKind::Filter(filter) => match filter {
+                Filter::GaussianBlur { .. }
+                | Filter::Sharpen { .. }
+                | Filter::MotionBlur { .. }
+                | Filter::RadialBlur { .. }
+                | Filter::Pixelate { .. }
+                | Filter::Median { .. }
+                | Filter::Noise { .. }
+                | Filter::Vignette { .. } => {}
+            },
+            NodeKind::Group
+            | NodeKind::Instance { .. }
+            | NodeKind::Paint { .. }
+            | NodeKind::Clone { .. }
+            | NodeKind::Vector { .. }
+            | NodeKind::Text(_)
+            | NodeKind::Artboard { .. } => {}
+        }
+        if let Some(mask) = &self.mask {
+            match &mask.kind {
+                MaskKind::Raster { resource_id, .. } => f(resource_id),
+                MaskKind::Vector { .. } | MaskKind::Painted { .. } => {}
+            }
         }
     }
 

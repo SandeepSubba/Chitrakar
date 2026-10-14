@@ -7740,6 +7740,79 @@ assert(
   assert((await page.locator(".panel ul li").count()) === all && (await field.inputValue()) === "", "Escape puts the whole list back");
 }
 
+// 9o18. Colour lookup: a .cube file chosen from the +FX list grades the
+// page through its table; the panel names it, loads another in its
+// place, and undo takes the second back; a file that is not a table
+// says so and adds nothing.
+{
+  await newDocument(200, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 200) * b.width, b.y + (y / 120) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#3366cc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 120), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  const cube = (title, f) => {
+    let text = `TITLE "${title}"\nLUT_3D_SIZE 2\n`;
+    for (const bl of [0, 1]) for (const g of [0, 1]) for (const r of [0, 1]) text += f(r, g, bl).join(" ") + "\n";
+    return { name: `${title.toLowerCase()}.cube`, mimeType: "text/plain", buffer: Buffer.from(text) };
+  };
+  const choose = async (act, file) => {
+    const [chooser] = await Promise.all([page.waitForEvent("filechooser"), act()]);
+    await chooser.setFiles(file);
+    await page.waitForTimeout(400);
+  };
+  const before = await canvasPixel(100, 60);
+  assert(before[2] > before[0] + 100, `a blue page (${before})`);
+  // Red and blue swapped.
+  await choose(
+    () => page.selectOption('[aria-label="Add adjustment layer"]', "lookup"),
+    cube("Swap", (r, g, bl) => [bl, g, r]),
+  );
+  let now = await canvasPixel(100, 60);
+  assert(
+    Math.abs(now[0] - before[2]) <= 2 && Math.abs(now[2] - before[0]) <= 2 && Math.abs(now[1] - before[1]) <= 2,
+    `red and blue swap through the table (${before} -> ${now})`,
+  );
+  assert((await page.locator(".panel ul li", { hasText: "Colour lookup" }).count()) === 1, "one layer, named");
+  assert(
+    (await page.locator('[aria-label="Colour lookup table"]').textContent()).includes("Swap"),
+    "the panel names the table",
+  );
+  // Another in its place: everything to grey.
+  await choose(
+    () => page.locator('[aria-label="Load another table"]').click(),
+    cube("Grey", () => [0.5, 0.5, 0.5]),
+  );
+  now = await canvasPixel(100, 60);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Colour lookup" }).count()) === 1,
+    "in its place, not as a layer of its own",
+  );
+  assert(Math.abs(now[0] - now[2]) <= 2 && Math.abs(now[0] - 128) <= 2, `the second table in its place (a half on the values shown) (${now})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  now = await canvasPixel(100, 60);
+  assert(Math.abs(now[0] - before[2]) <= 2, `undo puts the first back (${now})`);
+  // Not a table: said, and nothing added.
+  const layersBefore = await page.locator(".panel ul li").count();
+  lastDialog = "";
+  await choose(
+    () => page.selectOption('[aria-label="Add adjustment layer"]', "lookup"),
+    { name: "notes.cube", mimeType: "text/plain", buffer: Buffer.from("just some words") },
+  );
+  assert(
+    lastDialog.includes("notes.cube") && lastDialog.includes("LUT_3D_SIZE"),
+    `refused, and said why (${lastDialog})`,
+  );
+  assert((await page.locator(".panel ul li").count()) === layersBefore, "and nothing added");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

@@ -4747,6 +4747,46 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
             shadows,
             highlights,
         } => plain([9.0, *shadows, *highlights, 0.0], [0.0; 4]),
+        // A colour lookup: the CPU renderer's own table, out of the same
+        // resource, laid on a texture as its blue slices side by side in
+        // a square of tiles — a row of 65 slices of 65 would be wider
+        // than a texture goes. Read by hand between its grid points, as
+        // the CPU reads it, rather than by the sampler, which mixes in
+        // two dimensions and not three.
+        A::ColorLookup { .. } => {
+            let Some(chitrakar_render::Prepared::Table(size, table)) =
+                chitrakar_render::prepare(doc, adj)
+            else {
+                // No table to read — a resource missing, or not one — and
+                // the CPU leaves the picture as it is: so does a kind the
+                // shader has nothing to say about.
+                return Some(plain([0.0; 4], [0.0; 4]));
+            };
+            let n = size as usize;
+            let k = (n as f32).sqrt().ceil() as usize;
+            let (w, h) = (k * n, n.div_ceil(k) * n);
+            let mut texels = vec![0u16; w * h * 4];
+            for (i, entry) in table.iter().enumerate() {
+                let (r, g, b) = (i % n, (i / n) % n, i / (n * n));
+                let (x, y) = ((b % k) * n + r, (b / k) * n + g);
+                let at = (y * w + x) * 4;
+                for c in 0..3 {
+                    texels[at + c] = f32_to_f16(entry[c]);
+                }
+                texels[at + 3] = f32_to_f16(1.0);
+            }
+            Adjusting {
+                params: [24.0, n as f32, k as f32, 0.0],
+                grad: [0.0; 4],
+                extra: [0.0; 3],
+                table: Some(Image {
+                    width: w as u32,
+                    height: h as u32,
+                    channels: 4,
+                    texels,
+                }),
+            }
+        }
         // The three read off tables the CPU renderer builds, so neither
         // renderer can read a table the other did not write.
         A::Curves {
@@ -11746,6 +11786,97 @@ mod tests {
             },
             (90, 80)
         ));
+    }
+
+    /// A colour lookup reads the CPU renderer's own table out of the same
+    /// resource, laid as tiles of blue slices, between its eight nearest
+    /// entries by hand. A grid of 65 is nine tiles across, which is the
+    /// tiling actually being asked; one of 2 is the smallest there is.
+    #[test]
+    fn a_colour_lookup_reads_the_table_the_cpu_reads() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut base = Document::new(48, 24, ColorMode::Rgb);
+        for (i, rgb) in [
+            [0.9, 0.1, 0.1],
+            [0.1, 0.8, 0.2],
+            [0.15, 0.3, 0.95],
+            [0.95, 0.85, 0.2],
+            [0.5, 0.5, 0.5],
+            [0.02, 0.05, 0.1],
+            [1.0, 1.0, 1.0],
+            [0.6, 0.2, 0.7],
+        ]
+        .iter()
+        .enumerate()
+        {
+            add(
+                &mut base,
+                filled(
+                    "patch",
+                    VectorShape::Rect {
+                        width: 12.0,
+                        height: 12.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: rgb[0],
+                        g: rgb[1],
+                        b: rgb[2],
+                        a: if i == 7 { 0.5 } else { 1.0 },
+                    },
+                ),
+                Transform::translation((i % 4) as f32 * 12.0, (i / 4) as f32 * 12.0),
+            );
+        }
+        // Something no axis-by-axis table could do: each channel out of
+        // all three, bent.
+        let look = |[r, g, b]: [f32; 3]| {
+            [
+                (0.6 * g + 0.4 * b).powf(0.8),
+                (r * b).sqrt(),
+                (1.0 - r) * 0.7 + g * g * 0.3,
+            ]
+        };
+        for (size, opacity) in [(17u32, 1.0f32), (65, 1.0), (2, 1.0), (17, 0.6)] {
+            let table: Vec<[f32; 3]> = chitrakar_doc::lut::identity(size)
+                .into_iter()
+                .map(look)
+                .collect();
+            let (w, h, bytes) = chitrakar_doc::lut::encode(size, &table);
+            let mut doc = base.clone();
+            let id = doc.add_resource(w, h, bytes);
+            let mut node = Node::adjustment(
+                "look",
+                chitrakar_doc::Adjustment::ColorLookup {
+                    table: id,
+                    size,
+                    name: String::new(),
+                },
+            );
+            node.opacity = opacity;
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 8,
+                node: Box::new(node),
+            })
+            .unwrap();
+            assert!(GpuRenderer::can_render(&doc), "a grid of {size} is drawn");
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let bare = chitrakar_render::render(&base).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.001 && worst < 0.01,
+                "a grid of {size} at {opacity}: mean channel difference {mean:.5} (worst {worst:.4})"
+            );
+            assert!(
+                difference(&reference, &bare).0 > 0.05,
+                "and the table changed the picture"
+            );
+        }
     }
 
     /// A radial blur is the motion blur's pass with its line worked out

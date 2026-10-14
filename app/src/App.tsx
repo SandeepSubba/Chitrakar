@@ -1157,6 +1157,11 @@ export function App() {
   const openInputRef = useRef<HTMLInputElement>(null);
   const placeInputRef = useRef<HTMLInputElement>(null);
   const iccInputRef = useRef<HTMLInputElement>(null);
+  /** The `.cube` picker, and where what it reads goes: a new layer over
+   * everything, one only on the picked layer, or the picked lookup's own
+   * table replaced. */
+  const lookupInputRef = useRef<HTMLInputElement>(null);
+  const lookupFor = useRef<"over" | "only" | "replace">("over");
   const screenIccInputRef = useRef<HTMLInputElement>(null);
   const fontInputRef = useRef<HTMLInputElement>(null);
   const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
@@ -4591,8 +4596,23 @@ export function App() {
    * the whole trick. */
   const addAdjustment = (value: string) => {
     const only = value.startsWith("only:");
-    const preset = ADJUSTMENT_PRESETS[only ? value.slice(5) : value];
-    if (!session || !preset) return;
+    const key = only ? value.slice(5) : value;
+    // A colour lookup is a file before it is a layer: ask for the file,
+    // and the layer goes where this would have put it once it is read.
+    if (key === "lookup") {
+      lookupFor.current = only ? "only" : "over";
+      lookupInputRef.current?.click();
+      return;
+    }
+    const preset = ADJUSTMENT_PRESETS[key];
+    if (preset) putAdjustment(only, preset.name, preset.kind);
+  };
+
+  /** Put an adjustment on the page: over everything below, holding the
+   * region picked out if there is one, or only on the picked layer. */
+  const putAdjustment = (only: boolean, name: string, kind: NodeKind) => {
+    const preset = { name, kind };
+    if (!session) return;
     if (only && selected !== null) {
       try {
         const group = session.adjust_node(
@@ -7163,6 +7183,25 @@ export function App() {
     });
   };
 
+  /** A `.cube` file read into the document as a colour lookup's table,
+   * and the layer that reads it put where it was asked for. */
+  const loadLookup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    file.text().then((text) => {
+      let kind: NodeKind;
+      try {
+        kind = JSON.parse(session.color_lookup_kind(text, file.name.replace(/\.cube$/i, "")));
+      } catch (err) {
+        alert(`Could not read ${file.name}: ${err}`);
+        return;
+      }
+      if (lookupFor.current === "replace") setKind(kind, false);
+      else putAdjustment(lookupFor.current === "only", "Colour lookup", kind);
+    });
+  };
+
   const loadIccProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -7218,7 +7257,11 @@ export function App() {
     const rows = Object.entries(ADJUSTMENT_PRESETS).filter(([, p]) =>
       presetIs(p.kind, what),
     );
-    const over = rows.map(([key, p]) =>
+    // A colour lookup is a file to choose rather than numbers to start
+    // from, so it is a row of its own after the presets.
+    const lookup: [string, { name: string }][] =
+      what === "Adjustment" ? [["lookup", { name: "Colour lookup…" }]] : [];
+    const over = [...rows, ...lookup].map(([key, p]) =>
       item(`${what}-${key}`, icon, p.name, () => addAdjustment(key)),
     );
     // The same list again, scoped to the picked layer — which the
@@ -7235,7 +7278,7 @@ export function App() {
               `${what}-only`,
               icon,
               `Only on ${selectedLayer.name}`,
-              rows.map(([key, p]) =>
+              [...rows, ...lookup].map(([key, p]) =>
                 item(`${what}-only-${key}`, icon, p.name, () =>
                   addAdjustment(`only:${key}`),
                 ),
@@ -8051,6 +8094,14 @@ export function App() {
           type="file"
           accept=".icc,.icm"
           onChange={loadIccProfile}
+          hidden
+        />
+        <input
+          ref={lookupInputRef}
+          type="file"
+          accept=".cube"
+          onChange={loadLookup}
+          aria-label="Colour lookup file"
           hidden
         />
         <input
@@ -9830,6 +9881,7 @@ export function App() {
                     {p.name}
                   </option>
                 ))}
+                <option value="lookup">Colour lookup…</option>
               </optgroup>
               {selectedLayer &&
                 selectedLayer.kind !== "adjustment" &&
@@ -9840,6 +9892,7 @@ export function App() {
                         {p.name}
                       </option>
                     ))}
+                    <option value="only:lookup">Colour lookup…</option>
                   </optgroup>
                 )}
             </select>
@@ -10233,6 +10286,10 @@ export function App() {
                   onPickNeutral={() => setPickingNeutral((on) => !on)}
                   pickingNeutral={pickingNeutral}
                   onAutoColour={autoColour}
+                  onLoadLookup={() => {
+                    lookupFor.current = "replace";
+                    lookupInputRef.current?.click();
+                  }}
                   cmyk={cmyk}
                   fonts={fontNames}
                   shapes={layers
@@ -12261,6 +12318,8 @@ interface CurvesPanelProps {
 
 interface KindPropsProps {
   kind: NodeKind;
+  /** Ask for another `.cube` file for the picked colour lookup. */
+  onLoadLookup?: () => void;
   /** The document's resolution, for the paper sizes a frame can be given
    * — those are quoted on paper, not in pixels. */
   dpi: number;
@@ -12312,6 +12371,7 @@ function KindProps({
   onPickNeutral,
   pickingNeutral,
   onAutoColour,
+  onLoadLookup,
 }: KindPropsProps) {
   // Which band of colour the panel is showing, when it is showing one.
   const [band, setBand] = useState(0);
@@ -12509,6 +12569,19 @@ function KindProps({
             />
             Keep brightness
           </label>
+        </>
+      );
+    }
+    if ("ColorLookup" in adj) {
+      const p = adj.ColorLookup;
+      return (
+        <>
+          <p className="muted" aria-label="Colour lookup table">
+            {p.name || "A table"} — a grid of {p.size} a side
+          </p>
+          <button type="button" onClick={onLoadLookup} aria-label="Load another table">
+            Load another .cube…
+          </button>
         </>
       );
     }
