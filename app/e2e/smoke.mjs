@@ -7813,6 +7813,86 @@ assert(
   assert((await page.locator(".panel ul li").count()) === layersBefore, "and nothing added");
 }
 
+// 9o19. Layer comps to files: the export window writes the page once for
+// every comp, named for it, each the page as that comp shows it — and
+// the page on screen, and its history, do not move.
+{
+  await newDocument(200, 100, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 200) * b.width, b.y + (y / 100) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Rect");
+  await page.mouse.move(...at(10, 10));
+  await page.mouse.down();
+  await page.mouse.move(...at(60, 60), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  promptAnswer = "Shown";
+  await page.locator('[aria-label="Keep a layer comp"]').click();
+  await page.waitForTimeout(250);
+  const eye = page.locator(".panel ul li", { hasText: "Rect 1" }).locator("button.visibility");
+  await eye.click();
+  await page.waitForTimeout(200);
+  promptAnswer = "Hidden";
+  await page.locator('[aria-label="Keep a layer comp"]').click();
+  await page.waitForTimeout(250);
+  // Show the first again, so the export has to draw the one that is not
+  // showing.
+  await page.locator('[aria-label="Layer comps"] .comp-chip', { hasText: "Shown" }).click();
+  await page.waitForTimeout(250);
+  const before = await canvasPixel(30, 30);
+  assert(before[2] > 150, `the square showing (${before})`);
+  const entries = await page.locator(".history button").count();
+
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.selectOption('select[aria-label="Area"]', "comps");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.textContent(".export-size span")).includes("-Shown.png") &&
+      (await page.textContent(".export-size span")).includes("1 more"),
+    `named for the first comp, the rest counted (${await page.textContent(".export-size span")})`,
+  );
+  const landed = [];
+  const gather = (d) => landed.push(d);
+  page.on("download", gather);
+  await page.click(".modal-actions .primary");
+  for (let i = 0; i < 60 && landed.length < 2; i++) await page.waitForTimeout(100);
+  page.off("download", gather);
+  assert(landed.length === 2, `a file per comp (${landed.length})`);
+  // Each the page as its comp shows it: the square's corner pixel blue
+  // in one and clear in the other. A PNG's pixels are deflated, so the
+  // page is asked for them through the editor's own decoder.
+  const files = {};
+  for (const d of landed) files[d.suggestedFilename().replace(/^.*-/, "")] = await readFile(await d.path());
+  assert(Object.keys(files).sort().join(",") === "Hidden.png,Shown.png", `named for the comps (${Object.keys(files)})`);
+  const pixelOf = (bytes) =>
+    page.evaluate(async (data) => {
+      const blob = new Blob([new Uint8Array(data)], { type: "image/png" });
+      const bmp = await createImageBitmap(blob);
+      const c = new OffscreenCanvas(bmp.width, bmp.height);
+      const g = c.getContext("2d");
+      g.drawImage(bmp, 0, 0);
+      return Array.from(g.getImageData(30, 30, 1, 1).data);
+    }, Array.from(bytes));
+  const shown = await pixelOf(files["Shown.png"]);
+  const hidden = await pixelOf(files["Hidden.png"]);
+  assert(shown[2] > 150 && shown[3] === 255, `the comp with the square has it (${shown})`);
+  assert(hidden[3] === 0, `and the comp without it does not (${hidden})`);
+  const after = await canvasPixel(30, 30);
+  assert(after.join() === before.join(), `the page did not move (${after})`);
+  assert((await page.locator(".history button").count()) === entries, "nor its history");
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower
@@ -14119,9 +14199,31 @@ assert(
       "badge,banner",
     "and the regions are still kept, unpicked and unmoved",
   );
+  // A JPEG of each region is a JPEG: the box that holds it, on white.
+  // It was a PNG's bytes under a name ending .jpg.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("JPEG")');
+  await page.selectOption('select[aria-label="Area"]', "regions");
+  await page.waitForTimeout(300);
+  const jpegs = [];
+  const gatherJpeg = (d) => jpegs.push(d);
+  page.on("download", gatherJpeg);
+  await page.click(".modal-actions .primary");
+  for (let i = 0; i < 60 && jpegs.length < 2; i++) await page.waitForTimeout(100);
+  page.off("download", gatherJpeg);
+  assert(jpegs.length === 2, `a JPEG per kept region (${jpegs.length})`);
+  for (const d of jpegs) {
+    const bytes = await readFile(await d.path());
+    assert(
+      d.suggestedFilename().endsWith(".jpg") && bytes[0] === 0xff && bytes[1] === 0xd8,
+      `${d.suggestedFilename()} is a JPEG, not a PNG under its name (${bytes[0]}, ${bytes[1]})`,
+    );
+  }
   // Back to the whole page for whoever opens the window next.
   await page.keyboard.press("Control+Shift+E");
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
   await page.selectOption('select[aria-label="Area"]', "page");
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);

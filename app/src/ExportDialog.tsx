@@ -142,6 +142,7 @@ export function ExportDialog({
   selectionBounds,
   hasIcc,
   keptRegions,
+  keptComps,
   write,
   onClose,
 }: {
@@ -161,6 +162,9 @@ export function ExportDialog({
   /** The regions kept by name, in the order the engine holds them: a
    * slice each, when the area asked for is all of them. */
   keptRegions: string[];
+  /** The layer comps, in the order the engine holds them: the page once
+   * for each, when the area asked for is all of them. */
+  keptComps: string[];
   /** Write the files out, the way the platform writes them; false is a
    * panel cancelled, a failure throws. */
   write: (files: Outgoing[]) => Promise<boolean>;
@@ -173,10 +177,16 @@ export function ExportDialog({
   // carry less than the whole page: a setup kept when there were
   // regions must not ask a PDF for one now.
   const area: ExportArea =
-    asked === "regions" && keptRegions.length === 0 ? "page" : asked;
+    (asked === "regions" && keptRegions.length === 0) ||
+    (asked === "comps" && keptComps.length === 0)
+      ? "page"
+      : asked;
+  /** The names a file each is written for, when the area is one of the
+   * two that write several: the regions, or the comps. */
+  const many: string[] = area === "regions" ? keptRegions : area === "comps" ? keptComps : [];
   /** Every slice that will be written, or one file with no name of its
    * own. `null` is the whole page or what is picked out. */
-  const slices: (string | null)[] = area === "regions" ? keptRegions : [null];
+  const slices: (string | null)[] = many.length > 0 ? many : [null];
   /** Whether the set is asked for rather than one size. */
   const set = spec.scales && prefs.exportScale === 0;
   /** The one scale everything shown is worked out at; the set's other
@@ -255,10 +265,22 @@ export function ExportDialog({
    * encode, not two that might differ. */
   const encodeAt = useCallback(
     (scale: number, slice: number | null = null): Uint8Array => {
+      if (slice !== null && area === "comps") {
+        return format === "webp"
+          ? session.comp_webp(slice, scale)
+          : format === "jpeg"
+            ? session.comp_jpeg(slice, scale, prefs.jpegQuality)
+            : session.comp_png(slice, scale);
+      }
       if (slice !== null) {
+        // A JPEG of a region is the box that holds it, on white — the
+        // shape has nowhere to go. (It used to be a PNG's bytes under a
+        // name ending .jpg.)
         return format === "webp"
           ? session.kept_region_webp(slice, scale)
-          : session.kept_region_png(slice, scale);
+          : format === "jpeg"
+            ? session.kept_region_jpeg(slice, scale, prefs.jpegQuality)
+            : session.kept_region_png(slice, scale);
       }
       return encodeOne(scale);
     },
@@ -321,8 +343,9 @@ export function ExportDialog({
   /** The bytes at the one scale shown — the set's first, or the first
    * slice when a slice each is what is being written. */
   const encode = useCallback(
-    () => encodeAt(scale, area === "regions" ? 0 : null),
-    [encodeAt, scale, area],
+    () => encodeAt(scale, many.length > 0 ? 0 : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [encodeAt, scale, area, many.length],
   );
 
   /** How big the file comes out. `null` while it is being worked out,
@@ -366,7 +389,7 @@ export function ExportDialog({
         setSize(
           set
             ? SET.slice(1).reduce((n, s) => n + encodeAt(s).length, bytes.length)
-            : area === "regions"
+            : many.length > 0
               ? slices
                   .slice(1)
                   .reduce((n, _, i) => n + encodeAt(scale, i + 1).length, bytes.length)
@@ -408,10 +431,8 @@ export function ExportDialog({
     }.${spec.ext}`;
   const name = set
     ? `${nameAt(1)}, @2x, @3x`
-    : area === "regions"
-      ? `${nameAt(scale, keptRegions[0] ?? "")}${
-          keptRegions.length > 1 ? `, and ${keptRegions.length - 1} more` : ""
-        }`
+    : many.length > 0
+      ? `${nameAt(scale, many[0])}${many.length > 1 ? `, and ${many.length - 1} more` : ""}`
       : nameAt(scale);
 
   const run = useCallback(async () => {
@@ -581,10 +602,13 @@ export function ExportDialog({
                 Each kept region ({keptRegions.length})
               </option>
             )}
+            {keptComps.length > 0 && (
+              <option value="comps">Each layer comp ({keptComps.length})</option>
+            )}
           </select>
           {!spec.area ? (
             <span className="hint">{spec.label} carries the whole page</span>
-          ) : format === "jpeg" && area === "selection" ? (
+          ) : format === "jpeg" && (area === "selection" || area === "regions") ? (
             <span className="hint">as the box that holds it</span>
           ) : null}
         </label>

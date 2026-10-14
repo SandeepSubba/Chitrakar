@@ -5436,6 +5436,24 @@ impl Session {
         self.kept_region_raster(index, scale, Raster::Png)
     }
 
+    /// A kept region as a JPEG: the box that holds it, on white, since
+    /// a JPEG has nowhere to record the shape it was kept in — what a
+    /// JPEG of what is picked does too.
+    pub fn kept_region_jpeg(
+        &self,
+        index: usize,
+        scale: f32,
+        quality: u8,
+    ) -> Result<Vec<u8>, EngineError> {
+        let Some(kept) = self.doc.regions().get(index) else {
+            return Err(EngineError::BadCommand("no region is kept there".into()));
+        };
+        let Some([x0, y0, x1, y1]) = self.region_bounds(&kept.mask) else {
+            return Err(EngineError::BadCommand("that region has no outline".into()));
+        };
+        self.export_jpeg_at(scale, Some([x0, y0, x1 - x0, y1 - y0]), quality)
+    }
+
     /// A kept region as a file of either kind.
     pub fn kept_region_raster(
         &self,
@@ -5822,6 +5840,17 @@ impl Session {
             .find(|c| c.name == name)
             .cloned()
             .ok_or_else(|| EngineError::BadCommand(format!("no comp called {name}")))?;
+        let cmds = self.comp_commands(&comp);
+        if cmds.is_empty() {
+            return Ok(false);
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(format!("Show the comp {name}")))?;
+        Ok(true)
+    }
+
+    /// What it takes to put the page back as `comp` kept it: only what
+    /// differs, and nothing for a layer since taken away.
+    fn comp_commands(&self, comp: &chitrakar_doc::LayerComp) -> Vec<Command> {
         let mut cmds = Vec::new();
         for kept in &comp.layers {
             let Ok(node) = self.doc.node(kept.id) else {
@@ -5846,11 +5875,53 @@ impl Session {
                 });
             }
         }
+        cmds
+    }
+
+    /// The whole page as the comp at `index` keeps it, as a file of
+    /// either kind — Photoshop's Layer Comps to Files. The comp is shown
+    /// on the document, drawn, and put straight back, so exporting moves
+    /// neither the page nor its history; drawing a copy instead would
+    /// copy every picture's pixels once a comp.
+    pub fn comp_raster(
+        &mut self,
+        index: usize,
+        scale: f32,
+        kind: Raster,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.with_comp(index, |s| s.render_raster_at(scale, None, kind))
+    }
+
+    /// The same as a JPEG, on white.
+    pub fn comp_jpeg(
+        &mut self,
+        index: usize,
+        scale: f32,
+        quality: u8,
+    ) -> Result<Vec<u8>, EngineError> {
+        self.with_comp(index, |s| s.export_jpeg_at(scale, None, quality))
+    }
+
+    /// `f` asked of the page with the comp at `index` shown on it, and
+    /// the page put straight back.
+    fn with_comp<T>(
+        &mut self,
+        index: usize,
+        f: impl FnOnce(&Self) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let Some(comp) = self.doc.comps().get(index).cloned() else {
+            return Err(EngineError::BadCommand("no comp is kept there".into()));
+        };
+        let cmds = self.comp_commands(&comp);
         if cmds.is_empty() {
-            return Ok(false);
+            return f(self);
         }
-        self.apply_labeled(Command::Batch(cmds), Some(format!("Show the comp {name}")))?;
-        Ok(true)
+        let back = self.doc.apply(Command::Batch(cmds))?;
+        let out = f(self);
+        self.doc
+            .apply(back)
+            .expect("what was just applied takes back");
+        out
     }
 
     /// Whether the page is, for every layer the comp knows that is still
@@ -8352,6 +8423,72 @@ mod tests {
             other.render().unwrap().get(4, 4),
             graded,
             "and with a copy into another document"
+        );
+    }
+
+    /// Exporting a comp draws the page as the comp keeps it, pixel for
+    /// pixel the page you would get by showing it — and leaves the
+    /// document, its history and which comp is showing exactly as they
+    /// were.
+    #[test]
+    fn a_comp_exports_as_it_shows_and_moves_nothing() {
+        let mut session = Session::new(40, 30, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        let b = add_rect(&mut session, "b", 8.0, 8.0);
+        session
+            .apply(Command::SetTransform {
+                id: b,
+                transform: Transform::translation(20.0, 12.0),
+            })
+            .unwrap();
+        session.keep_comp("both").unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: b,
+                visible: false,
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(25.0, 15.0),
+            })
+            .unwrap();
+        session.keep_comp("moved").unwrap();
+        let entries = session.history_labels().0.len();
+        let before = session.render().unwrap();
+        let decoded = |bytes: Vec<u8>| chitrakar_codecs::decode(&bytes).unwrap().rgba8;
+
+        // The one not showing is exported last: one that left its comp
+        // on the page would leave this page behind, and asking after the
+        // one already showing could not tell.
+        let moved = decoded(session.comp_raster(1, 1.0, Raster::Png).unwrap());
+        let both = decoded(session.comp_raster(0, 1.0, Raster::Png).unwrap());
+        assert_eq!(
+            session.render().unwrap().pixels,
+            before.pixels,
+            "the page is as it was"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            entries,
+            "and nothing went into history"
+        );
+        assert!(session.comp_showing("moved") && !session.comp_showing("both"));
+
+        // Each file is the page with its comp shown.
+        for (name, file) in [("both", &both), ("moved", &moved)] {
+            session.apply_comp(name).unwrap();
+            assert_eq!(
+                &session.render().unwrap().to_srgb8(),
+                file,
+                "{name} exports as it shows"
+            );
+        }
+        assert_ne!(both, moved);
+        assert!(
+            session.comp_raster(2, 1.0, Raster::Png).is_err(),
+            "no third comp"
         );
     }
 

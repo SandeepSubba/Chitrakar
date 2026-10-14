@@ -942,6 +942,38 @@ impl WasmSession {
     }
 
     /// A region kept by name as its own lossless WebP.
+    /// The page as the comp at `index` keeps it, as a PNG at `scale`;
+    /// the document is left as it was.
+    pub fn comp_png(&mut self, index: usize, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .comp_raster(index, scale, crate::Raster::Png)
+            .map_err(to_js)
+    }
+
+    /// The same as a JPEG, on white.
+    pub fn comp_jpeg(&mut self, index: usize, scale: f32, quality: u8) -> Result<Vec<u8>, JsError> {
+        self.inner.comp_jpeg(index, scale, quality).map_err(to_js)
+    }
+
+    /// A kept region as a JPEG: the box that holds it, on white.
+    pub fn kept_region_jpeg(
+        &self,
+        index: usize,
+        scale: f32,
+        quality: u8,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .kept_region_jpeg(index, scale, quality)
+            .map_err(to_js)
+    }
+
+    /// The same as a lossless WebP.
+    pub fn comp_webp(&mut self, index: usize, scale: f32) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .comp_raster(index, scale, crate::Raster::Webp)
+            .map_err(to_js)
+    }
+
     pub fn kept_region_webp(&self, index: usize, scale: f32) -> Result<Vec<u8>, JsError> {
         self.inner
             .kept_region_raster(index, scale, crate::Raster::Webp)

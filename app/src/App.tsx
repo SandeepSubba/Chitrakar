@@ -8332,6 +8332,7 @@ export function App() {
           }}
           hasIcc={hasIcc}
           keptRegions={kept}
+          keptComps={comps.map((c) => c.name)}
           onClose={() => setExportOpen(false)}
         />
       )}

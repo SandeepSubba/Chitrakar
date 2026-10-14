@@ -1570,6 +1570,23 @@ without reading anything else.*
     smoke 9o18: a swap table through the +FX list, the panel naming it,
     "Load another" in place and undone, and a file that is not a table
     refused with nothing added.
+- **Layer comps to files ✅**, and a JPEG of a region that is a JPEG.
+  The export window's Area has "Each layer comp" beside "Each kept
+  region": the page once for every comp, named for it, in PNG, WebP or
+  JPEG, multiplied by the @1x/@2x/@3x set like slices are.
+  `Session::comp_raster` / `comp_jpeg` show the comp on the document,
+  draw, and put it straight back (`with_comp`), so neither the page nor
+  history moves; drawing a copy instead would copy every picture's
+  pixels once a comp. `a_comp_exports_as_it_shows_and_moves_nothing`
+  exports the comp that is *not* showing last, since a version that left
+  its comp on the page passed when the last one exported was the one
+  already showing; with the restore taken out it fails now. Smoke 9o19.
+  - **Found on the way:** JPEG with "Each kept region" wrote a *PNG's
+    bytes* under a name ending `.jpg`, because the slice path only knew
+    PNG and WebP. A JPEG of a region is now the box that holds it, on
+    white, as a JPEG of what is picked already was
+    (`Session::kept_region_jpeg`), and smoke 9by reads the files' first
+    bytes (FF D8) and fails with the old path.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
