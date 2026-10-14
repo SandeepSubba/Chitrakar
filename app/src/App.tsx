@@ -4404,7 +4404,7 @@ export function App() {
       name: "Hue/Saturation",
       kind: {
         Adjustment: {
-          HueSaturation: { hue_degrees: 0, saturation: 0, lightness: 0 },
+          HueSaturation: { hue_degrees: 0, saturation: 0, lightness: 0, colorize: false },
         },
       },
     },
@@ -12441,6 +12441,30 @@ function KindProps({
           {slider("Lightness", p.lightness, -1, 1, 0.01, (v) =>
             wrap({ HueSaturation: { ...p, lightness: v } }),
           )}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={!!p.colorize}
+              onChange={(e) =>
+                onEdit(
+                  wrap({
+                    HueSaturation: {
+                      ...p,
+                      colorize: e.target.checked,
+                      // Turned on from where it opens, the tint starts
+                      // at a quarter, where Photoshop's does: the slider
+                      // reads -1..1 as 0..1 of the tint.
+                      saturation:
+                        e.target.checked && p.saturation === 0 ? -0.5 : p.saturation,
+                    },
+                  }),
+                  false,
+                )
+              }
+              aria-label="Colorize"
+            />
+            Colorize
+          </label>
         </>
       );
     }

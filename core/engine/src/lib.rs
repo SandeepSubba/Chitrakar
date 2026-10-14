@@ -8346,10 +8346,6 @@ mod tests {
         }
     }
 
-    /// A radial blur reaches as far as it smears: a dot moved under a
-    /// strong zoom streaks across the page, and the repaint that follows
-    /// is the page drawn whole — a reach of the dot's own box would leave
-    /// the old streak standing.
     /// A colour lookup's table is a resource beside the document, not a
     /// field in it, so the two places a layer leaves its document by are
     /// asked to take it along: a file saved and opened, and a copy pasted
@@ -8492,6 +8488,10 @@ mod tests {
         );
     }
 
+    /// A radial blur reaches as far as it smears: a dot moved under a
+    /// strong zoom streaks across the page, and the repaint that follows
+    /// is the page drawn whole — a reach of the dot's own box would leave
+    /// the old streak standing.
     #[test]
     fn a_dot_moved_under_a_radial_blur_repaints_its_whole_streak() {
         // On a clear page, so the dot's streak is all there is.
@@ -8528,10 +8528,6 @@ mod tests {
         assert_cache_matches_fresh(&mut session);
     }
 
-    /// A comp keeps where each layer was, shown or not and how strongly,
-    /// and puts the page back that way in one step; a layer added since
-    /// is left alone, one taken away is passed over, and a page turned
-    /// after keeping a comp stays turned when the comp is put back.
     /// A comp keeps a layer's placement in the space its parent puts it
     /// in, and moving a layer to another parent rewrites that placement
     /// so it stays where it is on the page. A comp kept before has to be
@@ -8629,6 +8625,10 @@ mod tests {
         );
     }
 
+    /// A comp keeps where each layer was, shown or not and how strongly,
+    /// and puts the page back that way in one step; a layer added since
+    /// is left alone, one taken away is passed over, and a page turned
+    /// after keeping a comp stays turned when the comp is put back.
     #[test]
     fn a_comp_puts_the_page_back_as_it_was_kept() {
         let mut session = Session::new(100, 80, ColorMode::Rgb);

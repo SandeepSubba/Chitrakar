@@ -1848,6 +1848,23 @@ mod tests {
         ))
     }
 
+    /// A hue/saturation written before colorize was a field opens with it
+    /// off, which is what it meant then.
+    #[test]
+    fn a_hue_saturation_from_before_colorize_opens_without_it() {
+        let old: Adjustment = serde_json::from_str(
+            r#"{"HueSaturation":{"hue_degrees":10.0,"saturation":0.2,"lightness":0.0}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            Adjustment::HueSaturation {
+                colorize: false,
+                ..
+            }
+        ));
+    }
+
     /// The list of every command really is a list of every command.
     ///
     /// Five audits are built on `fixture::every_command` — that each

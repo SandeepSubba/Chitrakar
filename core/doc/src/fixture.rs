@@ -2306,6 +2306,10 @@ impl Rng {
                         hue_degrees: self.between(-60.0, 60.0),
                         saturation: self.between(-0.5, 0.5),
                         lightness: self.between(-0.2, 0.2),
+                        // A third of them colorize, decided off a stream
+                        // of its own so no page that was already here
+                        // moves.
+                        colorize: Rng((self.0 ^ 0x9e6c_63d0_676a_9a99) | 1).upto(3) == 0,
                     },
                     3 => {
                         let in_black = self.between(0.0, 0.3);

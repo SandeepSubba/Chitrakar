@@ -3785,6 +3785,24 @@ fn to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (hue.rem_euclid(6.0), sat.clamp(0.0, 1.0), light)
 }
 
+/// The tint a colorizing hue/saturation lays: its hue in sixths of the
+/// wheel, from degrees, and its saturation from the slider's -1..=1 as
+/// 0..=1. A number that is no number is red, and a quarter — what
+/// Photoshop's Colorize opens at.
+pub fn colorize_tint(hue_degrees: f32, saturation: f32) -> (f32, f32) {
+    let hue = if hue_degrees.is_finite() {
+        (hue_degrees / 60.0).rem_euclid(6.0)
+    } else {
+        0.0
+    };
+    let sat = if saturation.is_finite() {
+        ((saturation + 1.0) * 0.5).clamp(0.0, 1.0)
+    } else {
+        0.25
+    };
+    (hue, sat)
+}
+
 /// And back.
 fn from_hsl(hue: f32, sat: f32, light: f32) -> (f32, f32, f32) {
     let chroma = (1.0 - (2.0 * light - 1.0).abs()) * sat;
@@ -9847,6 +9865,23 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             hue_degrees,
             saturation,
             lightness,
+            colorize: true,
+        } => {
+            // One hue for everything, at the lightness each pixel shows
+            // at — lightness as a device shows it, since that is what a
+            // one-colour print keeps — and then lifted in light as the
+            // plain adjustment lifts it.
+            let (hue, sat) = colorize_tint(*hue_degrees, *saturation);
+            let (_, _, light) = to_hsl(shown_value(r), shown_value(g), shown_value(b));
+            let (nr, ng, nb) = from_hsl(hue, sat, light);
+            let f = |v: f32| (chitrakar_color::srgb_to_linear(v) + lightness).max(0.0);
+            (f(nr), f(ng), f(nb))
+        }
+        Adjustment::HueSaturation {
+            hue_degrees,
+            saturation,
+            lightness,
+            colorize: false,
         } => {
             // Hue rotation (feColorMatrix hueRotate, Rec.709-ish weights).
             let (sin, cos) = hue_degrees.to_radians().sin_cos();
@@ -15281,6 +15316,57 @@ mod tests {
         );
     }
 
+    /// Colorize lays one hue over everything at the lightness each pixel
+    /// shows at: a grey and a saturated blue that show equally light come
+    /// out the same tint; white and black stay white and black, as a
+    /// one-colour print's paper and ink do; and the tint's strength is
+    /// the slider's -1..=1 read as 0..=1.
+    #[test]
+    fn colorize_lays_one_hue_at_the_lightness_each_pixel_shows() {
+        let tint = |hue: f32, saturation: f32, lightness: f32| Adjustment::HueSaturation {
+            hue_degrees: hue,
+            saturation,
+            lightness,
+            colorize: true,
+        };
+        let srgb = |r: f32, g: f32, b: f32| to_working(&AuthoredColor::Srgb { r, g, b, a: 1.0 });
+        let shown = |p: LinearRgba| [p.r, p.g, p.b].map(chitrakar_color::linear_to_srgb);
+        // Red, at a quarter.
+        let red = tint(0.0, -0.5, 0.0);
+        // A grey showing at a half, and a blue whose HSL lightness is a
+        // half too (0.2 and 0.8 either side of it).
+        let grey = shown(apply_adjustment(&red, None, srgb(0.5, 0.5, 0.5)));
+        let blue = shown(apply_adjustment(&red, None, srgb(0.2, 0.3, 0.8)));
+        for c in 0..3 {
+            assert!((grey[c] - blue[c]).abs() < 0.01, "{grey:?} and {blue:?}");
+        }
+        // A quarter of red at a half: 0.625, 0.375, 0.375 as shown.
+        for (g, want) in grey.iter().zip([0.625, 0.375, 0.375]) {
+            assert!(
+                (g - want).abs() < 0.01,
+                "a quarter of red at a half: {grey:?}"
+            );
+        }
+        // Paper and ink.
+        let white = shown(apply_adjustment(&red, None, srgb(1.0, 1.0, 1.0)));
+        let black = shown(apply_adjustment(&red, None, srgb(0.0, 0.0, 0.0)));
+        assert!(white.iter().all(|v| *v > 0.99) && black.iter().all(|v| *v < 0.01));
+        // The hue is the hue asked for: a third of the way round is green.
+        let green = shown(apply_adjustment(
+            &tint(120.0, 1.0, 0.0),
+            None,
+            srgb(0.5, 0.5, 0.5),
+        ));
+        assert!(
+            green[1] > 0.95 && green[0] < 0.05 && green[2] < 0.05,
+            "{green:?}"
+        );
+        // And lightness lifts what the tint gave, in light.
+        let lifted = apply_adjustment(&tint(0.0, -0.5, 0.1), None, srgb(0.5, 0.5, 0.5));
+        let plain = apply_adjustment(&red, None, srgb(0.5, 0.5, 0.5));
+        assert!((lifted.g - plain.g - 0.1).abs() < 1e-4);
+    }
+
     /// Black and white is a recipe, not a switch: the same colours taken
     /// to grey by different weights come out different greys, which is
     /// the whole reason to have the weights at all.
@@ -18296,6 +18382,7 @@ mod tests {
                     hue_degrees: 0.0,
                     saturation: 0.0,
                     lightness: 0.0,
+                    colorize: false,
                 },
             ),
             (
@@ -21873,6 +21960,7 @@ mod tests {
                     hue_degrees: 180.0,
                     saturation: 0.0,
                     lightness: 0.0,
+                    colorize: false,
                 },
             )),
         })
@@ -21891,6 +21979,7 @@ mod tests {
                 hue_degrees: 0.0,
                 saturation: -1.0,
                 lightness: 0.0,
+                colorize: false,
             })),
         })
         .unwrap();
@@ -23906,6 +23995,7 @@ mod tests {
                     hue_degrees: 0.0,
                     saturation: 0.0,
                     lightness: 0.0,
+                    colorize: false,
                 },
             ),
             (

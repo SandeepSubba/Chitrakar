@@ -648,10 +648,16 @@ pub enum Adjustment {
     Exposure {
         stops: f32,
     },
+    /// Hue turned, saturation scaled and lightness lifted — or, with
+    /// `colorize`, every colour the one hue at `hue_degrees`, at a
+    /// saturation of `(saturation + 1) / 2`, each pixel keeping the
+    /// lightness it showed at: Photoshop's Colorize, the one-colour print.
     HueSaturation {
         hue_degrees: f32,
         saturation: f32,
         lightness: f32,
+        #[serde(default)]
+        colorize: bool,
     },
     /// Levels, in linear light like every adjustment here: the input
     /// range `in_black..in_white` is stretched to 0..1, a gamma lifts or

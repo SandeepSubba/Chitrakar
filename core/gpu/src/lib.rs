@@ -4787,7 +4787,20 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
             hue_degrees,
             saturation,
             lightness,
-        } => plain([3.0, *hue_degrees, *saturation, *lightness], [0.0; 4]),
+            colorize,
+        } => {
+            // Colorizing, the tint is worked out where the CPU works it
+            // out and rides the second row: set, hue in sixths, saturation.
+            let (hue, sat) = chitrakar_render::colorize_tint(*hue_degrees, *saturation);
+            plain(
+                [3.0, *hue_degrees, *saturation, *lightness],
+                if *colorize {
+                    [1.0, hue, sat, 0.0]
+                } else {
+                    [0.0; 4]
+                },
+            )
+        }
         A::Levels {
             in_black,
             in_white,
@@ -9500,6 +9513,21 @@ mod tests {
                 hue_degrees: 40.0,
                 saturation: 0.3,
                 lightness: 0.05,
+                colorize: false,
+            },
+            // Colorized: a sepia at a quarter, and a hue past a half turn
+            // given as a negative one, so the hue's own wrapping is asked.
+            A::HueSaturation {
+                hue_degrees: 32.0,
+                saturation: -0.5,
+                lightness: 0.02,
+                colorize: true,
+            },
+            A::HueSaturation {
+                hue_degrees: -150.0,
+                saturation: 0.6,
+                lightness: 0.0,
+                colorize: true,
             },
             A::Levels {
                 in_black: 0.1,

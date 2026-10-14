@@ -710,6 +710,13 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
         // Hue rotation (the feColorMatrix one), then saturation about
         // the pixel's own luminance, then a lightness offset.
         case 3: {
+            // Colorize: the tint in `q.yz`, at the lightness each pixel
+            // shows at, lifted in light by `p.w` as the plain one is.
+            if q.x > 0.5 {
+                let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
+                let tinted = from_hsl(vec3f(q.y, q.z, to_hsl(shown).z));
+                return max(vec3f(to_light(tinted.r), to_light(tinted.g), to_light(tinted.b)) + vec3f(p.w), vec3f(0.0));
+            }
             let a = radians(p.y);
             let sn = sin(a);
             let cs = cos(a);

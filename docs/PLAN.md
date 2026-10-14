@@ -1667,6 +1667,30 @@ without reading anything else.*
   What is still declined, by the same tally: frames turned, faded or
   masked (about 280 pages), and 374 pages that need more than one layer
   taken away before the GPU will draw them.
+- **Colorize ✅** on Hue/Saturation (a box under its sliders):
+  Photoshop's one-colour print. Every pixel keeps the lightness it shows
+  at (HSL, on the values a device shows) and takes the one hue the Hue
+  slider names, at a saturation of `(saturation + 1) / 2`, so the
+  slider's -1..=1 reads as 0..=1 of the tint, and ticking the box from
+  where the layer opens starts at a quarter, as Photoshop's does.
+  Lightness lifts in light afterwards, as it does unticked.
+  `HueSaturation { colorize }` is `#[serde(default)]`, so a file from
+  before opens with it off (a doc test asks). One function works the tint
+  out for both renderers (`chitrakar_render::colorize_tint`, which also
+  holds a non-number to red at a quarter); the GPU carries it on the
+  quad's second row. The random pages colorize a third of their
+  hue/saturation layers, from a forked stream so no page moved.
+  Tests: `colorize_lays_one_hue_at_the_lightness_each_pixel_shows` (a
+  grey and a blue of one lightness come out one tint; paper and ink stay
+  put; the hue is the hue asked; the slider maps, and fails read
+  straight), two colorized layers in the GPU's adjustment list (fails
+  ignoring the flag, or reading luma for HSL lightness), smoke 9o20.
+  - **Found on the way:** several tests added in this stretch had been
+    put between the test before them and *that* test's doc comment, so
+    a neighbour's comment sat on top of the new test's and the
+    neighbour had none. Four were tangled (two engine tests, one
+    renderer test, one document test) and each comment is back on its
+    own test.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

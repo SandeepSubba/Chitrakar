@@ -71,6 +71,9 @@ export type Adjustment =
         hue_degrees: number;
         saturation: number;
         lightness: number;
+        /** Every colour the one hue, at a saturation of
+         * `(saturation + 1) / 2`, keeping its lightness. */
+        colorize: boolean;
       };
     }
   | {

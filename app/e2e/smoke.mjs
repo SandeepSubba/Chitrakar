@@ -7893,6 +7893,50 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9o20. Colorize: a Hue/Saturation layer with its box ticked lays one
+// hue over the page at the lightness each pixel shows — a blue square
+// goes to a quarter of red at its own lightness, and the Hue slider
+// turns the tint; unticked it is a hue/saturation again.
+{
+  await newDocument(120, 80, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 120) * b.width, b.y + (y / 80) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#3366cc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(120, 80), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.selectOption('[aria-label="Add adjustment layer"]', "hue-saturation");
+  await page.waitForTimeout(300);
+  let px = await canvasPixel(60, 40);
+  assert(Math.abs(px[0] - 51) <= 2 && Math.abs(px[2] - 204) <= 2, `unchanged while nothing is asked (${px})`);
+  await page.locator('input[aria-label="Colorize"]').check();
+  await page.waitForTimeout(300);
+  px = await canvasPixel(60, 40);
+  // #3366cc is lightness one half as shown; a quarter of red there is
+  // 0.625, 0.375, 0.375.
+  assert(
+    Math.abs(px[0] - 159) <= 3 && Math.abs(px[1] - 96) <= 3 && Math.abs(px[2] - 96) <= 3,
+    `a quarter of red at the square's own lightness (${px})`,
+  );
+  await setSlider("Hue", 120);
+  await page.waitForTimeout(300);
+  px = await canvasPixel(60, 40);
+  assert(px[1] > px[0] + 40 && px[1] > px[2] + 40, `the hue turns the tint to green (${px})`);
+  await page.locator('input[aria-label="Colorize"]').uncheck();
+  await page.waitForTimeout(300);
+  px = await canvasPixel(60, 40);
+  assert(!(px[1] > px[0] + 40 && Math.abs(px[0] - px[2]) < 10), `unticked, a hue/saturation again (${px})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  px = await canvasPixel(60, 40);
+  assert(px[1] > px[0] + 40 && px[1] > px[2] + 40, `and undo ticks it again (${px})`);
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower
