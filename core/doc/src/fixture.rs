@@ -2429,10 +2429,32 @@ impl Rng {
                         sigma: self.between(0.5, 2.0),
                         amount: self.between(0.2, 1.5),
                     },
-                    3 => Filter::MotionBlur {
-                        distance: self.between(1.0, 6.0),
-                        degrees: self.between(0.0, 180.0),
-                    },
+                    3 => {
+                        let motion = Filter::MotionBlur {
+                            distance: self.between(1.0, 6.0),
+                            degrees: self.between(0.0, 180.0),
+                        };
+                        // Half of them a radial blur instead, from a
+                        // stream forked off this one so no other page
+                        // moves: zoomed or spun, about a point anywhere
+                        // on the page, small enough that a page is still
+                        // a page.
+                        let mut side = Rng((self.0 ^ 0x2545_f491_4f6c_dd1d) | 1);
+                        if side.chance(2) {
+                            let spin = side.chance(2);
+                            Filter::RadialBlur {
+                                amount: if spin {
+                                    side.between(2.0, 20.0)
+                                } else {
+                                    side.between(0.02, 0.2)
+                                },
+                                spin,
+                                center: [side.between(0.1, 0.9), side.between(0.1, 0.9)],
+                            }
+                        } else {
+                            motion
+                        }
+                    }
                     4 => Filter::Vignette {
                         amount: self.between(-0.8, 0.8),
                         radius: self.between(0.1, 0.8),

@@ -7641,6 +7641,47 @@ assert(
   promptAnswer = "";
 }
 
+// 9o16. Radial blur: a dot right of the middle streaks outward when the
+// blur is zoomed and sweeps up and down when it is spun; moved over the
+// dot, the centre leaves it sharp.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#000000", 0, 0, 400, 300);
+  await rect("#ffffff", 290, 144, 302, 156);
+  const bright = async (x, y) => (await canvasPixel(x, y))[0];
+  assert((await bright(296, 150)) > 240 && (await bright(320, 150)) < 10, "a white dot on black");
+  await page.selectOption('[aria-label="Add adjustment layer"]', "radial");
+  await page.waitForTimeout(400);
+  // A fifth of its distance from the middle, ninety out: nine each way.
+  assert((await bright(306, 150)) > 20, `zoomed, the dot streaks outward (${await bright(306, 150)})`);
+  assert((await bright(296, 162)) < 10, "and not up or down");
+  await page.locator(".panel ul li", { hasText: "Radial Blur" }).click();
+  await page.waitForTimeout(200);
+  await page.locator('[aria-label="Radial blur kind"] button', { hasText: "Spin" }).click();
+  await page.waitForTimeout(400);
+  // Fifteen degrees at ninety-six out is twelve each way.
+  assert((await bright(296, 160)) > 20, `spun, it sweeps round (${await bright(296, 160)})`);
+  assert((await bright(310, 150)) < 10, "and not outward");
+  await setSlider("Centre across", 0.74);
+  await page.waitForTimeout(400);
+  assert((await bright(296, 150)) > 200, `with the centre on the dot it stays sharp (${await bright(296, 150)})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await bright(296, 160)) > 20, "undo puts the centre back");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower

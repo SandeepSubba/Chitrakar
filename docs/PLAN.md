@@ -1454,6 +1454,28 @@ without reading anything else.*
     9o15: two arrangements, each back in a press, the mark following,
     one undo, ctrl-click forgetting. Without visibility in the comp,
     the hidden square stays hidden and the block catches it.
+- **Radial blur.** Layer › Add adjustment › Radial Blur is a smear about
+  a point, Photoshop's in its two kinds (`Filter::RadialBlur`).
+  - **Zoom** streaks outward, as a lens zoomed during the exposure does:
+    `amount` is the share of each pixel's distance from the centre it is
+    smeared over.
+  - **Spin** sweeps round, as a turning wheel blurs: `amount` is the
+    angle in degrees.
+  - **The centre** is a share of the page's width and height, so it
+    stays put when the page is resized. Smears are centred on the pixel,
+    sampled between pixels (every line runs its own way), and capped at
+    129 samples. The panel has Zoom/Spin, the amount, and the centre.
+  - **Its reach** (`filter_reach`) is half the smear at the page's
+    corners. The random pages hold it, from a forked stream, but too
+    gently for any audit to notice a wrong reach. So
+    `a_dot_moved_under_a_radial_blur_repaints_its_whole_streak` asks it
+    directly: a dot moved under a strong zoom, then the repaint against
+    the page drawn whole. With the reach taken out it fails. It first
+    passed with the reach out because the dot was the ground's own
+    colour and invisible, which the sabotage caught.
+  - **The GPU** declines it.
+  - **Tests.** `a_radial_blur_smears_out_from_its_centre_or_round_it`
+    (catches zoom and spin swapped), and smoke 9o16.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

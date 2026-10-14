@@ -789,6 +789,20 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 (median_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32)
                     .saturating_add(1)
             }
+            // Half the smear each way, and the most any pixel has is a
+            // corner's: its distance from the centre, at most the page's
+            // diagonal, times the share or the angle.
+            NodeKind::Filter(Filter::RadialBlur { amount, spin, .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+                let far = (w * w + h * h).sqrt();
+                let reach = radial_reach(*amount, *spin) * far / 2.0 * scale;
+                if reach.is_finite() {
+                    (reach.ceil() as u32).saturating_add(2)
+                } else {
+                    u32::MAX
+                }
+            }
             // Half the line each way, since it is centred on the pixel.
             NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -7476,6 +7490,111 @@ fn smeared(
     out
 }
 
+/// How far a radial blur smears a pixel, as a share of its distance from
+/// the centre: the share itself, zoomed, held to 0..=1; the angle in
+/// radians, spun, held to half a turn. A number that is no number is no
+/// smear.
+pub fn radial_reach(amount: f32, spin: bool) -> f32 {
+    if !amount.is_finite() {
+        return 0.0;
+    }
+    if spin {
+        amount.clamp(0.0, 180.0).to_radians()
+    } else {
+        amount.clamp(0.0, 1.0)
+    }
+}
+
+/// A radial blur over a snapshot of `clip`: each pixel the average of
+/// samples along its line to the centre, zoomed, or along its circle
+/// round it, spun — centred on the pixel, and as many as the smear is
+/// long in device pixels, up to a cap. Sampled between pixels, since
+/// every pixel's line runs at its own angle; past the snapshot's edge
+/// the edge is read again, as the motion blur reads it.
+fn radially_smeared(
+    original: &[LinearRgba],
+    clip: ClipRect,
+    amount: f32,
+    spin: bool,
+    center: [f32; 2],
+    page: (f32, f32),
+    view: Transform,
+) -> Vec<LinearRgba> {
+    let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+    let reach = radial_reach(amount, spin);
+    let Some(inv) = Inverse::of(view) else {
+        return original.to_vec();
+    };
+    if w <= 0 || h <= 0 || reach <= 0.0 {
+        return original.to_vec();
+    }
+    let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+    let (cx, cy) = (at(center[0]) * page.0, at(center[1]) * page.1);
+    let scale = max_scale(view);
+    let sample = |fx: f32, fy: f32| {
+        // Device pixel centres sit at (i + 0.5); read the four round
+        // the point, each held to the snapshot.
+        let (u, v) = (fx - 0.5 - clip.x0 as f32, fy - 0.5 - clip.y0 as f32);
+        let (u0, v0) = (u.floor(), v.floor());
+        let (tx, ty) = (u - u0, v - v0);
+        let get = |x: f32, y: f32| {
+            let (x, y) = ((x as i64).clamp(0, w - 1), (y as i64).clamp(0, h - 1));
+            original[(y * w + x) as usize]
+        };
+        let top = lerp(get(u0, v0), get(u0 + 1.0, v0), tx);
+        let bottom = lerp(get(u0, v0 + 1.0), get(u0 + 1.0, v0 + 1.0), tx);
+        lerp(top, bottom, ty)
+    };
+    // Odd, so that the pixel itself is one of the samples.
+    const MOST: usize = 129;
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (
+                (x + clip.x0 as i64) as f32 + 0.5,
+                (y + clip.y0 as i64) as f32 + 0.5,
+            );
+            let (dx, dy) = inv.at(fx, fy);
+            let (vx, vy) = (dx - cx, dy - cy);
+            let length = (vx * vx + vy * vy).sqrt() * reach * scale;
+            if length < 0.5 {
+                out.push(original[(y * w + x) as usize]);
+                continue;
+            }
+            let n = ((length.ceil() as usize).saturating_add(1)).min(MOST) | 1;
+            let half = (n / 2) as f32;
+            let mut acc = LinearRgba::TRANSPARENT;
+            for k in 0..n {
+                let t = (k as f32 - half) / (n as f32 - 1.0);
+                let (qx, qy) = if spin {
+                    let (s, c) = (reach * t).sin_cos();
+                    (cx + vx * c - vy * s, cy + vx * s + vy * c)
+                } else {
+                    let k = 1.0 + reach * t;
+                    (cx + vx * k, cy + vy * k)
+                };
+                let (px, py) = (
+                    view.a * qx + view.c * qy + view.e,
+                    view.b * qx + view.d * qy + view.f,
+                );
+                let s = sample(px, py);
+                acc.r += s.r;
+                acc.g += s.g;
+                acc.b += s.b;
+                acc.a += s.a;
+            }
+            let k = 1.0 / n as f32;
+            out.push(LinearRgba {
+                r: acc.r * k,
+                g: acc.g * k,
+                b: acc.b * k,
+                a: acc.a * k,
+            });
+        }
+    }
+    out
+}
+
 /// The average colour of each block of a pixelate grid, indexed by device
 /// pixel.
 ///
@@ -7610,6 +7729,21 @@ fn apply_filter(
             mix_snapshot(dst, clip, &original, |o, _, x, y| {
                 let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
                 lerp(o, middles[at], opacity * coverage_at(doc, mask, x, y))
+            });
+        }
+        Filter::RadialBlur {
+            amount,
+            spin,
+            center,
+        } => {
+            let original = blur::snapshot(dst, clip);
+            let page = (doc.meta.width as f32, doc.meta.height as f32);
+            let smear = radially_smeared(&original, clip, *amount, *spin, *center, page, view);
+            let w = (clip.x1 - clip.x0) as usize;
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                lerp(o, smear[at], weight)
             });
         }
         Filter::MotionBlur { distance, degrees } => {
@@ -16035,6 +16169,94 @@ mod tests {
             .unwrap();
         }
         assert_eq!(filter_reach(&doc), u32::MAX);
+    }
+
+    /// A radial blur smears along the line to its centre when zoomed and
+    /// round it when spun: a dot right of the centre streaks sideways in
+    /// the one and up and down in the other, and the centre itself is
+    /// left alone by both.
+    #[test]
+    fn a_radial_blur_smears_out_from_its_centre_or_round_it() {
+        let white = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let page = |spin: bool, amount: f32| {
+            let mut doc = Document::new(100, 100, ColorMode::Rgb);
+            let root = doc.root();
+            for (i, (w, h, x, y, c)) in [
+                (
+                    100.0f32,
+                    100.0f32,
+                    0.0f32,
+                    0.0f32,
+                    AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+                (4.0, 4.0, 78.0, 48.0, white.clone()),
+                (4.0, 4.0, 48.0, 48.0, white.clone()),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: filled_rect("part", w, h, c),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, y),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(Node::filter(
+                    "radial",
+                    Filter::RadialBlur {
+                        amount,
+                        spin,
+                        center: [0.5, 0.5],
+                    },
+                )),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let lit = |s: &Surface, x: u32, y: u32| s.get(x, y).r;
+        // Zoomed: a third of its distance, so the dot thirty along
+        // streaks five each way along the line, and not across it.
+        let zoom = page(false, 0.33);
+        assert!(
+            lit(&zoom, 85, 50) > 0.05,
+            "zoomed, it streaks along the line"
+        );
+        assert!(lit(&zoom, 80, 57) < 0.01, "and not across it");
+        // Spun by twenty degrees: a dot thirty out sweeps ten up and down.
+        let spun = page(true, 20.0);
+        assert!(lit(&spun, 80, 56) > 0.05, "spun, it sweeps round");
+        assert!(lit(&spun, 87, 50) < 0.01, "and not outward");
+        // The centre is where it was in both.
+        for s in [&zoom, &spun] {
+            assert!(lit(s, 50, 50) > 0.95, "the centre is left alone");
+        }
+        // Nothing asked of it, nothing done; and a number that is no
+        // number is nothing too.
+        let none = page(false, 0.0);
+        let nan = page(true, f32::NAN);
+        assert_eq!(lit(&none, 85, 50), 0.0);
+        assert_eq!(lit(&nan, 80, 56), 0.0);
+        assert!(lit(&none, 80, 50) > 0.95);
     }
 
     /// A photo filter multiplies every colour by its glass, in light, and

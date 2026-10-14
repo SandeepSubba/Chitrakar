@@ -4839,6 +4839,9 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
         // A median is a vote over a window, which no pass of quads can
         // hold: a page with one is the CPU's.
         F::Median { .. } => return None,
+        // A smear whose line runs a different way at every pixel: the
+        // CPU's.
+        F::RadialBlur { .. } => return None,
         F::Vignette {
             amount,
             radius,

@@ -4552,6 +4552,10 @@ export function App() {
       name: "Motion Blur",
       kind: { Filter: { MotionBlur: { distance: 20, degrees: 0 } } },
     },
+    radial: {
+      name: "Radial Blur",
+      kind: { Filter: { RadialBlur: { amount: 0.2, spin: false, center: [0.5, 0.5] } } },
+    },
     noise: {
       name: "Noise",
       kind: {
@@ -12723,6 +12727,47 @@ function KindProps({
         (v) => ({
           Filter: { GaussianBlur: { sigma: v } },
         }),
+      );
+    }
+    if ("RadialBlur" in filter) {
+      const p = filter.RadialBlur;
+      const wrapRadial = (next: typeof p) => ({ Filter: { RadialBlur: next } }) as NodeKind;
+      return (
+        <>
+          {/* Zoomed or spun. The amount means a share in the one and an
+              angle in the other, so changing kind starts it again at a
+              strength that reads as itself. */}
+          <div className="curve-channels" role="group" aria-label="Radial blur kind">
+            {(
+              [
+                ["Zoom", false],
+                ["Spin", true],
+              ] as const
+            ).map(([name, spin]) => (
+              <button
+                key={name}
+                type="button"
+                className={p.spin === spin ? "active" : ""}
+                aria-pressed={p.spin === spin}
+                onClick={() =>
+                  p.spin !== spin &&
+                  onEdit(wrapRadial({ ...p, spin, amount: spin ? 15 : 0.2 }), false)
+                }
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {p.spin
+            ? slider("Angle", p.amount, 0, 180, 1, (v) => wrapRadial({ ...p, amount: v }))
+            : slider("Amount", p.amount, 0, 1, 0.01, (v) => wrapRadial({ ...p, amount: v }))}
+          {slider("Centre across", p.center[0], 0, 1, 0.01, (v) =>
+            wrapRadial({ ...p, center: [v, p.center[1]] }),
+          )}
+          {slider("Centre down", p.center[1], 0, 1, 0.01, (v) =>
+            wrapRadial({ ...p, center: [p.center[0], v] }),
+          )}
+        </>
       );
     }
     if ("MotionBlur" in filter) {

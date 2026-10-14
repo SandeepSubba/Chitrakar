@@ -213,6 +213,11 @@ export type Filter =
    * when the page is panned or zoomed. */
   | { Pixelate: { size: number } }
   | { MotionBlur: { distance: number; degrees: number } }
+  /** A smear about a point: outward from it (zoomed: `amount` a share of
+   * each pixel's distance from the centre, 0..=1) or round it (`spin`:
+   * `amount` in degrees). `center` is a share of the page's width and
+   * height. */
+  | { RadialBlur: { amount: number; spin: boolean; center: [number, number] } }
   /** Grain: a function of where a speck sits in the document and of the
    * seed, so the same page grains the same way every time it is drawn. */
   | { Noise: { amount: number; grain: number; mono: boolean; seed: number } }

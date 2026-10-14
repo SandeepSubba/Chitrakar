@@ -896,6 +896,26 @@ pub enum Filter {
     /// what keeps the picture where it was instead of sliding it half the
     /// distance along.
     MotionBlur { distance: f32, degrees: f32 },
+    /// A smear about a point: outward from it, as the picture streaks
+    /// when a lens is zoomed during the exposure, or round it, as a wheel
+    /// blurs as it turns. Photoshop's radial blur, in its two kinds.
+    ///
+    /// `center` is where the point is, as a share of the page's width
+    /// and height (a half and a half is the middle), so it stays where it
+    /// was put when the page changes size. Zoomed, `amount` is how far
+    /// each pixel is smeared along its line to the centre, as a share of
+    /// its distance from it (0..=1) — nothing at the centre itself, the
+    /// most at the corners. Spun (`spin`), `amount` is the angle each
+    /// pixel is smeared through, in degrees (0..=180). Both centred on
+    /// the pixel, as the motion blur is, so the picture stays where it
+    /// was.
+    RadialBlur {
+        amount: f32,
+        #[serde(default)]
+        spin: bool,
+        #[serde(default = "page_middle")]
+        center: [f32; 2],
+    },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in
@@ -1531,6 +1551,7 @@ impl Filter {
             Filter::GaussianBlur { .. }
             | Filter::Sharpen { .. }
             | Filter::MotionBlur { .. }
+            | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
             | Filter::Median { .. }
             | Filter::Noise { .. }
@@ -2191,4 +2212,9 @@ mod projective_tests {
         assert_eq!(old.quad()[2], [4.0, 3.0]);
         assert!(!serde_json::to_string(&old).unwrap().contains("corners"));
     }
+}
+
+/// The middle of the page, as a share of its width and height.
+fn page_middle() -> [f32; 2] {
+    [0.5, 0.5]
 }

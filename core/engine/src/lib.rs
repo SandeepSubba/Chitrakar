@@ -8210,6 +8210,46 @@ mod tests {
         }
     }
 
+    /// A radial blur reaches as far as it smears: a dot moved under a
+    /// strong zoom streaks across the page, and the repaint that follows
+    /// is the page drawn whole — a reach of the dot's own box would leave
+    /// the old streak standing.
+    #[test]
+    fn a_dot_moved_under_a_radial_blur_repaints_its_whole_streak() {
+        // On a clear page, so the dot's streak is all there is.
+        let mut session = Session::new(120, 90, ColorMode::Rgb);
+        let dot = add_rect(&mut session, "dot", 4.0, 4.0);
+        session
+            .apply(Command::SetTransform {
+                id: dot,
+                transform: Transform::translation(100.0, 40.0),
+            })
+            .unwrap();
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(chitrakar_doc::Node::filter(
+                    "radial",
+                    chitrakar_doc::Filter::RadialBlur {
+                        amount: 0.8,
+                        spin: false,
+                        center: [0.5, 0.5],
+                    },
+                )),
+            })
+            .unwrap();
+        session.render_cached().unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: dot,
+                transform: Transform::translation(14.0, 70.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
     /// A comp keeps where each layer was, shown or not and how strongly,
     /// and puts the page back that way in one step; a layer added since
     /// is left alone, one taken away is passed over, and a page turned
