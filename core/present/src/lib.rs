@@ -178,7 +178,7 @@ impl Presenter {
             f: y,
             ..Default::default()
         };
-        GpuRenderer::can_render_view(doc, view, (width, height))
+        self.gpu.draws_view(doc, view, (width, height))
     }
 }
 

@@ -1602,6 +1602,44 @@ without reading anything else.*
   its cover cannot be caught and need not be: colour is premultiplied,
   so each pixel's colour is at most its alpha and so is the k-th of
   each, which leaves the hold for rounding between steps.
+- **The GPU draws a shrunk picture ✅**, which is a photograph looked at
+  zoomed out: the most ordinary view there is, and until now one the
+  desktop shell's GPU path handed back every time. The CPU averages a
+  grid of bilinear taps (at most four a side) over what each pixel
+  covers; the grid is worked out by one function both renderers call
+  (`chitrakar_render::picture_taps`) and carried on the image quad, and
+  `fs_image` takes the same taps. `a_shrunk_picture_is_averaged_the_way_the_cpu_averages_it`
+  holds it at a half, three tenths, a sixth, shrunk along one axis,
+  turned and faded, on stripes a texel wide where a single tap is a
+  different picture: one tap fails it (except at exactly a half, where
+  one bilinear tap *is* the two-by-two average), as do taps a texel
+  apart instead of spread over the footprint.
+  - **Found on the way:** the skirt every image and shape quad is grown
+    by, so its edge pixels can be faded by the area really covered, was
+    one figure for both axes (the grow over the larger scale). On a box
+    scaled unevenly the squashed axis got less than a pixel of it, and
+    the edge row came out a quarter dimmer than the CPU's: four MSAA
+    samples, three of them on the quad. Each axis is grown now by what
+    moves its edges `grow` device pixels square to themselves (the
+    determinant over the other axis's length). The one-axis case fails
+    with the old growth. That was reachable before this, by a picture
+    enlarged across and squashed down.
+  - **And a photograph wider than 2048 ✅.** The device asked for
+    `downlevel_defaults`, whose textures stop at 2048 a side: a camera's
+    picture (four to six thousand across) and a hi-DPI window past 2048
+    device pixels both went back to the CPU whole. A renderer now asks
+    its adapter for up to 8192 a side and a buffer of up to a gigabyte
+    (the readback grows with the window), and answers for what it was
+    given: `GpuRenderer::draws_view`, which the shell's mirror
+    (`core/present`) asks now. The checks with no renderer in hand
+    (`can_render`, `can_render_view`) still answer for the guarantee, so
+    tests running side by side in one process cannot see each other's
+    device. `a_photograph_wider_than_the_guarantee_is_drawn_where_there_is_room`:
+    a 3000-wide picture fitted to the page, and a 2500-wide window onto
+    it, drawn and held to the CPU; it asks the *device* what it was
+    granted before deciding to skip, since the first version asked the
+    renderer's own note of it and so skipped, rather than failed, when
+    that note was the thing broken.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -6846,8 +6846,7 @@ fn draw_raster(
     // device pixel spans more than one texel, average a grid across the
     // texels it really covers. The footprint is the inverse's own column
     // sums — how far in the source a step of one device pixel goes.
-    let foot_x = (inv.a.abs() + inv.c.abs()).max(1.0);
-    let foot_y = (inv.b.abs() + inv.d.abs()).max(1.0);
+    let ([foot_x, foot_y], [taps_x, taps_y]) = picture_footprint(inv);
     // One sample every *two* texels, not every one: a bilinear tap is
     // already the average of the two texels either side of it on each
     // axis, weighted to sum to one, so taps two texels apart cover the
@@ -6870,8 +6869,6 @@ fn draw_raster(
     // either way). What the old count bought for its four taps was
     // nothing. Past four an axis it is still capped, which is where the
     // shrink is so deep the picture has settled.
-    let taps_x = ((foot_x * 0.5).ceil() as u32).clamp(1, 4);
-    let taps_y = ((foot_y * 0.5).ceil() as u32).clamp(1, 4);
     let averaging = taps_x > 1 || taps_y > 1;
     // A picture laid down at its own size, square to the page, on whole
     // pixels — which is a photograph opened and looked at, and every
@@ -6944,6 +6941,23 @@ fn draw_raster(
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
         }
     }
+}
+
+/// How much of a picture one device pixel covers under `t`, in texels
+/// along each of the picture's own axes (never less than one), and how
+/// many bilinear taps a side average it — see [`draw_raster`]. `None`
+/// where `t` collapses space. The GPU backend asks this too, so the two
+/// renderers average a shrunk picture over the same grid.
+pub fn picture_taps(t: Transform) -> Option<([f32; 2], [u32; 2])> {
+    Inverse::of(t).map(picture_footprint)
+}
+
+fn picture_footprint(inv: Inverse) -> ([f32; 2], [u32; 2]) {
+    let foot_x = (inv.a.abs() + inv.c.abs()).max(1.0);
+    let foot_y = (inv.b.abs() + inv.d.abs()).max(1.0);
+    let taps_x = ((foot_x * 0.5).ceil() as u32).clamp(1, 4);
+    let taps_y = ((foot_y * 0.5).ceil() as u32).clamp(1, 4);
+    ([foot_x, foot_y], [taps_x, taps_y])
 }
 
 /// A picture whose corners have been moved: carried onto its quad by the

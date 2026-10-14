@@ -103,12 +103,25 @@ const NO_MASK: [f32; 4] = [0.0; 4];
 /// What a healing stroke's sums are kept in.
 const SUMS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
-/// The largest texture asked for, which is what `downlevel_defaults`
-/// guarantees on every adapter. A page that would need a bigger one —
-/// a page larger than this, a placed image larger than this, or a text
-/// block rasterized this finely — goes back to the CPU rather than
-/// overrunning what the device was asked for.
+/// The largest texture every adapter guarantees (`downlevel_defaults`),
+/// which is what the renderer-less checks — `can_render` and
+/// `can_render_view` — answer for. A renderer asks its adapter for up to
+/// [`TEXTURE_ASKED`] and answers for what it was given
+/// (`GpuRenderer::draws_view`). A page that would need a bigger texture
+/// than the one in hand — a surface, a placed image, a text block
+/// rasterized that finely — goes back to the CPU rather than overrunning
+/// what the device was asked for.
 const MAX_TEXTURE: u32 = 2048;
+
+/// The largest texture a renderer asks its adapter for. A camera's
+/// photograph is four to six thousand pixels across and a hi-DPI window
+/// can be past two thousand, and every desktop backend offers this much;
+/// past it a picture's half-float texture would be half a gigabyte.
+const TEXTURE_ASKED: u32 = 8192;
+
+/// The largest buffer asked for — the readback a surface is copied out
+/// through is the one that grows with the page.
+const BUFFER_ASKED: u64 = 1 << 30;
 
 /// Samples per pixel. A path's edge is as smooth as the stencil is
 /// finely sampled, and four is what every adapter offers.
@@ -336,6 +349,9 @@ pub struct GpuRenderer {
     open: wgpu::BindGroup,
     /// What the adapter calls itself, for tests and diagnostics.
     pub adapter: String,
+    /// The largest texture and buffer this device was given.
+    max_texture: u32,
+    max_buffer: u64,
 }
 
 impl GpuRenderer {
@@ -346,11 +362,21 @@ impl GpuRenderer {
         let adapter =
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))?;
         let info = adapter.get_info();
+        // What every adapter guarantees, and more of the two things a
+        // photograph needs where this one offers it.
+        let offered = adapter.limits();
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_texture_dimension_2d = offered
+            .max_texture_dimension_2d
+            .clamp(limits.max_texture_dimension_2d, TEXTURE_ASKED);
+        limits.max_buffer_size = offered
+            .max_buffer_size
+            .clamp(limits.max_buffer_size, BUFFER_ASKED);
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("chitrakar"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: limits.clone(),
                 memory_hints: wgpu::MemoryHints::default(),
             },
             None,
@@ -1246,6 +1272,8 @@ impl GpuRenderer {
             sampler,
             open,
             adapter: info.name,
+            max_texture: limits.max_texture_dimension_2d,
+            max_buffer: limits.max_buffer_size,
         })
     }
 
@@ -1273,7 +1301,11 @@ impl GpuRenderer {
         view: Transform,
         size: (u32, u32),
     ) -> Option<Surface> {
-        let mut scene = Scene::default();
+        let mut scene = Scene {
+            max_texture: self.max_texture,
+            max_buffer: self.max_buffer,
+            ..Scene::default()
+        };
         gather(doc, view, size, &mut scene)?;
         let heals = scene
             .draws
@@ -1291,9 +1323,22 @@ impl GpuRenderer {
         Self::can_render_view(doc, Transform::default(), size)
     }
 
-    /// Whether [`render_view`](Self::render_view) would draw it.
+    /// Whether a renderer on any adapter would draw it at that view —
+    /// with the textures every adapter guarantees. A renderer in hand
+    /// may draw more ([`draws_view`](Self::draws_view)).
     pub fn can_render_view(doc: &Document, view: Transform, size: (u32, u32)) -> bool {
         gather(doc, view, size, &mut Scene::default()).is_some()
+    }
+
+    /// Whether [`render_view`](Self::render_view) would draw it on this
+    /// renderer, with the textures its adapter gave it.
+    pub fn draws_view(&self, doc: &Document, view: Transform, size: (u32, u32)) -> bool {
+        let mut scene = Scene {
+            max_texture: self.max_texture,
+            max_buffer: self.max_buffer,
+            ..Scene::default()
+        };
+        gather(doc, view, size, &mut scene).is_some()
     }
 
     /// A healing stroke's passes (`Healing`), recorded onto `encoder`
@@ -2441,6 +2486,9 @@ struct Scene {
     /// surface needs: a vignette is placed from the page's middle in
     /// page units, so panning slides the picture under it.
     size: [f32; 2],
+    /// The largest texture and buffer the device drawing this has.
+    max_texture: u32,
+    max_buffer: u64,
 }
 
 /// A texture ready to upload: its size, how many channels each texel
@@ -2468,6 +2516,8 @@ impl Default for Scene {
                 y1: 0,
             },
             size: [0.0; 2],
+            max_texture: MAX_TEXTURE,
+            max_buffer: wgpu::Limits::downlevel_defaults().max_buffer_size,
         }
     }
 }
@@ -2523,7 +2573,13 @@ fn draws_something_masked(doc: &Document, id: NodeId) -> bool {
 /// document mapped through `view` on the way — or `None` when some of it
 /// cannot be.
 fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) -> Option<()> {
-    if size.0 > MAX_TEXTURE || size.1 > MAX_TEXTURE {
+    if size.0 > out.max_texture || size.1 > out.max_texture {
+        return None;
+    }
+    // And the surface comes back through one buffer, its rows padded out
+    // to the alignment a copy wants.
+    let row = (size.0 as u64 * 8).div_ceil(256) * 256;
+    if row * size.1 as u64 > out.max_buffer {
         return None;
     }
     // Where the page lands on the surface, rounded outward but no
@@ -3213,7 +3269,7 @@ fn one(
             if res.rgba8.is_empty() {
                 return Some(());
             }
-            if res.width > MAX_TEXTURE || res.height > MAX_TEXTURE {
+            if res.width > out.max_texture || res.height > out.max_texture {
                 return None;
             }
             // A picture with its corners moved is drawn through a
@@ -3222,14 +3278,14 @@ fn one(
             if raster.projective().is_some() {
                 return None;
             }
-            // Shrinking is where the two renderers part: the CPU box-
-            // filters the texels a pixel covers, and bilinear sampling
-            // would alias. Hand the page over rather than draw it
-            // differently.
-            let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs());
-            if scale < 0.99 {
-                return None;
-            }
+            // Shrunk, one bilinear tap would read four texels of the many
+            // a pixel covers and the picture would crawl as it moved. The
+            // CPU averages a grid of taps over what a pixel covers, and
+            // the grid is worked out by the same function here and
+            // carried on the quad, so the two average the same taps.
+            let Some((foot, taps)) = chitrakar_render::picture_taps(t) else {
+                return Some(());
+            };
             let at = match out.ids.iter().find(|(id, _)| *id == raster.resource_id) {
                 Some((_, at)) => *at,
                 None => {
@@ -3246,7 +3302,14 @@ fn one(
             // coordinates. The grown skirt is what lets the fragment
             // shader fade the border by the area the box really covers
             // — outside 0..1 it reads as no coverage at all.
-            let mut verts = quad(t, size, [0.0; 4], [0.0, 0.0, 0.0, alpha], [0.0; 4], 1.0);
+            let mut verts = quad(
+                t,
+                size,
+                [0.0; 4],
+                [0.0, 0.0, 0.0, alpha],
+                [foot[0], foot[1], taps[0] as f32, taps[1] as f32],
+                1.0,
+            );
             for v in &mut verts {
                 v.local = [v.local[0] / size[0], v.local[1] / size[1]];
             }
@@ -4117,7 +4180,7 @@ fn text(
     if raster.width == 0 || raster.height == 0 {
         return Some(());
     }
-    if raster.width + 2 > MAX_TEXTURE || raster.height + 2 > MAX_TEXTURE {
+    if raster.width + 2 > out.max_texture || raster.height + 2 > out.max_texture {
         return None;
     }
     // A transparent row and column around the coverage, so that off the
@@ -5683,13 +5746,22 @@ fn quad(
     grad: [f32; 4],
     grow: f32,
 ) -> Vec<Vertex> {
-    let scale = (t.a.abs() + t.c.abs()).max(t.b.abs() + t.d.abs()).max(1e-6);
-    let m = grow / scale;
+    // How far to push each pair of edges out, in the box's own units, for
+    // them to move `grow` device pixels square to themselves: the
+    // distance between the lines `x = 0` and `x = 1` on the page is the
+    // determinant over the length of the other axis, and likewise for y.
+    // One figure for both — the grow over the larger scale — fell short
+    // on the squashed axis of a box scaled unevenly, which left a picture
+    // shrunk more down than across without the skirt its edge pixels are
+    // faded on, and the edge row of it a quarter dimmer than the CPU's.
+    let det = (t.a * t.d - t.b * t.c).abs().max(1e-12);
+    let mx = grow * t.c.hypot(t.d) / det;
+    let my = grow * t.a.hypot(t.b) / det;
     let corners = [
-        [-m, -m],
-        [size[0] + m, -m],
-        [size[0] + m, size[1] + m],
-        [-m, size[1] + m],
+        [-mx, -my],
+        [size[0] + mx, -my],
+        [size[0] + mx, size[1] + my],
+        [-mx, size[1] + my],
     ];
     let place = |p: [f32; 2]| Vertex {
         doc: [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f],
@@ -7451,19 +7523,101 @@ mod tests {
         .unwrap();
         assert_eq!(scene.textures.len(), 1, "one texture for two placements");
         assert_eq!(scene.draws.len(), 2);
+    }
 
-        // Shrunk, the CPU box-filters the texels a pixel covers; rather
-        // than draw that differently, the page goes back.
-        doc.apply(Command::SetTransform {
-            id: img,
-            transform: Transform {
-                a: 0.25,
-                d: 0.25,
-                ..Default::default()
-            },
-        })
-        .unwrap();
-        assert!(!GpuRenderer::can_render(&doc));
+    /// A picture shrunk is averaged over a grid of taps across what a
+    /// pixel covers, as the CPU renderer averages it, rather than read at
+    /// one point and left to alias — which on fine stripes is a different
+    /// picture, not a slightly different one. The grid is asked of the
+    /// same function both renderers call, so this holds the sampling to
+    /// it at shrinks that need two, three and four taps a side, turned,
+    /// shrunk along one axis only, and faded.
+    #[test]
+    fn a_shrunk_picture_is_averaged_the_way_the_cpu_averages_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        // Stripes a texel wide one way and two the other, in colours, with
+        // a clear band: nothing a single tap could get right by chance.
+        let (w, h) = (96u32, 80u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let on = (x % 2 == 0) ^ ((y / 2) % 2 == 0);
+                let clear = (30..36).contains(&y);
+                rgba.extend_from_slice(&if on {
+                    [230, 60, 40, if clear { 0 } else { 255 }]
+                } else {
+                    [30, 90, 210, if clear { 0 } else { 255 }]
+                });
+            }
+        }
+        let place = |t: Transform, opacity: f32| {
+            let mut doc = Document::new(70, 60, ColorMode::Rgb);
+            let id = doc.add_resource(w, h, rgba.clone());
+            let mut node = Node::raster(
+                "stripes",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: w,
+                    height: h,
+                    corners: None,
+                },
+            );
+            node.opacity = opacity;
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let img = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: img,
+                transform: t,
+            })
+            .unwrap();
+            doc
+        };
+        let scaled = |sx: f32, sy: f32| Transform {
+            a: sx,
+            d: sy,
+            e: 3.0,
+            f: 2.0,
+            ..Default::default()
+        };
+        let (s, c) = 0.4f32.sin_cos();
+        let turned = Transform {
+            a: 0.45 * c,
+            b: 0.45 * s,
+            c: -0.45 * s,
+            d: 0.45 * c,
+            e: 30.0,
+            f: 5.0,
+        };
+        for (name, t, opacity) in [
+            ("a half", scaled(0.5, 0.5), 1.0),
+            ("three tenths", scaled(0.3, 0.3), 1.0),
+            ("a sixth", scaled(0.17, 0.17), 1.0),
+            ("one axis", scaled(0.6, 0.23), 1.0),
+            ("turned", turned, 1.0),
+            ("faded", scaled(0.4, 0.4), 0.6),
+            // And not shrunk at all, where it is one tap as it was.
+            ("its own size", scaled(1.0, 1.0), 1.0),
+        ] {
+            let doc = place(t, opacity);
+            assert!(GpuRenderer::can_render(&doc), "{name} is drawn");
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            // The worst is a turned picture's edge, which the CPU
+            // samples sixteen times and this works out exactly.
+            assert!(
+                mean < 0.001 && worst < 0.1,
+                "{name}: mean channel difference {mean:.5} (worst {worst:.4})"
+            );
+        }
     }
 
     #[test]
@@ -8379,9 +8533,111 @@ mod tests {
         );
     }
 
-    /// The device is asked for the textures every adapter guarantees,
-    /// so a page that would need a bigger one is handed back rather
-    /// than overrunning that.
+    /// A renderer asks its adapter for textures past what every adapter
+    /// guarantees, because a photograph is wider than that and so is a
+    /// hi-DPI window: a picture three thousand pixels across, and a
+    /// window two and a half thousand wide, are drawn where the device
+    /// was given room for them — and drawn as the CPU draws them — while
+    /// the checks with no device in hand still answer for the guarantee.
+    #[test]
+    fn a_photograph_wider_than_the_guarantee_is_drawn_where_there_is_room() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        // Asked of the device rather than of the renderer's own note of
+        // it, so a renderer that forgot what it was given fails here
+        // instead of skipping.
+        let given = gpu.device.limits().max_texture_dimension_2d;
+        if given < 3200 {
+            eprintln!("skipped: this adapter gives {given} a side");
+            return;
+        }
+        let (w, h) = (3000u32, 60u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend_from_slice(&[
+                    (x % 251) as u8,
+                    ((x / 7 + y * 3) % 256) as u8,
+                    (255 - (x % 199)) as u8,
+                    255,
+                ]);
+            }
+        }
+        let mut doc = Document::new(300, 40, ColorMode::Rgb);
+        let id = doc.add_resource(w, h, rgba);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "wide",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: w,
+                    height: h,
+                    corners: None,
+                },
+            )),
+        })
+        .unwrap();
+        let img = doc.children_of(root).unwrap()[0];
+        // Fitted to the page, which is a tenth of its width.
+        doc.apply(Command::SetTransform {
+            id: img,
+            transform: Transform {
+                a: 0.1,
+                d: 0.1,
+                e: 0.0,
+                f: 5.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let size = (300, 40);
+        assert!(
+            !GpuRenderer::can_render(&doc),
+            "with no device in hand, past the guarantee"
+        );
+        assert!(
+            gpu.draws_view(&doc, Transform::default(), size),
+            "with room, drawn"
+        );
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.001 && worst < 0.02,
+            "the photograph: mean channel difference {mean:.5} (worst {worst:.4})"
+        );
+
+        // A window two and a half thousand pixels wide onto it.
+        let view = Transform {
+            a: 8.5,
+            d: 8.5,
+            e: -10.0,
+            f: -20.0,
+            ..Default::default()
+        };
+        let size = (2500, 300);
+        assert!(!GpuRenderer::can_render_view(&doc, view, size));
+        assert!(gpu.draws_view(&doc, view, size));
+        let drawn = gpu.render_view(&doc, view, size).unwrap();
+        let mut surface = Surface::new(size.0, size.1);
+        let clip = surface.full_clip();
+        chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+        let (mean, worst) = difference(&drawn, &surface);
+        assert!(
+            mean < 0.001 && worst < 0.03,
+            "the wide window: mean channel difference {mean:.5} (worst {worst:.4})"
+        );
+        // And past what this device was given, back.
+        assert!(!gpu.draws_view(&doc, view, (gpu.max_texture + 1, 10)));
+    }
+
+    /// With no renderer in hand, the checks answer for the textures every
+    /// adapter guarantees, so a page that would need a bigger one is
+    /// handed back rather than overrunning that.
     #[test]
     fn a_page_bigger_than_the_textures_it_asked_for_goes_back() {
         let mut doc = Document::new(MAX_TEXTURE + 1, 100, ColorMode::Rgb);
@@ -11895,9 +12151,7 @@ mod tests {
                 "and the vote changed the picture"
             );
         }
-        // Under a view half as large again, a radius of two is three. (A
-        // view that shrinks the picture is one the picture itself goes
-        // back for.)
+        // Under a view half as large again, a radius of two is three.
         let doc = with(2.0, 1.0);
         let view = Transform {
             a: 1.5,

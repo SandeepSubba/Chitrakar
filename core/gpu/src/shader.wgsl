@@ -387,10 +387,25 @@ fn edge_cover(u: f32) -> f32 {
 @fragment
 fn fs_image(in: ImageOut) -> @location(0) vec4f {
     let border = edge_cover(in.uv.x) * edge_cover(in.uv.y);
-    return textureSample(image, image_sampler, clamp(in.uv, vec2f(0.0), vec2f(1.0)))
-        * in.alpha
-        * border
-        * mask_cover(in.page, in.mask);
+    // `grad` is how much of the picture a pixel covers, in texels along
+    // its own axes, and how many taps a side average it: one by one at
+    // its own size or larger, a grid when it is shrunk — spread evenly
+    // over the footprint, as the CPU renderer spreads them.
+    let taps = vec2i(max(in.grad.zw, vec2f(1.0)));
+    let size = vec2f(textureDimensions(image));
+    var sampled = vec4f(0.0);
+    if taps.x > 1 || taps.y > 1 {
+        for (var j = 0; j < taps.y; j = j + 1) {
+            for (var i = 0; i < taps.x; i = i + 1) {
+                let o = (vec2f(f32(i), f32(j)) + vec2f(0.5)) / vec2f(taps) - vec2f(0.5);
+                sampled = sampled + textureSampleLevel(image, image_sampler, in.uv + o * in.grad.xy / size, 0.0);
+            }
+        }
+        sampled = sampled / f32(taps.x * taps.y);
+    } else {
+        sampled = textureSampleLevel(image, image_sampler, clamp(in.uv, vec2f(0.0), vec2f(1.0)), 0.0);
+    }
+    return sampled * in.alpha * border * mask_cover(in.page, in.mask);
 }
 
 // A text layer: the whole block rasterized to coverage at the size it
