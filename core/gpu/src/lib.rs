@@ -3256,7 +3256,7 @@ fn one(
             // A filter's radius is written in the space it lives
             // in, so a group that scales stretches it — which is the
             // reading the CPU renderer takes.
-            match filter_of(filter, parent)? {
+            match filter_of(filter, parent, out.size)? {
                 Filtering::Pointwise(params, grad, extra) => {
                     let quad = out.push(page_quad(
                         (out.page, out.surface),
@@ -3322,6 +3322,29 @@ fn one(
                     // mixed with the smeared copy by the layer's opacity
                     // and its mask. Nothing is added back, so the amount
                     // that makes a sharpen out of a blur is zero here.
+                    let quad = out.push(page_quad(
+                        (out.page, out.surface),
+                        alpha,
+                        [0.0; 4],
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
+                    out.draws.push(Item::of(Draw::Smear { along, quad }));
+                }
+                // The same two quads, the first saying which way each
+                // pixel's line runs rather than one way for all of them.
+                Filtering::Radial {
+                    params,
+                    linear,
+                    down,
+                } => {
+                    let along = out.push(page_quad(
+                        (out.page, out.surface),
+                        1.0,
+                        params,
+                        linear,
+                        [down, 0.0, 0.0],
+                    ));
                     let quad = out.push(page_quad(
                         (out.page, out.surface),
                         alpha,
@@ -4804,7 +4827,7 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
 /// pixel: they want the surface under them sampled many times over, at
 /// offsets, which is passes of its own rather than the single copy-aside
 /// everything here works from. Until that exists they are the CPU's.
-fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filtering> {
+fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) -> Option<Filtering> {
     use chitrakar_doc::Filter as F;
     // A filter's radius is written in the space it lives in, so a group
     // that scales stretches it — and a smear, which has a direction as
@@ -4839,9 +4862,34 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform) -> Option<Filterin
         // A median is a vote over a window, which no pass of quads can
         // hold: a page with one is the CPU's.
         F::Median { .. } => return None,
-        // A smear whose line runs a different way at every pixel: the
-        // CPU's.
-        F::RadialBlur { .. } => return None,
+        // A smear whose line runs a different way at every pixel: out
+        // from the centre for a zoom, round it for a spin. It is the
+        // motion blur's pass with the line worked out per pixel rather
+        // than once, from the same numbers the CPU renderer works it out
+        // from — the centre on the surface, how far the line reaches, and
+        // the view's own linear part, since the line is drawn in the
+        // space the filter lives in and only then brought to the page.
+        F::RadialBlur {
+            amount,
+            spin,
+            center,
+        } => {
+            let reach = chitrakar_render::radial_reach(*amount, *spin);
+            if reach <= 0.0 {
+                return Some(Filtering::Nothing);
+            }
+            let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+            let (cx, cy) = (at(center[0]) * page[0], at(center[1]) * page[1]);
+            let (sx, sy) = (
+                view.a * cx + view.c * cy + view.e,
+                view.b * cx + view.d * cy + view.f,
+            );
+            Filtering::Radial {
+                params: [reach, reach * scale, sx, if *spin { 2.0 } else { 1.0 }],
+                linear: [view.a, view.b, view.c, view.d],
+                down: sy,
+            }
+        }
         F::Vignette {
             amount,
             radius,
@@ -5146,6 +5194,15 @@ enum Filtering {
     /// apart along a line: a smear, which has an angle and so cannot be
     /// separated into a turn along each axis the way a blur is.
     Smear { taps: f32, step: [f32; 2] },
+    /// A smear whose line is worked out per pixel: a radial blur. How
+    /// far it reaches, that times the view's scale, the centre across
+    /// the surface and whether it spins; the view's linear part; and the
+    /// centre down the surface.
+    Radial {
+        params: [f32; 4],
+        linear: [f32; 4],
+        down: f32,
+    },
     /// Two passes, one along each axis: a pixelate, whose block average
     /// separates where the grid is upright on the page. Each carries the
     /// inverse scale along its axis, the origin it is measured from, the
@@ -11558,6 +11615,160 @@ mod tests {
             !GpuRenderer::can_render(&with(F::Pixelate { size: 200.0 })),
             "a block wider than the walk goes back"
         );
+    }
+
+    /// A radial blur is the motion blur's pass with its line worked out
+    /// per pixel — out from a centre, or round it — and the line is drawn
+    /// in the space the filter lives in, so it is held against the CPU
+    /// renderer under a view that scales unevenly and turns as well as at
+    /// the page's own size. A zoom that read its centre off the surface
+    /// rather than the page, or a spin that turned the wrong way, would
+    /// each be a plausible picture on its own.
+    #[test]
+    fn a_radial_blur_smears_the_way_the_cpu_smears_it() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        // Everything inside a group, which is the space the filter lives
+        // in: upright, or turned and squashed, which is what makes the
+        // line's own space and the page's part company.
+        let with = |filter: F, group: Transform| {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+            let g = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: g,
+                transform: group,
+            })
+            .unwrap();
+            let blocks = [
+                ("back", 64.0, 48.0, (0.0, 0.0), [0.1, 0.12, 0.2]),
+                ("bar", 40.0, 5.0, (6.0, 10.0), [0.95, 0.9, 0.5]),
+                ("post", 5.0, 30.0, (44.0, 12.0), [0.3, 0.8, 0.6]),
+                ("dot", 6.0, 6.0, (18.0, 30.0), [0.9, 0.2, 0.3]),
+            ];
+            for (index, (name, w, h, at, rgb)) in blocks.into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: g,
+                    index,
+                    node: filled(
+                        name,
+                        VectorShape::Rect {
+                            width: w,
+                            height: h,
+                            radius: 0.0,
+                        },
+                        AuthoredColor::Srgb {
+                            r: rgb[0],
+                            g: rgb[1],
+                            b: rgb[2],
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+                let id = doc.children_of(g).unwrap()[index];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(at.0, at.1),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: g,
+                index: 4,
+                node: Box::new(Node::filter("f", filter)),
+            })
+            .unwrap();
+            doc
+        };
+        let turned = Transform {
+            a: 1.1,
+            b: 0.4,
+            c: -0.25,
+            d: 0.85,
+            e: 8.0,
+            f: -6.0,
+        };
+        let views = [
+            ("at the page's own size", Transform::default(), (64, 48)),
+            (
+                "scaled unevenly and panned",
+                Transform {
+                    a: 1.3,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 0.9,
+                    e: 9.0,
+                    f: -4.0,
+                },
+                (80, 60),
+            ),
+        ];
+        for filter in [
+            F::RadialBlur {
+                amount: 0.25,
+                spin: false,
+                center: [0.5, 0.5],
+            },
+            F::RadialBlur {
+                amount: 0.4,
+                spin: false,
+                center: [0.2, 0.8],
+            },
+            F::RadialBlur {
+                amount: 20.0,
+                spin: true,
+                center: [0.5, 0.5],
+            },
+            F::RadialBlur {
+                amount: 35.0,
+                spin: true,
+                center: [0.7, 0.3],
+            },
+            // Long enough that the far corners hit the sample cap.
+            F::RadialBlur {
+                amount: 1.0,
+                spin: false,
+                center: [0.0, 0.0],
+            },
+            // Nothing asked for.
+            F::RadialBlur {
+                amount: 0.0,
+                spin: true,
+                center: [0.5, 0.5],
+            },
+        ] {
+            for (name, group, view, size) in views
+                .iter()
+                .flat_map(|&(n, v, s)| [(n, Transform::default(), v, s), (n, turned, v, s)])
+            {
+                let doc = with(filter.clone(), group);
+                assert!(
+                    GpuRenderer::can_render_view(&doc, view, size),
+                    "{filter:?} {name}, in {group:?}, is drawn rather than handed back"
+                );
+                let drawn = gpu.render_view(&doc, view, size).unwrap();
+                let mut surface = Surface::new(size.0, size.1);
+                let clip = surface.full_clip();
+                chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+                let (mean, worst) = difference(&drawn, &surface);
+                assert!(
+                    // The worst is a turned shape's antialiased edge,
+                    // which the two renderers draw a little apart with no
+                    // filter over it at all.
+                    mean < 0.001 && worst < 0.1,
+                    "{filter:?} {name}, in {group:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+                );
+            }
+        }
     }
 
     /// A motion blur: one pass along the line it was given, rather than

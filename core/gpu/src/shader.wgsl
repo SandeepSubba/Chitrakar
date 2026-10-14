@@ -1146,6 +1146,9 @@ fn fs_box(in: ImageOut) -> @location(0) vec4f {
 // the even neighbour where the CPU takes it away from zero.
 @fragment
 fn fs_smear(in: ImageOut) -> @location(0) vec4f {
+    if in.params.w > 0.5 {
+        return radial(in);
+    }
     let n = i32(in.params.x);
     let step = vec2f(in.params.y, in.params.z);
     let half = f32(n / 2);
@@ -1155,6 +1158,67 @@ fn fs_smear(in: ImageOut) -> @location(0) vec4f {
         let at = floor(here + step * (f32(k) - half) + vec2f(0.5, 0.5));
         let p = clamp(at, page.lo, page.hi - vec2f(1.0, 1.0));
         sum = sum + textureLoad(image, vec2i(p), 0);
+    }
+    return sum / f32(n);
+}
+
+// A pixel of what is under the layer, read between texels: the four
+// round the point, each held to the page, the way the CPU renderer reads
+// its snapshot of the page's rectangle. Pixel centres sit at a half.
+fn held(p: vec2f) -> vec4f {
+    return textureLoad(image, vec2i(clamp(p, page.lo, page.hi - vec2f(1.0, 1.0))), 0);
+}
+
+fn between(at: vec2f) -> vec4f {
+    let u = at - vec2f(0.5, 0.5);
+    let f = floor(u);
+    let t = u - f;
+    let a = held(f);
+    let b = held(f + vec2f(1.0, 0.0));
+    let c = held(f + vec2f(0.0, 1.0));
+    let d = held(f + vec2f(1.0, 1.0));
+    let top = a + (b - a) * t.x;
+    let bottom = c + (d - c) * t.x;
+    return top + (bottom - top) * t.y;
+}
+
+// A radial blur: each pixel the average of samples along its line out
+// from the centre (a zoom) or along its circle round it (a spin), the
+// line drawn in the space the filter lives in and brought to the page by
+// the view's linear part — the CPU renderer's samples, its count and its
+// spacing, so the two come out at the same picture.
+//
+// `params` is how far the line reaches, that times the view's scale, the
+// centre across the surface and which of the two it is; `grad` is the
+// linear part (a, b, c, d); `extra.x` is the centre down the surface.
+fn radial(in: ImageOut) -> vec4f {
+    let reach = in.params.x;
+    let spin = in.params.w > 1.5;
+    let centre = vec2f(in.params.z, in.extra.x);
+    let l = in.grad;
+    let det = l.x * l.w - l.y * l.z;
+    let pixel = floor(in.uv * page.size);
+    let d = pixel + vec2f(0.5, 0.5) - centre;
+    // Back into the filter's own space, where the line is drawn.
+    let v = vec2f(l.w * d.x - l.z * d.y, l.x * d.y - l.y * d.x) / det;
+    let length = sqrt(v.x * v.x + v.y * v.y) * in.params.y;
+    if length < 0.5 {
+        return held(pixel);
+    }
+    // Odd, so that the pixel itself is one of the samples, and held to
+    // the CPU renderer's 129.
+    let n = min(i32(ceil(min(length, 256.0))) + 1, 129) | 1;
+    let half = f32(n / 2);
+    var sum = vec4f(0.0, 0.0, 0.0, 0.0);
+    for (var k = 0; k < n; k = k + 1) {
+        let t = (f32(k) - half) / f32(n - 1);
+        var q = v * (1.0 + reach * t);
+        if spin {
+            let s = sin(reach * t);
+            let c = cos(reach * t);
+            q = vec2f(v.x * c - v.y * s, v.x * s + v.y * c);
+        }
+        sum = sum + between(centre + vec2f(l.x * q.x + l.z * q.y, l.y * q.x + l.w * q.y));
     }
     return sum / f32(n);
 }

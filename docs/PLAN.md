@@ -1473,7 +1473,23 @@ without reading anything else.*
     the page drawn whole. With the reach taken out it fails. It first
     passed with the reach out because the dot was the ground's own
     colour and invisible, which the sabotage caught.
-  - **The GPU** declines it.
+  - **The GPU** draws it ✅, as the motion blur's pass with the line
+    worked out per pixel (`fs_smear` → `radial` in the shader): the
+    centre on the surface, how far the line reaches, and the view's
+    linear part, since the line is drawn in the space the filter
+    lives in. `a_radial_blur_smears_the_way_the_cpu_smears_it` holds it
+    to the CPU at the page's size and under an uneven scale, with the
+    layers upright and in a turned, squashed group. It fails with the
+    linear part dropped, the centre read off the surface, zoom and spin
+    swapped, nearest sampling instead of bilinear, a sample count one
+    short, or a cap of 9. (A reversed spin cannot fail it: the samples
+    are symmetric about the pixel.)
+  - **Found while writing it:** under a *turned view* the CPU cuts the
+    page's edge per pixel after drawing (`region_at`) and the GPU does
+    not, so anything that spreads (any blur) leaks into the corners of
+    the turned page's box there. The app's canvas never turns the view,
+    so nothing on screen shows it, but `render_view` does not decline
+    it. Next to look at.
   - **Tests.** `a_radial_blur_smears_out_from_its_centre_or_round_it`
     (catches zoom and spin swapped), and smoke 9o16.
 - **Find layers ✅** — a field and a kind picker over the Layers panel.
