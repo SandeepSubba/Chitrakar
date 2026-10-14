@@ -1488,8 +1488,13 @@ without reading anything else.*
     page's edge per pixel after drawing (`region_at`) and the GPU does
     not, so anything that spreads (any blur) leaks into the corners of
     the turned page's box there. The app's canvas never turns the view,
-    so nothing on screen shows it, but `render_view` does not decline
-    it. Next to look at.
+    so nothing on screen showed it, but `render_view` did not decline
+    it. It declines it now ✅: a turned page whose edge crosses the
+    surface goes back to the CPU, and one seen only from inside (no
+    edge on the surface to cut) is still drawn
+    (`a_turned_view_is_drawn_only_where_the_page_has_no_edge_to_cut`;
+    unguarded, a blur under the whole turned page was 0.55 out in the
+    box's corners).
   - **Tests.** `a_radial_blur_smears_out_from_its_centre_or_round_it`
     (catches zoom and spin swapped), and smoke 9o16.
 - **Find layers ✅** — a field and a kind picker over the Layers panel.

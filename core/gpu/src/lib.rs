@@ -2542,6 +2542,36 @@ fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) ->
         x1: (x1.ceil().max(0.0) as u32).min(size.0),
         y1: (y1.ceil().max(0.0) as u32).min(size.1),
     };
+    // Turned, the page is not the box it was rounded out to above: the
+    // CPU renderer draws into that box and then cuts the page's own edge
+    // per pixel (`region_at`), and nothing here cuts it — so anything
+    // that spreads, or hangs past the page, would show in the box's
+    // corners where the page is not. A turned page whose edge crosses
+    // the surface goes back. One the surface sees from inside, with its
+    // edge nowhere on it, has nothing to cut, and is drawn.
+    if view.b.abs() > 1e-6 || view.c.abs() > 1e-6 {
+        let det = view.a * view.d - view.b * view.c;
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+        let inside = |x: f32, y: f32| {
+            let (u, v) = (x - view.e, y - view.f);
+            let (dx, dy) = (
+                (view.d * u - view.c * v) / det,
+                (view.a * v - view.b * u) / det,
+            );
+            const SLACK: f32 = 1e-3;
+            dx >= SLACK && dy >= SLACK && dx <= w - SLACK && dy <= h - SLACK
+        };
+        let (sw, sh) = (size.0 as f32, size.1 as f32);
+        if ![(0.0, 0.0), (sw, 0.0), (0.0, sh), (sw, sh)]
+            .iter()
+            .all(|&(x, y)| inside(x, y))
+        {
+            return None;
+        }
+    }
     out.surface = size;
     out.page = page;
     out.size = [doc.meta.width as f32, doc.meta.height as f32];
@@ -11615,6 +11645,107 @@ mod tests {
             !GpuRenderer::can_render(&with(F::Pixelate { size: 200.0 })),
             "a block wider than the walk goes back"
         );
+    }
+
+    /// Turned, the page's edge is cut per pixel by the CPU renderer after
+    /// it draws, and nothing here cuts it: a blur under a turned view
+    /// leaked into the corners of the page's box, where the page is not.
+    /// Such a view goes back now, and one that sees the page only from
+    /// inside — its edge nowhere on the surface — is still drawn, and
+    /// drawn the way the CPU draws it.
+    #[test]
+    fn a_turned_view_is_drawn_only_where_the_page_has_no_edge_to_cut() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(64, 48, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "back",
+                VectorShape::Rect {
+                    width: 64.0,
+                    height: 48.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.12,
+                    b: 0.2,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        add(
+            &mut doc,
+            filled(
+                "bar",
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 5.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.9,
+                    b: 0.5,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(12.0, 20.0),
+        );
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(Node::filter("f", F::GaussianBlur { sigma: 3.0 })),
+        })
+        .unwrap();
+        let (s, c) = 0.3f32.sin_cos();
+        let turn = |scale: f32, e: f32, f: f32| Transform {
+            a: scale * c,
+            b: scale * s,
+            c: -scale * s,
+            d: scale * c,
+            e,
+            f,
+        };
+        // The whole page on the surface, its turned edge crossing it.
+        let whole = (turn(1.0, 20.0, 0.0), (90, 80));
+        assert!(
+            !GpuRenderer::can_render_view(&doc, whole.0, whole.1),
+            "a turned page whose edge crosses the surface goes back"
+        );
+        // Zoomed in on its middle: no edge anywhere on the surface.
+        let within = (turn(3.0, -50.4, -82.2), (40, 30));
+        assert!(
+            GpuRenderer::can_render_view(&doc, within.0, within.1),
+            "a turned page seen from inside is drawn"
+        );
+        let drawn = gpu.render_view(&doc, within.0, within.1).unwrap();
+        let mut surface = Surface::new(within.1 .0, within.1 .1);
+        let clip = surface.full_clip();
+        chitrakar_render::render_region_at(&doc, &mut surface, clip, within.0).unwrap();
+        let (mean, worst) = difference(&drawn, &surface);
+        assert!(
+            mean < 0.002 && worst < 0.05,
+            "seen from inside: mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // And an upright view with room round the page is still drawn.
+        assert!(GpuRenderer::can_render_view(
+            &doc,
+            Transform {
+                a: 0.8,
+                b: 0.0,
+                c: 0.0,
+                d: 0.8,
+                e: 10.0,
+                f: 5.0
+            },
+            (90, 80)
+        ));
     }
 
     /// A radial blur is the motion blur's pass with its line worked out
