@@ -1464,6 +1464,41 @@ body {
   border-color: var(--accent);
 }
 
+/* Finding layers: a field and a kind, in one row above the list. */
+.layer-search {
+  display: flex;
+  gap: 4px;
+  padding: 2px 6px 4px;
+}
+
+.layer-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.layer-search select {
+  max-width: 7.5rem;
+  font-size: 0.75rem;
+}
+
+.layer-search-none {
+  margin: 4px 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* A group shown only because something found is inside it. */
+.panel ul li.context {
+  opacity: 0.55;
+}
+
 /* Layer comps: a row of named chips under the layers' header, the one
    the page is showing now in the accent colour. */
 .palette.comps {

@@ -1404,6 +1404,10 @@ export function App() {
    * expensive thing on a page — a sky wanded out between branches — and
    * the only place to put one used to be the layer it was handed to. */
   const [kept, setKept] = useState<string[]>([]);
+  /** What the layers are being searched for: a word in the name, and a
+   * kind, either of them empty for any. */
+  const [layerQuery, setLayerQuery] = useState("");
+  const [layerKind, setLayerKind] = useState("");
   /** The states of the page kept by name, and whether each is the one
    * showing now — read back from the engine on every refresh, since any
    * edit can make the page stop being one or start being one again. */
@@ -5878,8 +5882,42 @@ export function App() {
       .map((l) => l.id),
   );
   /** The rows the panel shows: everything, less what is inside something
-   * folded shut. Depth-first and parent-first, so one pass does it. */
+   * folded shut. Depth-first and parent-first, so one pass does it.
+   *
+   * Searched — by a word in the name, by a kind, or both — it is the
+   * layers that match and the groups they are in, folded or not, since
+   * a layer found inside a folded group is still the layer looked for
+   * and the groups are where it is. */
+  const LAYER_KINDS: Record<string, LayerInfo["kind"][]> = {
+    shapes: ["vector"],
+    pictures: ["raster", "paint", "clone"],
+    text: ["text"],
+    adjustments: ["adjustment", "filter"],
+    groups: ["group", "artboard", "instance"],
+  };
+  const searching = layerQuery.trim() !== "" || layerKind !== "";
+  const found = new Set<number>();
+  const around = new Set<number>();
+  if (searching) {
+    const q = layerQuery.trim().toLowerCase();
+    const byId = new Map(layers.map((l) => [l.id as number, l]));
+    for (const l of layers) {
+      const named = q === "" || l.name.toLowerCase().includes(q);
+      const kinded = layerKind === "" || (LAYER_KINDS[layerKind] ?? []).includes(l.kind);
+      if (named && kinded) {
+        found.add(l.id as number);
+        let up = l.parent as number | null;
+        while (up !== null && up !== undefined && byId.has(up)) {
+          around.add(up);
+          up = byId.get(up)!.parent as number | null;
+        }
+      }
+    }
+  }
   const panelRows = (() => {
+    if (searching) {
+      return layers.filter((l) => found.has(l.id as number) || around.has(l.id as number));
+    }
     const out: LayerInfo[] = [];
     let hidingBelow: number | null = null;
     for (const l of layers) {
@@ -10427,6 +10465,40 @@ export function App() {
               )}
             </div>
           )}
+          {/* Finding a layer by name or by kind. */}
+          <div className="layer-search" role="search">
+            <input
+              type="search"
+              placeholder="Find layers"
+              value={layerQuery}
+              onChange={(e) => setLayerQuery(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === "Escape") {
+                  setLayerQuery("");
+                  setLayerKind("");
+                  e.currentTarget.blur();
+                }
+              }}
+              aria-label="Find layers"
+            />
+            <select
+              value={layerKind}
+              onChange={(e) => setLayerKind(e.target.value)}
+              aria-label="Layer kind"
+              title="Show only layers of one kind"
+            >
+              <option value="">All kinds</option>
+              <option value="shapes">Shapes</option>
+              <option value="pictures">Pictures</option>
+              <option value="text">Text</option>
+              <option value="adjustments">Adjustments</option>
+              <option value="groups">Groups and frames</option>
+            </select>
+          </div>
+          {searching && found.size === 0 && (
+            <p className="layer-search-none">No layer matches.</p>
+          )}
           <ul ref={layerListRef}>
             {panelRows.map((l) => (
               <li
@@ -10439,6 +10511,7 @@ export function App() {
                     : multiSel.includes(l.id)
                       ? "multi"
                       : "",
+                  searching && !found.has(l.id as number) ? "context" : "",
                   layerDrag?.over === l.id && layerDrag.id !== l.id
                     ? `drop-${layerDrag.where}`
                     : "",

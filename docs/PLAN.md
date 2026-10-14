@@ -1476,6 +1476,15 @@ without reading anything else.*
   - **The GPU** declines it.
   - **Tests.** `a_radial_blur_smears_out_from_its_centre_or_round_it`
     (catches zoom and spin swapped), and smoke 9o16.
+- **Find layers ✅** — a field and a kind picker over the Layers panel.
+  A word narrows the list to the layers whose names hold it, with the
+  groups they sit in shown dimmed beside them (folded or not, so a
+  match is never hidden inside a closed group); the kind picker —
+  shapes, pictures, text, adjustments, groups and frames — narrows by
+  what a layer is, and the two together by both. Typing there types,
+  it picks no tool; Escape puts the whole list back, and an empty
+  result says so. UI only: nothing about it is in the document.
+  Smoke block 9o17.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

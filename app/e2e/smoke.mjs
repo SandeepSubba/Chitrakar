@@ -7682,6 +7682,64 @@ assert(
   assert((await bright(296, 160)) > 20, "undo puts the centre back");
 }
 
+// 9o17. Finding layers: a word in the name shows the layers that have it
+// and the groups they are in, folded or not; a kind shows only that
+// kind; Escape puts the whole list back.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+  };
+  await rect(10, 10, 60, 60);
+  await rect(100, 10, 150, 60);
+  await rect(200, 10, 250, 60);
+  await pickTool("Move");
+  // The first two into a group.
+  await page.locator(".panel ul li", { hasText: "Rect 1" }).click();
+  await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: [MOD] });
+  await page.locator('[aria-label^="Group selected layers"]').click();
+  await page.waitForTimeout(250);
+  await page.selectOption('[aria-label="Add adjustment layer"]', "exposure");
+  await page.waitForTimeout(250);
+  const names = async () =>
+    page.locator(".panel ul li").evaluateAll((lis) =>
+      lis.map((li) => (li.className.includes("context") ? "~" : "") + li.dataset.id),
+    );
+  const all = (await names()).length;
+  assert(all >= 5, `five rows to search (${all})`);
+  const field = page.locator('input[aria-label="Find layers"]');
+  await field.fill("rect 2");
+  await page.waitForTimeout(150);
+  let shown = await page.locator(".panel ul li").allTextContents();
+  assert(
+    shown.length === 2 && shown.some((t) => t.includes("Rect 2")) &&
+      (await page.locator(".panel ul li.context").count()) === 1,
+    `the match, and its group dimmed beside it (${shown.join(" | ")})`,
+  );
+  // Typing in the field is typing, not a tool's key.
+  await field.press("e");
+  assert((await page.locator(".toolbar > button.active").getAttribute("aria-label")) === "Move", "a letter typed there picks no tool");
+  await field.fill("");
+  await page.selectOption('[aria-label="Layer kind"]', "adjustments");
+  await page.waitForTimeout(150);
+  shown = await page.locator(".panel ul li").allTextContents();
+  assert(shown.length === 1 && shown[0].includes("Exposure"), `only the adjustment (${shown.join(" | ")})`);
+  await field.fill("zzz");
+  await page.waitForTimeout(150);
+  assert((await page.locator(".layer-search-none").count()) === 1, "no match says so");
+  await field.press("Escape");
+  await page.waitForTimeout(150);
+  assert((await page.locator(".panel ul li").count()) === all && (await field.inputValue()) === "", "Escape puts the whole list back");
+}
+
 // 9p. A narrow window — a phone, a tablet held upright, a window dragged
 // small — has no room for a column of layers beside the canvas, so the
 // panel comes over it instead and is asked for from the bar. Narrower
