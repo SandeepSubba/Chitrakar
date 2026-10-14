@@ -255,7 +255,10 @@ fn local_size(kind: &NodeKind) -> Option<(f32, f32)> {
 fn shape_size(shape: &VectorShape) -> (f32, f32) {
     match shape {
         VectorShape::Rect { width, height, .. } => (*width, *height),
-        VectorShape::Ellipse { rx, ry } => (rx * 2.0, ry * 2.0),
+        // A polygon fills the box an ellipse of its size would.
+        VectorShape::Ellipse { rx, ry } | VectorShape::Polygon { rx, ry, .. } => {
+            (rx * 2.0, ry * 2.0)
+        }
         // Path anchors are normalized to a (0,0) origin on creation; local
         // size is their extent.
         VectorShape::Path {
@@ -3109,6 +3112,10 @@ fn render_child(
                 stroke,
                 gradient,
             } => {
+                // A polygon is drawn as the path through its corners,
+                // worked out once here rather than per pixel below.
+                let as_path = shape.as_path();
+                let shape = as_path.as_ref().unwrap_or(shape);
                 // A gradient paints in place of the flat fill.
                 let fill_paint = match gradient {
                     Some(g) => Paint::from_gradient(doc, g, &flatten_shape(shape), node.opacity),
@@ -4245,6 +4252,11 @@ pub fn smooth_handles(points: &[[f32; 2]], closed: bool) -> Vec<[f32; 4]> {
 fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     use std::borrow::Cow;
     const STEPS: usize = FLATTEN_STEPS;
+    // A polygon flattens to the path through its corners, which is
+    // already straight.
+    if let Some(path) = shape.as_path() {
+        return Cow::Owned(path);
+    }
     let VectorShape::Path {
         points,
         closed,
@@ -4358,7 +4370,7 @@ pub fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
             let (a, b) = (rx - by, ry - by);
             (a > 0.0 && b > 0.0).then_some(VectorShape::Ellipse { rx: a, ry: b })
         }
-        VectorShape::Path { .. } => None,
+        VectorShape::Path { .. } | VectorShape::Polygon { .. } => None,
     }
 }
 
@@ -4654,6 +4666,9 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
     /// strays under a fifth of a pixel from the true arc.
     const PER_QUARTER: usize = 16;
     match shape {
+        VectorShape::Polygon { .. } => {
+            shape_rings(&shape.as_path().unwrap_or_else(|| shape.clone()))
+        }
         VectorShape::Ellipse { rx, ry } => {
             let n = PER_QUARTER * 4;
             vec![(0..n)
@@ -4796,6 +4811,13 @@ fn shape_covers(shape: &VectorShape, x: f32, y: f32) -> bool {
             }
             inside
         }
+        // Worked out as its path. The drawing paths have already turned
+        // a polygon into one, so this is for a shape asked about on its
+        // own — a mask, a test — where once a pixel is the price of
+        // answering rather than refusing.
+        VectorShape::Polygon { .. } => shape
+            .as_path()
+            .is_some_and(|path| shape_covers(&path, x, y)),
     }
 }
 
@@ -5070,6 +5092,10 @@ pub fn offset_outline(shape: &VectorShape, by: f32) -> Option<Vec<Vec<[f32; 2]>>
     if !by.is_finite() || by == 0.0 {
         return None;
     }
+    // A polygon's outline is its path's.
+    if let Some(path) = shape.as_path() {
+        return offset_outline(&path, by);
+    }
     if !matches!(shape, VectorShape::Path { .. }) {
         return rim_ring(shape, by).map(|r| vec![r]);
     }
@@ -5171,7 +5197,7 @@ fn rim_ring(shape: &VectorShape, t: f32) -> Option<Vec<[f32; 2]>> {
                     .collect(),
             )
         }
-        VectorShape::Path { .. } => None,
+        VectorShape::Path { .. } | VectorShape::Polygon { .. } => None,
     }
 }
 
@@ -5919,7 +5945,12 @@ fn stroke_covers(
     x: f32,
     y: f32,
 ) -> bool {
-    if !pieces.is_empty() || matches!(shape, VectorShape::Path { .. }) {
+    if !pieces.is_empty()
+        || matches!(
+            shape,
+            VectorShape::Path { .. } | VectorShape::Polygon { .. }
+        )
+    {
         // Dashes are already laid along the middle of the band they
         // break up, so they need no clipping to land in it.
         return pieces.iter().any(|p| p.covers(x, y));
@@ -5954,7 +5985,7 @@ fn stroke_covers(
             };
             within(hi) && !within(lo)
         }
-        VectorShape::Path { .. } => unreachable!(),
+        VectorShape::Path { .. } | VectorShape::Polygon { .. } => unreachable!(),
     }
 }
 
@@ -15314,6 +15345,65 @@ mod tests {
             (after.r - after.g).abs() < 1e-6 && (after.g - after.b).abs() < 1e-6,
             "grey stays grey: {after:?}"
         );
+    }
+
+    /// A live polygon draws exactly what the path through its corners
+    /// draws — filled, stroked, as a mask — and a five-pointed star is a
+    /// star: its tips are filled and the gaps between them are not.
+    #[test]
+    fn a_polygon_draws_what_its_path_draws() {
+        let star = VectorShape::Polygon {
+            rx: 20.0,
+            ry: 20.0,
+            points: 5,
+            inner: 0.4,
+        };
+        let path = star.as_path().unwrap();
+        let page = |shape: VectorShape| {
+            let mut doc = Document::new(50, 50, ColorMode::Rgb);
+            let mut node = Node::vector("s", shape);
+            if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                *fill = Some(RED);
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.1,
+                        b: 0.9,
+                        a: 1.0,
+                    },
+                    width: 1.5,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    cap: StrokeCap::Round,
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: None,
+                });
+            }
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(5.0, 5.0),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let (a, b) = (page(star), page(path));
+        assert_eq!(a.pixels, b.pixels, "the polygon and its path draw the same");
+        // The box is 5..45; the top tip at (25, 5), the gap beside it at
+        // (25 ± 9, 12) or so, the middle filled.
+        assert!(a.get(25, 8).a > 0.9, "the top tip is filled");
+        assert!(a.get(25, 25).a > 0.9, "the middle is filled");
+        assert!(a.get(36, 10).a < 0.1, "between two tips is not");
     }
 
     /// Colorize lays one hue over everything at the lightness each pixel

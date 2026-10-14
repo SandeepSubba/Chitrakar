@@ -498,6 +498,9 @@ fn write_node(
                 stroke,
                 gradient,
             } => {
+                // A polygon is written as the path through its corners.
+                let as_path = shape.as_path();
+                let shape = as_path.as_ref().unwrap_or(shape);
                 // The fade goes on each paint (`paint_attrs`), not on the
                 // element or its group.
                 let common = {
@@ -632,6 +635,7 @@ fn write_node(
                             let _ = writeln!(out, "{pad}</g>");
                         }
                     },
+                    VectorShape::Polygon { .. } => unreachable!("written as its path above"),
                     VectorShape::Path {
                         points,
                         closed,

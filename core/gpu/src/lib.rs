@@ -4361,6 +4361,10 @@ fn vector(
     alpha: f32,
     out: &mut Scene,
 ) -> Option<()> {
+    // A polygon is drawn as the path through its corners: stencilled
+    // and covered, as every path is.
+    let as_path = shape.as_path();
+    let shape = as_path.as_ref().unwrap_or(shape);
     // A gradient paints in place of the flat fill, from a ramp baked
     // here once and sampled there per pixel; the layer's own opacity
     // scales it in the fragment, so two layers could share a ramp even
@@ -4447,7 +4451,7 @@ fn vector(
             radius.max(0.0).min(width.min(*height).max(0.0) / 2.0),
         ),
         VectorShape::Ellipse { rx, ry } => ([rx * 2.0, ry * 2.0], 0.0),
-        VectorShape::Path { .. } => unreachable!("handled above"),
+        VectorShape::Path { .. } | VectorShape::Polygon { .. } => unreachable!("handled above"),
     };
     if !(size[0] > 0.0 && size[1] > 0.0) {
         return Some(());
@@ -14728,9 +14732,16 @@ mod tests {
         // is how many pages reach the old ceiling, named, rather than
         // the ceiling alone. One does. A regression that moved many
         // edges would move many pages.
+        // And again when a third of these pages' ellipses became live
+        // polygons and stars: 275 rough pages of 948 became 310. An
+        // ellipse's edge is drawn here from its own distance, exactly as
+        // the reference renderer's is; a polygon is a path, stencilled
+        // and antialiased by four samples a pixel, so the same box with
+        // straight sides is an edge drawn two ways where it was one. The
+        // interiors, which are the claim, held on every page.
         let rough_pct = rough.len() * 100 / drawn.max(1);
         assert!(
-            rough_pct <= 30 && flipped.len() <= 2,
+            rough_pct <= 33 && flipped.len() <= 2,
             "{} of {drawn} pages have a pixel more than a twentieth off ({rough_pct}%), \
              worst {worst_seen:.3}; at or past 0.75: {flipped:?}",
             rough.len()

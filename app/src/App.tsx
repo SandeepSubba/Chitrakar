@@ -454,36 +454,23 @@ const BOX_TOOLS = new Set<string>([
   "Crop",
 ]);
 
-/** The points of a regular polygon, or of a star of the same count,
- * inscribed in a `w` by `h` box with its first point at the top.
+/** How far in a star's inner corners sit, as a share of the way out.
  *
  * A star's inner radius is the one that puts its inner points on the
  * lines its outer points make — which is what makes a five-pointed star
  * look like a five-pointed star rather than a cog — kept within reach of
  * that for counts where the arithmetic runs away. */
-function polygonPoints(
-  n: number,
-  w: number,
-  h: number,
-  star: boolean,
-): [number, number][] {
-  const sides = Math.max(3, Math.min(24, Math.round(n)));
-  const [cx, cy] = [w / 2, h / 2];
-  const inner = star
-    ? Math.min(
-        0.8,
-        Math.max(0.2, Math.cos((2 * Math.PI) / sides) / Math.cos(Math.PI / sides)),
-      )
-    : 1;
-  const count = star ? sides * 2 : sides;
-  return Array.from({ length: count }, (_, i) => {
-    const a = -Math.PI / 2 + (i * 2 * Math.PI) / count;
-    const r = star && i % 2 === 1 ? inner : 1;
-    return [cx + cx * r * Math.cos(a), cy + cy * r * Math.sin(a)] as [
-      number,
-      number,
-    ];
-  });
+function starDepth(sides: number): number {
+  return Math.min(
+    0.8,
+    Math.max(0.2, Math.cos((2 * Math.PI) / sides) / Math.cos(Math.PI / sides)),
+  );
+}
+
+/** How many corners the polygon and star tools draw with: whole, and
+ * no fewer than three or more than the engine draws. */
+function polygonCount(n: number): number {
+  return Math.max(3, Math.min(100, Math.round(n)));
 }
 
 /** The box a drag out of nothing describes: from the point it began to
@@ -3996,11 +3983,20 @@ export function App() {
       case "Ellipse":
         shape = { Ellipse: { rx: lw / 2, ry: lh / 2 } };
         break;
+      // Both live: the count, and a star's depth, stay numbers to
+      // change on the panel rather than becoming anchors.
       case "Polygon":
-        shape = path(polygonPoints(sides, lw, lh, false), true);
+        shape = { Polygon: { rx: lw / 2, ry: lh / 2, points: polygonCount(sides), inner: 1 } };
         break;
       case "Star":
-        shape = path(polygonPoints(sides, lw, lh, true), true);
+        shape = {
+          Polygon: {
+            rx: lw / 2,
+            ry: lh / 2,
+            points: polygonCount(sides),
+            inner: starDepth(polygonCount(sides)),
+          },
+        };
         break;
       case "Shape": {
         // One of the library's shapes, scaled to the box: a path like
@@ -13729,6 +13725,22 @@ function KindProps({
               most,
               0.5,
               (r) => patch({ shape: { Rect: { ...rect, radius: r } } }),
+            );
+          })()}
+        {"Polygon" in v.shape &&
+          (() => {
+            const poly = v.shape.Polygon;
+            return (
+              <>
+                {slider("Point count", poly.points, 3, 24, 1, (n) =>
+                  patch({ shape: { Polygon: { ...poly, points: Math.round(n) } } }),
+                )}
+                {/* One is a polygon; under it, every other corner comes in
+                    towards the middle and it is a star. */}
+                {slider("Star depth", 1 - poly.inner, 0, 0.95, 0.01, (d) =>
+                  patch({ shape: { Polygon: { ...poly, inner: 1 - d } } }),
+                )}
+              </>
             );
           })()}
         {"Path" in v.shape &&

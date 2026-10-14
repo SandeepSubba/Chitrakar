@@ -1710,6 +1710,43 @@ without reading anything else.*
     off-page content casting effects onto the page (above), so a masked
     frame wearing an effect goes back until that is settled. The
     unmasked case is not declined and is still apart.
+- **Live polygons and stars ✅** (`VectorShape::Polygon { rx, ry,
+  points, inner }`). The Polygon and Star tools used to lay down a path,
+  so a star's count was decided before it was drawn and its depth never.
+  Now both make a live shape: the panel has **Point count** and **Star
+  depth** sliders (one entry each), and *Convert to path* gives its
+  corners as anchors when a hand is wanted on them. It sits in the box an
+  ellipse of the same `rx`/`ry` fills, first corner straight up; a star's
+  every other corner is pulled in to `inner` of the way out
+  (`VectorShape::polygon_corners`, which holds a count to 3..=100, a
+  depth to 0..=1 and a size that is no number to nothing).
+  - **One meaning everywhere:** a polygon is the closed path through its
+    corners (`VectorShape::as_path`). The renderer, the GPU, SVG and PDF
+    each turn it into that path once, where a shape layer is drawn, and
+    the per-pixel functions answer for it by the same path where one
+    reaches them alone (a mask). `flatten_shape` returns the path, which
+    takes gradients, bounds and text on a polygon with it; `offset_outline`
+    goes the path's way (an outline effect), where the rim rings that
+    serve a rectangle and an ellipse would have given it none.
+  - **The random pages** make a third of their ellipses polygons, half of
+    those stars, from a forked stream. Two audits moved:
+    - The GPU's rough-page ratchet went from 29% to 32% (to 33%): an
+      ellipse's edge is exact on the GPU, while a polygon is a path
+      antialiased by four samples. The interiors held on every page.
+    - Ghostscript's flat-pixel audit on page 289. The triangle left
+      flat ground where the ellipse's edge had been, beside text on a
+      curve, and Ghostscript sets small turned type a pixel apart from
+      the engine (same glyph positions, `text::placed`, and the same
+      matrix, checked term by term; different rasterizer). It held
+      without the polygon too, so it is not the polygon's. The two
+      Ghostscript audits now ask that a pixel be flat in *both*
+      pictures. Swapping red and blue in every PDF fill still fails
+      them on page 0, with 1031 pixels.
+  - **Tests:** `a_polygon_has_its_corners_where_a_polygon_does` (count,
+    top, on the ellipse, clockwise, a star's two radii, the clamps, the
+    path); `a_polygon_draws_what_its_path_draws` (pixel-identical filled
+    and stroked, tips filled and notches bare); smoke 9j9 (depth to nothing
+    fills a notch, eight corners reach past the pentagon, one undo each).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

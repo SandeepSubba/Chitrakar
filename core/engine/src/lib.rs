@@ -2930,6 +2930,17 @@ impl Session {
         };
         let (points, handles): (Vec<[f32; 2]>, Vec<[f32; 4]>) = match shape {
             chitrakar_doc::VectorShape::Path { .. } => return Ok(false),
+            // A polygon's corners are its anchors, and its sides are
+            // straight: nothing to approximate.
+            chitrakar_doc::VectorShape::Polygon {
+                rx,
+                ry,
+                points,
+                inner,
+            } => (
+                chitrakar_doc::VectorShape::polygon_corners(*rx, *ry, *points, *inner),
+                Vec::new(),
+            ),
             chitrakar_doc::VectorShape::Ellipse { rx, ry } => {
                 let (kx, ky) = (KAPPA * rx, KAPPA * ry);
                 (

@@ -6138,6 +6138,26 @@ assert(
   assert(await ink(200, 70), "the star's top point reaches as far");
   assert(await ink(200, 180), "and it is filled at the middle");
   assert(!(await ink(120, 120)), "but cut away between its points");
+  // And it stays a star rather than becoming its corners: its depth and
+  // its count are on the panel, live. No depth is the pentagon, whose
+  // side fills the notch beside the top point; eight corners reach out
+  // past the pentagon's lower left side; and each is one step back.
+  assert(!(await ink(150, 105)), "the notch beside the top point is bare");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  await setSlider("Star depth", 0);
+  await page.waitForTimeout(250);
+  assert(await ink(150, 105), "with no depth it is the polygon, notch filled");
+  assert(!(await ink(110, 160)), "a pentagon does not reach its box's left side there");
+  await setSlider("Point count", 8);
+  await page.waitForTimeout(250);
+  assert(await ink(110, 160), "eight corners do");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(!(await ink(110, 160)) && (await ink(150, 105)), "one undo is five corners again");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(!(await ink(150, 105)), "and another is the star again");
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(250);
 

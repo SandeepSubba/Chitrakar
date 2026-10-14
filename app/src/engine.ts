@@ -49,6 +49,11 @@ export type AuthoredColor =
 export type VectorShape =
   | { Rect: { width: number; height: number; radius: number } }
   | { Ellipse: { rx: number; ry: number } }
+  /** A regular polygon, or a star where `inner` is under one: `points`
+   * corners (3..=100) round the ellipse of `rx` by `ry`, the first
+   * straight up; a star's every other corner pulled in to `inner` of the
+   * way out. Live: the count and the depth stay numbers. */
+  | { Polygon: { rx: number; ry: number; points: number; inner: number } }
   | {
       Path: {
         points: [number, number][];

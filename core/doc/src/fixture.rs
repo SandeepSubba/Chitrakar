@@ -2045,10 +2045,27 @@ impl Rng {
                     0.0
                 },
             },
-            1 => VectorShape::Ellipse {
-                rx: self.between(3.0, 12.0),
-                ry: self.between(3.0, 10.0),
-            },
+            1 => {
+                let (rx, ry) = (self.between(3.0, 12.0), self.between(3.0, 10.0));
+                // A third of them a polygon in the same box, half of those
+                // a star, from a stream of their own so the numbers every
+                // other shape draws stay where they were.
+                let mut side = Rng((self.0 ^ 0x6a09_e667_f3bc_c909) | 1);
+                if side.upto(3) == 0 {
+                    VectorShape::Polygon {
+                        rx,
+                        ry,
+                        points: 3 + side.upto(6) as u32,
+                        inner: if side.chance(2) {
+                            side.between(0.3, 0.8)
+                        } else {
+                            1.0
+                        },
+                    }
+                } else {
+                    VectorShape::Ellipse { rx, ry }
+                }
+            }
             _ => {
                 let n = 3 + self.upto(3) as usize;
                 let points = (0..n)

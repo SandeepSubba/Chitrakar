@@ -1353,6 +1353,9 @@ impl Page {
                 stroke,
                 gradient,
             } => {
+                // A polygon is written as the path through its corners.
+                let as_path = shape.as_path();
+                let shape = as_path.as_ref().unwrap_or(shape);
                 // A gradient paints in place of the flat fill, as on the
                 // page: a shading, clipped to the shape.
                 if let Some(g) = gradient {
@@ -1456,7 +1459,7 @@ impl Page {
                             // the renderer draws it. PDF numbers the same
                             // three of each: butt, round, square for a
                             // cap; miter, round, bevel for a join.
-                            VectorShape::Path { .. } => {
+                            VectorShape::Path { .. } | VectorShape::Polygon { .. } => {
                                 let cap = match stroke.cap {
                                     chitrakar_doc::StrokeCap::Butt => 0,
                                     chitrakar_doc::StrokeCap::Round => 1,
@@ -2458,6 +2461,9 @@ fn outline_ops(outlines: &[crate::strokes::Outline]) -> String {
 }
 
 fn path_ops(shape: &VectorShape) -> String {
+    if let Some(path) = shape.as_path() {
+        return path_ops(&path);
+    }
     let mut d = String::new();
     let p = |d: &mut String, op: &str, pts: &[[f32; 2]]| {
         for q in pts {
@@ -2515,6 +2521,7 @@ fn path_ops(shape: &VectorShape) -> String {
             );
             d.push_str("h\n");
         }
+        VectorShape::Polygon { .. } => unreachable!("written as its path above"),
         VectorShape::Path {
             points,
             closed,
@@ -5974,6 +5981,22 @@ mod tests {
                     if !flat {
                         continue;
                     }
+                    // And flat in ghostscript's picture too. Small type
+                    // set turned along a curve lands a pixel apart in the
+                    // two rasterizers — the glyphs placed the same, their
+                    // edges not — so a pixel beside a letter in one is on
+                    // its edge in the other. A colour put in the wrong
+                    // place is still caught: inside it both are flat.
+                    let t0 = theirs[(y * w + x) as usize];
+                    let theirs_flat = (-1..=1).all(|j| {
+                        (-1..=1).all(|i| {
+                            let n = theirs[((y + j) * w + x + i) as usize];
+                            (0..3).all(|k| n[k].abs_diff(t0[k]) <= 3)
+                        })
+                    });
+                    if !theirs_flat {
+                        continue;
+                    }
                     // Ghostscript draws on white, opaque everywhere.
                     let t = theirs[(y * w + x) as usize];
                     if (0..3).any(|q| c[q].abs_diff(t[q]) > 20) {
@@ -6032,6 +6055,22 @@ mod tests {
                             })
                         });
                     if !flat {
+                        continue;
+                    }
+                    // And flat in ghostscript's picture too. Small type
+                    // set turned along a curve lands a pixel apart in the
+                    // two rasterizers — the glyphs placed the same, their
+                    // edges not — so a pixel beside a letter in one is on
+                    // its edge in the other. A colour put in the wrong
+                    // place is still caught: inside it both are flat.
+                    let t0 = theirs[(y * w + x) as usize];
+                    let theirs_flat = (-1..=1).all(|j| {
+                        (-1..=1).all(|i| {
+                            let n = theirs[((y + j) * w + x + i) as usize];
+                            (0..3).all(|k| n[k].abs_diff(t0[k]) <= 3)
+                        })
+                    });
+                    if !theirs_flat {
                         continue;
                     }
                     let t = theirs[(y * w + x) as usize];

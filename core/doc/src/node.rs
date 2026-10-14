@@ -428,6 +428,78 @@ pub enum VectorShape {
         #[serde(default)]
         subpaths: Vec<Vec<[f32; 2]>>,
     },
+    /// A regular polygon, or a star: `points` corners (3..=100) round an
+    /// ellipse of `rx` by `ry`, in the same box an ellipse of that size
+    /// fills (its centre at `rx, ry`), the first corner straight up. With `inner` under one it is a star, every
+    /// other corner pulled in to that share of the way out — so a star of
+    /// five has ten corners and `points` is still five. Live, as a
+    /// rectangle's corner radius is: the count and the depth stay numbers
+    /// to change rather than becoming a path nobody can turn back.
+    Polygon {
+        rx: f32,
+        ry: f32,
+        points: u32,
+        #[serde(default = "whole")]
+        inner: f32,
+    },
+}
+
+fn whole() -> f32 {
+    1.0
+}
+
+/// The most corners a polygon is drawn with, and the fewest.
+pub const POLYGON_MOST: u32 = 100;
+pub const POLYGON_FEWEST: u32 = 3;
+
+impl VectorShape {
+    /// A polygon's corners, in order round it from the top, in its box:
+    /// `points` of them, or twice that for a star. Numbers that are no numbers are
+    /// held to what can be drawn — a count to 3..=100, a depth to
+    /// 0..=1, a size to nothing — rather than read as something else.
+    pub fn polygon_corners(rx: f32, ry: f32, points: u32, inner: f32) -> Vec<[f32; 2]> {
+        let n = points.clamp(POLYGON_FEWEST, POLYGON_MOST) as usize;
+        let size = |v: f32| if v.is_finite() { v.abs() } else { 0.0 };
+        let (rx, ry) = (size(rx), size(ry));
+        let inner = if inner.is_finite() {
+            inner.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let star = inner < 1.0;
+        let count = if star { 2 * n } else { n };
+        (0..count)
+            .map(|i| {
+                let k = if star && i % 2 == 1 { inner } else { 1.0 };
+                let a = std::f32::consts::TAU * i as f32 / count as f32;
+                let (s, c) = a.sin_cos();
+                [rx + rx * k * s, ry - ry * k * c]
+            })
+            .collect()
+    }
+
+    /// The same shape as a path, where it is one a path can be: a
+    /// polygon is the closed path through its corners. Everything that
+    /// knows how to draw, export or test a path then knows a polygon.
+    pub fn as_path(&self) -> Option<VectorShape> {
+        match self {
+            VectorShape::Polygon {
+                rx,
+                ry,
+                points,
+                inner,
+            } => Some(VectorShape::Path {
+                points: Self::polygon_corners(*rx, *ry, *points, *inner),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            }),
+            VectorShape::Rect { .. } | VectorShape::Ellipse { .. } | VectorShape::Path { .. } => {
+                None
+            }
+        }
+    }
 }
 
 /// Reference to an immutable pixel resource embedded in the document
@@ -1466,7 +1538,9 @@ pub fn stroke_align(shape: &VectorShape, stroke: &Stroke) -> StrokeAlign {
         // line means and what an open one can only mean. Putting a band
         // to one side of a closed path asks for its outline offset, and
         // an offset outline is a guess where a distance is not.
-        VectorShape::Path { .. } => StrokeAlign::Centre,
+        // A polygon is the closed path through its corners, stroked as
+        // that path is.
+        VectorShape::Path { .. } | VectorShape::Polygon { .. } => StrokeAlign::Centre,
     }
 }
 
@@ -2073,6 +2147,58 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// A polygon's corners: as many as asked, the first straight up,
+    /// round the ellipse of its box; a star's every other one pulled in;
+    /// and numbers that are no numbers held to what can be drawn.
+    #[test]
+    fn a_polygon_has_its_corners_where_a_polygon_does() {
+        let five = VectorShape::polygon_corners(10.0, 8.0, 5, 1.0);
+        assert_eq!(five.len(), 5);
+        assert!(
+            (five[0][0] - 10.0).abs() < 1e-5 && five[0][1].abs() < 1e-5,
+            "top: {:?}",
+            five[0]
+        );
+        for p in &five {
+            let (nx, ny) = ((p[0] - 10.0) / 10.0, (p[1] - 8.0) / 8.0);
+            assert!(
+                (nx * nx + ny * ny - 1.0).abs() < 1e-4,
+                "on the ellipse: {p:?}"
+            );
+        }
+        // Clockwise on the page (y down): the second corner is right of
+        // the first.
+        assert!(five[1][0] > five[0][0]);
+        let star = VectorShape::polygon_corners(10.0, 10.0, 5, 0.4);
+        assert_eq!(star.len(), 10, "a star of five has ten corners");
+        let out = |p: [f32; 2]| ((p[0] - 10.0).powi(2) + (p[1] - 10.0).powi(2)).sqrt();
+        for (i, p) in star.iter().enumerate() {
+            let want = if i % 2 == 0 { 10.0 } else { 4.0 };
+            assert!((out(*p) - want).abs() < 1e-4, "corner {i} at {}", out(*p));
+        }
+        assert_eq!(VectorShape::polygon_corners(1.0, 1.0, 0, 1.0).len(), 3);
+        assert_eq!(VectorShape::polygon_corners(1.0, 1.0, 5000, 1.0).len(), 100);
+        assert_eq!(
+            VectorShape::polygon_corners(1.0, 1.0, 6, f32::NAN).len(),
+            6,
+            "a depth that is no number is no star"
+        );
+        assert!(VectorShape::polygon_corners(f32::NAN, 2.0, 4, 1.0)
+            .iter()
+            .all(|p| p[0].is_finite() && p[1].is_finite()));
+        // And it is the path through those corners.
+        let VectorShape::Path { points, closed, .. } = (VectorShape::Polygon {
+            rx: 10.0,
+            ry: 8.0,
+            points: 5,
+            inner: 1.0,
+        })
+        .as_path()
+        .unwrap() else {
+            panic!("a path");
+        };
+        assert!(closed && points == five);
+    }
 
     /// Rings out from a focus start at it and end on the outer ring all
     /// the way round, whichever side of the focus; with the focus at the
@@ -2081,6 +2207,7 @@ mod tests {
     #[test]
     fn rings_from_a_focus_start_there_and_end_on_the_outer_ring() {
         use super::{focal_offset, focal_ramp, FOCUS_REACH};
+
         for f in [[0.0, 0.0], [0.4, -0.3], [-0.9, 0.1], [0.0, 0.99]] {
             assert!(focal_ramp(f, f).abs() < 1e-6, "nothing at the focus {f:?}");
             for k in 0..32 {
