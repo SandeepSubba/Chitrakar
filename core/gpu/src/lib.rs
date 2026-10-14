@@ -2978,6 +2978,14 @@ fn one(
             && (node.opacity < 1.0
                 || node.mask.is_some()
                 || chitrakar_render::reads_backdrop(doc, child).ok()?))
+        // A frame faded or masked, holding nothing that reads the page, is
+        // composited as a whole — what the CPU renderer does with one —
+        // which is a surface of its own and its fade and mask taken once
+        // on the way down. (One that does hold such a thing the CPU draws
+        // in place and mixes back, which goes back, in the frame's arm.)
+        || (matches!(node.kind, NodeKind::Artboard { .. })
+            && (node.opacity < 1.0 || node.mask.is_some())
+            && !chitrakar_render::reads_backdrop(doc, child).ok()?)
         // And a copy on the same terms. What a copy draws is a whole
         // layer, and that layer may be a group whose children overlap: a
         // fade, a mask or the alpha it is held to, taken as each child
@@ -3494,7 +3502,24 @@ fn one(
             ..
         } => {
             let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
-            if !upright || node.opacity < 1.0 || node.mask.is_some() {
+            // Faded or masked, it is on a surface of its own (above) unless
+            // what it holds reads the page, which the CPU draws in place
+            // and mixes back by the fade and the mask: that goes back.
+            if !upright || ((node.opacity < 1.0 || node.mask.is_some()) && !alone) {
+                return None;
+            }
+            // Masked and wearing an effect, a frame goes back — for want of
+            // knowing, rather than for a reason in this arm. One random page
+            // (seed 1233) holds such a frame inside an outlined frame, in a
+            // copy that hangs off the page's edge, and comes out apart from
+            // the CPU along that edge; the same page with the mask taken off
+            // is drawn and comes out apart on the code before masked frames
+            // were drawn at all, and moved onto the page the difference
+            // falls to the one edge it still hangs over. It is the open
+            // question of what lies past the page casting effects onto it
+            // (see the roadmap), and this keeps masked frames from walking
+            // into more of it until that is settled.
+            if node.mask.is_some() && !node.effects.is_empty() {
                 return None;
             }
             // Brought down by a blend of its own while holding something
@@ -3571,7 +3596,12 @@ fn one(
                     item.mask = at;
                 }
             }
-            collect(doc, child, t, opacity, Some(inside), out)?;
+            // On a surface of its own, what is inside is drawn whole, as a
+            // group's is. (Whatever holds a frame and fades it is on a
+            // surface of its own already, so what arrives here is whole
+            // either way; this says so rather than leaning on it.)
+            let inner = if alone { 1.0 } else { opacity };
+            collect(doc, child, t, inner, Some(inside), out)?;
             // Everything inside took the bound as it was collected,
             // and the frame itself has no mask — it was declined
             // above if it had one — so there is nothing left to put
@@ -7267,9 +7297,8 @@ mod tests {
             "hanging off: mean {mean:.5}, worst {worst:.3}"
         );
 
-        // Turned, or composited as a whole, the CPU draws a frame on a
-        // surface of its own — a different picture from this one — so
-        // those go back.
+        // Faded, it is composited as a whole — on a surface of its own,
+        // its fade taken once on the way down — on both.
         let mut faded = doc.clone();
         faded
             .apply(Command::SetOpacity {
@@ -7277,7 +7306,14 @@ mod tests {
                 opacity: 0.5,
             })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&faded), "a frame composited whole");
+        assert!(GpuRenderer::can_render(&faded), "a frame composited whole");
+        let (mean, worst) = difference(
+            &gpu.render(&faded).unwrap(),
+            &chitrakar_render::render(&faded).unwrap(),
+        );
+        assert!(mean < 0.004, "faded: mean {mean:.5}, worst {worst:.3}");
+        // Turned, the CPU works its edge out per pixel on a surface of its
+        // own, which goes back.
         let mut turned = doc.clone();
         turned.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
         assert!(!GpuRenderer::can_render(&turned), "a turned frame");
@@ -12354,6 +12390,135 @@ mod tests {
         ] {
             assert!(!GpuRenderer::can_render(&doc), "{what} goes back");
         }
+    }
+
+    /// A frame faded or masked, holding only paint, is composited as a
+    /// whole — on a surface of its own, its fade and its mask taken once
+    /// on the way down — which is what the CPU renderer does with one —
+    /// and inside a faded group as well. One that holds something reading
+    /// the page is drawn in place and mixed back by the CPU, and goes
+    /// back here.
+    #[test]
+    fn a_faded_or_masked_frame_is_composited_whole() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let page = |opacity: f32, masked: bool, in_faded_group: bool, inside: Option<Node>| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("under", VectorShape::Ellipse { rx: 30.0, ry: 22.0 }, BLUE),
+                Transform::translation(35.0, 30.0),
+            );
+            let root = doc.root();
+            let host = if in_faded_group {
+                let mut g = Node::group("g");
+                g.opacity = 0.6;
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(g),
+                })
+                .unwrap();
+                doc.children_of(root).unwrap()[1]
+            } else {
+                root
+            };
+            let mut frame = Node::artboard("frame", 37.3, 25.6, Some(WHITE));
+            frame.opacity = opacity;
+            if masked {
+                frame.mask = Some(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 15.0, ry: 10.0 },
+                        transform: Transform::translation(28.0, 20.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                });
+            }
+            let index = doc.children_of(host).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: host,
+                index,
+                node: Box::new(frame),
+            })
+            .unwrap();
+            let id = doc.children_of(host).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(10.4, 7.7),
+            })
+            .unwrap();
+            // Two shapes overlapping inside it, so a fade taken per shape
+            // rather than once over the whole shows where they meet.
+            for (i, (at, color)) in [((8.0, 8.0), RED), ((14.0, 11.0), BLUE)]
+                .into_iter()
+                .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: id,
+                    index: i,
+                    node: filled("dot", VectorShape::Ellipse { rx: 7.0, ry: 6.0 }, color),
+                })
+                .unwrap();
+                let dot = doc.children_of(id).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id: dot,
+                    transform: Transform::translation(at.0, at.1),
+                })
+                .unwrap();
+            }
+            if let Some(node) = inside {
+                doc.apply(Command::AddNode {
+                    parent: id,
+                    index: 2,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let views = [
+            ("its own size", Transform::default(), (80, 60)),
+            (
+                "an awkward zoom",
+                Transform {
+                    a: 1.37,
+                    d: 1.37,
+                    e: -3.3,
+                    f: 2.6,
+                    ..Default::default()
+                },
+                (100, 80),
+            ),
+        ];
+        for (what, doc) in [
+            ("faded", page(0.5, false, false, None)),
+            ("masked", page(1.0, true, false, None)),
+            ("faded and masked", page(0.7, true, false, None)),
+            ("faded, in a faded group", page(0.5, false, true, None)),
+        ] {
+            for (name, view, size) in views {
+                assert!(
+                    GpuRenderer::can_render_view(&doc, view, size),
+                    "{what} at {name} is drawn"
+                );
+                let drawn = gpu.render_view(&doc, view, size).unwrap();
+                let mut surface = Surface::new(size.0, size.1);
+                let clip = surface.full_clip();
+                chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+                let (mean, worst) = difference(&drawn, &surface);
+                assert!(
+                    mean < 0.002 && worst < 0.15,
+                    "{what} at {name}: mean channel difference {mean:.5} (worst {worst:.4})"
+                );
+            }
+        }
+        let curves = Node::adjustment("invert", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
+        assert!(
+            !GpuRenderer::can_render(&page(0.5, false, false, Some(curves))),
+            "a faded frame holding what works on the page goes back"
+        );
     }
 
     /// A colour lookup reads the CPU renderer's own table out of the same

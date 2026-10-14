@@ -1691,6 +1691,25 @@ without reading anything else.*
     neighbour had none. Four were tangled (two engine tests, one
     renderer test, one document test) and each comment is back on its
     own test.
+- **The GPU draws a faded or masked frame ✅** that holds only paint:
+  composited as a whole, on a surface of its own with its fade and mask
+  taken once on the way down, which is what the CPU does with one. One
+  holding something that reads the page (the CPU draws it in place and
+  mixes it back) still goes back, and so does a masked frame wearing an
+  effect. Random pages drawn: 948 of 2000, from 913.
+  `a_faded_or_masked_frame_is_composited_whole`: faded, masked, both, and
+  inside a faded group, at its own size and an awkward zoom, with two
+  overlapping shapes inside so a fade taken per shape would show. Taking
+  faded frames off the surface fails it.
+  - **Open, found on the way:** seed 1233 holds a masked, outlined frame
+    inside an outlined frame, in a copy hanging off the page's bottom
+    edge, and the GPU and the CPU part along that edge. Taking the mask
+    off still differs, on the code from before this change, which drew
+    that version. Moving the copy up onto the page leaves eleven pixels,
+    along the one edge it still hangs over. It is the same question as
+    off-page content casting effects onto the page (above), so a masked
+    frame wearing an effect goes back until that is settled. The
+    unmasked case is not declined and is still apart.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
