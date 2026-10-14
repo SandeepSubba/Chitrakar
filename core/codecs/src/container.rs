@@ -994,6 +994,22 @@ mod tests {
         // default joins it and the test names the place, and an entry that
         // has stopped being needed has to leave.
         const ALWAYS: &[&str] = &[
+            // A layer comp is a name and the layers it keeps, and a layer
+            // kept cannot be missing which it is or how it was shown —
+            // the same twelve a layer's own placement wants. A file from
+            // before comps has none, and `comps` itself defaults.
+            "/document/comps/*/layers/*/transform:a",
+            "/document/comps/*/layers/*/transform:b",
+            "/document/comps/*/layers/*/transform:c",
+            "/document/comps/*/layers/*/transform:d",
+            "/document/comps/*/layers/*/transform:e",
+            "/document/comps/*/layers/*/transform:f",
+            "/document/comps/*/layers/*:id",
+            "/document/comps/*/layers/*:opacity",
+            "/document/comps/*/layers/*:transform",
+            "/document/comps/*/layers/*:visible",
+            "/document/comps/*:layers",
+            "/document/comps/*:name",
             "/document/meta:color_mode",
             "/document/meta:dpi",
             "/document/meta:height",

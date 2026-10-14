@@ -1506,6 +1506,23 @@ without reading anything else.*
   it picks no tool; Escape puts the whole list back, and an empty
   result says so. UI only: nothing about it is in the document.
   Smoke block 9o17.
+- **Comps in the shared fixture, and a comp that follows a layer ✅.**
+  `fixture::everything()` keeps a comp now ("quiet": the pair hidden,
+  the loose shape faded and moved), so every audit is asked of a
+  document that holds one. One audit stopped holding, and rightly: the
+  file format's inventory grew by the twelve fields a kept comp cannot
+  be missing. Everything else held, so the question became what *would*
+  break a comp, and it was a layer changing parent. `reparent` and
+  `ungroup_node` rewrite a layer's transform so it stays put on the page,
+  but a comp kept before went on holding the old numbers, in the old
+  parent's space: showing it afterwards put the layer somewhere else on
+  the page, and a comp of a page nobody had changed stopped reading as
+  showing. Both now carry the comps in the same batch (one entry, undone
+  together): a reparent by the same `carry` the layer gets, an ungroup by
+  the group's placement *as each comp kept it*, with a child hidden where
+  that comp hid the group. `a_comp_follows_a_layer_into_another_group_and_out_of_one`;
+  each of the three carries taken out fails it. Grouping adds an
+  identity group, so it moves nothing and needs no carry.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -1818,6 +1818,35 @@ pub fn everything() -> Fixture {
         }],
     })
     .unwrap();
+    // And a comp: the page kept as it stands, but for the pair hidden and
+    // the loose shape faded and somewhere else. Every layer is in it, as
+    // `Session::keep_comp` keeps them, so a command that renumbers,
+    // reparents or takes a layer away is asked what becomes of a comp
+    // that names it.
+    {
+        let mut layers: Vec<crate::CompLayer> = doc
+            .nodes()
+            .filter(|(id, _)| **id != root)
+            .map(|(id, n)| crate::CompLayer {
+                id: *id,
+                visible: n.visible && *id != group,
+                opacity: if *id == over { 0.3 } else { n.opacity },
+                transform: if *id == over {
+                    Transform::translation(40.0, 30.0)
+                } else {
+                    n.transform
+                },
+            })
+            .collect();
+        layers.sort_by_key(|l| l.id.0);
+        doc.apply(Command::SetComps {
+            comps: vec![crate::LayerComp {
+                name: "quiet".into(),
+                layers,
+            }],
+        })
+        .unwrap();
+    }
 
     Fixture {
         doc,

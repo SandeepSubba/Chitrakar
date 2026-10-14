@@ -2285,7 +2285,41 @@ impl Session {
                     .collect(),
             });
         }
+        // And a comp keeps the layer's placement in the space it was
+        // written in too, so it is carried with it: otherwise showing a
+        // comp kept before the move would put the layer's old numbers in
+        // its new parent's space, somewhere else on the page.
+        cmds.extend(self.comps_carried(|_, kept| {
+            if kept.id == id {
+                kept.transform = carry.compose(kept.transform);
+            }
+        }));
         self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// The comps, with every layer each one keeps passed through `f`
+    /// (which is handed the comp too), as the one command that says so —
+    /// or nothing, where no comp changes.
+    fn comps_carried(
+        &self,
+        mut f: impl FnMut(&chitrakar_doc::LayerComp, &mut chitrakar_doc::CompLayer),
+    ) -> Option<Command> {
+        let mut changed = false;
+        let comps = self
+            .doc
+            .comps()
+            .iter()
+            .map(|comp| {
+                let mut out = comp.clone();
+                for kept in &mut out.layers {
+                    let before = kept.clone();
+                    f(comp, kept);
+                    changed |= *kept != before;
+                }
+                out
+            })
+            .collect();
+        changed.then_some(Command::SetComps { comps })
     }
 
     /// Put a live copy of a layer beside it: a layer that draws whatever
@@ -6281,6 +6315,21 @@ impl Session {
                 index: position + i,
             });
         }
+        // A comp that keeps the group keeps its children in the group's
+        // space, and the group as that comp placed and showed it: each
+        // child comes out carried by the group's kept transform and
+        // hidden where the comp hid the group, the same two things the
+        // children themselves are given above. A comp kept before the
+        // group was made knows nothing to carry by.
+        cmds.extend(self.comps_carried(|comp, kept| {
+            if !children.contains(&kept.id) {
+                return;
+            }
+            if let Some(group) = comp.layers.iter().find(|g| g.id == id) {
+                kept.transform = group.transform.compose(kept.transform);
+                kept.visible &= group.visible;
+            }
+        }));
         cmds.push(Command::RemoveNode { id });
         self.apply_labeled(Command::Batch(cmds), Some(label))
     }
@@ -8254,6 +8303,103 @@ mod tests {
     /// and puts the page back that way in one step; a layer added since
     /// is left alone, one taken away is passed over, and a page turned
     /// after keeping a comp stays turned when the comp is put back.
+    /// A comp keeps a layer's placement in the space its parent puts it
+    /// in, and moving a layer to another parent rewrites that placement
+    /// so it stays where it is on the page. A comp kept before has to be
+    /// carried the same way, or showing it afterwards puts the layer's
+    /// old numbers in the new parent's space; and dissolving a group
+    /// hands each child the group's placement as each comp kept it.
+    #[test]
+    fn a_comp_follows_a_layer_into_another_group_and_out_of_one() {
+        let mut session = Session::new(100, 80, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+        let g = session.document().children_of(root).unwrap()[1];
+        session
+            .apply(Command::SetTransform {
+                id: g,
+                transform: Transform::translation(30.0, 20.0),
+            })
+            .unwrap();
+        session.keep_comp("start").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(15.0, 12.0),
+            })
+            .unwrap();
+        session.keep_comp("moved").unwrap();
+
+        // Into the group, staying put on the page.
+        session.reparent(a, g, 0).unwrap();
+        assert_eq!(
+            session.document().node(a).unwrap().transform,
+            Transform::translation(-15.0, -8.0)
+        );
+        assert!(
+            session.comp_showing("moved"),
+            "the page has not changed, so the comp it was kept as is still showing"
+        );
+        assert!(session.apply_comp("start").unwrap());
+        assert_eq!(
+            session.document().node(a).unwrap().transform,
+            Transform::translation(-20.0, -10.0),
+            "where the comp kept it on the page, said in the group's space"
+        );
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(
+            session.comp_showing("moved"),
+            "the move undone, and the comps with it"
+        );
+        assert_eq!(
+            session.document().node(a).unwrap().transform,
+            Transform::translation(15.0, 12.0)
+        );
+
+        // Out of a group: in it, a comp that hides the group, and then the
+        // group dissolved.
+        session.reparent(a, g, 0).unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: g,
+                visible: false,
+            })
+            .unwrap();
+        session.keep_comp("hidden").unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: g,
+                visible: true,
+            })
+            .unwrap();
+        session.ungroup_node(g).unwrap();
+        assert_eq!(
+            session.document().node(a).unwrap().transform,
+            Transform::translation(15.0, 12.0)
+        );
+        assert!(session.comp_showing("moved"));
+        assert!(session.apply_comp("hidden").unwrap());
+        let n = session.document().node(a).unwrap();
+        assert!(
+            !n.visible && n.transform == Transform::translation(15.0, 12.0),
+            "the comp hid the group, so it hides what was in it, where it was"
+        );
+    }
+
     #[test]
     fn a_comp_puts_the_page_back_as_it_was_kept() {
         let mut session = Session::new(100, 80, ColorMode::Rgb);
