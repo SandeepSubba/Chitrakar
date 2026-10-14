@@ -3349,6 +3349,29 @@ fn one(
             // A filter's radius is written in the space it lives
             // in, so a group that scales stretches it — which is the
             // reading the CPU renderer takes.
+            // Inside a frame, a filter that reads a neighbourhood stops
+            // at the frame's edge on the CPU, whose contents are drawn
+            // into the frame's rectangle and nowhere else: a blur carries
+            // the frame's edge on past it, a pixelate's blocks at the edge
+            // average only what is inside. The passes here read as far as
+            // the page goes, so a pixelate in a frame came out a different
+            // grid along every side of it. A filter of one pixel does not
+            // care, and the page's own edge is the same on both; anything
+            // else inside a frame goes back.
+            let framed = bound.is_some_and(|b| b != out.page);
+            if framed
+                && matches!(
+                    filter,
+                    chitrakar_doc::Filter::GaussianBlur { .. }
+                        | chitrakar_doc::Filter::Sharpen { .. }
+                        | chitrakar_doc::Filter::MotionBlur { .. }
+                        | chitrakar_doc::Filter::RadialBlur { .. }
+                        | chitrakar_doc::Filter::Pixelate { .. }
+                        | chitrakar_doc::Filter::Median { .. }
+                )
+            {
+                return None;
+            }
             match filter_of(filter, parent, out.size)? {
                 Filtering::Pointwise(params, grad, extra) => {
                     let quad = out.push(page_quad(
@@ -3460,12 +3483,10 @@ fn one(
         // inside a frame sees the page below the frame on both.
         //
         // The rectangle is rounded to whole pixels there, because a
-        // frame's edge is a page edge and a page edge is crisp; a
-        // frame whose box does not land on whole pixels would want
-        // an antialiased edge here and a rounded one there, so it
-        // goes back. So does a turned frame, and one composited as
-        // a whole — both of which the CPU draws on a surface of its
-        // own, which is a different picture from this.
+        // frame's edge is a page edge and a page edge is crisp, and it
+        // is rounded the same way here. A turned frame goes back, and
+        // one composited as a whole — both of which the CPU draws on a
+        // surface of its own, which is a different picture from this.
         NodeKind::Artboard {
             width,
             height,
@@ -3476,16 +3497,32 @@ fn one(
             if !upright || node.opacity < 1.0 || node.mask.is_some() {
                 return None;
             }
+            // Brought down by a blend of its own while holding something
+            // that works on the page — an adjustment, a filter, a clone —
+            // the CPU draws the frame where it stands as well as on a
+            // surface of its own, and lays only what it paints by the
+            // blend. Here a blended frame is a surface, where what works
+            // on the page has nothing under it: a curves layer in a frame
+            // set to Exclusion left the page as it was. It goes back.
+            // (Found once a frame between pixels stopped being handed
+            // back, which is how one first reached a page drawn here.)
+            if node.blend != BlendMode::Normal
+                && chitrakar_render::works_on_what_is_under(doc, child).ok()?
+            {
+                return None;
+            }
+            // Held to the layer under it, the whole frame — its ground and
+            // everything in it — is cut to that layer. This arm draws
+            // what is inside straight in and returns before the cut every
+            // other layer takes, so a held frame came out uncut: a frame
+            // over an ellipse showed its whole rectangle. It goes back.
+            if held_to.is_some() {
+                return None;
+            }
             let box_ = chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height]);
             let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) = box_ else {
                 return None;
             };
-            if [fx0, fy0, fx1, fy1]
-                .iter()
-                .any(|v| (v - v.round()).abs() > 1e-3)
-            {
-                return None;
-            }
             let (pw, ph) = out.surface;
             let board = chitrakar_render::ClipRect {
                 x0: (fx0.round().max(0.0) as u32).min(pw),
@@ -3500,22 +3537,26 @@ fn one(
             if inside.is_empty() {
                 return Some(());
             }
-            // The ground is the frame's own rectangle, filled. Laid
-            // down as the shape it is, so it goes through the same
-            // arithmetic every other filled rectangle does.
+            // The ground is the frame's rectangle, filled — the one
+            // rounded to whole pixels, as the CPU renderer fills it, laid
+            // down as a rectangle on the surface. On whole pixels an
+            // antialiased edge is a crisp one, so a frame between pixels
+            // (which is any frame at most zooms) is the same picture
+            // both ways rather than one handed back.
             if let Some(ground) = background {
+                let (rx0, ry0) = (fx0.round(), fy0.round());
                 vector(
                     doc,
                     child,
                     &VectorShape::Rect {
-                        width: *width,
-                        height: *height,
+                        width: fx1.round() - rx0,
+                        height: fy1.round() - ry0,
                         radius: 0.0,
                     },
                     Some(ground.clone()),
                     None,
                     None,
-                    t,
+                    Transform::translation(rx0, ry0),
                     alpha,
                     out,
                 )?;
@@ -12175,6 +12216,118 @@ mod tests {
         );
     }
 
+    /// A frame's box is rounded to whole pixels by the CPU renderer — a
+    /// frame's edge is a page edge, and crisp — and a frame between
+    /// pixels, which is every frame at most zooms, was handed back for
+    /// it. It is rounded the same way here now, its ground laid on the
+    /// rounded box, and held to the CPU at an awkward zoom with a picture
+    /// of a frame half off the page. Letting those frames through found
+    /// three things this backend drew wrongly in any frame and had never
+    /// been asked to draw, and each goes back: a frame with a blend
+    /// holding what works on the page, a frame held to the layer under
+    /// it, and a filter reading a neighbourhood inside one.
+    #[test]
+    fn a_frame_between_pixels_is_drawn_and_what_it_cannot_hold_goes_back() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let page = |inside: Option<Node>, blend: BlendMode, clipped: bool| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("under", VectorShape::Ellipse { rx: 30.0, ry: 22.0 }, BLUE),
+                Transform::translation(35.0, 30.0),
+            );
+            let mut frame = Node::artboard("frame", 37.3, 25.6, Some(WHITE));
+            frame.blend = blend;
+            frame.clipped = clipped;
+            let id = add(&mut doc, Box::new(frame), Transform::translation(10.4, 7.7));
+            doc.apply(Command::AddNode {
+                parent: id,
+                index: 0,
+                node: filled("dot", VectorShape::Ellipse { rx: 9.0, ry: 7.0 }, RED),
+            })
+            .unwrap();
+            if let Some(node) = inside {
+                doc.apply(Command::AddNode {
+                    parent: id,
+                    index: 1,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let views = [
+            ("its own size", Transform::default(), (80, 60)),
+            (
+                "an awkward zoom, panned",
+                Transform {
+                    a: 1.37,
+                    d: 1.37,
+                    e: -3.3,
+                    f: 2.6,
+                    ..Default::default()
+                },
+                (100, 80),
+            ),
+        ];
+        let vignette = Node::filter(
+            "v",
+            F::Vignette {
+                amount: 0.6,
+                radius: 0.5,
+                softness: 0.5,
+            },
+        );
+        for (what, doc) in [
+            ("a plain frame", page(None, BlendMode::Normal, false)),
+            (
+                "a filter of one pixel",
+                page(Some(vignette), BlendMode::Normal, false),
+            ),
+            (
+                "a blended frame of paint",
+                page(None, BlendMode::Multiply, false),
+            ),
+        ] {
+            for (name, view, size) in views {
+                assert!(
+                    GpuRenderer::can_render_view(&doc, view, size),
+                    "{what} at {name} is drawn"
+                );
+                let drawn = gpu.render_view(&doc, view, size).unwrap();
+                let mut surface = Surface::new(size.0, size.1);
+                let clip = surface.full_clip();
+                chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+                let (mean, worst) = difference(&drawn, &surface);
+                assert!(
+                    mean < 0.002 && worst < 0.15,
+                    "{what} at {name}: mean channel difference {mean:.5} (worst {worst:.4})"
+                );
+            }
+        }
+        let curves = Node::adjustment("curves", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
+        let pixelate = Node::filter("p", F::Pixelate { size: 5.0 });
+        for (what, doc) in [
+            (
+                "a blended frame working on the page",
+                page(Some(curves), BlendMode::Exclusion, false),
+            ),
+            (
+                "a frame held to the layer under it",
+                page(None, BlendMode::Normal, true),
+            ),
+            (
+                "a pixelate inside a frame",
+                page(Some(pixelate), BlendMode::Normal, false),
+            ),
+        ] {
+            assert!(!GpuRenderer::can_render(&doc), "{what} goes back");
+        }
+    }
+
     /// A colour lookup reads the CPU renderer's own table out of the same
     /// resource, laid as tiles of blue slices, between its eight nearest
     /// entries by hand. A grid of 65 is nine tiles across, which is the
@@ -14232,9 +14385,13 @@ mod tests {
         // The page mean is a coarse net and it drifts, which is the same
         // thing the SVG witness says about its own: a page that amplifies
         // its edges pushes it up without anything being drawn wrongly.
-        // Exactly one page of these two thousand does — seed 1529, at
-        // 0.00737 — and it was worth running to ground rather than
-        // tolerating. It holds a self-intersecting path whose long thin
+        // One page of these two thousand does. It was seed 1529, at
+        // 0.00737, which was worth running to ground rather than
+        // tolerating (below); it has since come under the level, and the
+        // one over it now is seed 970, at 0.0044 — a turned rectangle
+        // wearing an effect, held to a copy of a line of text: a soft
+        // clip compounded with a soft edge, the question the roadmap
+        // keeps open rather than a layer drawn in the wrong place. It holds a self-intersecting path whose long thin
         // wedge is nearly all edge, drawn under a Difference blend
         // against a strongly contrasting ground, then sharpened (which
         // multiplies a difference by one and a half) and then given more

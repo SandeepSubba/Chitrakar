@@ -1640,6 +1640,33 @@ without reading anything else.*
     granted before deciding to skip, since the first version asked the
     renderer's own note of it and so skipped, rather than failed, when
     that note was the thing broken.
+- **The GPU draws a frame between pixels ✅**, which is every frame at
+  most zooms. The CPU rounds a frame's box to whole pixels (a frame's
+  edge is a page edge, and crisp); the GPU handed such a frame back
+  rather than round it. It rounds it the same way now and lays the
+  ground on the rounded box, where an antialiased edge is a crisp one.
+  Of the two thousand random pages, 913 are drawn now against 801.
+  Letting those frames through found three things the GPU drew wrongly
+  in *any* frame and had never been asked to draw, because no frame of
+  that kind had reached it; each goes back now:
+  - a frame with a blend of its own holding something that works on the
+    page (a curves layer in a frame set to Exclusion left the page as it
+    was: the GPU draws a blended frame on a surface, where an adjustment
+    has nothing under it, and the CPU draws it in place as well);
+  - a frame held to the layer under it (the frame arm returned before
+    the cut every other layer takes, so the whole rectangle showed);
+  - a filter reading a neighbourhood inside a frame (on the CPU it stops
+    at the frame's edge; the GPU's passes read to the page's, so a
+    pixelate's blocks along every side came out a different grid).
+  `a_frame_between_pixels_is_drawn_and_what_it_cannot_hold_goes_back`
+  holds a plain frame, one with a vignette and one blended over paint
+  to the CPU at its own size and at an awkward zoom, and asks the three
+  to go back; laying the ground on the unrounded box fails it. The
+  random-page audit's note on the one page over its drift level was
+  stale (1529 had come under it); it is seed 970 now, on HEAD as before.
+  What is still declined, by the same tally: frames turned, faded or
+  masked (about 280 pages), and 374 pages that need more than one layer
+  taken away before the GPU will draw them.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
