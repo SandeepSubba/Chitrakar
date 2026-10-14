@@ -788,7 +788,7 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
         // Channel mixer: each channel made again from all three, in light,
         // by the rows the CPU folded and held (`channel_mix`). Nine
         // numbers, row by row across `p.yzw`, `q` and `e.xy`; one with a
-        // constant to add has no room left here and stays the CPU's.
+        // constant to add is kind 25, which reads it off a texel.
         case 22: {
             let r = dot(vec3f(p.y, p.z, p.w), c);
             let g = dot(vec3f(q.x, q.y, q.z), c);
@@ -981,6 +981,16 @@ fn adjusted_from_table(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec
             }
             return vec3f(to_light(out.r), to_light(out.g), to_light(out.b));
         }
+        // A channel mixer with a constant to add: the nine numbers where
+        // kind 22 has them, and the constant on the one texel bound
+        // where a table would be.
+        case 25: {
+            let k = textureLoad(image, vec2i(0, 0), 0).rgb;
+            let r = dot(vec3f(p.y, p.z, p.w), c) + k.r;
+            let g = dot(vec3f(q.x, q.y, q.z), c) + k.g;
+            let b = dot(vec3f(q.w, e.x, e.y), c) + k.b;
+            return max(vec3f(r, g, b), vec3f(0.0));
+        }
         // A colour lookup: a 3D table of `p.y` points a side, its blue
         // slices laid `p.z` to a row of tiles, read on the values a device
         // shows between its eight nearest entries — red mixed first, then
@@ -1035,7 +1045,7 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     // adjustments are stated.
     let straight = was.rgb / was.a;
     var out = adjusted(kind, in.params, in.grad, in.extra, straight);
-    if (kind >= 10 && kind < 14) || kind == 24 {
+    if (kind >= 10 && kind < 14) || kind == 24 || kind == 25 {
         out = adjusted_from_table(kind, in.params, in.grad, in.extra, straight);
     }
     return vec4f(mix(was.rgb, out * was.a, weight), was.a);

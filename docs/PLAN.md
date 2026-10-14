@@ -1254,9 +1254,15 @@ without reading anything else.*
     included. It is folded into the matrix (every row the red one), so
     both renderers mix by the same nine numbers.
   - **The GPU** draws it as kind 22, with nine numbers across the quad's
-    ten free slots. A mixer with a constant would need twelve, so it is
-    handed back to the processor rather than rounded through an f16
-    table (tested).
+    ten free slots. A mixer with a constant needs twelve; it was handed
+    back rather than rounded through an f16 table, but every surface the
+    GPU draws on is `Rgba16Float`, so a constant on a half-float texel is
+    rounded no further than the pixel it lands on. It is drawn now ✅ as
+    kind 25, the constant on a one-texel table, held to the CPU with a
+    constant that lifts one channel and lowers another, monochrome and
+    not (dropping the constant, or only its negative part, fails it). A
+    two-texel split, half-float plus remainder, was tried and could not
+    be told apart, which is how the surface's own precision came out.
   - **Tests.** The random pages hold it near the identity, with every
     weight moved, sometimes monochrome and sometimes with a constant.
     Smoke 9o11 covers: red made from the blue (a red patch goes black, a
