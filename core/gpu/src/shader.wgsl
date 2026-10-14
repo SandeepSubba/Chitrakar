@@ -1186,6 +1186,9 @@ fn fs_box(in: ImageOut) -> @location(0) vec4f {
 // the even neighbour where the CPU takes it away from zero.
 @fragment
 fn fs_smear(in: ImageOut) -> @location(0) vec4f {
+    if in.params.w > 2.5 {
+        return median(in);
+    }
     if in.params.w > 0.5 {
         return radial(in);
     }
@@ -1220,6 +1223,46 @@ fn between(at: vec2f) -> vec4f {
     let top = a + (b - a) * t.x;
     let bottom = c + (d - c) * t.x;
     return top + (bottom - top) * t.y;
+}
+
+// Which of the display encoding's 256 steps each channel of a pixel is
+// on, the way the CPU renderer bins it: colour by what it shows at,
+// rounded, with above white held at white; alpha as it is.
+fn steps_of(v: vec4f) -> vec4f {
+    let c = clamp(v, vec4f(0.0), vec4f(1.0));
+    return floor(vec4f(to_shown(c.r), to_shown(c.g), to_shown(c.b), c.a) * 255.0 + vec4f(0.5));
+}
+
+// A median: each channel the lower middle of the window `params.x`
+// pixels each way, the page's edge carried on past it. The middle is
+// found among the 256 steps by halving: count how much of the window is
+// at or below the middle of what is left, and keep the half the median
+// must be in — eight times, all four channels at once. What comes back
+// is the step's own light, a colour held to the cover the pixel has, as
+// the CPU renderer gives it.
+fn median(in: ImageOut) -> vec4f {
+    let r = i32(in.params.x);
+    let here = floor(in.uv * page.size);
+    let side = 2 * r + 1;
+    let want = f32((side * side - 1) / 2);
+    var lo = vec4f(0.0);
+    var hi = vec4f(255.0);
+    for (var halving = 0; halving < 8; halving = halving + 1) {
+        let mid = floor((lo + hi) * 0.5);
+        var count = vec4f(0.0);
+        for (var dy = -r; dy <= r; dy = dy + 1) {
+            for (var dx = -r; dx <= r; dx = dx + 1) {
+                let b = steps_of(held(here + vec2f(f32(dx), f32(dy))));
+                count = count + select(vec4f(0.0), vec4f(1.0), b <= mid);
+            }
+        }
+        let over = count > vec4f(want);
+        hi = select(hi, mid, over);
+        lo = select(mid + vec4f(1.0), lo, over);
+    }
+    let a = lo.w / 255.0;
+    let colour = vec3f(to_light(lo.x / 255.0), to_light(lo.y / 255.0), to_light(lo.z / 255.0));
+    return vec4f(min(colour, vec3f(a)), a);
 }
 
 // A radial blur: each pixel the average of samples along its line out

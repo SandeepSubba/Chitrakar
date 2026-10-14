@@ -182,8 +182,8 @@ fn the_mirror_draws_the_frame_the_engine_draws() {
 #[test]
 fn what_the_backend_declines_is_left_to_the_engine() {
     let Some(mut p) = presenter() else { return };
-    // A page with a median on it: a vote over a window, which the
-    // backend hands back.
+    // A page with a wide median on it: a vote over a window more than
+    // eight pixels each way, which the backend hands back.
     let mut s = Session::new(60, 40, ColorMode::Rgb);
     let root = s.document().root();
     s.apply(Command::AddNode {
@@ -191,7 +191,7 @@ fn what_the_backend_declines_is_left_to_the_engine() {
         index: 0,
         node: Box::new(Node::filter(
             "quiet",
-            chitrakar_doc::Filter::Median { radius: 2.0 },
+            chitrakar_doc::Filter::Median { radius: 20.0 },
         )),
     })
     .unwrap();

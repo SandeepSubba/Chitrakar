@@ -7876,7 +7876,9 @@ fn apply_filter(
 /// How many surface pixels a median reaches each way: its radius in
 /// document pixels at the scale it is drawn, held to 64 — past that a
 /// window is a quarter of a screen and nothing is a speck any more.
-fn median_radius(radius: f32, scale: f32) -> usize {
+/// How many device pixels each way a median of `radius` reads, at a
+/// view of `scale`: whole pixels, and no more than 64.
+pub fn median_radius(radius: f32, scale: f32) -> usize {
     let r = radius * scale;
     if r.is_finite() {
         r.round().clamp(0.0, 64.0) as usize

@@ -4940,9 +4940,23 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
         Filtering::Pointwise(params, back, [from[0], from[1], third])
     };
     Some(match filter {
-        // A median is a vote over a window, which no pass of quads can
-        // hold: a page with one is the CPU's.
-        F::Median { .. } => return None,
+        // A median is a vote over a window, channel by channel, among the
+        // 256 steps of the display encoding. A sliding histogram is not
+        // a thing a fragment can keep, but a vote among 256 steps is
+        // eight halvings: count how much of the window is at or below a
+        // guess, and halve the range the middle can be in. Eight reads
+        // of the window a pixel, which is the smear's pass with a square
+        // walked instead of a line — and past a radius of eight, more of
+        // a walk than a pass should be, so that is handed back.
+        F::Median { radius } => match chitrakar_render::median_radius(*radius, scale) {
+            0 => Filtering::Nothing,
+            r if r > MEDIAN_MOST => return None,
+            r => Filtering::Radial {
+                params: [r as f32, 0.0, 0.0, 3.0],
+                linear: [0.0; 4],
+                down: 0.0,
+            },
+        },
         // A smear whose line runs a different way at every pixel: out
         // from the centre for a zoom, round it for a spin. It is the
         // motion blur's pass with the line worked out per pixel rather
@@ -5245,6 +5259,10 @@ fn effect_of(
     }
 }
 
+/// The widest median drawn here, in device pixels each way: a window of
+/// seventeen by seventeen, read eight times over.
+const MEDIAN_MOST: usize = 8;
+
 /// The widest band, in device pixels, either pass will walk: 129 taps
 /// out from the pixel, which is the count a smear is capped at.
 const BAND_MOST: f32 = 128.0;
@@ -5275,10 +5293,11 @@ enum Filtering {
     /// apart along a line: a smear, which has an angle and so cannot be
     /// separated into a turn along each axis the way a blur is.
     Smear { taps: f32, step: [f32; 2] },
-    /// A smear whose line is worked out per pixel: a radial blur. How
-    /// far it reaches, that times the view's scale, the centre across
-    /// the surface and whether it spins; the view's linear part; and the
-    /// centre down the surface.
+    /// A pass of the smear's that works its window out per pixel: a
+    /// radial blur (how far it reaches, that times the view's scale, the
+    /// centre across the surface and whether it spins; the view's linear
+    /// part; and the centre down the surface), or a median (its radius,
+    /// and 3 for its kind).
     Radial {
         params: [f32; 4],
         linear: [f32; 4],
@@ -11792,6 +11811,114 @@ mod tests {
             },
             (90, 80)
         ));
+    }
+
+    /// A median is a vote among the 256 steps a channel shows at, found
+    /// here by halving rather than by the CPU renderer's sliding
+    /// histogram — two ways to the same step, which is the thing held
+    /// against each other: on a speckled picture with clear patches in
+    /// it, at the radii either end of what is drawn, faded, and under a
+    /// view that halves it. Past a radius of eight it goes back.
+    #[test]
+    fn a_median_votes_the_way_the_cpu_votes() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (w, h) = (64u32, 48u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        let mut seed = 0x2545_f491u32;
+        for i in 0..w * h {
+            let (x, y) = (i % w, i / w);
+            let mut next = || {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed >> 24) as u8
+            };
+            // Smooth ground, a speck in one pixel of five, and a clear
+            // patch: the vote has to see past specks and through edges.
+            let speck = next() < 52;
+            let clear = (20..30).contains(&x) && (10..22).contains(&y);
+            let (r, g, b) = if speck {
+                (next(), next(), next())
+            } else {
+                ((x * 4) as u8, (y * 5) as u8, 128)
+            };
+            rgba.extend_from_slice(&[r, g, b, if clear { 0 } else { 255 }]);
+        }
+        let mut doc = Document::new(w, h, ColorMode::Rgb);
+        let id = doc.add_resource(w, h, rgba);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "speckled",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: w,
+                    height: h,
+                    corners: None,
+                },
+            )),
+        })
+        .unwrap();
+        let with = |radius: f32, opacity: f32| {
+            let mut doc = doc.clone();
+            let mut node = Node::filter("median", F::Median { radius });
+            node.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc
+        };
+        let bare = chitrakar_render::render(&doc).unwrap();
+        for (radius, opacity) in [(1.0, 1.0), (3.0, 1.0), (8.0, 1.0), (2.0, 0.5)] {
+            let doc = with(radius, opacity);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a median of {radius} is drawn"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.0015 && worst < 0.03,
+                "a median of {radius} at {opacity}: mean channel difference {mean:.5} (worst {worst:.4})"
+            );
+            assert!(
+                difference(&reference, &bare).0 > 0.01,
+                "and the vote changed the picture"
+            );
+        }
+        // Under a view half as large again, a radius of two is three. (A
+        // view that shrinks the picture is one the picture itself goes
+        // back for.)
+        let doc = with(2.0, 1.0);
+        let view = Transform {
+            a: 1.5,
+            d: 1.5,
+            e: -6.0,
+            f: -4.0,
+            ..Default::default()
+        };
+        let drawn = gpu.render_view(&doc, view, (40, 30)).unwrap();
+        let mut surface = Surface::new(40, 30);
+        let clip = surface.full_clip();
+        chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+        let (mean, worst) = difference(&drawn, &surface);
+        assert!(
+            mean < 0.0015 && worst < 0.03,
+            "enlarged: mean channel difference {mean:.5} (worst {worst:.4})"
+        );
+        assert!(
+            !GpuRenderer::can_render(&with(9.0, 1.0)),
+            "a median of nine goes back"
+        );
     }
 
     /// A colour lookup reads the CPU renderer's own table out of the same

@@ -1165,8 +1165,8 @@ without reading anything else.*
   what made it a third of a second for three megapixels at radius 1.
   Equal to sorting every window on random pictures; its reach is
   guarded by the region-render audit (breaking it fails there), its
-  zero radius by the neutral-settings audit; the GPU declines a page
-  with one, and the random pages hold it one filter page in four of
+  zero radius by the neutral-settings audit; the GPU draws it ✅ up to a
+  radius of eight device pixels (below), and the random pages hold it one filter page in four of
   the last slot (smoke 9o8). Putting it there reshuffled the random
   pages, and the hostile-number audit found an older defect on a new
   one: every filter's reach stops at the most there is, but the sum of
@@ -1587,6 +1587,21 @@ without reading anything else.*
     white, as a JPEG of what is picked already was
     (`Session::kept_region_jpeg`), and smoke 9by reads the files' first
     bytes (FF D8) and fails with the old path.
+- **The GPU draws a median ✅** (radius up to eight device pixels; past
+  that it goes back). A sliding histogram is not something a fragment
+  can keep, but a vote among 256 steps is eight halvings: count how much
+  of the window is at or below the middle of what is left, keep the half
+  the median must be in, all four channels at once. It rides the smear
+  pass (`fs_smear` → `median`), reading the backdrop copy with the
+  page's edge carried on past it, as the CPU's snapshot does.
+  `a_median_votes_the_way_the_cpu_votes`: a speckled picture with clear
+  patches, at radii 1, 3 and 8, faded, and under a view that enlarges
+  it (one that shrinks the picture is handed back for the picture's own
+  sake). It fails with the upper middle for the lower, seven halvings,
+  the radius one short, or steps counted in light. Holding a colour to
+  its cover cannot be caught and need not be: colour is premultiplied,
+  so each pixel's colour is at most its alpha and so is the k-th of
+  each, which leaves the hold for rounding between steps.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
