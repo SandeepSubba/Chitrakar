@@ -271,6 +271,9 @@ export type Effect =
         blur: number;
         color: AuthoredColor;
         opacity: number;
+        /** 0..0.95: the shadow held solid further out (see
+         * `chitrakar_doc::spread_gain`). Absent in what older code built. */
+        spread?: number;
       };
     }
   | { Outline: { width: number; color: AuthoredColor; opacity: number } }
@@ -281,6 +284,8 @@ export type Effect =
         blur: number;
         color: AuthoredColor;
         opacity: number;
+        /** The same hardening, which inside the shape is a choke. */
+        spread?: number;
       };
     };
 

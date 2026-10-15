@@ -294,6 +294,7 @@ pub fn everything() -> Fixture {
                 a: 1.0,
             },
             opacity: 0.6,
+            spread: 0.0,
         }],
     })
     .unwrap();
@@ -412,6 +413,7 @@ pub fn everything() -> Fixture {
                 a: 1.0,
             },
             opacity: 0.75,
+            spread: 0.0,
         }],
     })
     .unwrap();
@@ -718,6 +720,7 @@ pub fn everything() -> Fixture {
                 a: 1.0,
             },
             opacity: 0.8,
+            spread: 0.5,
         }],
     })
     .unwrap();
@@ -768,6 +771,7 @@ pub fn everything() -> Fixture {
                 a: 0.9,
             },
             opacity: 0.7,
+            spread: 0.0,
         }],
     })
     .unwrap();
@@ -2875,6 +2879,14 @@ impl Rng {
             .unwrap();
         }
         if self.chance(5) {
+            // Half the shadows are hardened, out of a stream of their own
+            // so that every page from before spread is the page it was.
+            let mut side = Rng((self.0 ^ 0x3c6e_f372_fe94_f82b) | 1);
+            let hard = if side.chance(2) {
+                side.between(0.2, 0.9)
+            } else {
+                0.0
+            };
             doc.apply(Command::SetEffects {
                 id,
                 effects: vec![match self.upto(3) {
@@ -2884,6 +2896,7 @@ impl Rng {
                         blur: self.between(0.0, 2.5),
                         color: self.color(1.0),
                         opacity: self.between(0.4, 1.0),
+                        spread: hard,
                     },
                     1 => Effect::Outline {
                         width: self.between(0.5, 3.0),
@@ -2896,6 +2909,7 @@ impl Rng {
                         blur: self.between(0.0, 2.0),
                         color: self.color(1.0),
                         opacity: self.between(0.4, 1.0),
+                        spread: hard,
                     },
                 }],
             })
@@ -3724,6 +3738,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                     a: 1.0,
                 },
                 opacity: 0.7,
+                spread: 0.0,
             }],
         },
         Command::SetMask {

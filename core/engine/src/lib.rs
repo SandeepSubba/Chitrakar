@@ -8303,6 +8303,7 @@ mod tests {
                             a: 1.0,
                         },
                         opacity: 0.8,
+                        spread: 0.0,
                     },
                     chitrakar_doc::Effect::Outline {
                         width: 3.0,
@@ -9208,6 +9209,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 1.0,
+            spread: 0.0,
         };
         session
             .apply(Command::SetEffects {
@@ -9697,6 +9699,7 @@ mod tests {
                     a: 1.0,
                 },
                 opacity: 1.0,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -11577,6 +11580,7 @@ mod tests {
                     a: 1.0,
                 },
                 opacity: 0.9,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -11653,6 +11657,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 0.9,
+            spread: 0.0,
         };
         // An outline has no offset at all, only a width — the other kind
         // of length, and the other half of the same carry.
@@ -11872,6 +11877,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 0.9,
+            spread: 0.0,
         };
         for (what, id) in [
             ("a shape", f.under),
@@ -12227,6 +12233,7 @@ mod tests {
             blur: 3.0,
             color: srgb(0.0, 0.0, 0.0),
             opacity: 0.5,
+            spread: 0.0,
         }];
         if let NodeKind::Vector { stroke, fill, .. } = &mut card.kind {
             *fill = Some(srgb(0.9, 0.3, 0.2));
@@ -12662,6 +12669,7 @@ mod tests {
             blur: 0.0,
             color: srgb(0.0, 0.0, 0.0),
             opacity: 0.5,
+            spread: 0.0,
         }];
         add(&mut s, card);
         assert!(s.trim_page().unwrap());
@@ -12810,6 +12818,7 @@ mod tests {
             blur: 2.0,
             color: srgb(0.0, 0.0, 0.0),
             opacity: 0.6,
+            spread: 0.0,
         }];
         let disc = add(&mut session, disc);
         let words = add(
@@ -13186,6 +13195,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 0.8,
+            spread: 0.0,
         };
         // A backdrop to blend against, then the shape being combined.
         let mut session = Session::new(80, 60, ColorMode::Rgb);
@@ -14119,6 +14129,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 1.0,
+            spread: 0.0,
         };
         // Copy a group with the shadow on its child, and a plain layer
         // with the shadow on itself: the first is the one that was wrong,
@@ -16822,6 +16833,7 @@ mod tests {
                         a: 1.0,
                     },
                     opacity: n,
+                    spread: 0.0,
                 }],
             });
             let _ = session.apply(Command::SetMask {
@@ -17434,6 +17446,7 @@ mod tests {
                         a: 1.0,
                     },
                     opacity: 1.0,
+                    spread: 0.0,
                 }],
             })
             .unwrap();

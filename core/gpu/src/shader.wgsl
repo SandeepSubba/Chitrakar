@@ -1785,6 +1785,17 @@ fn field_at(uv: vec2f, offset: vec2f) -> vec4f {
     return mix(top, low, t.y);
 }
 
+// A shadow's spread, taken on the field as it was read at its offset —
+// the CPU renderer's `Gain`. `gain.x` is the gain on the coverage, one
+// for none; `gain.y` the tint's alpha, which the coverage is the field's
+// alpha over. Held at full: the tint is the most it can come to.
+fn gained(px: vec4f, gain: vec2f) -> vec4f {
+    if gain.x <= 1.0 || gain.y <= 0.0 || px.a <= 0.0 {
+        return px;
+    }
+    return px * min(gain.x, gain.y / px.a);
+}
+
 // The blurred field coming down onto what is under the layer, read at
 // the effect's offset.
 //
@@ -1799,7 +1810,7 @@ fn field_at(uv: vec2f, offset: vec2f) -> vec4f {
 // inner shadow inside the silhouette instead of spilling past it.
 @fragment
 fn fs_effect(in: ImageOut) -> @location(0) vec4f {
-    var out = field_at(in.uv, vec2f(in.params.x, in.params.y));
+    var out = gained(field_at(in.uv, vec2f(in.params.x, in.params.y)), in.extra.xy);
     if in.params.z != 0.0 {
         // `params.w` is what the surface still owes its own silhouette,
         // which is a group's opacity and nothing for anything else.
@@ -1822,7 +1833,7 @@ fn fs_effect(in: ImageOut) -> @location(0) vec4f {
 // it to read.
 @fragment
 fn fs_settle(in: ImageOut) -> @location(0) vec4f {
-    var out = field_at(in.uv, vec2f(in.params.x, in.params.y));
+    var out = gained(field_at(in.uv, vec2f(in.params.x, in.params.y)), in.extra.xy);
     if in.params.z != 0.0 {
         out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a * in.params.w;
     }

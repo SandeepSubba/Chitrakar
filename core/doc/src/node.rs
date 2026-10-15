@@ -1849,12 +1849,19 @@ pub enum Effect {
     /// The layer's silhouette, blurred and offset, painted behind it.
     /// `dx`/`dy` and `blur` are in the layer's parent space, so a shadow
     /// scales and turns with the group it is in.
+    ///
+    /// `spread` hardens it: the blurred silhouette's coverage is gained
+    /// by `1 / (1 - spread)` and held at full, so the shadow reaches as
+    /// far as before but stays solid further out (see [`spread_gain`]).
+    /// At no offset and in a light colour this is a glow.
     DropShadow {
         dx: f32,
         dy: f32,
         blur: f32,
         color: AuthoredColor,
         opacity: f32,
+        #[serde(default)]
+        spread: f32,
     },
     /// A band of colour hugging the layer's silhouette from outside, the
     /// way a headline is given an outline. `width` is in the layer's
@@ -1865,14 +1872,36 @@ pub enum Effect {
         opacity: f32,
     },
     /// The same shadow, cast inward: it darkens the inside of the
-    /// silhouette against its own edge and never leaves it.
+    /// silhouette against its own edge and never leaves it. `spread` is
+    /// the same hardening, which an inside shadow calls a choke: the
+    /// shadow stays solid further in from the edge.
     InnerShadow {
         dx: f32,
         dy: f32,
         blur: f32,
         color: AuthoredColor,
         opacity: f32,
+        #[serde(default)]
+        spread: f32,
     },
+}
+
+/// The most a shadow's spread is taken as. A spread of one would gain
+/// the coverage without bound, which is a hard edge cut wherever the
+/// blur left anything at all: aliased, and dependent on noise in the
+/// last bit of a blur. At this much it is a gain of twenty.
+pub const SPREAD_MOST: f32 = 0.95;
+
+/// What a shadow's coverage is multiplied by before it is held at full:
+/// one for no spread, rising to twenty at [`SPREAD_MOST`]. Anything that
+/// is not a number is no spread.
+pub fn spread_gain(spread: f32) -> f32 {
+    let s = if spread.is_finite() {
+        spread.clamp(0.0, SPREAD_MOST)
+    } else {
+        0.0
+    };
+    1.0 / (1.0 - s)
 }
 
 impl Effect {
@@ -2184,6 +2213,28 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// A shadow written before there was a spread opens soft, and the
+    /// gain a spread asks for is one at none, held at twenty, and one
+    /// for anything that is not a number.
+    #[test]
+    fn a_shadow_from_before_spread_opens_soft() {
+        let old = r#"{"DropShadow":{"dx":1.0,"dy":2.0,"blur":3.0,"color":{"Srgb":{"r":0.0,"g":0.0,"b":0.0,"a":1.0}},"opacity":0.5}}"#;
+        let effect: super::Effect = serde_json::from_str(old).unwrap();
+        assert!(matches!(effect, super::Effect::DropShadow { spread, .. } if spread == 0.0));
+        assert_eq!(super::spread_gain(0.0), 1.0);
+        assert!((super::spread_gain(0.8) - 5.0).abs() < 1e-4);
+        assert_eq!(super::spread_gain(-3.0), 1.0, "no spread below none");
+        assert_eq!(
+            super::spread_gain(f32::NAN),
+            1.0,
+            "nor from what is not a number"
+        );
+        assert!(
+            (super::spread_gain(2.0) - 20.0).abs() < 1e-3,
+            "and at most twenty"
+        );
+    }
+
     /// Round a conic gradient's centre clockwise on the page from its
     /// angle: right is the start, below a quarter, left a half, above
     /// three quarters; the start moves with the angle; and the centre

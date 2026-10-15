@@ -711,6 +711,7 @@ fn effects_of(
                     blur: page.blur((d.std_dev_x().get() + d.std_dev_y().get()) / 2.0),
                     color: color_of(d.color(), 1.0),
                     opacity: d.opacity().get(),
+                    spread: 0.0,
                 });
             }
             // This editor's own: what goes under the source, the source,
@@ -825,27 +826,44 @@ impl Page {
                     && *c.input2() == Input::SourceAlpha =>
             {
                 let (color, opacity, shape) = self.flooded(named(c.input1())?, named)?;
-                let (dx, dy, blur, inverted, grown) = self.shaped(shape, named)?;
+                let Shaped {
+                    dx,
+                    dy,
+                    blur,
+                    inverted,
+                    grown,
+                    spread,
+                } = self.shaped(shape, named)?;
                 (inverted && grown.is_none()).then_some(Effect::InnerShadow {
                     dx,
                     dy,
                     blur,
                     color,
                     opacity,
+                    spread,
                 })
             }
             Kind::Composite(_) if !over => {
                 let (color, opacity, shape) = self.flooded(p, named)?;
-                let (dx, dy, blur, inverted, grown) = self.shaped(shape, named)?;
+                let Shaped {
+                    dx,
+                    dy,
+                    blur,
+                    inverted,
+                    grown,
+                    spread,
+                } = self.shaped(shape, named)?;
                 if inverted {
                     return None;
                 }
                 Some(match grown {
-                    Some(width) if dx == 0.0 && dy == 0.0 && blur == 0.0 => Effect::Outline {
-                        width,
-                        color,
-                        opacity,
-                    },
+                    Some(width) if dx == 0.0 && dy == 0.0 && blur == 0.0 && spread == 0.0 => {
+                        Effect::Outline {
+                            width,
+                            color,
+                            opacity,
+                        }
+                    }
                     Some(_) => return None,
                     None => Effect::DropShadow {
                         dx,
@@ -853,6 +871,7 @@ impl Page {
                         blur,
                         color,
                         opacity,
+                        spread,
                     },
                 })
             }
@@ -880,13 +899,21 @@ impl Page {
                     a: 1.0,
                 };
                 let opacity = v[18].clamp(0.0, 1.0);
-                let (dx, dy, blur, inverted, grown) = self.shaped(named(m.input())?, named)?;
+                let Shaped {
+                    dx,
+                    dy,
+                    blur,
+                    inverted,
+                    grown,
+                    spread,
+                } = self.shaped(named(m.input())?, named)?;
                 (!inverted && grown.is_none()).then_some(Effect::DropShadow {
                     dx,
                     dy,
                     blur,
                     color,
                     opacity,
+                    spread,
                 })
             }
             _ => None,
@@ -926,9 +953,10 @@ impl Page {
         &self,
         mut p: &'a usvg::filter::Primitive,
         named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
-    ) -> Option<(f32, f32, f32, bool, Option<f32>)> {
+    ) -> Option<Shaped> {
         use usvg::filter::{ColorMatrixKind, CompositeOperator, Input, Kind, TransferFunction};
         let (mut dx, mut dy, mut blur, mut inverted, mut grown) = (0.0, 0.0, 0.0, false, None);
+        let mut spread = 0.0;
         for _ in 0..16 {
             let input = match p.kind() {
                 Kind::Offset(o) => {
@@ -966,6 +994,13 @@ impl Page {
                             // Half way up the step is the edge.
                             self.edge.set(Some((0.5 - intercept) / slope));
                         }
+                        // A shadow's spread: its coverage gained, which
+                        // the reader holds at full as the engine does.
+                        TransferFunction::Linear { slope, intercept }
+                            if *slope > 1.0 && intercept.abs() < 1e-6 =>
+                        {
+                            spread = 1.0 - 1.0 / slope;
+                        }
                         _ => return None,
                     }
                     c.input()
@@ -989,13 +1024,35 @@ impl Page {
                 _ => return None,
             };
             match input {
-                Input::SourceAlpha => return Some((dx, dy, blur, inverted, grown)),
+                Input::SourceAlpha => {
+                    return Some(Shaped {
+                        dx,
+                        dy,
+                        blur,
+                        inverted,
+                        grown,
+                        spread,
+                    })
+                }
                 Input::SourceGraphic => return None,
                 Input::Reference(_) => p = named(input)?,
             }
         }
         None
     }
+}
+
+/// The silhouette a shadow is made from, as [`Page::shaped`] walks it
+/// back: how far it is moved, how much it is blurred, whether the alpha
+/// was turned inside out (an inner shadow's), how far it was grown (an
+/// outline's) and how hard its coverage was gained (a shadow's spread).
+struct Shaped {
+    dx: f32,
+    dy: f32,
+    blur: f32,
+    inverted: bool,
+    grown: Option<f32>,
+    spread: f32,
 }
 
 /// Whether anything under a group comes down by a blend of its own,
@@ -3327,6 +3384,42 @@ mod tests {
                 })
                 .unwrap();
             }
+            // A copy of a blended layer comes back as a picture of it
+            // carrying the blend itself, so effects the copy wears go
+            // down by that blend rather than over it (seed 305: a copy of
+            // a Hard Light brush layer, inner-shadowed, and a copy of that
+            // copy). Not what these audits ask about either: the copies
+            // lose their effects here, all along the chain.
+            if let NodeKind::Instance { .. } = &n.kind {
+                let mut chain = vec![id];
+                let mut blended = false;
+                let mut at = id;
+                while let Ok(NodeKind::Instance { of, .. }) = page.node(at).map(|n| &n.kind) {
+                    at = *of;
+                    if chain.contains(&at) {
+                        break;
+                    }
+                    chain.push(at);
+                }
+                let mut stack = vec![at];
+                while let Some(k) = stack.pop() {
+                    if let Ok(node) = page.node(k) {
+                        blended |= node.blend != chitrakar_doc::BlendMode::Normal;
+                    }
+                    stack.extend(page.children_of(k).map(|c| c.to_vec()).unwrap_or_default());
+                }
+                if blended {
+                    for k in chain {
+                        if page.node(k).is_ok_and(|n| !n.effects.is_empty()) {
+                            doc.apply(Command::SetEffects {
+                                id: k,
+                                effects: Vec::new(),
+                            })
+                            .unwrap();
+                        }
+                    }
+                }
+            }
             if let NodeKind::Text(t) = &n.kind {
                 let mut t = t.clone();
                 t.italic = false;
@@ -4616,70 +4709,91 @@ mod tests {
     #[test]
     fn an_effect_exported_comes_back_as_itself() {
         use chitrakar_doc::Effect;
-        let mut doc = Document::new(64, 48, ColorMode::Rgb);
-        let root = doc.root();
-        let mut card = Node::vector(
-            "card",
-            VectorShape::Rect {
-                width: 30.0,
-                height: 20.0,
-                radius: 3.0,
-            },
-        );
-        card.transform = chitrakar_doc::Transform::translation(14.0, 12.0);
-        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
-        if let NodeKind::Vector { fill, .. } = &mut card.kind {
-            *fill = Some(ink(0.9, 0.5, 0.2));
-        }
-        card.effects = vec![
-            Effect::DropShadow {
-                dx: 3.0,
-                dy: 4.0,
-                blur: 2.5,
-                color: ink(0.1, 0.1, 0.3),
-                opacity: 0.6,
-            },
-            Effect::Outline {
-                width: 2.0,
-                color: ink(0.2, 0.7, 0.3),
-                opacity: 1.0,
-            },
-            Effect::InnerShadow {
-                dx: 1.0,
-                dy: 2.0,
-                blur: 1.5,
-                color: ink(0.0, 0.0, 0.0),
-                opacity: 0.5,
-            },
-        ];
-        doc.apply(Command::AddNode {
-            parent: root,
-            index: 0,
-            node: Box::new(card),
-        })
-        .unwrap();
-        let svg = crate::export_svg(&doc).unwrap();
-        let back = import_svg(svg.as_bytes()).unwrap();
-        let fx = &back.shapes[0].effects;
-        assert_eq!(fx.len(), 3, "all three came back: {fx:?}");
-        let before = chitrakar_render::render(&doc).unwrap();
-        let after = chitrakar_render::render(&brought_in(&svg, 64, 48)).unwrap();
-        let worst = before
-            .pixels
-            .iter()
-            .zip(&after.pixels)
-            .map(|(p, q)| {
-                (p.r - q.r)
-                    .abs()
-                    .max((p.g - q.g).abs())
-                    .max((p.b - q.b).abs())
-                    .max((p.a - q.a).abs())
+        // Soft, and then hardened: a spread goes out as a gain on the
+        // shadow's coverage and comes back as the spread it was.
+        for hard in [0.0, 0.6] {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let root = doc.root();
+            let mut card = Node::vector(
+                "card",
+                VectorShape::Rect {
+                    width: 30.0,
+                    height: 20.0,
+                    radius: 3.0,
+                },
+            );
+            card.transform = chitrakar_doc::Transform::translation(14.0, 12.0);
+            let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+            if let NodeKind::Vector { fill, .. } = &mut card.kind {
+                *fill = Some(ink(0.9, 0.5, 0.2));
+            }
+            card.effects = vec![
+                Effect::DropShadow {
+                    dx: 3.0,
+                    dy: 4.0,
+                    blur: 2.5,
+                    color: ink(0.1, 0.1, 0.3),
+                    opacity: 0.6,
+                    spread: hard,
+                },
+                Effect::Outline {
+                    width: 2.0,
+                    color: ink(0.2, 0.7, 0.3),
+                    opacity: 1.0,
+                },
+                Effect::InnerShadow {
+                    dx: 1.0,
+                    dy: 2.0,
+                    blur: 1.5,
+                    color: ink(0.0, 0.0, 0.0),
+                    opacity: 0.5,
+                    spread: hard / 2.0,
+                },
+            ];
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(card),
             })
-            .fold(0.0f32, f32::max);
-        assert!(
-            worst < 0.02,
-            "the page came back as it was, worst {worst}; {fx:?}"
-        );
+            .unwrap();
+            let svg = crate::export_svg(&doc).unwrap();
+            let back = import_svg(svg.as_bytes()).unwrap();
+            let fx = &back.shapes[0].effects;
+            assert_eq!(fx.len(), 3, "all three came back: {fx:?}");
+            let spreads: Vec<f32> = fx
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::DropShadow { spread, .. } | Effect::InnerShadow { spread, .. } => {
+                        Some(*spread)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                spreads.len() == 2
+                    && (spreads[0] - hard).abs() < 1e-4
+                    && (spreads[1] - hard / 2.0).abs() < 1e-4,
+                "the spreads came back: {spreads:?}"
+            );
+            let before = chitrakar_render::render(&doc).unwrap();
+            let after = chitrakar_render::render(&brought_in(&svg, 64, 48)).unwrap();
+            let worst = before
+                .pixels
+                .iter()
+                .zip(&after.pixels)
+                .map(|(p, q)| {
+                    (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs())
+                })
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst < 0.02,
+                "the page came back as it was, worst {worst}; {fx:?}"
+            );
+        }
     }
 
     /// How far apart two pictures of a page are at worst, premultiplied:
@@ -4805,6 +4919,7 @@ mod tests {
                     a: 1.0,
                 },
                 opacity: 0.7,
+                spread: 0.0,
             }],
         })
         .unwrap();

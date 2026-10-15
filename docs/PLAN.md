@@ -1785,6 +1785,55 @@ without reading anything else.*
     the wrong side of the start fails it); smoke 2b (the ends meet
     straight up, the slider moves the seam, the knob puts it back, one
     undo).
+- **Spread, choke, and glows ✅** (`spread` on `Effect::DropShadow`
+  and `Effect::InnerShadow`, `#[serde(default)]`). A shadow could only
+  be soft, so the panel had no glow and no hard-edged shadow that still
+  feathers. Spread multiplies the blurred coverage by
+  `chitrakar_doc::spread_gain` (`1 / (1 - spread)`, held at twenty at
+  `SPREAD_MOST` = 0.95, and one for anything that is not a number), then
+  caps it at full. The shadow stays solid further out but reaches no
+  further: three box passes have finite support, so the reach is still
+  the blur's, and `Effect::reach` is unchanged. An inner shadow's spread
+  is its choke.
+  - **Where it is taken:** in the stamp, after the field is read at
+    its offset (`Gain` in `core/render`), so a second renderer reading
+    the field with its own bilinear tap can follow the same order.
+  - **GPU:** `gained` in `fs_effect`, or in `fs_settle` when the layer
+    carries a blend, with the gain and the tint's alpha riding the
+    quad's `extra`.
+  - **SVG:** an `feComponentTransfer` linear slope after the
+    `feOffset`. A reader clamps it, which is the engine's cap. The
+    importer reads it back as the spread
+    (`Shaped::spread`), and an outline is still told apart because it
+    is a hard step of slope ≥ 100 with an intercept.
+  - **PDF:** effects go as pixels, so nothing changed there.
+  - **In the panel:** a **Spread** slider on a drop shadow and a
+    **Choke** on an inner shadow. *Add effect* also offers **Outer
+    glow** and **Inner glow**, which are shadows cast nowhere, light
+    and hardened, and the row calls a shadow at no offset by that name.
+  - **Fixture:** half the random pages' shadows are hardened (their own
+    stream). `everything()`'s inner shadow is at 0.5, and both fields
+    show up in its file.
+  - **Open, found on the way:** seed 305 has a copy of a Hard Light
+    brush layer that wears an inner shadow, and a copy of that copy.
+    Through SVG they come back as pictures that carry the blend
+    themselves, so the shadow goes down in Hard Light, not Normal over
+    them. That was 56 pixels apart before spread; hardened, the shadow
+    put 35 flat ones past the colour audit. `portable()` takes effects
+    off a copy whose chain reaches a blended layer until the importer
+    brings such a copy back as a group of its own around the blended
+    picture.
+  - **Tests:** `a_shadow_from_before_spread_opens_soft` (doc);
+    `a_spread_hardens_a_shadow_without_carrying_it_further` (gain exact
+    pixel by pixel, nothing where there was nothing, a choke darker
+    inside, nothing outside; switching the gain off fails it);
+    `a_spread_shadow_is_hardened_the_way_the_cpu_hardens_it` on the GPU
+    (a glow, a fractional offset, a choke, and both on a screened layer;
+    taking the gain off the stamp or off the settle pass each fails it);
+    `an_effect_exported_comes_back_as_itself` now runs soft and
+    hardened (dropping the spread on import fails it); smoke 8x2 (a glow
+    on both sides alike, spread solid further out and no further, one
+    undo a step, an inner glow lighting the edge, choked further in).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

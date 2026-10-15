@@ -2209,6 +2209,7 @@ mod tests {
                 blur: 2.0,
                 color: blue.clone(),
                 opacity: 0.7,
+                spread: 0.0,
             }],
         })
         .unwrap();

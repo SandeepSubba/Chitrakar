@@ -3316,6 +3316,7 @@ fn draw_effect(
             blur,
             color,
             opacity,
+            spread,
         } => {
             if *opacity <= 0.0 {
                 return;
@@ -3331,6 +3332,7 @@ fn draw_effect(
                 write,
                 blend,
                 None,
+                Gain::of(*spread, tint),
             );
         }
         Effect::InnerShadow {
@@ -3339,6 +3341,7 @@ fn draw_effect(
             blur,
             color,
             opacity,
+            spread,
         } => {
             if *opacity <= 0.0 {
                 return;
@@ -3357,6 +3360,7 @@ fn draw_effect(
                 write,
                 blend,
                 Some(layer),
+                Gain::of(*spread, tint),
             );
         }
         Effect::Outline {
@@ -3378,6 +3382,7 @@ fn draw_effect(
                 layer_clip,
                 write,
                 blend,
+                None,
                 None,
             );
         }
@@ -3572,6 +3577,7 @@ fn stamp(
     write: ClipRect,
     blend: BlendMode,
     keep_inside: Option<&Surface>,
+    gain: Option<Gain>,
 ) {
     let (ox, oy) = offset;
     let (lo_x, hi_x) = (field_clip.x0 as f32, field_clip.x1 as f32 - 1.0);
@@ -3605,6 +3611,9 @@ fn stamp(
             let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
             let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
             let mut src = lerp(top, bottom, ty);
+            if let Some(g) = gain {
+                src = g.apply(src);
+            }
             let i = (y * dst.width + x) as usize;
             if let Some(inside) = keep_inside {
                 src = scale_alpha(src, inside.pixels[at_in(origin, inside.width, x, y)].a);
@@ -3614,6 +3623,38 @@ fn stamp(
             }
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
         }
+    }
+}
+
+/// A shadow's spread, as the stamp lays it down: the field's coverage
+/// gained and held at full.
+///
+/// Taken after the field is read at its offset rather than before, so
+/// the gain is of what lands on the pixel — the same order a second
+/// renderer reading the field with its own bilinear tap can follow.
+/// The field is the tint scaled by a coverage, so the coverage is the
+/// field's alpha over the tint's.
+#[derive(Clone, Copy)]
+struct Gain {
+    gain: f32,
+    tint_alpha: f32,
+}
+
+impl Gain {
+    /// Nothing to do at no spread, or for a tint with nothing in it.
+    fn of(spread: f32, tint: LinearRgba) -> Option<Gain> {
+        let gain = chitrakar_doc::spread_gain(spread);
+        (gain > 1.0 && tint.a > 0.0).then_some(Gain {
+            gain,
+            tint_alpha: tint.a,
+        })
+    }
+
+    fn apply(self, px: LinearRgba) -> LinearRgba {
+        if px.a <= 0.0 {
+            return px;
+        }
+        scale_alpha(px, self.gain.min(self.tint_alpha / px.a))
     }
 }
 
@@ -12822,6 +12863,7 @@ mod tests {
                         a: 1.0,
                     },
                     opacity: 0.8,
+                    spread: 0.0,
                 }],
             })
             .unwrap();
@@ -13643,6 +13685,7 @@ mod tests {
                     a: 1.0,
                 },
                 opacity: 0.9,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -13840,6 +13883,7 @@ mod tests {
             blur: 1.0,
             color: BLACK,
             opacity: 0.8,
+            spread: 0.0,
         }];
         let mut shadowed = build(Some((1.0, false, BlendMode::Normal)), false);
         let copy = shadowed.children_of(shadowed.root()).unwrap()[3];
@@ -14313,6 +14357,7 @@ mod tests {
                             a: 1.0,
                         },
                         opacity: 1.0,
+                        spread: 0.0,
                     }],
                 })
                 .unwrap();
@@ -14396,6 +14441,7 @@ mod tests {
                             a: 1.0,
                         },
                         opacity,
+                        spread: 0.0,
                     }],
                 })
                 .unwrap();
@@ -17113,6 +17159,7 @@ mod tests {
                 blur: 8.0,
                 color: RED,
                 opacity: 0.6,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -18952,6 +18999,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 1.0,
+            spread: 0.0,
         };
         // A quarter turn about the middle of the page, so the shape stays
         // on the page and only the direction of the light can move.
@@ -19037,6 +19085,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 1.0,
+            spread: 0.0,
         };
         let alone = {
             let mut doc = Document::new(80, 80, ColorMode::Rgb);
@@ -19129,6 +19178,7 @@ mod tests {
                 a: 1.0,
             },
             opacity: 1.0,
+            spread: 0.0,
         };
         let build = |grouped: bool| {
             let mut doc = Document::new(80, 80, ColorMode::Rgb);
@@ -19221,6 +19271,7 @@ mod tests {
                     a: 1.0,
                 },
                 opacity: 0.8,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -19524,6 +19575,7 @@ mod tests {
                 a: 1.0,
             },
             opacity,
+            spread: 0.0,
         };
         let bare = page(vec![]);
         // The copy is there and outlined at all: red where it lays the
@@ -20122,6 +20174,73 @@ mod tests {
     }
 
     #[test]
+    fn a_spread_hardens_a_shadow_without_carrying_it_further() {
+        // A glow: a shadow at no offset. Spread gains its coverage and
+        // holds it at full, so wherever the soft one had anything the
+        // hard one has five times as much, up to all of it — and where
+        // the soft one had nothing, neither has the hard one: the reach
+        // is the blur's, not the spread's.
+        let glow = |spread: f32| {
+            square_with(vec![chitrakar_doc::Effect::DropShadow {
+                dx: 0.0,
+                dy: 0.0,
+                blur: 3.0,
+                color: BLACK,
+                opacity: 1.0,
+                spread,
+            }])
+        };
+        let (soft, hard) = (glow(0.0), glow(0.8));
+        let mut gained = 0;
+        for x in 0..20 {
+            let (s, h) = (soft.get(x, 30).a, hard.get(x, 30).a);
+            assert!(
+                (h - (5.0 * s).min(1.0)).abs() < 1e-4,
+                "at ({x}, 30): {s} gained to {h}"
+            );
+            if s == 0.0 {
+                assert_eq!(h, 0.0, "nothing where there was nothing, at ({x}, 30)");
+            }
+            if h >= 1.0 && s < 0.9 {
+                gained += 1;
+            }
+        }
+        assert!(
+            gained >= 2,
+            "solid further out: {gained} pixels held at full"
+        );
+        assert_eq!(
+            hard.get(30, 30),
+            soft.get(30, 30),
+            "the layer itself is the layer"
+        );
+        // Choked, an inner shadow stays dark further in from its edge.
+        let inner = |spread: f32| {
+            square_with(vec![chitrakar_doc::Effect::InnerShadow {
+                dx: 0.0,
+                dy: 0.0,
+                blur: 3.0,
+                color: BLACK,
+                opacity: 1.0,
+                spread,
+            }])
+        };
+        let (open, choked) = (inner(0.0), inner(0.8));
+        let (o, c) = (open.get(24, 30), choked.get(24, 30));
+        assert!(
+            c.r < o.r - 0.1,
+            "choked darker four pixels in: {o:?} vs {c:?}"
+        );
+        for (x, y) in [(18, 30), (30, 18), (42, 30)] {
+            assert_eq!(
+                choked.get(x, y),
+                open.get(x, y),
+                "and nothing outside at ({x},{y})"
+            );
+        }
+    }
+
+    #[test]
     fn an_inner_shadow_stays_inside_the_shape() {
         // Cast from the hole around the layer and kept to the silhouette:
         // it darkens the inside of the edge it is aimed from, leaves the
@@ -20133,6 +20252,7 @@ mod tests {
             blur: 2.0,
             color: BLACK,
             opacity: 1.0,
+            spread: 0.0,
         }]);
         for (x, y) in [(18, 30), (30, 18), (42, 30), (30, 42)] {
             assert_eq!(s.get(x, y), plain.get(x, y), "nothing outside at ({x},{y})");
@@ -20170,6 +20290,7 @@ mod tests {
                 blur: 2.0,
                 color: BLACK,
                 opacity: 1.0,
+                spread: 0.0,
             },
         ]);
         assert!(both.get(18, 30).a > 0.9, "the outline is there");
@@ -20211,6 +20332,7 @@ mod tests {
                         a: 1.0,
                     },
                     opacity: 1.0,
+                    spread: 0.0,
                 }],
             })
             .unwrap();
@@ -23515,6 +23637,7 @@ mod tests {
                         a: 1.0,
                     },
                     opacity: 1.0,
+                    spread: 0.0,
                 }];
             }
             doc.apply(Command::AddNode {
@@ -23597,6 +23720,7 @@ mod tests {
                     a: 1.0,
                 },
                 opacity: 1.0,
+                spread: 0.0,
             }]
         };
         // `lifting` picks the layer kind; `cast` says whether it wears
@@ -23947,6 +24071,7 @@ mod tests {
                     blur: 2.0,
                     color: black.clone(),
                     opacity: 0.0,
+                    spread: 0.0,
                 },
             ),
             (
@@ -23957,6 +24082,7 @@ mod tests {
                     blur: 2.0,
                     color: black.clone(),
                     opacity: 0.0,
+                    spread: 0.0,
                 },
             ),
             (
@@ -25594,6 +25720,7 @@ mod tests {
             blur: 2.0,
             color: RED,
             opacity: 0.0,
+            spread: 0.0,
         }]);
         for (a, b) in plain.pixels.iter().zip(&shadowed.pixels) {
             assert!(

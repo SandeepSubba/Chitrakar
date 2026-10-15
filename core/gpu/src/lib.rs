@@ -3754,9 +3754,12 @@ fn one(
                     if s.inside { 1.0 } else { 0.0 },
                     owed,
                 ];
+                // The spread goes with the offset: whichever pass reads
+                // the field at it gains what it read.
+                let gain = [s.gain[0], s.gain[1], 0.0];
                 let blended = node.blend != BlendMode::Normal;
                 let settle = if blended {
-                    out.push(page_quad(on, 1.0, carried, [0.0; 4], [0.0; 3]))
+                    out.push(page_quad(on, 1.0, carried, [0.0; 4], gain))
                 } else {
                     0..0
                 };
@@ -3769,7 +3772,7 @@ fn one(
                         carried
                     },
                     [0.0; 4],
-                    [0.0; 3],
+                    if blended { [0.0; 3] } else { gain },
                 ));
                 Painted {
                     over: s.over,
@@ -5292,6 +5295,10 @@ struct Shading {
     /// In device pixels, which is where the layer's parent space has
     /// already carried it.
     offset: [f32; 2],
+    /// A shadow's spread as the stamp takes it: the gain on the field's
+    /// coverage and the tint's alpha, which is what the coverage is the
+    /// field's alpha over. A gain of one is no spread.
+    gain: [f32; 2],
 }
 
 /// How a field is carried out from the silhouette it was built on.
@@ -5336,6 +5343,7 @@ fn effect_of(
             blur,
             color,
             opacity,
+            spread,
         }
         | E::InnerShadow {
             dx,
@@ -5343,18 +5351,21 @@ fn effect_of(
             blur,
             color,
             opacity,
+            spread,
         } => {
             let inner = matches!(effect, E::InnerShadow { .. });
+            let tint = tinted(color, *opacity);
             Some(Shading {
                 over: inner,
                 invert: inner,
                 inside: inner,
-                tint: tinted(color, *opacity),
+                tint,
                 spread: match box_radius(blur * scale) {
                     Some(radius) => Spread::Blurred(radius),
                     None => Spread::Still,
                 },
                 offset: along(*dx, *dy),
+                gain: [chitrakar_doc::spread_gain(*spread), tint[3]],
             })
         }
         // A band hugging the silhouette from outside, whose width is a
@@ -5381,6 +5392,7 @@ fn effect_of(
                     tint: [0.0; 4],
                     spread: Spread::Still,
                     offset: [0.0; 2],
+                    gain: [1.0, 0.0],
                 });
             }
             // Both passes walk out as far as the band reaches, and a
@@ -5413,6 +5425,7 @@ fn effect_of(
                     inside: 0.5 * layer_opacity.max(1e-3),
                 },
                 offset: [0.0; 2],
+                gain: [1.0, 0.0],
             })
         }
     }
@@ -6618,6 +6631,7 @@ mod tests {
                         blur: 1.5,
                         color: BLUE,
                         opacity: 0.8,
+                        spread: 0.0,
                     }],
                 },
             ),
@@ -6732,6 +6746,7 @@ mod tests {
             blur: 1.5,
             color: ink(0.0, 0.0, 0.0, 1.0),
             opacity: 0.8,
+            spread: 0.0,
         };
         let outline = E::Outline {
             width: 3.0,
@@ -6749,6 +6764,7 @@ mod tests {
                     blur: 1.0,
                     color: ink(0.0, 0.0, 0.1, 1.0),
                     opacity: 0.9,
+                    spread: 0.0,
                 }],
             ),
             ("both at once", vec![shadow.clone(), outline.clone()]),
@@ -6915,6 +6931,7 @@ mod tests {
             blur,
             color: ink(0.0, 0.0, 0.0, 1.0),
             opacity: 0.9,
+            spread: 0.0,
         };
         let outline = E::Outline {
             width: 3.0,
@@ -6927,6 +6944,7 @@ mod tests {
             blur: 1.0,
             color: ink(0.0, 0.0, 0.1, 1.0),
             opacity: 0.9,
+            spread: 0.0,
         };
         for (what, build) in [
             ("a group", &grouped as &dyn Fn(f32, Vec<E>) -> Document),
@@ -7066,6 +7084,7 @@ mod tests {
             blur,
             color: black.clone(),
             opacity: 1.0,
+            spread: 0.0,
         };
         let inner = E::InnerShadow {
             dx: 2.0,
@@ -7073,6 +7092,7 @@ mod tests {
             blur: 1.0,
             color: ink(0.0, 0.0, 0.1, 1.0),
             opacity: 0.9,
+            spread: 0.0,
         };
         let outline = E::Outline {
             width: 3.0,
@@ -7212,6 +7232,7 @@ mod tests {
             blur: 2.5,
             color: ink(0.0, 0.05, 0.15, 1.0),
             opacity: 0.75,
+            spread: 0.0,
         }]);
         assert!(GpuRenderer::can_render(&doc));
         let (mean, worst) = difference(
@@ -8598,6 +8619,7 @@ mod tests {
                 blur: 1.3,
                 color: BLUE,
                 opacity: 1.0,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -8644,6 +8666,7 @@ mod tests {
                 blur: 1.0,
                 color: RED,
                 opacity: 0.5,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -11183,6 +11206,101 @@ mod tests {
         );
     }
 
+    /// A spread gains a shadow's coverage once it has been read at its
+    /// offset, and a choke an inner shadow's — on the stamp itself, and
+    /// on the pass that settles the field first when the layer carries a
+    /// blend. A glow is the case to look at: a light shadow at no offset,
+    /// hardened, on a dark page.
+    #[test]
+    fn a_spread_shadow_is_hardened_the_way_the_cpu_hardens_it() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let page = |effects: Vec<E>, blend: BlendMode| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ink(0.1, 0.12, 0.2, 1.0),
+                ),
+                Transform::default(),
+            );
+            let id = add(
+                &mut doc,
+                filled(
+                    "shape",
+                    VectorShape::Rect {
+                        width: 20.0,
+                        height: 14.0,
+                        radius: 4.0,
+                    },
+                    ink(0.2, 0.35, 0.75, 1.0),
+                ),
+                Transform::translation(20.0, 13.0),
+            );
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+            doc
+        };
+        let glow = |dx: f32, spread: f32| E::DropShadow {
+            dx,
+            dy: dx / 2.0,
+            blur: 2.5,
+            color: ink(1.0, 0.9, 0.4, 1.0),
+            opacity: 0.9,
+            spread,
+        };
+        let choke = |spread: f32| E::InnerShadow {
+            dx: 0.0,
+            dy: 0.0,
+            blur: 2.0,
+            color: ink(0.0, 0.0, 0.05, 1.0),
+            opacity: 1.0,
+            spread,
+        };
+        for (name, effects, blend) in [
+            ("a glow", vec![glow(0.0, 0.8)], BlendMode::Normal),
+            // Off by a fraction of a pixel, so the gain is taken on a
+            // reading between pixels.
+            ("a hard shadow", vec![glow(2.3, 0.6)], BlendMode::Normal),
+            ("a choked inner shadow", vec![choke(0.7)], BlendMode::Normal),
+            (
+                "both, on a screened layer",
+                vec![glow(1.5, 0.9), choke(0.5)],
+                BlendMode::Screen,
+            ),
+        ] {
+            let doc = page(effects, blend);
+            assert!(GpuRenderer::can_render(&doc), "{name} is drawn here");
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.003,
+                "{name}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            // And it is hardened, not merely the same either way: the
+            // glow is brighter a few pixels out than an unhardened one.
+            let soft = page(vec![glow(0.0, 0.0)], blend);
+            let soft = gpu.render(&soft).unwrap();
+            if name == "a glow" {
+                let (h, s) = (drawn.get(30, 30).r, soft.get(30, 30).r);
+                assert!(
+                    h > s + 0.1,
+                    "hardened, the glow is brighter out at the rim: {h} vs {s}"
+                );
+            }
+        }
+    }
+
     /// Live effects: a shadow is the layer's own silhouette, tinted,
     /// blurred and stamped back down — which is why a shadow of a
     /// photograph is a shape rather than a picture of one.
@@ -11244,6 +11362,7 @@ mod tests {
             blur,
             color: ink(0.0, 0.0, 0.0, 1.0),
             opacity,
+            spread: 0.0,
         };
         let inner = |dx: f32, dy: f32, blur: f32| E::InnerShadow {
             dx,
@@ -11251,6 +11370,7 @@ mod tests {
             blur,
             color: ink(0.05, 0.0, 0.1, 1.0),
             opacity: 0.9,
+            spread: 0.0,
         };
 
         for (name, effects) in [
@@ -13577,6 +13697,7 @@ mod tests {
                                 blur: 1.0,
                                 color: BLUE,
                                 opacity: 0.8,
+                                spread: 0.0,
                             }],
                         })
                         .unwrap(),
@@ -15054,6 +15175,7 @@ mod tests {
                     blur: 1.5,
                     color: ink(0.95, 0.85, 0.0, 0.0),
                     opacity: 0.9,
+                    spread: 0.0,
                 }],
             })
             .unwrap();
@@ -15261,6 +15383,7 @@ mod tests {
                 blur: 1.0,
                 color: BLUE,
                 opacity: 0.9,
+                spread: 0.0,
             }],
         })
         .unwrap();
@@ -15459,6 +15582,7 @@ mod tests {
                         a: 1.0,
                     },
                     opacity: 0.85,
+                    spread: 0.0,
                 }],
             })
             .unwrap();
@@ -15605,6 +15729,7 @@ mod tests {
                             a: 1.0,
                         },
                         opacity: 1.0,
+                        spread: 0.0,
                     }],
                 })
                 .unwrap();
@@ -15869,6 +15994,7 @@ mod tests {
             blur: 2.0,
             color: ink(0.0, 0.0, 0.0),
             opacity: 1.0,
+            spread: 0.0,
         };
         let build = |effects: Vec<chitrakar_doc::Effect>,
                      dress: &dyn Fn(&mut Document, NodeId),
@@ -16005,6 +16131,7 @@ mod tests {
             blur: 1.5,
             color: ink(0.0, 0.0, 0.3),
             opacity: 0.8,
+            spread: 0.0,
         };
         type Dress<'a> = &'a dyn Fn(&mut Document, NodeId);
         let cases: Vec<(&str, Vec<chitrakar_doc::Effect>, Dress, bool, bool)> = vec![

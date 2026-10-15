@@ -629,6 +629,7 @@ const EFFECT_FIELDS: Record<
     ["dx", "X", -60, 60, 1],
     ["dy", "Y", -60, 60, 1],
     ["blur", "Blur", 0, 40, 0.5],
+    ["spread", "Spread", 0, 0.95, 0.01],
     ["opacity", "Strength", 0, 1, 0.01],
   ],
   Outline: [
@@ -639,14 +640,59 @@ const EFFECT_FIELDS: Record<
     ["dx", "X", -40, 40, 1],
     ["dy", "Y", -40, 40, 1],
     ["blur", "Blur", 0, 30, 0.5],
+    ["spread", "Choke", 0, 0.95, 0.01],
     ["opacity", "Strength", 0, 1, 0.01],
   ],
 };
 
+/** What the picker offers beyond the effects themselves: a glow is a
+ * shadow cast nowhere, in a light colour and hardened, so it is offered
+ * by name and made as the shadow it is. */
+const EFFECT_PRESETS: Record<string, string> = {
+  OuterGlow: "Outer glow",
+  InnerGlow: "Inner glow",
+};
+
+/** What the effect's row is headed: a shadow cast nowhere is a glow. */
+function effectTitle(effect: Effect): string {
+  const kind = effectKind(effect);
+  const body = effectBody(effect) as Record<string, number>;
+  if (kind !== "Outline" && body.dx === 0 && body.dy === 0) {
+    return kind === "DropShadow" ? "Outer glow" : "Inner glow";
+  }
+  return EFFECT_LABELS[kind];
+}
+
 /** A newly added effect, with defaults that read as the effect's name at
  * a glance rather than as nothing at all. */
-function newEffect(kind: EffectKind, color: AuthoredColor): Effect {
+function newEffect(
+  kind: EffectKind | keyof typeof EFFECT_PRESETS,
+  color: AuthoredColor,
+  light: AuthoredColor,
+): Effect {
   switch (kind) {
+    case "OuterGlow":
+      return {
+        DropShadow: {
+          dx: 0,
+          dy: 0,
+          blur: 8,
+          color: light,
+          opacity: 0.85,
+          spread: 0.3,
+        },
+      };
+    case "InnerGlow":
+      return {
+        InnerShadow: {
+          dx: 0,
+          dy: 0,
+          blur: 6,
+          color: light,
+          opacity: 0.75,
+          spread: 0.2,
+        },
+      };
     case "Outline":
       return { Outline: { width: 4, color, opacity: 1 } };
     case "InnerShadow":
@@ -10349,7 +10395,7 @@ export function App() {
                   return (
                     <div className="effect" key={`${kind}${at}`}>
                       <div className="row effect-head">
-                        <span>{EFFECT_LABELS[kind]}</span>
+                        <span>{effectTitle(effect)}</span>
                         <input
                           type="color"
                           value={colorToHex(
@@ -10430,14 +10476,11 @@ export function App() {
                       const kind = e.target.value as EffectKind;
                       if (!kind) return;
                       e.target.value = "";
+                      const ink = (hex: string) =>
+                        cmyk ? hexToCmykColor(hex) : hexColor(hex);
                       setEffects([
                         ...selectedEffects,
-                        newEffect(
-                          kind,
-                          cmyk
-                            ? hexToCmykColor("#000000")
-                            : hexColor("#000000"),
-                        ),
+                        newEffect(kind, ink("#000000"), ink("#ffe08a")),
                       ]);
                     }}
                     aria-label="Add effect"
@@ -10446,6 +10489,11 @@ export function App() {
                     {(Object.keys(EFFECT_LABELS) as EffectKind[]).map((k) => (
                       <option key={k} value={k}>
                         {EFFECT_LABELS[k]}
+                      </option>
+                    ))}
+                    {Object.entries(EFFECT_PRESETS).map(([k, name]) => (
+                      <option key={k} value={k}>
+                        {name}
                       </option>
                     ))}
                   </select>

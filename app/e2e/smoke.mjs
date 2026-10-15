@@ -2958,6 +2958,71 @@ assert(
     (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 0,
     "the layer carries no effects again",
   );
+
+  // A glow is a shadow cast nowhere, light and hardened: it lands on
+  // both sides of the shape alike, and its spread holds it solid further
+  // out without reaching any further. Inside, the same thing is an inner
+  // glow, lighting the shape's own edge.
+  await page.selectOption('select[aria-label="Add effect"]', "OuterGlow");
+  await page.waitForTimeout(300);
+  assert(
+    (await stackOrder()).join() === "Outer glow",
+    `the glow is listed as one (${await stackOrder()})`,
+  );
+  const right = await canvasPixel(504, 200);
+  const left = await canvasPixel(96, 200);
+  assert(
+    // Both sides, not exactly alike: the drag that drew the rect put
+    // its edges a fraction off the pixels these are counted from.
+    right[3] > 60 && left[3] > 60 && Math.abs(right[3] - left[3]) <= 40 && right[0] > 150,
+    `a light glow lands on both sides alike (${left} | ${right})`,
+  );
+  const spreadAt = async (v) => {
+    await setSlider("Drop shadow spread", v);
+    await page.waitForTimeout(250);
+    return (await canvasPixel(510, 200))[3];
+  };
+  const asMade = (await canvasPixel(510, 200))[3];
+  const hard = await spreadAt(0.9);
+  const soft = await spreadAt(0);
+  assert(
+    hard > asMade + 20 && soft < asMade - 5,
+    `spread holds the glow solid further out (${soft} < ${asMade} < ${hard})`,
+  );
+  assert(
+    (await canvasPixel(560, 200))[3] === 0 && (await spreadAt(0.95)) > 0 &&
+      (await canvasPixel(560, 200))[3] === 0,
+    "and reaches no further for it",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(510, 200))[3] === soft,
+    "each spread is one step back",
+  );
+  await page.selectOption('select[aria-label="Add effect"]', "InnerGlow");
+  await page.waitForTimeout(300);
+  const rim = await canvasPixel(497, 200);
+  const middle = await canvasPixel(300, 200);
+  assert(
+    (await stackOrder()).join() === "Outer glow,Inner glow" && rim[0] > middle[0] + 40,
+    `an inner glow lights the shape's own edge (${rim} against ${middle})`,
+  );
+  const unchoked = rim[0];
+  await setSlider("Inner shadow choke", 0.9);
+  await page.waitForTimeout(250);
+  assert(
+    (await canvasPixel(490, 200))[0] > middle[0] + 40 &&
+      (await canvasPixel(497, 200))[0] >= unchoked,
+    "choked, it lights further in",
+  );
+  await page.click('button[aria-label="Remove Inner shadow"]');
+  await page.click('button[aria-label="Remove Drop shadow"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('.panel ul li [title="This layer has effects"]').count()) === 0,
+    "and the glows come off as the shadows they are",
+  );
 }
 
 // 8x3. Dragging one member of a multi-selection carries the rest. Rects

@@ -1114,6 +1114,22 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
             );
         }
     };
+    // A shadow's spread, gained on the coverage once it has been moved
+    // to its offset — where the engine's stamp takes it. A reader holds a
+    // transfer's answer at one, which is the engine's hold at full. The
+    // name of what the flood is to be cut to comes back.
+    let gained = |into: &mut String, name: &str, hard: f32| {
+        let gain = chitrakar_doc::spread_gain(hard);
+        if gain > 1.0 {
+            let _ = write!(
+                into,
+                r#"<feComponentTransfer in="{name}o" result="{name}g"><feFuncA type="linear" slope="{gain}" intercept="0"/></feComponentTransfer>"#
+            );
+            format!("{name}g")
+        } else {
+            format!("{name}o")
+        }
+    };
     let mut body = String::new();
     let (mut under, mut over) = (Vec::new(), Vec::new());
     for (k, effect) in node.effects.iter().enumerate() {
@@ -1125,6 +1141,7 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                 blur,
                 color,
                 opacity,
+                spread: hard,
             } => {
                 if *opacity <= 0.0 {
                     continue;
@@ -1132,7 +1149,12 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                 blurred(&mut body, "SourceAlpha", *blur, &format!("{name}b"));
                 let _ = write!(
                     body,
-                    r#"<feOffset in="{name}b" dx="{dx}" dy="{dy}" result="{name}o"/><feFlood {}/><feComposite in2="{name}o" operator="in" result="{name}"/>"#,
+                    r#"<feOffset in="{name}b" dx="{dx}" dy="{dy}" result="{name}o"/>"#
+                );
+                let shape = gained(&mut body, &name, *hard);
+                let _ = write!(
+                    body,
+                    r#"<feFlood {}/><feComposite in2="{shape}" operator="in" result="{name}"/>"#,
                     tint(color, *opacity)
                 );
                 under.push(name);
@@ -1163,6 +1185,7 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                 blur,
                 color,
                 opacity,
+                spread: hard,
             } => {
                 if *opacity <= 0.0 {
                     continue;
@@ -1174,7 +1197,12 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                 blurred(&mut body, &format!("{name}h"), *blur, &format!("{name}b"));
                 let _ = write!(
                     body,
-                    r#"<feOffset in="{name}b" dx="{dx}" dy="{dy}" result="{name}o"/><feFlood {}/><feComposite in2="{name}o" operator="in" result="{name}s"/><feComposite in="{name}s" in2="SourceAlpha" operator="in" result="{name}"/>"#,
+                    r#"<feOffset in="{name}b" dx="{dx}" dy="{dy}" result="{name}o"/>"#
+                );
+                let shape = gained(&mut body, &name, *hard);
+                let _ = write!(
+                    body,
+                    r#"<feFlood {}/><feComposite in2="{shape}" operator="in" result="{name}s"/><feComposite in="{name}s" in2="SourceAlpha" operator="in" result="{name}"/>"#,
                     tint(color, *opacity)
                 );
                 over.push(name);

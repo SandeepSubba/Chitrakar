@@ -5347,6 +5347,7 @@ mod tests {
             blur: 2.0,
             color: RED,
             opacity: 0.8,
+            spread: 0.0,
         };
         let mut word =
             chitrakar_doc::Node::text("word", chitrakar_doc::TextSpec::new("Ab", 16.0, BLUE));
@@ -5368,6 +5369,7 @@ mod tests {
             blur: 2.0,
             color: RED,
             opacity: 0.9,
+            spread: 0.0,
         }];
         add(&mut doc, tile, [38.0, 4.0]);
         add(
@@ -5481,6 +5483,7 @@ mod tests {
             blur: 1.0,
             color: RED,
             opacity: 1.0,
+            spread: 0.0,
         }];
         add(&mut doc, base, [4.0, 4.0]);
         let mut wide = shape(
