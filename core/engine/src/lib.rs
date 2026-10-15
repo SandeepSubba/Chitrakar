@@ -205,6 +205,52 @@ impl Gesture {
     }
 }
 
+/// A colour `t` of the way from one to another: component by component
+/// where both are said the same way, sRGB with sRGB or ink with ink, and
+/// otherwise whichever of the two is nearer — two ways of saying a colour
+/// have no line between them that means anything.
+fn blended_color(
+    a: &chitrakar_color::AuthoredColor,
+    b: &chitrakar_color::AuthoredColor,
+    t: f32,
+) -> chitrakar_color::AuthoredColor {
+    use chitrakar_color::AuthoredColor as C;
+    let mix = |x: f32, y: f32| x + (y - x) * t;
+    match (a.flat(), b.flat()) {
+        (
+            C::Srgb { r, g, b, a },
+            C::Srgb {
+                r: r2,
+                g: g2,
+                b: b2,
+                a: a2,
+            },
+        ) => C::Srgb {
+            r: mix(*r, *r2),
+            g: mix(*g, *g2),
+            b: mix(*b, *b2),
+            a: mix(*a, *a2),
+        },
+        (
+            C::Cmyk { c, m, y, k, a },
+            C::Cmyk {
+                c: c2,
+                m: m2,
+                y: y2,
+                k: k2,
+                a: a2,
+            },
+        ) => C::Cmyk {
+            c: mix(*c, *c2),
+            m: mix(*m, *m2),
+            y: mix(*y, *y2),
+            k: mix(*k, *k2),
+            a: mix(*a, *a2),
+        },
+        (x, y) => (if t < 0.5 { x } else { y }).clone(),
+    }
+}
+
 /// The verb a boolean operation is described by in history and in the name
 /// the combined layer takes.
 fn label_for(op: chitrakar_render::boolean::BoolOp) -> &'static str {
@@ -1967,6 +2013,134 @@ impl Session {
             Some(format!("{} shapes", label_for(op))),
         )?;
         Ok(new_id)
+    }
+
+    /// The shapes between two: `steps` of them, each its share of the
+    /// way from one outline to the other and from one look to the other
+    /// — fill, line, fade — in a group laid just above the lower of the
+    /// two, stacked from it towards the upper. Illustrator's blend, made
+    /// once rather than kept live: the shapes in between are ordinary
+    /// paths, to be recoloured, deleted or pulled about like any other.
+    ///
+    /// The two keep their places and are not changed. Both have to be
+    /// shapes in the same group, since what lies between two layers in
+    /// different groups has no one place to go. A compound shape blends
+    /// by its outer outline. One step in the history; the answer is the
+    /// group.
+    pub fn blend_shapes(
+        &mut self,
+        a: NodeId,
+        b: NodeId,
+        steps: u32,
+    ) -> Result<NodeId, EngineError> {
+        if a == b {
+            return Err(EngineError::BadCommand("a blend needs two shapes".into()));
+        }
+        let parent = self
+            .doc
+            .parent_of(a)
+            .ok_or_else(|| EngineError::BadCommand("cannot blend the root".into()))?;
+        if self.doc.parent_of(b) != Some(parent) {
+            return Err(EngineError::BadCommand(
+                "the two shapes have to be in the same group".into(),
+            ));
+        }
+        let siblings = self.doc.children_of(parent)?.to_vec();
+        let at = |id: NodeId| siblings.iter().position(|s| *s == id).unwrap_or(0);
+        let (lower, upper) = if at(a) <= at(b) { (a, b) } else { (b, a) };
+        let outline = |id: NodeId| -> Result<(Node, Vec<[f32; 2]>), EngineError> {
+            let node = self.doc.node(id)?.clone();
+            let NodeKind::Vector { shape, .. } = &node.kind else {
+                return Err(EngineError::BadCommand("only shapes can be blended".into()));
+            };
+            let t = node.transform;
+            let ring = chitrakar_render::shape_rings(shape)
+                .into_iter()
+                .next()
+                .ok_or_else(|| EngineError::BadCommand("this shape has no outline".into()))?;
+            let ring = ring
+                .into_iter()
+                .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                .collect();
+            Ok((node, ring))
+        };
+        let (from, ring_a) = outline(lower)?;
+        let (to, ring_b) = outline(upper)?;
+        let (pa, pb) = chitrakar_render::morph::matched(&ring_a, &ring_b).ok_or_else(|| {
+            EngineError::BadCommand("one of these has no outline to blend".into())
+        })?;
+        let steps = steps.clamp(1, 100);
+        let group_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index: at(lower) + 1,
+            node: Box::new(Node::group(&format!("Blend {} to {}", from.name, to.name))),
+        }];
+        let (
+            NodeKind::Vector {
+                fill: fill_a,
+                stroke: stroke_a,
+                ..
+            },
+            NodeKind::Vector {
+                fill: fill_b,
+                stroke: stroke_b,
+                ..
+            },
+        ) = (&from.kind, &to.kind)
+        else {
+            unreachable!("both are shapes, checked above")
+        };
+        for k in 1..=steps {
+            let t = k as f32 / (steps + 1) as f32;
+            let ring = chitrakar_render::morph::between(&pa, &pb, t);
+            let (anchors, handles) = chitrakar_render::fit::fit_curves(&ring, true, 0.25);
+            let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+            for p in &anchors {
+                x0 = x0.min(p[0]);
+                y0 = y0.min(p[1]);
+            }
+            let fill = match (fill_a, fill_b) {
+                (Some(x), Some(y)) => Some(blended_color(x, y, t)),
+                (x, y) => (if t < 0.5 { x } else { y }).clone(),
+            };
+            let stroke = match (stroke_a, stroke_b) {
+                (Some(x), Some(y)) => {
+                    let mut s = if t < 0.5 { x.clone() } else { y.clone() };
+                    s.color = blended_color(&x.color, &y.color, t);
+                    s.width = x.width + (y.width - x.width) * t;
+                    s.widths.clear();
+                    Some(s)
+                }
+                (x, y) => (if t < 0.5 { x } else { y }).clone(),
+            };
+            let mut n = Node::vector(
+                &format!("{} {k}", from.name),
+                chitrakar_doc::VectorShape::Path {
+                    points: anchors.iter().map(|p| [p[0] - x0, p[1] - y0]).collect(),
+                    closed: true,
+                    smooth: false,
+                    handles,
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector {
+                fill: f, stroke: s, ..
+            } = &mut n.kind
+            {
+                *f = fill;
+                *s = stroke;
+            }
+            n.opacity = from.opacity + (to.opacity - from.opacity) * t;
+            n.transform = Transform::translation(x0, y0);
+            cmds.push(Command::AddNode {
+                parent: group_id,
+                index: (k - 1) as usize,
+                node: Box::new(n),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some("Blend the shapes".into()))?;
+        Ok(group_id)
     }
 
     /// Give one layer its own adjustment or filter: wrap the layer and the
@@ -7812,6 +7986,107 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// A blend lays the shapes between two: a small red square and a
+    /// large blue one become squares growing from one to the other and
+    /// purpling on the way, in a group between the two, as one step.
+    #[test]
+    fn a_blend_lays_the_shapes_between_two() {
+        let mut session = Session::new(120, 40, ColorMode::Rgb);
+        let root = session.document().root();
+        let square = |name: &str, side: f32, x: f32, r: f32, b: f32| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: side,
+                    height: side,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, stroke, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r,
+                    g: 0.0,
+                    b,
+                    a: 1.0,
+                });
+                *stroke = None;
+            }
+            n.transform = Transform::translation(x, 0.0);
+            n
+        };
+        for (i, n) in [
+            square("small", 10.0, 0.0, 1.0, 0.0),
+            square("large", 30.0, 80.0, 0.0, 1.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(n),
+                })
+                .unwrap();
+        }
+        let ids = session.document().children_of(root).unwrap().to_vec();
+        let before = session.history_labels().0.len();
+        // Asked for from the upper one: the blend still runs from the
+        // lower one up.
+        let group = session.blend_shapes(ids[1], ids[0], 3).unwrap();
+        assert_eq!(session.history_labels().0.len(), before + 1, "one step");
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[ids[0], group, ids[1]],
+            "between the two"
+        );
+        let steps = session.document().children_of(group).unwrap().to_vec();
+        assert_eq!(steps.len(), 3);
+        // Halfway: a square of twenty, halfway along, halfway purple.
+        let [x0, y0, w, h] = session.bounds_of(steps[1]).unwrap();
+        assert!(
+            (x0 - 40.0).abs() < 0.5
+                && y0.abs() < 0.5
+                && (w - 20.0).abs() < 0.5
+                && (h - 20.0).abs() < 0.5,
+            "a square of twenty at (40, 0): {:?}",
+            [x0, y0, w, h]
+        );
+        let NodeKind::Vector { fill: Some(f), .. } =
+            &session.document().node(steps[1]).unwrap().kind
+        else {
+            panic!("a filled shape")
+        };
+        assert_eq!(
+            *f,
+            chitrakar_color::AuthoredColor::Srgb {
+                r: 0.5,
+                g: 0.0,
+                b: 0.5,
+                a: 1.0
+            }
+        );
+        // Growing from the small one to the large one, in order.
+        let width = |id: NodeId| session.bounds_of(id).unwrap()[2];
+        assert!(width(steps[0]) < width(steps[1]) && width(steps[1]) < width(steps[2]));
+        let page = session.render().unwrap();
+        let mid = page.get(50, 10).to_srgb8();
+        assert!(
+            mid[0] > 100 && mid[2] > 100 && mid[3] == 255,
+            "purple drawn halfway: {mid:?}"
+        );
+        session.undo().unwrap();
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &ids[..],
+            "undone, gone"
+        );
+        assert!(
+            session.blend_shapes(ids[0], ids[0], 3).is_err(),
+            "one shape is no blend"
+        );
     }
 
     /// A traced picture draws the picture again — and its preview shows

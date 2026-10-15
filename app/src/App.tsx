@@ -5249,6 +5249,28 @@ export function App() {
     }
   };
 
+  /** The shapes between the two picked ones, as many as asked, in a
+   * group between them; the group is picked after it. */
+  const blendSelection = () => {
+    if (!session) return;
+    if (selectionSet.length !== 2) {
+      alert("Blend: pick exactly two shapes");
+      return;
+    }
+    const answer = window.prompt("How many shapes between the two?", "5");
+    if (answer === null) return;
+    const steps = Math.round(Number(answer));
+    if (!Number.isFinite(steps) || steps < 1) return;
+    try {
+      const id = session.blend_shapes(selectionSet[0], selectionSet[1], Math.min(steps, 100));
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Blend: ${err}`);
+    }
+  };
+
   /** Turn the picked shape's stroke into a shape of its own — the line
    * filled in its colour, which can then be given a gradient, combined
    * or reshaped. One step in the history; the layer that took its place
@@ -7565,6 +7587,7 @@ export function App() {
             item(`combine-${op}`, icon, label, () => combineSelection(op)),
           ),
         ),
+        item("blend-shapes", "shapes", "Blend between the two…", blendSelection),
         item("outline-stroke", "line", "Outline the stroke", outlineStroke),
         item("offset-path", "shapes", "Offset path…", offsetPath),
         item("simplify-path", "node", "Simplify path…", simplifyPath),

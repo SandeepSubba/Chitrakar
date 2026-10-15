@@ -657,6 +657,15 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// `steps` shapes between two, in a group just above the lower; the
+    /// group's id.
+    pub fn blend_shapes(&mut self, a: f64, b: f64, steps: u32) -> Result<f64, JsError> {
+        self.inner
+            .blend_shapes(NodeId(a as u64), NodeId(b as u64), steps)
+            .map(|n| n.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Turn a shape's stroke into a shape of its own; the id of the
     /// layer that took its place (a group of fill and outline when the
     /// shape had a fill).

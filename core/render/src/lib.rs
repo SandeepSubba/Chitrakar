@@ -19,6 +19,7 @@ pub mod blur;
 pub mod boolean;
 pub mod fit;
 pub mod median;
+pub mod morph;
 pub mod text;
 pub mod tiles;
 pub mod trace;

@@ -7493,6 +7493,53 @@ assert(
   );
 }
 
+// 9o23. Blend between two shapes: a red square on the left and a blue
+// one on the right, picked together, fill the space between them with
+// squares turning purple on the way across — in a group between the two,
+// one undo away.
+{
+  await newDocument(300, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 120) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await paint("#dd2020", 20, 40, 60, 80);
+  await paint("#2020dd", 230, 30, 290, 90);
+  await pickTool("Move");
+  assert((await canvasPixel(150, 60))[3] === 0, "nothing between them yet");
+  await page.locator(".panel ul li").first().click();
+  await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
+  await page.waitForTimeout(200);
+  promptAnswer = "3";
+  await menuClick("Layer", "Blend between the two…");
+  await page.waitForTimeout(400);
+  const middle = await canvasPixel(150, 60);
+  assert(
+    middle[3] === 255 && middle[0] > 80 && middle[2] > 80 && middle[1] < 60,
+    `a purple square halfway across (${middle})`,
+  );
+  const nearRed = await canvasPixel(97, 60);
+  assert(
+    nearRed[3] === 255 && nearRed[0] > nearRed[2],
+    `redder nearer the red one (${nearRed})`,
+  );
+  assert(
+    await page.locator(".panel ul li", { hasText: "Blend" }).first().isVisible(),
+    "the blend is a group of its own",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(150, 60))[3] === 0, "one undo takes it away");
+}
+
 // 9o9. Trim to the artwork: on a white ground, the page comes in to the
 // shape drawn on it, and one undo gives the page back its size.
 {

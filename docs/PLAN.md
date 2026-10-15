@@ -1990,6 +1990,34 @@ without reading anything else.*
     second paragraph in the engine's row, and dropping the top from the
     baseline fails it. `a_block_from_before_paragraph_spacing_opens_without_it`.
     Smoke 8v2: the two-paragraph block grows downwards only.
+- **Blend between two shapes ✅** (`Session::blend_shapes`, Layer ›
+  *Blend between the two…*). With two shapes picked in the same group,
+  the space between them fills with *n* in-between shapes. Each is its
+  share of the way from one outline to the other, and from one look to
+  the other: fill, stroke colour and width, fade. They go in a group
+  just above the lower of the two, stacked towards the upper, as one
+  step. Unlike Illustrator's blend, which stays live, the in-betweens
+  are ordinary paths. The two originals are untouched.
+  - **Geometry** (`core/render/src/morph.rs`): both outlines are walked
+    at equal steps of their own length into 128 points and matched,
+    wound the same way and the second turned to start where it lines up
+    best with the first. That is judged about each one's own middle, so
+    where the two stand on the page does not twist the blend. Each
+    in-between is fitted with curves (`fit_curves`, 0.25 px).
+  - **Colour:** a colour blends component by component when both are
+    said the same way (sRGB with sRGB, ink with ink). Otherwise it is
+    whichever end is nearer, since two ways of saying a colour have no
+    line between them. A compound shape blends by its outer outline.
+  - **Tests:** `halfway_between_two_squares_is_the_square_between_them`
+    (a square starting at another corner and wound the other way still
+    gives the square between, every point on its edge); skipping the
+    winding or the turn each fails it.
+    `a_blend_lays_the_shapes_between_two` (engine): placed between the
+    two even when asked from the upper; the middle is a square of twenty
+    halfway along and exactly half purple; the steps grow in order; one
+    undo. A colour that does not blend, or the order taken as asked,
+    each fail it. Smoke 9o23: red to blue across a page, purple in the
+    middle, redder near the red, gone in one undo.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
