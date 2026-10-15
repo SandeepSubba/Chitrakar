@@ -1128,6 +1128,12 @@ pub enum TextAlign {
     Left,
     Center,
     Right,
+    /// Set flush to both edges of the block's width: what a line falls
+    /// short by is shared out after its spaces. Only a wrapping block has
+    /// edges to set to, and the last line of each paragraph — which ends
+    /// where the writer ended it, not where the width did — is set to the
+    /// left, as is any line with no space to widen.
+    Justify,
 }
 
 /// A live text object: the string and styling are the document state,

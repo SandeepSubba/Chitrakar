@@ -2442,6 +2442,53 @@ assert(
     folded[0] < single[0] * 0.6 && folded[1] > single[1] * 1.8,
     `a wrap width folded one line into several (${single} -> ${folded})`,
   );
+  // Justified, every folded line but the last is spread to the block's
+  // right edge, so row by row the ink reaches further right on average;
+  // set back to the left, it is where it was.
+  const meanRight = () =>
+    page.evaluate(() => {
+      const el = document.getElementById("engine-canvas");
+      const s = Number(el.dataset.frameScale) || 1;
+      const ox = Number(el.dataset.originX) || 0;
+      const oy = Number(el.dataset.originY) || 0;
+      const [a, b] = [Math.round(ox + 700 * s), Math.round(oy + 540 * s)];
+      const [w, h] = [
+        Math.min(el.width - a, Math.round(580 * s)),
+        Math.min(el.height - b, Math.round(180 * s)),
+      ];
+      const img = el.getContext("2d").getImageData(a, b, w, h).data;
+      let sum = 0;
+      let rows = 0;
+      for (let y = 0; y < h; y++) {
+        for (let x = w - 1; x >= 0; x--) {
+          if (img[(y * w + x) * 4 + 3] > 0) {
+            sum += x / s;
+            rows++;
+            break;
+          }
+        }
+      }
+      return rows === 0 ? null : sum / rows;
+    });
+  const raggedRight = await meanRight();
+  await page.click('button[aria-label="Justify text"]');
+  await page.waitForTimeout(300);
+  const flushRight = await meanRight();
+  assert(
+    flushRight > raggedRight + 4,
+    `justified, the folded lines reach further right (${raggedRight} -> ${flushRight})`,
+  );
+  const justified = await outline();
+  assert(
+    Math.abs(justified[0] - folded[0]) < 1 && Math.abs(justified[1] - folded[1]) < 1,
+    `and the block is the size it was (${folded} -> ${justified})`,
+  );
+  await page.click('button[aria-label="Align text left"]');
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await meanRight()) - raggedRight) < 0.5,
+    "set to the left again, the lines are ragged again",
+  );
   await setSlider("Wrap width", 0);
   await page.waitForTimeout(300);
   const unfolded = await outline();

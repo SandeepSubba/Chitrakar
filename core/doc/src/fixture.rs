@@ -2232,6 +2232,13 @@ impl Rng {
                 };
                 if self.chance(3) {
                     spec.width = self.between(14.0, 40.0);
+                    // Half the wrapped blocks are justified, out of a
+                    // stream of their own so every page from before is
+                    // the page it was.
+                    let mut side = Rng((self.0 ^ 0xa54f_f53a_5f1d_36f1) | 1);
+                    if side.chance(2) {
+                        spec.align = crate::TextAlign::Justify;
+                    }
                 }
                 if self.chance(3) {
                     spec.letter_spacing = self.between(-0.05, 0.2);

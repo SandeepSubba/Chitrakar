@@ -73,6 +73,7 @@ export type IconName =
   | "alignLeft"
   | "alignCenterH"
   | "alignRight"
+  | "textJustify"
   | "alignTop"
   | "alignMiddleV"
   | "alignBottom"
@@ -589,6 +590,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M20 4v16" />
       <rect x="5" y="6.5" width="12" height="4" rx="1" />
       <rect x="10" y="13.5" width="7" height="4" rx="1" />
+    </>
+  ),
+  // Justified text: full lines meeting both rules, the last left short.
+  textJustify: (
+    <>
+      <path d="M4 4v16M20 4v16" />
+      <path d="M7 7.5h10M7 12h10M7 16.5h5" />
     </>
   ),
   alignTop: (

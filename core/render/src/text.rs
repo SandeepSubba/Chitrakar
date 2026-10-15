@@ -472,15 +472,74 @@ fn shape_piece(
 }
 
 /// Where a line's start sits, given the block's alignment and the room a
-/// lean takes: the x its first glyph's origin lands on.
+/// lean takes: the x its first glyph's origin lands on. A justified line
+/// starts at the left edge and is widened to the right one instead.
 fn line_start(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
     let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
     l.room.0
         + match spec.align {
-            chitrakar_doc::TextAlign::Left => 0.0,
+            chitrakar_doc::TextAlign::Left | chitrakar_doc::TextAlign::Justify => 0.0,
             chitrakar_doc::TextAlign::Center => slack / 2.0,
             chitrakar_doc::TextAlign::Right => slack,
         }
+}
+
+/// What a justified line puts after each of its spaces, in raster
+/// pixels: the line's slack shared out among them. Nothing for any other
+/// alignment, for a block with no width to fill, for the last line of a
+/// paragraph, and for a line with no space in it.
+///
+/// Every space on the line takes a share, an indent's too — which is
+/// what SVG's `word-spacing` says, so the exporter can say it that way
+/// and a reader lays the same line.
+fn word_gap(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
+    if spec.align != chitrakar_doc::TextAlign::Justify || spec.width <= 0.0 {
+        return 0.0;
+    }
+    let (line, at) = &l.lines[line_no];
+    let end = at + line.len();
+    if end >= spec.text.len() || spec.text.as_bytes()[end] == b'\n' {
+        return 0.0;
+    }
+    let spaces = line.bytes().filter(|b| *b == b' ').count();
+    if spaces == 0 {
+        return 0.0;
+    }
+    let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
+    (slack / spaces as f32).max(0.0)
+}
+
+/// One line of a laid-out block, shaped and placed: its glyphs, where it
+/// starts, and how wide it is set — which, justified, is wider than it
+/// shaped to by the gap after each space. Everything that draws a line
+/// or measures along one reads it from here, so the glyphs, the bands
+/// under them and what an exporter places are the same line.
+fn set_line(spec: &TextSpec, l: &Layout, line_no: usize, scale: f32) -> (Vec<Shaped>, f32, f32) {
+    let (line, at) = &l.lines[line_no];
+    let (mut glyphs, _) = shape_line(line, *at, spec, scale);
+    let start = line_start(spec, l, line_no);
+    let gap = word_gap(spec, l, line_no);
+    let mut width = l.widths[line_no];
+    if gap > 0.0 {
+        let bytes = line.as_bytes();
+        // How many spaces stand before each byte of the line.
+        let mut before = Vec::with_capacity(bytes.len() + 1);
+        let mut n = 0usize;
+        for b in bytes {
+            before.push(n);
+            n += usize::from(*b == b' ');
+        }
+        before.push(n);
+        for g in &mut glyphs {
+            let c = g.cluster.min(bytes.len());
+            g.x += gap * before[c] as f32;
+            if bytes.get(c) == Some(&b' ') {
+                g.advance += gap;
+            }
+        }
+        width += gap * n as f32;
+    }
+    (glyphs, start, width)
 }
 
 /// The bands an underline and a strike-through paint, `[x0, y0, x1, y1]`
@@ -506,17 +565,16 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], O
     let thickness = (em * 0.05).max(scale);
     let step = line_step(&font, spec);
     let mut bands = Vec::new();
-    for (line_no, (line, at)) in l.lines.iter().enumerate() {
-        let width = l.widths[line_no];
-        if width <= 0.0 {
+    for line_no in 0..l.lines.len() {
+        if l.widths[line_no] <= 0.0 {
             continue;
         }
         let baseline = line_no as f32 * step + font.ascent();
-        let left = line_start(spec, l, line_no);
+        let (glyphs, left, width) = set_line(spec, l, line_no, scale);
         // A line with no runs on it is one stretch, the whole of it: the
         // width the layout already measured, rather than one summed back
         // up out of advances.
-        for (x0, x1, run) in stretches(spec, line, *at, left, width, scale) {
+        for (x0, x1, run) in stretches(spec, &glyphs, left, width) {
             let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
             if styling.underline {
                 let y0 = baseline + em * 0.1;
@@ -536,18 +594,15 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], O
 /// one stretch as wide as the layout measured it.
 fn stretches(
     spec: &TextSpec,
-    line: &str,
-    at: usize,
+    glyphs: &[Shaped],
     left: f32,
     width: f32,
-    scale: f32,
 ) -> Vec<(f32, f32, Option<usize>)> {
     if spec.runs.is_empty() {
         return vec![(left, left + width, None)];
     }
-    let (glyphs, _) = shape_line(line, at, spec, scale);
     let mut out: Vec<(f32, f32, Option<usize>)> = Vec::new();
-    for g in &glyphs {
+    for g in glyphs {
         let (x0, x1) = (left + g.x, left + g.x + g.advance);
         match out.last_mut() {
             Some(last) if last.2 == g.run => last.1 = last.1.max(x1),
@@ -978,10 +1033,9 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
             );
         }
     } else {
-        for (line_no, (line, at)) in l.lines.iter().enumerate() {
+        for (line_no, (line, _)) in l.lines.iter().enumerate() {
             let baseline = line_no as f32 * step + font.ascent();
-            let (shaped, _) = shape_line(line, *at, spec, 1.0);
-            let start = line_start(spec, &l, line_no);
+            let (shaped, start, _) = set_line(spec, &l, line_no, 1.0);
             let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
             for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
                 push(
@@ -1116,6 +1170,9 @@ pub struct SetLine {
     pub at: usize,
     /// The width the line shaped to.
     pub width: f32,
+    /// What a justified line puts after each of its spaces — SVG's
+    /// `word-spacing` — and nothing on any other line.
+    pub gap: f32,
 }
 
 pub struct SetBlock {
@@ -1137,11 +1194,13 @@ pub fn set(spec: &TextSpec) -> SetBlock {
     SetBlock {
         inner: l.width - l.room.0 - l.room.1,
         inset: l.room.0,
-        lines: l
-            .lines
-            .into_iter()
-            .zip(l.widths)
-            .map(|((text, at), width)| SetLine { text, at, width })
+        lines: (0..l.lines.len())
+            .map(|k| SetLine {
+                text: l.lines[k].0.clone(),
+                at: l.lines[k].1,
+                width: l.widths[k],
+                gap: word_gap(spec, &l, k),
+            })
             .collect(),
         width: l.width,
         height: l.height,
@@ -1426,12 +1485,12 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         }
     };
 
-    for (line_no, (line, at)) in l.lines.iter().enumerate() {
+    for line_no in 0..l.lines.len() {
         let baseline = line_no as f32 * step + font.ascent() + phase[1];
-        let (glyphs, _) = shape_line(line, *at, spec, scale);
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
-        let start = line_start(spec, &l, line_no) + phase[0];
+        let (glyphs, start, _) = set_line(spec, &l, line_no, scale);
+        let start = start + phase[0];
         for g in glyphs {
             let cut = cuts.cut(g.run);
             let face = cut.fonts.font.as_scaled(spec.size.max(0.1) * scale);
@@ -1618,6 +1677,82 @@ mod tests {
         // The block is the same size whichever way it is aligned.
         left.align = chitrakar_doc::TextAlign::Right;
         assert_eq!(measure(&left).0, block);
+    }
+
+    #[test]
+    fn a_justified_line_reaches_both_edges_and_a_paragraphs_last_does_not() {
+        // Each line's ink, as the first and last column inked in its band
+        // of rows.
+        let ink = |s: &TextSpec| -> Vec<Option<(u32, u32)>> {
+            let r = rasterize(s);
+            let block = set(s);
+            (0..block.lines.len())
+                .map(|k| {
+                    let (y0, y1) = (k as f32 * block.step, (k + 1) as f32 * block.step);
+                    let rows = (y0.ceil() as u32)..(y1.floor() as u32).min(r.height);
+                    let inked = |x: u32| rows.clone().any(|y| r.sample(x, y) > 0.3);
+                    let first = (0..r.width).find(|&x| inked(x))?;
+                    let last = (0..r.width).rev().find(|&x| inked(x))?;
+                    Some((first, last))
+                })
+                .collect()
+        };
+        let text = "The quick brown fox jumps over the lazy dog\nend of it\nUnbreakable stuff";
+        let mut s = spec(text, 20.0);
+        s.width = 150.0;
+        let aligned = |align| {
+            let mut t = s.clone();
+            t.align = align;
+            t
+        };
+        let (left, right, justified) = (
+            ink(&aligned(chitrakar_doc::TextAlign::Left)),
+            ink(&aligned(chitrakar_doc::TextAlign::Right)),
+            ink(&aligned(chitrakar_doc::TextAlign::Justify)),
+        );
+        let lines = set(&s).lines;
+        assert!(lines.len() >= 5, "the paragraph wraps: {}", lines.len());
+        let mut spread = 0;
+        for (k, line) in lines.iter().enumerate() {
+            let end = line.at + line.text.len();
+            let last = end >= text.len() || text.as_bytes()[end] == b'\n';
+            let (j, l, r) = (justified[k].unwrap(), left[k].unwrap(), right[k].unwrap());
+            if last || !line.text.contains(' ') {
+                assert_eq!(j, l, "line {k} ({:?}) is set to the left", line.text);
+            } else {
+                assert!(
+                    j.0.abs_diff(l.0) <= 1 && j.1.abs_diff(r.1) <= 1,
+                    "line {k} ({:?}) reaches both edges: {j:?}, left {l:?}, right {r:?}",
+                    line.text
+                );
+                spread += 1;
+            }
+        }
+        assert!(spread >= 2, "some lines were spread: {spread}");
+        assert_eq!(
+            measure(&aligned(chitrakar_doc::TextAlign::Justify)),
+            measure(&s),
+            "the block is the size it was"
+        );
+        // Under it, the band runs edge to edge as the letters do.
+        let mut ruled = aligned(chitrakar_doc::TextAlign::Justify);
+        ruled.underline = true;
+        let bands = placed(&ruled).decorations;
+        let edge = set(&ruled).inset + set(&ruled).inner;
+        assert!(
+            (bands[0].0[2] - edge).abs() < 0.5,
+            "the first line's underline reaches the right edge: {:?} against {edge}",
+            bands[0].0
+        );
+        // With no width there are no edges, and justified is left.
+        let mut free = spec("two words\nand three more", 20.0);
+        let plain = rasterize(&free).coverage;
+        free.align = chitrakar_doc::TextAlign::Justify;
+        assert_eq!(
+            rasterize(&free).coverage,
+            plain,
+            "no width, nothing to justify to"
+        );
     }
 
     #[test]

@@ -301,7 +301,9 @@ export function effectBody(e: Effect): Record<string, number | AuthoredColor> {
   return Object.values(e)[0];
 }
 
-export type TextAlign = "Left" | "Center" | "Right";
+/** Justify sets every line but a paragraph's last flush to both edges of
+ * a wrapping block's width; without a width it is Left. */
+export type TextAlign = "Left" | "Center" | "Right" | "Justify";
 
 /** A stretch of a block set differently from the rest: the same choices
  * the block itself makes, made again over a range of its text, with

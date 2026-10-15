@@ -9545,7 +9545,9 @@ export function App() {
                         ? "center"
                         : spec.align === "Right"
                           ? "right"
-                          : "left",
+                          : spec.align === "Justify" && spec.width > 0
+                            ? "justify"
+                            : "left",
                     whiteSpace: spec.width > 0 ? "pre-wrap" : "pre",
                     fontStyle: spec.italic ? "italic" : "normal",
                     fontWeight: spec.bold ? "bold" : "normal",
@@ -13181,6 +13183,7 @@ function KindProps({
               ["Left", "alignLeft", "Align text left"],
               ["Center", "alignCenterH", "Centre text"],
               ["Right", "alignRight", "Align text right"],
+              ["Justify", "textJustify", "Justify text"],
             ] as const
           ).map(([mode, icon, title]) => (
             <button

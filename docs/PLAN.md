@@ -1834,6 +1834,45 @@ without reading anything else.*
     hardened (dropping the spread on import fails it); smoke 8x2 (a glow
     on both sides alike, spread solid further out and no further, one
     undo a step, an inner glow lighting the edge, choked further in).
+- **Justified text ✅** (`TextAlign::Justify`). A wrapping block can be
+  set flush to both edges of its width. Each line's slack is shared out
+  after its spaces (`text::word_gap`). The last line of each paragraph,
+  any line without a space, and any block with no width are set to the
+  left, which is what a reader expects of justified type.
+  - **One place:** every space on the line takes a share, an indent's
+    too, because that is exactly SVG's `word-spacing`. `text::set_line`
+    is now the one place a line is shaped and placed. The rasterizer,
+    `placed` (so the PDF's glyph-by-glyph text) and the underline and
+    strike bands all read it, so the letters, the bands under them and
+    what an exporter writes are the same line. `stretches` takes the
+    glyphs instead of shaping the line again.
+  - **SVG:** each spread line says `word-spacing` on its pieces, with
+    the start at the left edge (`SetLine::gap`). The importer brings
+    text in as outlines, so the round trip needs nothing of its own.
+  - **In the panel:** a fourth alignment button, *Justify text*, and
+    the canvas's typing box justifies when the block wraps.
+  - **Fixture:** half the random pages' wrapped blocks are justified
+    (their own stream).
+  - **Tests:** `a_justified_line_reaches_both_edges_and_a_paragraphs_last_does_not`
+    checks each line's ink against the same block set Left and set
+    Right. It also checks the block's size, an underline reaching the
+    right edge, and no change without a width; zeroing the gap fails
+    it, and so does leaving the band's width unspread.
+    `a_justified_block_leaves_as_the_engine_sets_it` has resvg ending
+    every line in the engine's column; dropping `word-spacing` or
+    halving it fails it. Smoke 8v2: justified, the folded lines reach
+    further right, the block keeps its size, and setting it Left puts
+    them back.
+  - **The reader audit's allowance went from six pixels a page to
+    ten.** Page 578's block is now justified, so it is set to the left,
+    and it is twelve-pixel type turned 13°. The engine draws it as a
+    resampled raster and resvg as outlines, and nine pixels along the
+    foot of the letters come out 0.55 against 0.05. That is an edge half
+    a pixel apart, which the audit allows for, and set to the right the
+    same block has four. The audit itself does not see a halved gap,
+    because the fixture's strings give few lines with a space to spread,
+    so `a_justified_block_leaves_as_the_engine_sets_it` is what holds
+    justification in SVG.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
