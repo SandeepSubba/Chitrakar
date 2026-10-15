@@ -497,8 +497,7 @@ fn word_gap(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
         return 0.0;
     }
     let (line, at) = &l.lines[line_no];
-    let end = at + line.len();
-    if end >= spec.text.len() || spec.text.as_bytes()[end] == b'\n' {
+    if ends_paragraph(spec, line, *at) {
         return 0.0;
     }
     let spaces = line.bytes().filter(|b| *b == b' ').count();
@@ -507,6 +506,13 @@ fn word_gap(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
     }
     let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
     (slack / spaces as f32).max(0.0)
+}
+
+/// Whether a line is the last of its paragraph: the writer ended it, with
+/// a newline or with the end of the text, rather than the width.
+fn ends_paragraph(spec: &TextSpec, line: &str, at: usize) -> bool {
+    let end = at + line.len();
+    end >= spec.text.len() || spec.text.as_bytes()[end] == b'\n'
 }
 
 /// One line of a laid-out block, shaped and placed: its glyphs, where it
@@ -563,13 +569,12 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], O
     let font = fonts.font.as_scaled(px);
     let em = px * fonts.font.units_per_em().unwrap_or(1000.0) / fonts.font.height_unscaled();
     let thickness = (em * 0.05).max(scale);
-    let step = line_step(&font, spec);
     let mut bands = Vec::new();
     for line_no in 0..l.lines.len() {
         if l.widths[line_no] <= 0.0 {
             continue;
         }
-        let baseline = line_no as f32 * step + font.ascent();
+        let baseline = l.tops[line_no] + font.ascent();
         let (glyphs, left, width) = set_line(spec, l, line_no, scale);
         // A line with no runs on it is one stretch, the whole of it: the
         // width the layout already measured, rather than one summed back
@@ -1008,7 +1013,6 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
     let l = layout(spec, 1.0);
     let px = spec.size.max(0.1);
     let font = fonts_for(spec).font.as_scaled(px);
-    let step = line_step(&font, spec);
     // Glyphs are gathered per run and handed over in the order the runs
     // are drawn, so an exporter switches face and colour once a stretch
     // rather than once a letter.
@@ -1034,7 +1038,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
         }
     } else {
         for (line_no, (line, _)) in l.lines.iter().enumerate() {
-            let baseline = line_no as f32 * step + font.ascent();
+            let baseline = l.tops[line_no] + font.ascent();
             let (shaped, start, _) = set_line(spec, &l, line_no, 1.0);
             let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
             for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
@@ -1173,6 +1177,9 @@ pub struct SetLine {
     /// What a justified line puts after each of its spaces — SVG's
     /// `word-spacing` — and nothing on any other line.
     pub gap: f32,
+    /// Where the line's top sits below the block's: its line steps and
+    /// the paragraph spacing before it.
+    pub top: f32,
 }
 
 pub struct SetBlock {
@@ -1200,6 +1207,7 @@ pub fn set(spec: &TextSpec) -> SetBlock {
                 at: l.lines[k].1,
                 width: l.widths[k],
                 gap: word_gap(spec, &l, k),
+                top: l.tops[k],
             })
             .collect(),
         width: l.width,
@@ -1233,6 +1241,10 @@ struct Layout {
     /// block's own text — which is what says who styles it.
     lines: Vec<(String, usize)>,
     widths: Vec<f32>,
+    /// Where each line's top sits, in raster pixels: a line step after
+    /// the one before, and a paragraph's spacing more after the last line
+    /// of a paragraph.
+    tops: Vec<f32>,
     width: f32,
     height: f32,
     /// Room a synthesized lean takes inside `width`, left and right of
@@ -1259,8 +1271,19 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
         widest
     };
     let room = lean_room(spec, &font);
+    let gap = spec.paragraph_gap() * spec.size.max(0.1) * scale;
+    let mut tops = Vec::with_capacity(lines.len());
+    let mut y = 0f32;
+    for (line, at) in &lines {
+        tops.push(y);
+        y += step;
+        if gap > 0.0 && ends_paragraph(spec, line, *at) && at + line.len() < spec.text.len() {
+            y += gap;
+        }
+    }
     Layout {
-        height: (lines.len().max(1) as f32 * step).max(1.0),
+        height: tops.last().map_or(step, |t| t + step).max(1.0),
+        tops,
         lines,
         widths,
         width: (width + room.0 + room.1).max(1.0),
@@ -1467,7 +1490,6 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     // Every metric below comes from the scaled font, so advances, kerning
     // and line height are all in raster pixels already.
     let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
-    let step = line_step(&font, spec);
     let cuts = Palette::of(spec, scale);
     let mut tint = vec![0u8; if cuts.many() { coverage.len() } else { 0 }];
     // Lay ink down and remember whose it is: where two pieces overlap —
@@ -1486,7 +1508,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     };
 
     for line_no in 0..l.lines.len() {
-        let baseline = line_no as f32 * step + font.ascent() + phase[1];
+        let baseline = l.tops[line_no] + font.ascent() + phase[1];
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
         let (glyphs, start, _) = set_line(spec, &l, line_no, scale);
@@ -1753,6 +1775,88 @@ mod tests {
             plain,
             "no width, nothing to justify to"
         );
+    }
+
+    #[test]
+    fn paragraph_spacing_opens_a_gap_after_each_paragraph_and_nowhere_else() {
+        // Two paragraphs, the first wrapping.
+        let mut s = spec("one two three four\nword", 20.0);
+        s.width = 80.0;
+        let plain = set(&s);
+        let n = plain.lines.len();
+        assert!(
+            n >= 3 && plain.lines[n - 1].text == "word",
+            "a paragraph wrapped, then one of its own"
+        );
+        s.paragraph_spacing = 0.5;
+        let spaced = set(&s);
+        let gap = 0.5 * 20.0;
+        for k in 0..n - 1 {
+            assert!(
+                (spaced.lines[k].top - plain.lines[k].top).abs() < 1e-4,
+                "a wrapped line moves nothing: line {k}"
+            );
+        }
+        assert!(
+            (spaced.lines[n - 1].top - plain.lines[n - 1].top - gap).abs() < 1e-4,
+            "after the paragraph, half the size: {} -> {}",
+            plain.lines[n - 1].top,
+            spaced.lines[n - 1].top
+        );
+        assert!(
+            (spaced.height - plain.height - gap).abs() < 1e-3,
+            "and the block is that much taller, with nothing after its last line"
+        );
+        // Every glyph of the second paragraph goes down with it, the
+        // first paragraph's stay.
+        let ys = |s: &TextSpec| -> Vec<f32> {
+            placed(s)
+                .runs
+                .iter()
+                .flat_map(|r| r.glyphs.iter().map(|g| g.y))
+                .collect()
+        };
+        let (before, after) = (
+            ys(&{
+                let mut p = s.clone();
+                p.paragraph_spacing = 0.0;
+                p
+            }),
+            ys(&s),
+        );
+        let moved = before
+            .iter()
+            .zip(&after)
+            .filter(|(b, a)| (*a - *b - gap).abs() < 1e-3)
+            .count();
+        let stayed = before
+            .iter()
+            .zip(&after)
+            .filter(|(b, a)| (*a - *b).abs() < 1e-3)
+            .count();
+        assert_eq!(
+            moved,
+            "word".len(),
+            "the second paragraph's letters move down"
+        );
+        assert_eq!(stayed + moved, before.len(), "and nothing else moves");
+        // The ink moves with them.
+        assert!(
+            rasterize(&s).height as f32
+                >= rasterize(&{
+                    let mut p = s.clone();
+                    p.paragraph_spacing = 0.0;
+                    p
+                })
+                .height as f32
+                    + gap
+                    - 1.0
+        );
+        // Nonsense is no spacing.
+        s.paragraph_spacing = f32::NAN;
+        assert_eq!(set(&s).height, plain.height);
+        s.paragraph_spacing = -3.0;
+        assert_eq!(set(&s).height, plain.height);
     }
 
     #[test]

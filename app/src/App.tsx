@@ -3165,6 +3165,7 @@ export function App() {
                 align: "Left",
                 line_height: 1,
                 letter_spacing: 0,
+                paragraph_spacing: 0,
                 width: 0,
                 font: "",
                 italic: false,
@@ -13383,6 +13384,16 @@ function KindProps({
           0.01,
           (v) => ({
             Text: { ...t, letter_spacing: v },
+          }),
+        )}
+        {slider(
+          "Paragraph spacing",
+          t.paragraph_spacing ?? 0,
+          0,
+          3,
+          0.05,
+          (v) => ({
+            Text: { ...t, paragraph_spacing: v },
           }),
         )}
         {/* A row of its own rather than one label around both controls:

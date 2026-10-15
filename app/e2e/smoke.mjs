@@ -2420,6 +2420,17 @@ assert(
   );
   await setSlider("Line height", 1);
   await page.waitForTimeout(250);
+  // Space after a paragraph: the block is two of them, so it grows down
+  // by the space once, and not at all sideways.
+  await setSlider("Paragraph spacing", 1);
+  await page.waitForTimeout(250);
+  const paragraphs = await outline();
+  assert(
+    paragraphs[1] > plain[1] * 1.3 && paragraphs[1] < spaced[1] && Math.abs(paragraphs[0] - plain[0]) < 2,
+    `paragraph spacing grew the block downwards only (${plain} -> ${paragraphs})`,
+  );
+  await setSlider("Paragraph spacing", 0);
+  await page.waitForTimeout(250);
 
   await setSlider("Letter spacing", 0.3);
   await page.waitForTimeout(250);

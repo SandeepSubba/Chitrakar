@@ -1965,6 +1965,31 @@ without reading anything else.*
     it. Smoke 9o22 drives the window: the preview at the picture's size
     with the disc in red, a new picture when the colour count changes,
     Escape laying nothing, *Trace* laying the group.
+- **Paragraph spacing ✅** (`TextSpec::paragraph_spacing`,
+  `#[serde(default)]`). The space after each paragraph: after every line
+  the writer ended with a newline, never one the width wrapped, and
+  never after the last. It is in ems of the size, as tracking is, held
+  to 0..10 and nothing for what is not a number
+  (`TextSpec::paragraph_gap`). The panel has a **Paragraph spacing**
+  slider.
+  - **One place:** the layout keeps each line's top (`Layout::tops`,
+    `SetLine::top`). The rasterizer, `placed` (so the PDF), the
+    underline and strike bands and the SVG exporter's baselines all read
+    it, so the letters, their rules and every exporter move together.
+    The block's height is the last top plus a step.
+  - **Known:** the box you type into on the canvas is a transparent
+    textarea, and CSS has no paragraph spacing. On a spaced block the
+    caret on a later paragraph sits as far above its letters as the
+    spacing before it, until typing ends and the engine sets the block.
+  - **Tests:** `paragraph_spacing_opens_a_gap_after_each_paragraph_and_nowhere_else`
+    (wrapped lines stay, the next paragraph and only its letters move
+    by the gap, the block is that much taller and the ink with it,
+    nonsense is no spacing); a gap after every line, or `placed` reading
+    the old step, each fail it.
+    `paragraph_spacing_leaves_as_the_engine_sets_it`: resvg starts the
+    second paragraph in the engine's row, and dropping the top from the
+    baseline fails it. `a_block_from_before_paragraph_spacing_opens_without_it`.
+    Smoke 8v2: the two-paragraph block grows downwards only.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

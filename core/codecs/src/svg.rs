@@ -951,8 +951,8 @@ fn write_node(
                     write_bands(doc, &bands, &pad, out);
                     let _ = writeln!(out, "{pad}</g>");
                 } else {
-                    for (i, set) in block.lines.iter().enumerate() {
-                        let y = block.ascent + i as f32 * block.step;
+                    for set in &block.lines {
+                        let y = block.ascent + set.top;
                         let x = block.inset + (block.inner - set.width) * slack;
                         // A line no style run touches is one tspan, as it
                         // always was. One a run crosses is cut where the
@@ -4156,6 +4156,41 @@ mod tests {
                 line.text
             );
         }
+    }
+
+    /// The space after a paragraph leaves as where the next line's
+    /// baseline is, and a reader starts the second paragraph's ink in
+    /// the row the engine does.
+    #[test]
+    fn paragraph_spacing_leaves_as_the_engine_sets_it() {
+        let mut doc = Document::new(120, 120, ColorMode::Rgb);
+        let root = doc.root();
+        let mut spec = chitrakar_doc::TextSpec::new("Top\nLow", 20.0, RED);
+        spec.paragraph_spacing = 1.2;
+        let mut node = Node::text("t", spec.clone());
+        node.transform = chitrakar_doc::Transform::translation(10.0, 5.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let w = doc.meta.width as usize;
+        let set = chitrakar_render::text::set(&spec);
+        // The first inked row below the first line's band.
+        let below = (5.0 + set.lines[0].top + set.step).ceil() as usize;
+        let first = |a: &dyn Fn(usize) -> f32| {
+            (below..doc.meta.height as usize)
+                .find(|&y| (0..w).any(|x| a(y * w + x) > 0.5))
+                .unwrap_or(0)
+        };
+        let (e, r) = (first(&|i| ours.pixels[i].a), first(&|i| theirs[i]));
+        assert!(
+            e > below + 20 && e.abs_diff(r) <= 1,
+            "the second paragraph starts at row {e} on the page and {r} in a reader"
+        );
     }
 
     /// What a reader that is not us covers, pixel by pixel, when it

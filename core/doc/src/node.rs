@@ -1166,6 +1166,12 @@ pub struct TextSpec {
     /// normally quoted — so it scales with the size rather than fighting it.
     #[serde(default)]
     pub letter_spacing: f32,
+    /// Space after each paragraph — after every line the writer ended
+    /// with a newline, not every line the width wrapped — in ems as
+    /// tracking is, so it scales with the size. Nought, the default, is
+    /// every block written before there was a choice.
+    #[serde(default)]
+    pub paragraph_spacing: f32,
     /// Wrap width in document pixels. Zero is a block that fits its own
     /// text; anything else wraps words to that width and is that wide, so
     /// alignment inside it holds still while the text changes. A word
@@ -1277,6 +1283,7 @@ impl TextSpec {
             align: TextAlign::default(),
             line_height: 1.0,
             letter_spacing: 0.0,
+            paragraph_spacing: 0.0,
             width: 0.0,
             font: String::new(),
             italic: false,
@@ -1293,6 +1300,17 @@ impl TextSpec {
     /// multiple that would collapse every line onto one.
     pub fn line_scale(&self) -> f32 {
         self.line_height.max(0.05)
+    }
+
+    /// The space after a paragraph actually used, as a multiple of the
+    /// size: none below nothing, at most ten, and none for what is not a
+    /// number.
+    pub fn paragraph_gap(&self) -> f32 {
+        if self.paragraph_spacing.is_finite() {
+            self.paragraph_spacing.clamp(0.0, 10.0)
+        } else {
+            0.0
+        }
     }
 
     /// The block's text as a sequence of pieces, each with the index of
@@ -2232,6 +2250,16 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// A block written before paragraph spacing opens without it.
+    #[test]
+    fn a_block_from_before_paragraph_spacing_opens_without_it() {
+        let old =
+            r#"{"text":"a\nb","size":12.0,"fill":{"Srgb":{"r":0.0,"g":0.0,"b":0.0,"a":1.0}}}"#;
+        let spec: super::TextSpec = serde_json::from_str(old).unwrap();
+        assert_eq!(spec.paragraph_spacing, 0.0);
+        assert_eq!(spec.paragraph_gap(), 0.0);
+    }
+
     /// A shadow written before there was a spread opens soft, and the
     /// gain a spread asks for is one at none, held at twenty, and one
     /// for anything that is not a number.

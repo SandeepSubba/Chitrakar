@@ -335,6 +335,9 @@ export interface TextSpec {
   line_height: number;
   /** Tracking, in ems, so it follows the size. */
   letter_spacing: number;
+  /** Space after each paragraph (after a newline, not a wrap), in ems of
+   * the size. Absent in what older code built. */
+  paragraph_spacing?: number;
   /** Wrap width in document pixels; zero fits the text instead. */
   width: number;
   /** The face's registered name; empty is the bundled DejaVu Sans. */
