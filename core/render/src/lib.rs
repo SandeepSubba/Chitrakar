@@ -6022,6 +6022,10 @@ enum GradientGeom {
         /// (`chitrakar_doc::focal_offset`).
         focal: [f32; 2],
     },
+    Conic {
+        center: [f32; 2],
+        angle: f32,
+    },
 }
 
 impl Paint {
@@ -6058,6 +6062,10 @@ impl Paint {
                 radius: *radius,
                 axes: axes.unwrap_or([1.0, 0.0, 0.0, 1.0]),
                 focal: chitrakar_doc::focal_offset(*center, *radius, *axes, *focus),
+            },
+            Gradient::Conic { center, angle, .. } => GradientGeom::Conic {
+                center: *center,
+                angle: *angle,
             },
         };
         Some(Paint::Gradient {
@@ -6127,11 +6135,39 @@ impl Paint {
                     }
                 }
             }
+            GradientGeom::Conic { center, angle } => {
+                chitrakar_doc::conic_turn(*center, *angle, u, v)
+            }
         };
         // Past the ends, what the gradient's spread says: the end colour
         // on, the ramp back again, or the ramp from its start.
         ramp(stops, spread.place(t))
     }
+}
+
+/// A gradient laid over a box of `w` by `h` pixels, as eight-bit sRGB
+/// with straight alpha, row by row — the picture of it an exporter with
+/// no word for the gradient (a conic one, which neither SVG nor PDF has)
+/// fills a shape with. Each pixel is the gradient at its centre, read as
+/// a shape filling the box reads it.
+pub fn gradient_rgba8(doc: &Document, g: &Gradient, w: u32, h: u32) -> Vec<u8> {
+    let (w, h) = (w.max(1), h.max(1));
+    let shape = VectorShape::Rect {
+        width: w as f32,
+        height: h as f32,
+        radius: 0.0,
+    };
+    let mut out = Vec::with_capacity((w * h * 4) as usize);
+    let Some(paint) = Paint::from_gradient(doc, g, &shape, 1.0) else {
+        out.resize((w * h * 4) as usize, 0);
+        return out;
+    };
+    for y in 0..h {
+        for x in 0..w {
+            out.extend_from_slice(&paint.at(x as f32 + 0.5, y as f32 + 0.5).to_srgb8());
+        }
+    }
+    out
 }
 
 /// Colour at `t` along a sorted ramp, clamped past either end.

@@ -2177,20 +2177,33 @@ impl Rng {
                             axes: None,
                         });
                     } else if self.chance(4) {
-                        *gradient = Some(Gradient::Linear {
-                            from: [0.0, 0.0],
-                            to: [1.0, 1.0],
-                            stops: vec![
-                                GradientStop {
-                                    offset: 0.0,
-                                    color: self.color(1.0),
-                                },
-                                GradientStop {
-                                    offset: 1.0,
-                                    color: self.color(1.0),
-                                },
-                            ],
-                            spread: Default::default(),
+                        let stops = vec![
+                            GradientStop {
+                                offset: 0.0,
+                                color: self.color(1.0),
+                            },
+                            GradientStop {
+                                offset: 1.0,
+                                color: self.color(1.0),
+                            },
+                        ];
+                        // A third of them round a centre instead of along
+                        // a line, from a stream of their own so every page
+                        // with a line on it is the page it was.
+                        let mut side = Rng((self.0 ^ 0xbb67_ae85_84ca_a73b) | 1);
+                        *gradient = Some(if side.upto(3) == 0 {
+                            Gradient::Conic {
+                                center: [side.between(0.2, 0.8), side.between(0.2, 0.8)],
+                                angle: side.between(0.0, 360.0),
+                                stops,
+                            }
+                        } else {
+                            Gradient::Linear {
+                                from: [0.0, 0.0],
+                                to: [1.0, 1.0],
+                                stops,
+                                spread: Default::default(),
+                            }
                         });
                     }
                 }

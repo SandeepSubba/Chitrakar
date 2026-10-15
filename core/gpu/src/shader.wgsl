@@ -435,8 +435,19 @@ fn fs_text(in: CoverOut) -> @location(0) vec4f {
 // the projection onto the line from `from` to `to`, or the distance from
 // the centre in units of the radius, clamped past either end — the same
 // arithmetic the CPU renderer does per pixel.
-fn ramp_at(uv: vec2f, geom: vec4f, radial: bool, spread: f32, focal_y: f32) -> f32 {
-    if radial {
+fn ramp_at(uv: vec2f, geom: vec4f, kind: f32, spread: f32, focal_y: f32) -> f32 {
+    // Conic: once round the centre in `geom.xy` from the angle in
+    // `geom.z`, clockwise on the page — `chitrakar_doc::conic_turn`, the
+    // centre itself at the start.
+    if kind > 1.5 {
+        let d = uv - geom.xy;
+        if d.x == 0.0 && d.y == 0.0 {
+            return 0.0;
+        }
+        let t = (degrees(atan2(d.y, d.x)) - geom.z) / 360.0;
+        return t - floor(t);
+    }
+    if kind > 0.5 {
         // A ring of no size is the last colour throughout.
         if geom.z < 1e-6 {
             return 1.0;
@@ -505,7 +516,7 @@ fn ramp_color(t: f32) -> vec4f {
 fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
     let cov = coverage(in);
     let uv = in.local / max(in.params.xy, vec2f(1e-6, 1e-6));
-    return ramp_color(ramp_at(uv, in.grad, in.color.r > 0.5, in.color.g, in.color.b))
+    return ramp_color(ramp_at(uv, in.grad, in.color.r, in.color.g, in.color.b))
         * in.color.a
         * cov
         * mask_cover(in.page, in.mask);
@@ -517,7 +528,7 @@ fn fs_shape_gradient(in: VsOut) -> @location(0) vec4f {
 // across the quad however the layer is transformed.
 @fragment
 fn fs_cover_gradient(in: CoverOut) -> @location(0) vec4f {
-    return ramp_color(ramp_at(in.uv, in.grad, in.color.r > 0.5, in.color.g, in.color.b))
+    return ramp_color(ramp_at(in.uv, in.grad, in.color.r, in.color.g, in.color.b))
         * in.color.a
         * mask_cover(in.page, in.mask);
 }

@@ -1747,6 +1747,44 @@ without reading anything else.*
     path); `a_polygon_draws_what_its_path_draws` (pixel-identical filled
     and stroked, tips filled and notches bare); smoke 9j9 (depth to nothing
     fills a notch, eight corners reach past the pentagon, one undo each).
+- **Angular gradients ✅** (`Gradient::Conic { center, angle, stops }`).
+  A ramp that goes round a point instead of along a line or out from
+  one: the colour wheels, dials, and cone highlights that a linear or
+  radial ramp can only fake. `chitrakar_doc::conic_turn` is the one
+  reading of it. The turn starts at `angle` degrees, clockwise on the
+  page (0 points right, 270 straight up), and wraps once. At the centre
+  it is 0. It is never NaN, whatever the angle holds. There is no
+  spread, because it never runs past its ends.
+  - **Drawn** by the CPU through `GradientGeom::Conic`, and on the GPU
+    as ramp kind 2 in `ramp_at` (geom `[cx, cy, angle, 0]`), for shapes
+    and stencilled paths alike.
+  - **PDF** has no angular shading, so a conic-filled layer goes as
+    pixels (`is_live` says no). **SVG** has none either: it goes as a
+    512² picture of the ramp (`gradient_rgba8`) inside a pattern in the
+    shape's box units, so it is still clipped to the shape and still
+    follows it.
+  - **In the panel** it is *Angular gradient* in the fill type, with a
+    **Gradient start** slider. On the canvas there is a centre knob and
+    an angle knob, the angle knob at 0.3 out. Each drag is one undo.
+  - **Fixture:** a third of the linear ramps on the random pages are
+    angular now (their own RNG stream, so nothing else moved).
+  - **Importer fix, found on the way:** a picture tiling a shape in its
+    box's units came back as a unit square. usvg leaves box-unit pattern
+    contents in a group whose transform their children are not told
+    about. The `Image` arm now takes that group's transform, as paths
+    already did. It is `a_picture_tiling_a_shape_in_its_boxs_units_comes_in`.
+  - **Open:** seed 156 puts a conic-filled path inside a Color-blended,
+    outlined frame. It comes back from SVG as a picture in a pattern,
+    and the frame's outline effect differs along it. `portable()` turns
+    conic ramps linear before the round-trip audits, as it does for
+    other things SVG brings back as something else.
+  - **Tests:** `a_conic_gradient_turns_clockwise_from_its_angle`;
+    `an_angular_gradient_goes_as_a_picture_inside_its_shape` (swapping
+    the picture's axes fails it); `an_angular_gradient_turns_the_way_the_cpu_turns_it`
+    on the GPU (a rect and a turned path; turning the other way or from
+    the wrong side of the start fails it); smoke 2b (the ends meet
+    straight up, the slider moves the seam, the knob puts it back, one
+    undo).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

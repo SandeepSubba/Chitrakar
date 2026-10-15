@@ -375,7 +375,20 @@ export type Gradient =
          * a highlight off to one side. Left out or null, the centre. */
         focus?: [number, number] | null;
       };
+    }
+  | {
+      /** Once round `center` from `angle` degrees (clockwise on the
+       * page from pointing right), in the box's units. */
+      Conic: {
+        center: [number, number];
+        angle: number;
+        stops: GradientStop[];
+      };
     };
+
+/** A gradient's stops, whichever kind it is. */
+export const gradientStops = (g: Gradient): GradientStop[] =>
+  "Linear" in g ? g.Linear.stops : "Radial" in g ? g.Radial.stops : g.Conic.stops;
 
 /** What a layer does when the frame around it is given a new size. */
 export type Pin = "Start" | "End" | "Middle" | "Stretch";

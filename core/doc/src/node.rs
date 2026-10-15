@@ -169,6 +169,38 @@ pub enum Gradient {
         #[serde(default)]
         focus: Option<[f32; 2]>,
     },
+    /// Ramp once round `center`, starting at `angle` degrees and running
+    /// clockwise on the page — an angular gradient, a colour wheel, the
+    /// sheen on a dial. In the box's units like the other two, so on a
+    /// box that is not square the turn is measured in the box rather
+    /// than on the page. A full turn has no end to spread past, so a
+    /// conic one pads; the seam where the last colour meets the first is
+    /// the line out from the centre at `angle`.
+    Conic {
+        center: [f32; 2],
+        #[serde(default)]
+        angle: f32,
+        stops: Vec<GradientStop>,
+    },
+}
+
+/// Where round a conic gradient a point of its box lies, `0..1` from
+/// `angle` (degrees, clockwise on the page from pointing right) — the
+/// renderers' one reading of it. A point on the centre is at the start,
+/// and an angle that is no number is nought.
+pub fn conic_turn(center: [f32; 2], angle: f32, u: f32, v: f32) -> f32 {
+    let (dx, dy) = (u - center[0], v - center[1]);
+    if dx == 0.0 && dy == 0.0 {
+        return 0.0;
+    }
+    let start = if angle.is_finite() { angle } else { 0.0 };
+    let a = dy.atan2(dx).to_degrees() - start;
+    let t = (a / 360.0).rem_euclid(1.0);
+    if t.is_finite() {
+        t
+    } else {
+        0.0
+    }
 }
 
 /// How far in from the outer ring a focus is held, as a share of it: on
@@ -277,18 +309,23 @@ impl Gradient {
     pub fn spread(&self) -> Spread {
         match self {
             Gradient::Linear { spread, .. } | Gradient::Radial { spread, .. } => *spread,
+            Gradient::Conic { .. } => Spread::Pad,
         }
     }
 
     pub fn stops(&self) -> &[GradientStop] {
         match self {
-            Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,
+            Gradient::Linear { stops, .. }
+            | Gradient::Radial { stops, .. }
+            | Gradient::Conic { stops, .. } => stops,
         }
     }
 
     pub fn stops_mut(&mut self) -> &mut [GradientStop] {
         match self {
-            Gradient::Linear { stops, .. } | Gradient::Radial { stops, .. } => stops,
+            Gradient::Linear { stops, .. }
+            | Gradient::Radial { stops, .. }
+            | Gradient::Conic { stops, .. } => stops,
         }
     }
 }
@@ -2147,6 +2184,40 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// Round a conic gradient's centre clockwise on the page from its
+    /// angle: right is the start, below a quarter, left a half, above
+    /// three quarters; the start moves with the angle; and the centre
+    /// itself, and an angle that is no number, read as the start.
+    #[test]
+    fn a_conic_gradient_turns_clockwise_from_its_angle() {
+        let c = [0.5, 0.5];
+        let at = |angle: f32, u: f32, v: f32| conic_turn(c, angle, u, v);
+        for (u, v, want) in [
+            (0.9, 0.5, 0.0),
+            (0.5, 0.9, 0.25),
+            (0.1, 0.5, 0.5),
+            (0.5, 0.1, 0.75),
+        ] {
+            assert!(
+                (at(0.0, u, v) - want).abs() < 1e-5,
+                "{u},{v}: {}",
+                at(0.0, u, v)
+            );
+        }
+        // Starting from the top, the top is the start and the right a
+        // quarter round.
+        assert!(at(270.0, 0.5, 0.1).abs() < 1e-5 || (at(270.0, 0.5, 0.1) - 1.0).abs() < 1e-5);
+        assert!((at(270.0, 0.9, 0.5) - 0.25).abs() < 1e-5);
+        assert_eq!(at(0.0, 0.5, 0.5), 0.0, "the centre");
+        assert!(
+            (at(f32::NAN, 0.5, 0.9) - 0.25).abs() < 1e-5,
+            "no number is nought"
+        );
+        // Every reading is on the ramp, just short of the seam included.
+        let just = at(0.0, 0.9, 0.4999);
+        assert!((0.0..1.0).contains(&just) && just > 0.99, "{just}");
+    }
+
     /// A polygon's corners: as many as asked, the first straight up,
     /// round the ellipse of its box; a star's every other one pulled in;
     /// and numbers that are no numbers held to what can be drawn.

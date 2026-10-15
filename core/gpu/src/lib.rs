@@ -4374,10 +4374,9 @@ fn vector(
         // flat fill stays covered up.
         Some(g) if g.stops().is_empty() => None,
         Some(g) => {
-            let (ramp, geom, radial) = bake(doc, g);
+            let (ramp, geom, kind) = bake(doc, g);
             let at = out.textures.len();
             out.textures.push(ramp);
-            let kind = if radial { 1.0 } else { 0.0 };
             // What it does past its ends rides beside which kind it is
             // (`spread_at`).
             let spread = match g.spread() {
@@ -4722,12 +4721,12 @@ const RAMP: u32 = 512;
 
 /// A gradient as the shader wants it: its ramp baked into a row of
 /// premultiplied linear texels, its geometry in the shape's normalized
-/// box, and whether that geometry is a radial one.
+/// box, and which kind it is: nought linear, one radial, two conic.
 ///
 /// A stop authored for a press resolves through the document's profile,
 /// the same colour at a time the CPU renderer resolves it. The caller has
 /// already ruled out a gradient with no stops.
-fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) {
+fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], f32) {
     let mut stops = Vec::with_capacity(g.stops().len());
     for stop in g.stops() {
         stops.push((
@@ -4746,10 +4745,19 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) 
             f32_to_f16(c.a),
         ]);
     }
-    let (geom, radial) = match g {
-        chitrakar_doc::Gradient::Linear { from, to, .. } => {
-            ([from[0], from[1], to[0], to[1]], false)
-        }
+    let (geom, kind) = match g {
+        chitrakar_doc::Gradient::Linear { from, to, .. } => ([from[0], from[1], to[0], to[1]], 0.0),
+        // Round its centre from its angle, which rides where a radius
+        // would (`ramp_at`).
+        chitrakar_doc::Gradient::Conic { center, angle, .. } => (
+            [
+                center[0],
+                center[1],
+                if angle.is_finite() { *angle } else { 0.0 },
+                0.0,
+            ],
+            2.0,
+        ),
         // The centre goes through the radial's own axes with the box's
         // coordinates (`fill_path`), so the shader measures from it there.
         chitrakar_doc::Gradient::Radial {
@@ -4767,7 +4775,7 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) 
                 ],
                 None => *center,
             };
-            ([c[0], c[1], *radius, f[0]], true)
+            ([c[0], c[1], *radius, f[0]], 1.0)
         }
     };
     (
@@ -4778,7 +4786,7 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], bool) 
             texels,
         },
         geom,
-        radial,
+        kind,
     )
 }
 
@@ -7746,6 +7754,88 @@ mod tests {
             *gradient = Some(g);
         }
         Box::new(node)
+    }
+
+    /// An angular gradient is a turn round a centre, read the CPU's way
+    /// (`chitrakar_doc::conic_turn`) — on a rectangle, where the shape
+    /// pass paints it, and on a turned path, where the stencil says where
+    /// and the cover quad says what colour. The seam is a jump from the
+    /// last colour to the first, which an edge pixel can land either side
+    /// of, so what is held is the average and points clear of it.
+    #[test]
+    fn an_angular_gradient_turns_the_way_the_cpu_turns_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(120, 80, ColorMode::Rgb);
+        add(
+            &mut doc,
+            gradient_filled(
+                "rect",
+                VectorShape::Rect {
+                    width: 44.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                chitrakar_doc::Gradient::Conic {
+                    center: [0.4, 0.55],
+                    angle: 30.0,
+                    stops: ramp(&[(0.0, RED), (0.4, BLUE), (1.0, WHITE)]),
+                },
+            ),
+            Transform::translation(8.0, 8.0),
+        );
+        add(
+            &mut doc,
+            gradient_filled(
+                "path",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [44.0, 6.0], [38.0, 30.0], [6.0, 24.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+                chitrakar_doc::Gradient::Conic {
+                    center: [0.5, 0.5],
+                    angle: 200.0,
+                    stops: ramp(&[(0.0, WHITE), (0.5, RED), (1.0, BLUE)]),
+                },
+            ),
+            Transform {
+                a: 0.9,
+                b: 0.3,
+                c: -0.3,
+                d: 0.9,
+                e: 70.0,
+                f: 30.0,
+            },
+        );
+        assert!(GpuRenderer::can_render(&doc));
+        let drawn = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&drawn, &reference);
+        assert!(
+            mean < 0.004,
+            "mean channel difference {mean:.5} (worst {worst:.3})"
+        );
+        // Round each centre, clear of each seam: the colour is the
+        // reference's at every one.
+        for (x, y) in [
+            (36, 14),
+            (16, 30),
+            (40, 34),
+            (24, 18),
+            (90, 46),
+            (78, 56),
+            (96, 60),
+        ] {
+            let (g, c) = (drawn.get(x, y), reference.get(x, y));
+            assert!(
+                (g.r - c.r).abs() < 0.02 && (g.g - c.g).abs() < 0.02 && (g.b - c.b).abs() < 0.02,
+                "at ({x}, {y}): {g:?} vs {c:?}"
+            );
+        }
     }
 
     /// A gradient is a ramp baked into a row of texels here and a flat

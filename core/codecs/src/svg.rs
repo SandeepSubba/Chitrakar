@@ -1606,7 +1606,24 @@ fn marker_path(marker: chitrakar_doc::Marker, at_start: bool) -> Option<String> 
 }
 
 fn write_gradient_def(doc: &Document, g: &Gradient, name: &str, defs: &mut String) {
+    // SVG has no conic gradient. In the box's own units a conic one is
+    // the same picture stretched to any box, so the shape keeps its
+    // outline and is filled by a pattern of that one picture, laid over
+    // its bounding box.
+    if let Gradient::Conic { .. } = g {
+        const SIDE: u32 = 512;
+        let rgba = chitrakar_render::gradient_rgba8(doc, g, SIDE, SIDE);
+        if let Ok(png) = crate::encode_png(SIDE, SIDE, &rgba) {
+            let _ = writeln!(
+                defs,
+                r#"    <pattern id="{name}" patternContentUnits="objectBoundingBox" width="1" height="1"><image width="1" height="1" preserveAspectRatio="none" href="data:image/png;base64,{}"/></pattern>"#,
+                base64(&png)
+            );
+        }
+        return;
+    }
     let (open, close) = match g {
+        Gradient::Conic { .. } => unreachable!("written as a pattern above"),
         Gradient::Linear { from, to, .. } => (
             format!(
                 r#"    <linearGradient id="{name}" x1="{}" y1="{}" x2="{}" y2="{}">"#,
@@ -3997,6 +4014,59 @@ mod tests {
                 "the word sits in {ours_ink:?} here and {theirs:?} there"
             );
         }
+    }
+
+    /// SVG has no angular gradient, so a shape filled with one keeps its
+    /// outline and is filled by a pattern holding one picture of the
+    /// gradient over its box — which, in the box's own units, is the same
+    /// picture stretched to any box. A reader paints the inside as the
+    /// engine does, a turn's worth round, the outline stays a shape and
+    /// nothing is painted past it.
+    #[test]
+    fn an_angular_gradient_goes_as_a_picture_inside_its_shape() {
+        let mut doc = Document::new(80, 60, chitrakar_color::ColorMode::Rgb);
+        let mut node =
+            chitrakar_doc::Node::vector("dial", VectorShape::Ellipse { rx: 30.0, ry: 20.0 });
+        let stop = |offset: f32, r: f32, g: f32, b: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb { r, g, b, a: 1.0 },
+        };
+        if let NodeKind::Vector { gradient, .. } = &mut node.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Conic {
+                center: [0.5, 0.5],
+                angle: 0.0,
+                stops: vec![stop(0.0, 0.9, 0.1, 0.1), stop(1.0, 0.1, 0.2, 0.9)],
+            });
+        }
+        node.transform = chitrakar_doc::Transform::translation(10.0, 10.0);
+        let root = doc.root();
+        doc.apply(chitrakar_doc::Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains("<pattern") && svg.contains("<ellipse"),
+            "{svg}"
+        );
+        let theirs = resvg_pixels(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let w = 80usize;
+        // Just past the seam (right of the centre, a little below), half
+        // way round (left), and just before the seam (a little above).
+        for (x, y) in [(60usize, 42usize), (20, 40), (60, 37), (40, 52), (40, 18)] {
+            let o = ours.get(x as u32, y as u32).to_srgb8();
+            let t = &theirs[(y * w + x) * 4..(y * w + x) * 4 + 4];
+            for c in 0..4 {
+                assert!(
+                    o[c].abs_diff(t[c]) <= 8,
+                    "at ({x}, {y}) the engine {o:?}, a reader {t:?}"
+                );
+            }
+        }
+        assert_eq!(theirs[(5 * w + 5) * 4 + 3], 0, "nothing past the shape");
     }
 
     /// What a reader that is not us covers, pixel by pixel, when it

@@ -77,6 +77,7 @@ import {
   hexColor,
   hexToCmykColor,
   swatchName,
+  gradientStops,
   initEngine,
   nodePayload,
   sendCommand,
@@ -3409,9 +3410,7 @@ export function App() {
       const had = gradTool.vector.gradient;
       const white = cmyk ? hexToCmykColor("#ffffff") : hexColor("#ffffff");
       const stops: GradientStop[] = had
-        ? "Linear" in had
-          ? had.Linear.stops
-          : had.Radial.stops
+        ? gradientStops(had)
         : [
             { offset: 0, color: currentInk() },
             { offset: 1, color: white },
@@ -5702,7 +5701,7 @@ export function App() {
    * Coordinates are the gradient's own — the shape's box, normalized — so
    * dragging maps the cursor back through the layer and its box. */
   const gradDragRef = useRef<{
-    part: "from" | "to" | "centre" | "focus" | "radius" | number;
+    part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number;
     vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
   } | null>(null);
 
@@ -5723,7 +5722,7 @@ export function App() {
 
   const onGradHandleDown = (
     e: React.PointerEvent,
-    part: "from" | "to" | "centre" | "focus" | "radius" | number,
+    part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number,
   ) => {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
@@ -5767,6 +5766,14 @@ export function App() {
           i === drag.part ? { ...st, offset: Math.min(1, Math.max(0, t)) } : st,
         );
         next = { Linear: { ...lin, stops } };
+      }
+    } else if ("Conic" in g) {
+      // Its centre, or where round it the ramp starts.
+      const con = g.Conic;
+      if (drag.part === "centre") next = { Conic: { ...con, center: [u, v] } };
+      else if (drag.part === "angle") {
+        const deg = (Math.atan2(v - con.center[1], u - con.center[0]) * 180) / Math.PI;
+        next = { Conic: { ...con, angle: Math.round(deg < 0 ? deg + 360 : deg) } };
       }
     } else {
       const rad = g.Radial;
@@ -9704,7 +9711,7 @@ export function App() {
                 const knob = (
                   key: string,
                   p: [number, number],
-                  part: "from" | "to" | "centre" | "focus" | "radius" | number,
+                  part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number,
                   cls: string,
                 ) => (
                   <div
@@ -9746,6 +9753,23 @@ export function App() {
                             "grad-stop",
                           ),
                         )}
+                    </>
+                  );
+                }
+                if ("Conic" in g) {
+                  // The centre, and a knob out along where the ramp
+                  // starts: drag it round to turn the seam.
+                  const { center, angle } = g.Conic;
+                  const r = (angle * Math.PI) / 180;
+                  const c = at(center[0], center[1]);
+                  const start = at(center[0] + 0.3 * Math.cos(r), center[1] + 0.3 * Math.sin(r));
+                  return (
+                    <>
+                      <svg className="sel-outline" aria-hidden="true">
+                        <line className="grad-line" x1={c[0]} y1={c[1]} x2={start[0]} y2={start[1]} />
+                      </svg>
+                      {knob("centre", c, "centre", "grad-handle")}
+                      {knob("angle", start, "angle", "grad-handle")}
                     </>
                   );
                 }
@@ -13377,12 +13401,14 @@ function KindProps({
     const authored = (hex: string) =>
       cmyk ? hexToCmykColor(hex) : hexColor(hex);
     const grad = v.gradient;
-    const gradStops = grad
-      ? "Linear" in grad
-        ? grad.Linear.stops
-        : grad.Radial.stops
-      : [];
-    const fillKind = !grad ? "solid" : "Linear" in grad ? "linear" : "radial";
+    const gradStops = grad ? gradientStops(grad) : [];
+    const fillKind = !grad
+      ? "solid"
+      : "Linear" in grad
+        ? "linear"
+        : "Conic" in grad
+          ? "conic"
+          : "radial";
     // A gradient's ends are the shape's own fill and white, so switching
     // fill type starts from what is already on screen.
     const startingStops = (): GradientStop[] => [
@@ -13409,6 +13435,9 @@ function KindProps({
       if (next === "solid") return patch({ gradient: null });
       if (next === "linear")
         return patch({ gradient: { Linear: { ...endpoints(0), stops } } });
+      // From the top, as a colour wheel starts.
+      if (next === "conic")
+        return patch({ gradient: { Conic: { center: [0.5, 0.5], angle: 270, stops } } });
       return patch({
         gradient: { Radial: { center: [0.5, 0.5], radius: 0.5, stops } },
       });
@@ -13419,6 +13448,8 @@ function KindProps({
         return patch({ gradient: { Linear: { ...grad.Linear, stops } } });
       if (grad && "Radial" in grad)
         return patch({ gradient: { Radial: { ...grad.Radial, stops } } });
+      if (grad && "Conic" in grad)
+        return patch({ gradient: { Conic: { ...grad.Conic, stops } } });
       return patch({});
     };
 
@@ -13434,6 +13465,7 @@ function KindProps({
             <option value="solid">Solid</option>
             <option value="linear">Linear gradient</option>
             <option value="radial">Radial gradient</option>
+            <option value="conic">Angular gradient</option>
           </select>
         </label>
         {grad && (
@@ -13445,7 +13477,11 @@ function KindProps({
               onChange={(next, gesture) => onEdit(withStops(next), gesture)}
               onGestureEnd={onGestureEnd}
             />
-            {"Linear" in grad
+            {"Conic" in grad
+              ? slider("Gradient start", grad.Conic.angle, 0, 359, 1, (deg) =>
+                  patch({ gradient: { Conic: { ...grad.Conic, angle: deg } } }),
+                )
+              : "Linear" in grad
               ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
                   patch({
                     gradient: {
@@ -13465,7 +13501,9 @@ function KindProps({
                     }),
                 )}
             {/* What it does past the ends of its ramp — a file's
-                spreadMethod, and the stripes a reflect or a repeat makes. */}
+                spreadMethod, and the stripes a reflect or a repeat makes.
+                A full turn has no ends to be past. */}
+            {!("Conic" in grad) && (
             <label className="row">
               Past the ends
               <select
@@ -13486,6 +13524,7 @@ function KindProps({
                 <option value="Repeat">Repeat</option>
               </select>
             </label>
+            )}
           </>
         )}
         <label className="row">

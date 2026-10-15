@@ -5732,11 +5732,7 @@ impl Session {
             flat(&mut s.color);
         }
         if let Some(g) = &mut look.gradient {
-            let stops = match g {
-                chitrakar_doc::Gradient::Linear { stops, .. }
-                | chitrakar_doc::Gradient::Radial { stops, .. } => stops,
-            };
-            for stop in stops {
+            for stop in g.stops_mut() {
                 flat(&mut stop.color);
             }
         }

@@ -612,6 +612,62 @@ assert(
   `dragged back onto the centre, the focus is the centre again (${knobsLeft} focus knobs, ${backAgain} where it was ${leftOfCentre})`,
 );
 
+// Angular: the ramp goes round the centre rather than out from it,
+// starting straight up and turning clockwise — so either side of the
+// line up from the centre are the two ends, and straight down is the
+// middle. Turning the start to the right moves that seam with it, by the
+// slider or by the angle knob, and the knob's drag undoes as one step.
+await page.selectOption('[aria-label="Fill type"]', "conic");
+await page.waitForTimeout(200);
+assert(
+  (await page.locator('select[aria-label="Gradient spread"]').count()) === 0,
+  "an angular gradient has no spread to choose: it never runs past its ends",
+);
+const red = (p) => p[0];
+const firstEnd = await canvasPixel(262, 120);
+const lastEnd = await canvasPixel(238, 120);
+const below = await canvasPixel(250, 285);
+assert(
+  Math.abs(red(firstEnd) - red(lastEnd)) > 60 &&
+    red(below) > Math.min(red(firstEnd), red(lastEnd)) + 15 &&
+    red(below) < Math.max(red(firstEnd), red(lastEnd)) - 15,
+  `angular: the ends meet straight up and the middle is below (${firstEnd} | ${lastEnd}, ${below})`,
+);
+await page.locator('input[aria-label="Gradient start"]').evaluate((el) => {
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+  setter.call(el, "0");
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+});
+await page.waitForTimeout(250);
+const seamAbove = await canvasPixel(380, 190);
+const seamBelow = await canvasPixel(380, 210);
+assert(
+  Math.abs(red(seamAbove) - red(seamBelow)) > 60 &&
+    Math.abs(red(await canvasPixel(262, 120)) - red(await canvasPixel(238, 120))) < 20,
+  `started to the right, the seam is to the right (${seamAbove} | ${seamBelow})`,
+);
+const angleKnob = page.locator('[data-grad="angle"]');
+const ak = await angleKnob.boundingBox();
+await page.mouse.move(ak.x + ak.width / 2, ak.y + ak.height / 2);
+await page.mouse.down();
+await page.mouse.move(box.x + 250 * sx, box.y + 130 * sy, { steps: 6 });
+await page.mouse.up();
+await page.waitForTimeout(250);
+const knobFirst = await canvasPixel(262, 120);
+const knobLast = await canvasPixel(238, 120);
+assert(
+  closeTo(knobFirst, firstEnd, 12) && closeTo(knobLast, lastEnd, 12),
+  `the angle knob dragged straight up puts the seam back there (${knobFirst} | ${knobLast})`,
+);
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(200);
+assert(
+  closeTo(await canvasPixel(380, 190), seamAbove, 2) &&
+    closeTo(await canvasPixel(380, 210), seamBelow, 2),
+  "and the knob's drag undoes as one step",
+);
+
 // Back to a flat fill: the shape is uniform again and later steps see the
 // same rect they always did.
 await page.selectOption('[aria-label="Fill type"]', "solid");

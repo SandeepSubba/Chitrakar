@@ -1425,6 +1425,19 @@ fn walk(
                     }
                     kind => {
                         if let Some(mut pic) = picture_of(img, kind, opacity, got.shapes.len()) {
+                            // Put right where usvg's own account of where
+                            // the group stands is out, as a path in it is:
+                            // a pattern's contents in its box's units sit in
+                            // a group whose scale they are never told about,
+                            // so a picture tiling a shape came in a unit
+                            // square at the tile's corner and the shape came
+                            // in clear. The correction is the group's — a
+                            // path's own transform is its group's, and a
+                            // picture's is that and its own placement on its
+                            // pixels, which the group's correction leaves be.
+                            if let Some(f) = fix(group.abs_transform()) {
+                                pic.transform = f.compose(pic.transform);
+                            }
                             pic.clip = worn.clone();
                             pic.within = within;
                             pic.blend = place.blend;
@@ -3287,6 +3300,33 @@ mod tests {
                     .unwrap();
             }
 
+            // An angular gradient has no SVG word, so it goes as a picture
+            // of itself filling the shape and comes back a picture: a
+            // different kind of layer, which is not what these audits ask
+            // about. It stays a gradient here, along the line instead.
+            if let NodeKind::Vector {
+                shape,
+                fill,
+                stroke,
+                gradient: Some(chitrakar_doc::Gradient::Conic { stops, .. }),
+            } = &n.kind
+            {
+                doc.apply(Command::SetKind {
+                    id,
+                    kind: Box::new(NodeKind::Vector {
+                        shape: shape.clone(),
+                        fill: fill.clone(),
+                        stroke: stroke.clone(),
+                        gradient: Some(chitrakar_doc::Gradient::Linear {
+                            from: [0.0, 0.0],
+                            to: [1.0, 1.0],
+                            stops: stops.clone(),
+                            spread: Default::default(),
+                        }),
+                    }),
+                })
+                .unwrap();
+            }
             if let NodeKind::Text(t) = &n.kind {
                 let mut t = t.clone();
                 t.italic = false;
@@ -3311,6 +3351,43 @@ mod tests {
     fn round_trip(doc: &Document) -> Document {
         let svg = crate::export_svg(doc).unwrap();
         brought_in(&svg, doc.meta.width, doc.meta.height)
+    }
+
+    /// A pattern whose tile is a picture, in the box's own units — what
+    /// an exported angular gradient is, and how a texture from another
+    /// editor often comes. usvg leaves a box-unit pattern's contents in a
+    /// group whose scale they are never told about; paths and text were
+    /// put right for it and a picture was not, so it came in a unit square
+    /// at the tile's corner and the shape it filled came in clear.
+    #[test]
+    fn a_picture_tiling_a_shape_in_its_boxs_units_comes_in() {
+        let red = crate::encode_png(4, 4, &[255, 0, 0, 255].repeat(16)).unwrap();
+        let b64 = crate::svg::base64_for_tests(&red);
+        for (what, units, size) in [
+            (
+                "the box's units",
+                r#"patternContentUnits="objectBoundingBox" width="1" height="1""#,
+                r#"width="1" height="1""#,
+            ),
+            (
+                "the page's",
+                r#"patternUnits="userSpaceOnUse" width="20" height="10""#,
+                r#"width="20" height="10""#,
+            ),
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><defs><pattern id="p" {units}><image {size} preserveAspectRatio="none" href="data:image/png;base64,{b64}"/></pattern></defs><rect x="5" y="5" width="20" height="10" fill="url(#p)"/></svg>"#
+            );
+            let page = chitrakar_render::render(&brought_in(&svg, 40, 30)).unwrap();
+            for (x, y) in [(6, 6), (15, 10), (24, 14)] {
+                assert_eq!(
+                    page.get(x, y).to_srgb8(),
+                    [255, 0, 0, 255],
+                    "in {what}, ({x}, {y}) is the tile's red"
+                );
+            }
+            assert_eq!(page.get(30, 20).a, 0.0, "and past the shape, nothing");
+        }
     }
 
     /// An SVG file brought in the way `Session::place_svg` brings one in,

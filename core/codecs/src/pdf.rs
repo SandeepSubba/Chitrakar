@@ -635,7 +635,13 @@ impl Page {
                 self.siblings_live(self.doc.children_of(id)?)?
             }
             // A gradient is a shading (`gradient_fill`) and a stroke whose
-            // width varies is the outline it covers (`strokes`).
+            // width varies is the outline it covers (`strokes`). A conic
+            // one has no shading in PDF to be, so its layer goes as the
+            // pixels the engine draws.
+            NodeKind::Vector {
+                gradient: Some(chitrakar_doc::Gradient::Conic { .. }),
+                ..
+            } => false,
             NodeKind::Vector { .. } => true,
             // A picture with its corners moved is no rectangle a PDF image
             // can be placed as, so it is drawn as the rest of what is not
@@ -1647,6 +1653,11 @@ impl Page {
         if stops.is_empty() {
             return Ok(());
         }
+        // A conic gradient's layer never reaches here: it goes as pixels
+        // (`is_live`).
+        if matches!(g, chitrakar_doc::Gradient::Conic { .. }) {
+            return Ok(());
+        }
         stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let (x0, y0, x1, y1) = chitrakar_render::gradient_box(shape);
         // How far the shading has to reach. A pad is the ramp once and
@@ -1666,6 +1677,7 @@ impl Page {
                     .map(|q| ((q[0] - from[0]) * d[0] + (q[1] - from[1]) * d[1]) / dd)
                     .collect()
             }
+            chitrakar_doc::Gradient::Conic { .. } => unreachable!("returned above"),
             chitrakar_doc::Gradient::Radial {
                 center,
                 radius,
@@ -1727,6 +1739,7 @@ impl Page {
         // engine's reading of a line or a ring of no size is the colour at
         // one end, everywhere, which a shading of one colour says.
         let (kind, coords, flat) = match g {
+            chitrakar_doc::Gradient::Conic { .. } => unreachable!("returned above"),
             chitrakar_doc::Gradient::Linear { from, to, .. } => {
                 let degenerate = (to[0] - from[0]).hypot(to[1] - from[1]) < 1e-6;
                 let (a, b) = (along(*from, *to, t0), along(*from, *to, t1));
