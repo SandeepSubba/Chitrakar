@@ -5285,6 +5285,26 @@ export function App() {
     }
   };
 
+  /** The picked picture traced into flat shapes, in a group just above
+   * it: its colours brought down to as many as asked, each traced and
+   * fitted with curves. The picture stays where it was; the group is
+   * picked after it. */
+  const tracePicture = () => {
+    if (!session || selected === null) return;
+    const answer = window.prompt("Trace the picture in how many colours? (2 to 32)", "6");
+    if (answer === null) return;
+    const colours = Math.round(Number(answer));
+    if (!Number.isFinite(colours) || colours < 2) return;
+    try {
+      const id = session.trace_picture(selected, Math.min(colours, 32), 1);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Trace the picture: ${err}`);
+    }
+  };
+
   /** Say the picked path in as few anchors as stay within a distance
    * of it — the step after outlining, offsetting or combining, which
    * leave hundreds of short steps nobody can reshape by hand. */
@@ -7539,6 +7559,7 @@ export function App() {
         item("text-to-shapes", "text", "Turn the text into shapes", textToShapes),
         item("merge-layers", "image", "Merge into a picture", mergeLayers),
         item("square-corners", "image", "Put the picture's corners back", squareCorners),
+        item("trace-picture", "image", "Trace into shapes…", tracePicture),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),

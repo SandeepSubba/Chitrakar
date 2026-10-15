@@ -21,6 +21,7 @@ pub mod fit;
 pub mod median;
 pub mod text;
 pub mod tiles;
+pub mod trace;
 
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{

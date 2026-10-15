@@ -1906,6 +1906,49 @@ without reading anything else.*
     again. A plain-blur weight, a missing column pass and the wrong
     sigma each fail it. Smoke 9o21: grain over two greys is smoothed,
     the edge holds, and three undos bring the grain back.
+- **Trace a picture into shapes ✅** (`Session::trace_picture`, Layer ›
+  *Trace into shapes…*). A logo scanned from paper or an icon from a
+  screenshot comes back as flat vector shapes, in a group just above the
+  picture. The picture stays, so the trace can be compared, hidden or
+  thrown away. One step in the history. A picture on four corners is
+  refused. The work is `core/render/src/trace.rs`:
+  - **Colours:** counted at five bits a channel, then chosen the
+    k-means++ way, made deterministic. The commonest colour comes first;
+    each next one has the most pixels times squared distance from those
+    already chosen. Then six rounds of moving each to the middle of its
+    pixels. All in the display encoding.
+  - **Why not median cut:** it was the first attempt, and it was wrong
+    for drawings. It splits by population, so when one colour is most of
+    the picture every split lands inside it, and a red disc and a blue
+    frame on white came back as white and one purple.
+  - **Specks:** a pixel that at most one of its four side neighbours
+    shares a colour with (a speck, or a one-pixel bump on an edge) takes
+    its neighbours' majority. Islands smaller than (2·tolerance)², and at
+    least 3 px², are dropped.
+  - **Stacked:** the commonest colour is at the bottom, and each colour
+    covers its own pixels *and every pixel above it*. Shapes meeting
+    edge to edge would each antialias half the seam and leave a hairline
+    of whatever is behind.
+  - **Outlines:** `trace_pixels` rings go through the middle of the step
+    either side of each corner, so a staircase becomes the slope it
+    stands for. A corner between two runs of three pixels or more is
+    kept exactly. Then `fit::fit_curves` fits the outline, and holes are
+    `straightened` (a path's subpaths are straight-sided).
+  - **Size:** a picture longer than 1024 px is averaged down by a whole
+    factor first, and the shapes are scaled back to the picture's units.
+    The group takes the picture's transform.
+  - **Tests:** `a_drawing_comes_back_as_its_shapes` (three colours,
+    ground at the bottom with no holes, the disc a few curves on its
+    circle, the frame exactly its four corners outside and in).
+    Without the step midpoints the disc is 92 anchors; edge to edge,
+    the stacking fails it; without the corner rule the corners move.
+    `grain_does_not_come_out_as_specks`: without despeckle the frame
+    grows bumps. `a_big_picture_is_traced_smaller_and_brought_back_to_size`.
+    `a_traced_picture_draws_the_picture_again` (engine): placed at half
+    size, traced, the picture hidden, under 3% of pixels differ, and
+    undo removes it. Dropping the group's transform or the size scale
+    fails it. Smoke 9o22: a canvas-drawn sign traced in three colours,
+    picture hidden, shapes in place, undone.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

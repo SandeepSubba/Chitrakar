@@ -7381,6 +7381,69 @@ assert(
   );
 }
 
+// 9o22. Trace into shapes: a picture of a red disc and a blue bar on a
+// pale ground comes back as a group of shapes in those colours, laid
+// over the picture; with the picture hidden the shapes still draw it,
+// and one undo takes the trace away.
+{
+  await newDocument(200, 120, "rgb");
+  const png = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 200;
+    c.height = 120;
+    const g = c.getContext("2d");
+    g.fillStyle = "#f0ecdc";
+    g.fillRect(0, 0, 200, 120);
+    g.fillStyle = "#c8283c";
+    g.beginPath();
+    g.arc(60, 60, 35, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = "#1e3cb4";
+    g.fillRect(120, 30, 50, 60);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+    name: "sign.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(png, "base64"),
+  });
+  await page.waitForTimeout(400);
+  await page.locator(".panel ul li", { hasText: "sign.png" }).click();
+  await page.waitForTimeout(200);
+  promptAnswer = "3";
+  await menuClick("Layer", "Trace into shapes…");
+  await page.waitForTimeout(500);
+  assert(
+    await page.locator(".panel ul li", { hasText: "Traced sign.png" }).isVisible(),
+    "the trace is a group of its own",
+  );
+  await page
+    .locator(".panel ul li", { hasText: /^sign\.png/ })
+    .locator("button[title^='Hide layer']")
+    .click();
+  await page.waitForTimeout(400);
+  const near = (p, hex) =>
+    [1, 3, 5].every((k, i) => Math.abs(p[i] - parseInt(hex.slice(k, k + 2), 16)) <= 6);
+  const disc = await canvasPixel(60, 60);
+  const bar = await canvasPixel(145, 60);
+  const ground = await canvasPixel(10, 10);
+  assert(
+    near(disc, "#c8283c") && near(bar, "#1e3cb4") && near(ground, "#f0ecdc"),
+    `with the picture hidden the shapes draw it (${disc} / ${bar} / ${ground})`,
+  );
+  assert(
+    near(await canvasPixel(60, 28), "#c8283c") && near(await canvasPixel(60, 22), "#f0ecdc"),
+    "and the disc keeps its edge",
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Traced sign.png" }).count()) === 0,
+    "one undo takes the trace away",
+  );
+}
+
 // 9o9. Trim to the artwork: on a white ground, the page comes in to the
 // shape drawn on it, and one undo gives the page back its size.
 {

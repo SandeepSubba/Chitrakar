@@ -1361,6 +1361,136 @@ impl Session {
         Ok(group_id)
     }
 
+    /// A picture said again as flat shapes, in a group just above it:
+    /// its colours brought down to `colors`, each colour's pixels traced
+    /// and their outlines fitted with curves within `tolerance` of the
+    /// pixels (`chitrakar_render::trace`). A logo scanned from paper or
+    /// an icon taken from a screenshot, wanted as vectors.
+    ///
+    /// The picture stays where it was, under the group, so the trace can
+    /// be compared with it, hidden or thrown away. The group stands
+    /// where the picture stands and every shape is in the picture's own
+    /// units, so a picture placed at a size or turned is traced as it
+    /// is seen. A picture laid on four corners has no such place, and is
+    /// refused. One step in the history; the answer is the group.
+    pub fn trace_picture(
+        &mut self,
+        id: NodeId,
+        colors: u32,
+        tolerance: f32,
+    ) -> Result<NodeId, EngineError> {
+        let node = self.doc.node(id)?.clone();
+        let NodeKind::Raster(r) = &node.kind else {
+            return Err(EngineError::BadCommand(
+                "only a picture has pixels to trace".into(),
+            ));
+        };
+        if r.corners.is_some() {
+            return Err(EngineError::BadCommand(
+                "this picture is laid on four corners; straighten it first".into(),
+            ));
+        }
+        let resource = self.doc.resource(&r.resource_id).ok_or_else(|| {
+            EngineError::BadCommand("this picture's pixels are not in the document".into())
+        })?;
+        let traced = chitrakar_render::trace::trace_picture(
+            &resource.rgba8,
+            resource.width,
+            resource.height,
+            colors as usize,
+            tolerance,
+        );
+        if traced.is_empty() {
+            return Err(EngineError::BadCommand(
+                "this picture has nothing covered enough to trace".into(),
+            ));
+        }
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root is not a picture".into()))?;
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|c| *c == id)
+            .map_or(0, |i| i + 1);
+        // The resource's pixels laid over the size the picture is shown
+        // at, which is the units the shapes are drawn in.
+        let (sx, sy) = (
+            r.width as f32 / resource.width.max(1) as f32,
+            r.height as f32 / resource.height.max(1) as f32,
+        );
+        let group_id = self.doc.peek_next_id();
+        let mut group = Node::group(&format!("Traced {}", node.name));
+        group.transform = node.transform;
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index,
+            node: Box::new(group),
+        }];
+        let mut at = 0;
+        for colour in &traced {
+            let [r8, g8, b8] = colour.color;
+            let fill = chitrakar_color::AuthoredColor::Srgb {
+                r: r8 as f32 / 255.0,
+                g: g8 as f32 / 255.0,
+                b: b8 as f32 / 255.0,
+                a: 1.0,
+            };
+            let name = format!("#{r8:02x}{g8:02x}{b8:02x}");
+            for shape in &colour.shapes {
+                let put = |p: [f32; 2]| [p[0] * sx, p[1] * sy];
+                let anchors: Vec<[f32; 2]> = shape.anchors.iter().map(|p| put(*p)).collect();
+                // A shape at the corner of what it covers, as every path
+                // is kept.
+                let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+                for p in &anchors {
+                    x0 = x0.min(p[0]);
+                    y0 = y0.min(p[1]);
+                }
+                if !x0.is_finite() || !y0.is_finite() {
+                    continue;
+                }
+                let local = |p: [f32; 2]| [p[0] - x0, p[1] - y0];
+                let mut n = Node::vector(
+                    &name,
+                    chitrakar_doc::VectorShape::Path {
+                        points: anchors.iter().map(|p| local(*p)).collect(),
+                        closed: true,
+                        smooth: false,
+                        handles: shape
+                            .handles
+                            .iter()
+                            .map(|h| [h[0] * sx, h[1] * sy, h[2] * sx, h[3] * sy])
+                            .collect(),
+                        subpaths: shape
+                            .holes
+                            .iter()
+                            .map(|h| h.iter().map(|p| local(put(*p))).collect())
+                            .collect(),
+                    },
+                );
+                if let NodeKind::Vector {
+                    fill: f, stroke, ..
+                } = &mut n.kind
+                {
+                    *f = Some(fill.clone());
+                    *stroke = None;
+                }
+                n.transform = Transform::translation(x0, y0);
+                cmds.push(Command::AddNode {
+                    parent: group_id,
+                    index: at,
+                    node: Box::new(n),
+                });
+                at += 1;
+            }
+        }
+        self.apply_labeled(Command::Batch(cmds), Some("Trace the picture".into()))?;
+        Ok(group_id)
+    }
+
     /// Say a path's outline again in as few anchors as stay within
     /// `tolerance` page pixels of it: straight where it runs straight,
     /// curves with handles where it bends, corners kept as corners
@@ -7619,6 +7749,97 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// A traced picture draws the picture again. The picture is placed
+    /// at half its size and moved, on a page it first gave its size to, the trace is laid over it in one
+    /// step, and with the picture hidden what is left looks like it —
+    /// nearly every pixel within a few levels, the rest along its edges.
+    /// Undone, it is gone; what is not a picture is refused.
+    #[test]
+    fn a_traced_picture_draws_the_picture_again() {
+        let (w, h) = (60u32, 40u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let (fx, fy) = (x as f32 + 0.5 - 20.0, y as f32 + 0.5 - 20.0);
+                let c = if fx * fx + fy * fy <= 144.0 {
+                    [200u8, 40, 60]
+                } else if (38..54).contains(&x) && (8..32).contains(&y) {
+                    [30, 60, 180]
+                } else {
+                    [240, 236, 220]
+                };
+                px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let png = chitrakar_codecs::encode_png(w, h, &px).unwrap();
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let id = session.place_image(&png, "sign").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform {
+                    a: 0.5,
+                    d: 0.5,
+                    e: 5.0,
+                    f: 3.0,
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        let picture = session.render().unwrap().to_srgb8();
+        let before = session.history_labels().0.len();
+        let group = session.trace_picture(id, 3, 1.0).unwrap();
+        assert_eq!(session.history_labels().0.len(), before + 1, "one step");
+        let root = session.document().root();
+        let order = session.document().children_of(root).unwrap().to_vec();
+        assert_eq!(order, vec![id, group], "laid just above the picture");
+        assert!(session.document().children_of(group).unwrap().len() >= 3);
+        session
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+        let traced = session.render().unwrap().to_srgb8();
+        let off = picture
+            .chunks_exact(4)
+            .zip(traced.chunks_exact(4))
+            .filter(|(p, t)| (0..4).any(|k| p[k].abs_diff(t[k]) > 12))
+            .count();
+        let total = (picture.len() / 4) as f32;
+        assert!(total >= 2400.0, "the page is the picture's size: {total}");
+        assert!(
+            (off as f32) < total * 0.03,
+            "{off} of {total} pixels differ from the picture"
+        );
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[id],
+            "undone, gone"
+        );
+        let shape = session
+            .apply_labeled(
+                Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::vector(
+                        "box",
+                        VectorShape::Rect {
+                            width: 4.0,
+                            height: 4.0,
+                            radius: 0.0,
+                        },
+                    )),
+                },
+                None,
+            )
+            .map(|_| session.document().children_of(root).unwrap()[1])
+            .unwrap();
+        assert!(
+            session.trace_picture(shape, 3, 1.0).is_err(),
+            "only a picture"
+        );
     }
 
     /// A brush repaints the stroke it is drawing, all of it.

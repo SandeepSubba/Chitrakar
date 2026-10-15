@@ -633,6 +633,16 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// A picture traced into flat shapes in `colors` colours, each
+    /// outline within `tolerance` pixels, in a group just above it; the
+    /// group's id.
+    pub fn trace_picture(&mut self, id: f64, colors: u32, tolerance: f32) -> Result<f64, JsError> {
+        self.inner
+            .trace_picture(NodeId(id as u64), colors, tolerance)
+            .map(|n| n.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Turn a shape's stroke into a shape of its own; the id of the
     /// layer that took its place (a group of fill and outline when the
     /// shape had a fill).
