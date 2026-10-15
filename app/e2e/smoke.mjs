@@ -7410,8 +7410,46 @@ assert(
   await page.waitForTimeout(400);
   await page.locator(".panel ul li", { hasText: "sign.png" }).click();
   await page.waitForTimeout(200);
-  promptAnswer = "3";
+  // The window shows what the trace will be before anything is laid,
+  // and Escape leaves the document as it was.
   await menuClick("Layer", "Trace into shapes…");
+  const traceWindow = page.locator('[role="dialog"][aria-label="Trace into shapes"]');
+  await page.waitForSelector('img[alt="Trace preview"]');
+  const firstPreview = await page.locator('img[alt="Trace preview"]').getAttribute("src");
+  await setSlider("Trace colours", 3);
+  await page.waitForFunction(
+    (was) => document.querySelector('img[alt="Trace preview"]')?.getAttribute("src") !== was,
+    firstPreview,
+    { timeout: 5000 },
+  );
+  const shown = await page.locator('img[alt="Trace preview"]').evaluate((img) => {
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const g = c.getContext("2d");
+    g.drawImage(img, 0, 0);
+    const at = (x, y) => Array.from(g.getImageData(x, y, 1, 1).data);
+    return { w: img.naturalWidth, disc: at(Math.round(img.naturalWidth * 0.3), Math.round(img.naturalHeight / 2)) };
+  });
+  assert(
+    shown.w === 200 && shown.disc[0] > 150 && shown.disc[2] < 100,
+    `the preview is the trace at the picture's size, the disc in red (${JSON.stringify(shown)})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert(
+    (await traceWindow.count()) === 0 &&
+      (await page.locator(".panel ul li", { hasText: "Traced sign.png" }).count()) === 0,
+    "Escape closes the window and lays nothing",
+  );
+  // Escape let go of the layer too, as it does anywhere.
+  await page.locator(".panel ul li", { hasText: "sign.png" }).click();
+  await page.waitForTimeout(200);
+  await menuClick("Layer", "Trace into shapes…");
+  await page.waitForSelector('img[alt="Trace preview"]');
+  await setSlider("Trace colours", 3);
+  await page.waitForTimeout(300);
+  await traceWindow.locator("button", { hasText: "Trace" }).click();
   await page.waitForTimeout(500);
   assert(
     await page.locator(".panel ul li", { hasText: "Traced sign.png" }).isVisible(),

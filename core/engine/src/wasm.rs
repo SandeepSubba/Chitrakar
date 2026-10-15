@@ -643,6 +643,20 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// What tracing a picture would lay down, drawn on its own as a PNG
+    /// at most `side` pixels long; the document is not touched.
+    pub fn trace_preview(
+        &self,
+        id: f64,
+        colors: u32,
+        tolerance: f32,
+        side: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .trace_preview(NodeId(id as u64), colors, tolerance, side)
+            .map_err(to_js)
+    }
+
     /// Turn a shape's stroke into a shape of its own; the id of the
     /// layer that took its place (a group of fill and outline when the
     /// shape had a fill).

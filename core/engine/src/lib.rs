@@ -1379,7 +1379,92 @@ impl Session {
         colors: u32,
         tolerance: f32,
     ) -> Result<NodeId, EngineError> {
-        let node = self.doc.node(id)?.clone();
+        let (group, shapes) = self.traced(id, colors, tolerance)?;
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root is not a picture".into()))?;
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|c| *c == id)
+            .map_or(0, |i| i + 1);
+        let group_id = self.doc.peek_next_id();
+        let mut cmds = vec![Command::AddNode {
+            parent,
+            index,
+            node: Box::new(group),
+        }];
+        for (at, shape) in shapes.into_iter().enumerate() {
+            cmds.push(Command::AddNode {
+                parent: group_id,
+                index: at,
+                node: Box::new(shape),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some("Trace the picture".into()))?;
+        Ok(group_id)
+    }
+
+    /// What tracing a picture would lay down, as a PNG of the trace on
+    /// its own — no picture under it — at most `side` pixels along its
+    /// longer edge. Nothing in the document changes: the shapes are
+    /// drawn on a page of their own, which is what lets the window that
+    /// asks how a picture is to be traced show the answer as it is
+    /// asked.
+    pub fn trace_preview(
+        &self,
+        id: NodeId,
+        colors: u32,
+        tolerance: f32,
+        side: u32,
+    ) -> Result<Vec<u8>, EngineError> {
+        let (mut group, shapes) = self.traced(id, colors, tolerance)?;
+        let NodeKind::Raster(r) = &self.doc.node(id)?.kind else {
+            return Err(EngineError::BadCommand(
+                "only a picture can be traced".into(),
+            ));
+        };
+        let (w, h) = (r.width.max(1) as f32, r.height.max(1) as f32);
+        let k = (side.max(16) as f32 / w.max(h)).min(1.0);
+        let (pw, ph) = ((w * k).ceil() as u32, (h * k).ceil() as u32);
+        let mut page = Document::new(pw.max(1), ph.max(1), ColorMode::Rgb);
+        let root = page.root();
+        let group_id = page.peek_next_id();
+        group.transform = Transform {
+            a: k,
+            d: k,
+            ..Default::default()
+        };
+        let mut cmds = vec![Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(group),
+        }];
+        for (at, shape) in shapes.into_iter().enumerate() {
+            cmds.push(Command::AddNode {
+                parent: group_id,
+                index: at,
+                node: Box::new(shape),
+            });
+        }
+        page.apply(Command::Batch(cmds))?;
+        let surface = chitrakar_render::render(&page)?;
+        chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// A picture traced, as the group that would hold the trace —
+    /// standing where the picture stands — and the shapes to go in it,
+    /// bottom first, each in the picture's own units.
+    fn traced(
+        &self,
+        id: NodeId,
+        colors: u32,
+        tolerance: f32,
+    ) -> Result<(Node, Vec<Node>), EngineError> {
+        let node = self.doc.node(id)?;
         let NodeKind::Raster(r) = &node.kind else {
             return Err(EngineError::BadCommand(
                 "only a picture has pixels to trace".into(),
@@ -1405,31 +1490,15 @@ impl Session {
                 "this picture has nothing covered enough to trace".into(),
             ));
         }
-        let parent = self
-            .doc
-            .parent_of(id)
-            .ok_or_else(|| EngineError::BadCommand("the root is not a picture".into()))?;
-        let index = self
-            .doc
-            .children_of(parent)?
-            .iter()
-            .position(|c| *c == id)
-            .map_or(0, |i| i + 1);
         // The resource's pixels laid over the size the picture is shown
         // at, which is the units the shapes are drawn in.
         let (sx, sy) = (
             r.width as f32 / resource.width.max(1) as f32,
             r.height as f32 / resource.height.max(1) as f32,
         );
-        let group_id = self.doc.peek_next_id();
         let mut group = Node::group(&format!("Traced {}", node.name));
         group.transform = node.transform;
-        let mut cmds = vec![Command::AddNode {
-            parent,
-            index,
-            node: Box::new(group),
-        }];
-        let mut at = 0;
+        let mut shapes = Vec::new();
         for colour in &traced {
             let [r8, g8, b8] = colour.color;
             let fill = chitrakar_color::AuthoredColor::Srgb {
@@ -1479,16 +1548,10 @@ impl Session {
                     *stroke = None;
                 }
                 n.transform = Transform::translation(x0, y0);
-                cmds.push(Command::AddNode {
-                    parent: group_id,
-                    index: at,
-                    node: Box::new(n),
-                });
-                at += 1;
+                shapes.push(n);
             }
         }
-        self.apply_labeled(Command::Batch(cmds), Some("Trace the picture".into()))?;
-        Ok(group_id)
+        Ok((group, shapes))
     }
 
     /// Say a path's outline again in as few anchors as stay within
@@ -7751,8 +7814,9 @@ mod tests {
         worst
     }
 
-    /// A traced picture draws the picture again. The picture is placed
-    /// at half its size and moved, on a page it first gave its size to, the trace is laid over it in one
+    /// A traced picture draws the picture again — and its preview shows
+    /// what it will draw without drawing it. The picture is placed at
+    /// half its size and moved, on a page it first gave its size to, the trace is laid over it in one
     /// step, and with the picture hidden what is left looks like it —
     /// nearly every pixel within a few levels, the rest along its edges.
     /// Undone, it is gone; what is not a picture is refused.
@@ -7790,6 +7854,27 @@ mod tests {
             .unwrap();
         let picture = session.render().unwrap().to_srgb8();
         let before = session.history_labels().0.len();
+        // Asked first how it would look: the trace on its own, half the
+        // picture's size here, and nothing in the document moved.
+        let preview =
+            chitrakar_codecs::decode(&session.trace_preview(id, 3, 1.0, 30).unwrap()).unwrap();
+        assert_eq!((preview.width, preview.height), (30, 20));
+        let at = |x: u32, y: u32| {
+            let i = ((y * 30 + x) * 4) as usize;
+            [preview.rgba8[i], preview.rgba8[i + 1], preview.rgba8[i + 2]]
+        };
+        assert!(
+            at(10, 10)[0] > 150 && at(23, 10)[2] > 150 && at(2, 2)[0] > 200,
+            "the disc, the bar and the ground: {:?} {:?} {:?}",
+            at(10, 10),
+            at(23, 10),
+            at(2, 2)
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            before,
+            "a preview is not a step"
+        );
         let group = session.trace_picture(id, 3, 1.0).unwrap();
         assert_eq!(session.history_labels().0.len(), before + 1, "one step");
         let root = session.document().root();

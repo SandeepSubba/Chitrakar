@@ -1161,6 +1161,8 @@ export function App() {
   const [newDocOpen, setNewDocOpen] = useState(false);
   /** The export window, and the preferences window. */
   const [exportOpen, setExportOpen] = useState(false);
+  /** The picture the trace window is open on, if it is. */
+  const [traceFor, setTraceFor] = useState<{ id: number; name: string } | null>(null);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   /** Which page the preferences window opens on: a row that is about
@@ -5291,13 +5293,22 @@ export function App() {
    * picked after it. */
   const tracePicture = () => {
     if (!session || selected === null) return;
-    const answer = window.prompt("Trace the picture in how many colours? (2 to 32)", "6");
-    if (answer === null) return;
-    const colours = Math.round(Number(answer));
-    if (!Number.isFinite(colours) || colours < 2) return;
+    const layer = layers.find((l) => l.id === selected);
+    if (!layer || layer.kind !== "raster") {
+      alert("Trace the picture: pick a picture first");
+      return;
+    }
+    setTraceFor({ id: selected, name: layer.name });
+  };
+
+  /** Lay the trace the window settled on: one step, the group picked
+   * after it. */
+  const traceAs = (id: number, colours: number, smoothing: number) => {
+    if (!session) return;
     try {
-      const id = session.trace_picture(selected, Math.min(colours, 32), 1);
-      setSelected(id);
+      const group = session.trace_picture(id, colours, smoothing);
+      setTraceFor(null);
+      setSelected(group);
       setMultiSel([]);
       refresh(session);
     } catch (err) {
@@ -8377,6 +8388,15 @@ export function App() {
           }}
         />
       )}
+      {traceFor && session && (
+        <TraceDialog
+          session={session}
+          id={traceFor.id}
+          name={traceFor.name}
+          onCancel={() => setTraceFor(null)}
+          onTrace={(colours, smoothing) => traceAs(traceFor.id, colours, smoothing)}
+        />
+      )}
       {exportOpen && session && (
         <ExportDialog
           session={session}
@@ -11255,6 +11275,121 @@ function NewDocDialog({
  * every print asks for — without a single layer having to be moved by
  * hand. Both are one command: a new size, and the shift that decides
  * where the old page sits inside it. */
+/** Trace into shapes: how many colours the picture is said in and how
+ * closely each outline follows its pixels, with the answer drawn as it is
+ * asked — the trace on its own, made by the engine on a page of its own,
+ * so nothing is laid until it is wanted. */
+function TraceDialog({
+  session,
+  id,
+  name,
+  onCancel,
+  onTrace,
+}: {
+  session: WasmSession;
+  id: number;
+  name: string;
+  onCancel: () => void;
+  onTrace: (colours: number, smoothing: number) => void;
+}) {
+  const [colours, setColours] = useState(6);
+  const [smoothing, setSmoothing] = useState(1);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  // A moment after the last change, so a slider being dragged is not a
+  // trace a pixel; the picture it replaces is let go of.
+  useEffect(() => {
+    let url: string | null = null;
+    const timer = window.setTimeout(() => {
+      try {
+        const png = session.trace_preview(id, colours, smoothing, 360);
+        url = URL.createObjectURL(new Blob([png as BlobPart], { type: "image/png" }));
+        setPreview(url);
+        setFailed(null);
+      } catch (err) {
+        setPreview(null);
+        setFailed(String(err));
+      }
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [session, id, colours, smoothing]);
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal trace"
+        role="dialog"
+        aria-label="Trace into shapes"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Trace {name} into shapes</h2>
+        <figure className="trace-preview">
+          {preview ? (
+            <img src={preview} alt="Trace preview" />
+          ) : (
+            <span className="modal-note">{failed ?? "Tracing…"}</span>
+          )}
+        </figure>
+        <label className="row">
+          Colours {colours}
+          <input
+            type="range"
+            min={2}
+            max={16}
+            step={1}
+            value={colours}
+            onChange={(e) => setColours(Number(e.target.value))}
+            aria-label="Trace colours"
+          />
+        </label>
+        <label className="row">
+          Smoothing {smoothing.toFixed(2)}
+          <input
+            type="range"
+            min={0.5}
+            max={4}
+            step={0.25}
+            value={smoothing}
+            onChange={(e) => setSmoothing(Number(e.target.value))}
+            aria-label="Trace smoothing"
+          />
+        </label>
+        <p className="modal-note">
+          The picture is said in this many flat colours, the commonest laid
+          at the bottom and each one under everything above it, so no seam
+          shows between them. Smoothing is how far, in the picture's
+          pixels, an outline may stray from the pixels it follows: more is
+          fewer, rounder curves. The picture stays under the shapes.
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            disabled={failed !== null}
+            onClick={() => onTrace(colours, smoothing)}
+          >
+            Trace
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Straighten: an angle to turn the page by, shown as it is dragged so a
  * crooked horizon can be laid level against the edge of the page rather
  * than guessed at, and cropped back to the page's own proportions when it

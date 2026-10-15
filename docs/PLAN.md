@@ -1949,6 +1949,22 @@ without reading anything else.*
     undo removes it. Dropping the group's transform or the size scale
     fails it. Smoke 9o22: a canvas-drawn sign traced in three colours,
     picture hidden, shapes in place, undone.
+- **The trace window ✅** (`TraceDialog`, `Session::trace_preview`).
+  *Trace into shapes…* asked one question through the browser's prompt
+  and drew blind. It is now a window with **Colours** (2 to 16) and
+  **Smoothing** (0.5 to 4 picture pixels, the fit's tolerance), and the
+  trace drawn as it is asked. `trace_preview` builds the same shapes
+  (`Session::traced`, now shared with `trace_picture`) on a page of its
+  own, at most 360 pixels long. It renders them there and hands back a
+  PNG, so nothing is laid until *Trace* is pressed, and a preview is not
+  a step in the history. The picture is redrawn a moment after the last
+  change, so a dragged slider is not a trace a pixel.
+  - **Tests:** `a_traced_picture_draws_the_picture_again` now asks for
+    the preview first (the right size, the disc, bar and ground in their
+    colours, history untouched); leaving the preview's scale off fails
+    it. Smoke 9o22 drives the window: the preview at the picture's size
+    with the disc in red, a new picture when the colour count changes,
+    Escape laying nothing, *Trace* laying the group.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
