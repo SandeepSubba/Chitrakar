@@ -1876,8 +1876,57 @@ fn block_tap(here: vec2f, q: f32, vertical: bool) -> vec4f {
 //
 // `params` is the inverse scale along this axis, the origin it is
 // measured from, the block's side in document units, and which axis.
+// What a pixel shows, for a surface blur to judge likeness by: its
+// straight colour in the display encoding, held to 0..1, and its alpha —
+// the CPU renderer's `bilateral::shown`.
+fn shown_of(p: vec4f) -> vec4f {
+    if p.a <= 0.0 {
+        return vec4f(0.0);
+    }
+    let s = clamp(p.rgb / p.a, vec3f(0.0), vec3f(1.0));
+    return vec4f(to_shown(s.r), to_shown(s.g), to_shown(s.b), p.a);
+}
+
+// One pass of a surface blur: the weighted average of the `params.x`
+// pixels each side of this one along a row (`params.w` 2) or down a
+// column (3), each weighed by a Gaussian of half the radius and by how
+// alike it looks — one for the same shown colour, nothing once any
+// channel is `params.y` apart. Reads past the page's edge are held at
+// it, as the CPU's are at the edge of what it snapshotted.
+fn surface_pass(in: ImageOut) -> vec4f {
+    let r = i32(in.params.x);
+    let threshold = in.params.y;
+    let vertical = in.params.w > 2.5;
+    let sigma = max(f32(r) / 2.0, 0.5);
+    let lo = vec2i(page.lo);
+    let hi = vec2i(page.hi) - vec2i(1, 1);
+    let here = vec2i(floor(in.uv * page.size));
+    let c = shown_of(textureLoad(image, clamp(here, lo, hi), 0));
+    var sum = vec4f(0.0);
+    var total = 0.0;
+    for (var k = -r; k <= r; k = k + 1) {
+        var p = here;
+        if vertical {
+            p.y = p.y + k;
+        } else {
+            p.x = p.x + k;
+        }
+        let px = textureLoad(image, clamp(p, lo, hi), 0);
+        let d = abs(shown_of(px) - c);
+        let apart = max(max(d.r, d.g), max(d.b, d.a));
+        let near = exp(-f32(k * k) / (2.0 * sigma * sigma));
+        let weight = near * max(1.0 - apart / threshold, 0.0);
+        sum = sum + weight * px;
+        total = total + weight;
+    }
+    return sum / max(total, 1e-6);
+}
+
 @fragment
 fn fs_block(in: ImageOut) -> @location(0) vec4f {
+    if in.params.w > 1.5 {
+        return surface_pass(in);
+    }
     let inv = in.params.x;
     let origin = in.params.y;
     let side = in.params.z;

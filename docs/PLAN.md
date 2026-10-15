@@ -1873,6 +1873,39 @@ without reading anything else.*
     because the fixture's strings give few lines with a space to spread,
     so `a_justified_block_leaves_as_the_engine_sets_it` is what holds
     justification in SVG.
+- **Surface blur ✅** (`Filter::SurfaceBlur { radius, threshold }`). This
+  is edge-preserving smoothing, for sensor noise and skin: grain in flat
+  areas goes soft while the edges between them stay. The filters had a
+  blur that smears edges and a median that takes specks out, but
+  nothing for this.
+  - **How it works:** a bilateral filter, taken one axis at a time
+    (`core/render/src/bilateral.rs`). First along each row, then down
+    each column of that result. A neighbour weighs by a Gaussian of half
+    the radius times its likeness: one for the same shown colour,
+    falling straight to nothing once any channel is `threshold` apart.
+  - **Why the display encoding:** likeness is judged there, which is
+    where a person sees two colours as near or far. In linear light,
+    every pair of shadows would be alike.
+  - **Why separable:** a line of reads a pixel a pass rather than a
+    square. That keeps the browser's CPU engine usable at wide radii,
+    up to `SURFACE_MOST` = 64 device pixels each way.
+  - **GPU:** the pixelate's two-pass arrangement, with `fs_block` sent
+    to `surface_pass` by a 2 or a 3 in `params.w`. It computes the same
+    weights per tap from the same radius, and it is declined inside a
+    frame like every neighbourhood filter.
+  - **In the panel:** *Surface blur* in the adjustment picker, with
+    **Smoothing radius** and **Edge threshold**.
+  - **Fixture:** half the random pages' medians are surface blurs
+    (their own stream).
+  - **Tests:** `a_surface_blur_takes_the_grain_out_and_leaves_the_edge`
+    (grain more than halved, both sides of the edge keep their tone
+    where a Gaussian of the same reach smears them, and nothing asked of
+    it does nothing; making likeness always one fails it).
+    `a_surface_blur_smooths_the_way_the_cpu_smooths` on the GPU checks
+    four radius, threshold and opacity settings and a view half as large
+    again. A plain-blur weight, a missing column pass and the wrong
+    sigma each fail it. Smoke 9o21: grain over two greys is smoothed,
+    the edge holds, and three undos bring the grain back.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

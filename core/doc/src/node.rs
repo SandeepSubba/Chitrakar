@@ -1095,6 +1095,17 @@ pub enum Filter {
     /// between two flat colours stays an edge, since the middle value
     /// either side of it is that side's own.
     Median { radius: f32 },
+    /// Smoothed where it is flat and left alone where it is not: skin,
+    /// sky and sensor noise go soft while the edges between them stay.
+    /// Each pixel becomes a weighted average of those within `radius`
+    /// document pixels along its row, then of the result down its
+    /// column. A neighbour counts by how near it is (a Gaussian of half
+    /// the radius) and by how alike it looks: fully when its shown
+    /// colour is the pixel's own, and not at all once any channel is
+    /// `threshold` apart, in the display encoding's 0..1. A bilateral
+    /// filter, taken one axis at a time so a wide one costs a line of
+    /// reads a pixel rather than a square of them.
+    SurfaceBlur { radius: f32, threshold: f32 },
 }
 
 /// A straight line the user placed to lay work out against. Not artwork —
@@ -1695,6 +1706,7 @@ impl Filter {
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
             | Filter::Median { .. }
+            | Filter::SurfaceBlur { .. }
             | Filter::Noise { .. }
             | Filter::Vignette { .. } => {}
         }
@@ -2101,6 +2113,7 @@ impl Node {
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }
                 | Filter::Median { .. }
+                | Filter::SurfaceBlur { .. }
                 | Filter::Noise { .. }
                 | Filter::Vignette { .. } => {}
             },

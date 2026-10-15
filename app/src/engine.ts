@@ -238,7 +238,12 @@ export type Filter =
   | { Vignette: { amount: number; radius: number; softness: number } }
   /** Noise taken out: every channel the middle value within `radius`
    * document pixels each way, so a speck goes and an edge stays. */
-  | { Median: { radius: number } };
+  | { Median: { radius: number } }
+  /** Smoothed where flat, left alone at edges: a weighted average along
+   * each row then down each column within `radius` document pixels, a
+   * neighbour counting less the less alike it looks and not at all once
+   * `threshold` (0..1, display encoding) apart. */
+  | { SurfaceBlur: { radius: number; threshold: number } };
 
 export type MaskKind =
   | { Vector: { shape: VectorShape; transform: Transform } }

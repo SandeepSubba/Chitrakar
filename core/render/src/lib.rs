@@ -14,6 +14,7 @@
 //! Transforms support translation and scale (`a`, `d`, `e`, `f`); shear and
 //! rotation (`b`, `c`) arrive with the GPU rasterizer.
 
+pub mod bilateral;
 pub mod blur;
 pub mod boolean;
 pub mod fit;
@@ -790,6 +791,11 @@ pub fn filter_reach(doc: &Document) -> u32 {
             // The window reaches its radius each way.
             NodeKind::Filter(Filter::Median { radius }) => {
                 (median_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32)
+                    .saturating_add(1)
+            }
+            // A row's reach, then a column's of that: as far each way.
+            NodeKind::Filter(Filter::SurfaceBlur { radius, .. }) => {
+                (surface_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32)
                     .saturating_add(1)
             }
             // Half the smear each way, and the most any pixel has is a
@@ -7871,6 +7877,20 @@ fn apply_filter(
                 lerp(o, middles[at], opacity * coverage_at(doc, mask, x, y))
             });
         }
+        Filter::SurfaceBlur { radius, threshold } => {
+            let r = surface_radius(*radius, scale);
+            let t = surface_threshold(*threshold);
+            if r == 0 || t <= 0.0 {
+                return;
+            }
+            let original = blur::snapshot(dst, clip);
+            let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
+            let smooth = bilateral::surface_blur(&original, w, h, r, t);
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                lerp(o, smooth[at], opacity * coverage_at(doc, mask, x, y))
+            });
+        }
         Filter::RadialBlur {
             amount,
             spin,
@@ -8024,6 +8044,31 @@ pub fn median_radius(radius: f32, scale: f32) -> usize {
         r.round().clamp(0.0, 64.0) as usize
     } else {
         0
+    }
+}
+
+/// How many device pixels each way a surface blur of `radius` reads, at
+/// a view of `scale`: whole pixels, and no more than [`SURFACE_MOST`].
+pub fn surface_radius(radius: f32, scale: f32) -> usize {
+    let r = radius * scale;
+    if r.is_finite() {
+        r.round().clamp(0.0, SURFACE_MOST as f32) as usize
+    } else {
+        0
+    }
+}
+
+/// The widest surface blur, in device pixels each way: a line of 129
+/// reads a pixel a pass, which is the most a smear is given.
+pub const SURFACE_MOST: usize = 64;
+
+/// A surface blur's threshold as it is used: 0..1 of the display
+/// encoding, and nothing for what is not a number.
+pub fn surface_threshold(threshold: f32) -> f32 {
+    if threshold.is_finite() {
+        threshold.clamp(0.0, 1.0)
+    } else {
+        0.0
     }
 }
 
@@ -20171,6 +20216,115 @@ mod tests {
             s.get(18, 30)
         );
         assert_eq!(s.get(14, 30).a, 0.0, "and it still stops at its width");
+    }
+
+    /// A grainy picture of two flat tones, dark left and light right, its
+    /// grain as a byte-sized wobble a pixel.
+    fn grainy_halves(w: u32, h: u32) -> Document {
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        let mut seed = 0x9e37_79b9u32;
+        for i in 0..w * h {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let wobble = (seed >> 27) as i32 - 16; // -16..15
+            let base = if i % w < w / 2 { 70 } else { 190 };
+            let v = (base + wobble).clamp(0, 255) as u8;
+            rgba.extend_from_slice(&[v, v, v, 255]);
+        }
+        let mut doc = Document::new(w, h, ColorMode::Rgb);
+        let resource_id = doc.add_resource(w, h, rgba);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "grain",
+                chitrakar_doc::RasterRef {
+                    resource_id,
+                    width: w,
+                    height: h,
+                    corners: None,
+                },
+            )),
+        })
+        .unwrap();
+        doc
+    }
+
+    #[test]
+    fn a_surface_blur_takes_the_grain_out_and_leaves_the_edge() {
+        let (w, h) = (48u32, 24u32);
+        let bare = grainy_halves(w, h);
+        let filtered = |filter: Filter| {
+            let mut doc = bare.clone();
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::filter("f", filter)),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let tone = |s: &Surface, x: u32, y: u32| s.get(x, y).to_srgb8()[0] as f32;
+        // How much the grain wobbles across the middle of the dark half.
+        let wobble = |s: &Surface| {
+            let v: Vec<f32> = (6..18)
+                .flat_map(|y| (4..18).map(move |x| (x, y)))
+                .map(|(x, y)| tone(s, x, y))
+                .collect();
+            let mean = v.iter().sum::<f32>() / v.len() as f32;
+            (v.iter().map(|t| (t - mean).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+        };
+        let before = render(&bare).unwrap();
+        let smooth = filtered(Filter::SurfaceBlur {
+            radius: 4.0,
+            threshold: 0.2,
+        });
+        let blurred = filtered(Filter::GaussianBlur { sigma: 2.0 });
+        assert!(
+            wobble(&smooth) < wobble(&before) * 0.5,
+            "the grain is taken down: {} -> {}",
+            wobble(&before),
+            wobble(&smooth)
+        );
+        // Either side of the edge each pixel keeps its own side's tone,
+        // where a blur of the same reach runs them into each other.
+        let (edge_dark, edge_light) = (w / 2 - 1, w / 2);
+        let side = |s: &Surface, x: u32| (4..20).map(|y| tone(s, x, y)).sum::<f32>() / 16.0;
+        assert!(
+            (side(&smooth, edge_dark) - 70.0).abs() < 10.0
+                && (side(&smooth, edge_light) - 190.0).abs() < 10.0,
+            "the edge stays an edge: {} | {}",
+            side(&smooth, edge_dark),
+            side(&smooth, edge_light)
+        );
+        assert!(
+            (side(&blurred, edge_dark) - 70.0).abs() > 25.0,
+            "where a blur smears it: {}",
+            side(&blurred, edge_dark)
+        );
+        // Asked for nothing, it does nothing.
+        for nothing in [
+            Filter::SurfaceBlur {
+                radius: 0.0,
+                threshold: 0.2,
+            },
+            Filter::SurfaceBlur {
+                radius: 4.0,
+                threshold: 0.0,
+            },
+            Filter::SurfaceBlur {
+                radius: f32::NAN,
+                threshold: f32::NAN,
+            },
+        ] {
+            assert!(
+                filtered(nothing.clone()).pixels == before.pixels,
+                "{nothing:?} leaves the picture"
+            );
+        }
     }
 
     #[test]

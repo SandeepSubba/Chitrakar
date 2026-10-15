@@ -4598,6 +4598,10 @@ export function App() {
       name: "Reduce noise",
       kind: { Filter: { Median: { radius: 1 } } },
     },
+    surface: {
+      name: "Surface blur",
+      kind: { Filter: { SurfaceBlur: { radius: 4, threshold: 0.15 } } },
+    },
     motion: {
       name: "Motion Blur",
       kind: { Filter: { MotionBlur: { distance: 20, degrees: 0 } } },
@@ -13035,6 +13039,21 @@ function KindProps({
       return slider("Radius", filter.Median.radius, 1, 20, 1, (v) => ({
         Filter: { Median: { radius: v } },
       }));
+    }
+    if ("SurfaceBlur" in filter) {
+      const p = filter.SurfaceBlur;
+      // How far each pixel looks along its row and down its column, and
+      // how unlike a neighbour may look and still be averaged in.
+      return (
+        <>
+          {slider("Smoothing radius", p.radius, 1, 40, 1, (v) => ({
+            Filter: { SurfaceBlur: { ...p, radius: v } },
+          }))}
+          {slider("Edge threshold", p.threshold, 0.01, 0.6, 0.01, (v) => ({
+            Filter: { SurfaceBlur: { ...p, threshold: v } },
+          }))}
+        </>
+      );
     }
     if ("Noise" in filter) {
       const p = filter.Noise;

@@ -3376,6 +3376,7 @@ fn one(
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
                         | chitrakar_doc::Filter::Median { .. }
+                        | chitrakar_doc::Filter::SurfaceBlur { .. }
                 )
             {
                 return None;
@@ -5110,6 +5111,23 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
         // of the window a pixel, which is the smear's pass with a square
         // walked instead of a line — and past a radius of eight, more of
         // a walk than a pass should be, so that is handed back.
+        // Two passes, along the rows and then down the columns, which is
+        // the pixelate's arrangement with the bilateral's weights in each
+        // pass instead of a block's average: the 2 and the 3 say which
+        // pass, the radius and the threshold are the CPU renderer's own,
+        // and the spatial weight is worked out per tap from the same
+        // radius the same way.
+        F::SurfaceBlur { radius, threshold } => {
+            let r = chitrakar_render::surface_radius(*radius, scale);
+            let t = chitrakar_render::surface_threshold(*threshold);
+            if r == 0 || t <= 0.0 {
+                return Some(Filtering::Nothing);
+            }
+            Filtering::Blocks {
+                across: [r as f32, t, 0.0, 2.0],
+                down: [r as f32, t, 0.0, 3.0],
+            }
+        }
         F::Median { radius } => match chitrakar_render::median_radius(*radius, scale) {
             0 => Filtering::Nothing,
             r if r > MEDIAN_MOST => return None,
@@ -12491,6 +12509,109 @@ mod tests {
         assert!(
             !GpuRenderer::can_render(&with(9.0, 1.0)),
             "a median of nine goes back"
+        );
+    }
+
+    /// A surface blur is two bilateral passes, along the rows and then
+    /// down the columns, with the CPU renderer's weights worked out per
+    /// tap: on a grainy picture of two tones with a clear patch and a
+    /// bright speck in it, narrow and wide, faded, and under a view that
+    /// makes its radius half as large again.
+    #[test]
+    fn a_surface_blur_smooths_the_way_the_cpu_smooths() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (w, h) = (64u32, 48u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        let mut seed = 0x7f4a_7c15u32;
+        for i in 0..w * h {
+            let (x, y) = (i % w, i / w);
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let wobble = (seed >> 26) as i32 - 32;
+            let clear = (20..30).contains(&x) && (10..22).contains(&y);
+            let speck = x == 45 && y == 30;
+            let (r, g, b) = if speck {
+                (255, 255, 255)
+            } else if x < w / 2 {
+                (40 + wobble / 2, 90 + wobble, 160)
+            } else {
+                (200 + wobble / 2, 120, 60 + wobble)
+            };
+            let c = |v: i32| v.clamp(0, 255) as u8;
+            rgba.extend_from_slice(&[c(r), c(g), c(b), if clear { 0 } else { 255 }]);
+        }
+        let mut doc = Document::new(w, h, ColorMode::Rgb);
+        let id = doc.add_resource(w, h, rgba);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "grain",
+                chitrakar_doc::RasterRef {
+                    resource_id: id,
+                    width: w,
+                    height: h,
+                    corners: None,
+                },
+            )),
+        })
+        .unwrap();
+        let with = |radius: f32, threshold: f32, opacity: f32| {
+            let mut doc = doc.clone();
+            let mut node = Node::filter("smooth", F::SurfaceBlur { radius, threshold });
+            node.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc
+        };
+        let bare = chitrakar_render::render(&doc).unwrap();
+        for (radius, threshold, opacity) in [
+            (1.0, 0.2, 1.0),
+            (4.0, 0.25, 1.0),
+            (20.0, 0.15, 1.0),
+            (3.0, 0.6, 0.5),
+        ] {
+            let doc = with(radius, threshold, opacity);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a surface blur of {radius} is drawn"
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.0015 && worst < 0.03,
+                "a surface blur of {radius} at {threshold}, {opacity}: mean channel \
+                 difference {mean:.5} (worst {worst:.4})"
+            );
+            let changed = difference(&reference, &bare).0;
+            assert!(changed > 0.002, "and it changed the picture: {changed:.5}");
+        }
+        let doc = with(3.0, 0.2, 1.0);
+        let view = Transform {
+            a: 1.5,
+            d: 1.5,
+            e: -6.0,
+            f: -4.0,
+            ..Default::default()
+        };
+        let drawn = gpu.render_view(&doc, view, (40, 30)).unwrap();
+        let mut surface = Surface::new(40, 30);
+        let clip = surface.full_clip();
+        chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+        let (mean, worst) = difference(&drawn, &surface);
+        assert!(
+            mean < 0.0015 && worst < 0.03,
+            "enlarged: mean channel difference {mean:.5} (worst {worst:.4})"
         );
     }
 

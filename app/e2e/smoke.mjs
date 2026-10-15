@@ -7316,6 +7316,71 @@ assert(
   assert((await canvasPixel(59, 99))[0] > 240, "undo takes the filter away and the speck is back");
 }
 
+// 9o21. Surface blur: grain over two flat greys is smoothed away, and the
+// edge between them stays an edge, which a blur of that reach would not
+// leave.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  const paint = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await paint("#303030", 0, 0, 150, 200);
+  await paint("#c0c0c0", 150, 0, 300, 200);
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await page.selectOption('[aria-label="Add adjustment layer"]', "noise");
+  await page.waitForTimeout(300);
+  // How much a row of the dark grey wobbles, and what either side of the
+  // edge reads, averaged down a few rows.
+  const row = async () => {
+    const v = [];
+    for (let x = 40; x < 100; x += 3) v.push((await canvasPixel(x, 80))[0]);
+    const mean = v.reduce((a, c) => a + c, 0) / v.length;
+    return Math.sqrt(v.reduce((a, c) => a + (c - mean) ** 2, 0) / v.length);
+  };
+  const sideOf = async (x) => {
+    let sum = 0;
+    for (let y = 60; y < 140; y += 8) sum += (await canvasPixel(x, y))[0];
+    return sum / 10;
+  };
+  const grainy = await row();
+  assert(grainy > 3, `the grain is there to take out (${grainy.toFixed(2)})`);
+  await page.selectOption('[aria-label="Add adjustment layer"]', "surface");
+  await page.waitForTimeout(400);
+  await page.locator(".panel ul li", { hasText: "Surface blur" }).click();
+  await page.waitForTimeout(200);
+  await setSlider("Smoothing radius", 8);
+  await setSlider("Edge threshold", 0.3);
+  await page.waitForTimeout(400);
+  const smooth = await row();
+  assert(
+    smooth < grainy * 0.6,
+    `the grain is smoothed away (${grainy.toFixed(2)} -> ${smooth.toFixed(2)})`,
+  );
+  const [dark, light] = [await sideOf(148), await sideOf(152)];
+  assert(
+    Math.abs(dark - 0x30) < 14 && Math.abs(light - 0xc0) < 14,
+    `and the edge between the greys stays an edge (${dark.toFixed(1)} / ${light.toFixed(1)})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  assert(
+    Math.abs((await row()) - grainy) < 0.01,
+    "undo takes the filter away and the grain is back",
+  );
+}
+
 // 9o9. Trim to the artwork: on a white ground, the page comes in to the
 // shape drawn on it, and one undo gives the page back its size.
 {

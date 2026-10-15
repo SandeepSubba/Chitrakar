@@ -2569,8 +2569,17 @@ impl Rng {
                     // ask the second renderer to decline them.
                     _ => {
                         if self.chance(4) {
-                            Filter::Median {
-                                radius: self.between(0.5, 3.0),
+                            let radius = self.between(0.5, 3.0);
+                            // Half of those a surface blur instead, out of
+                            // a stream of its own so no other page moves.
+                            let mut side = Rng((self.0 ^ 0x510e_527f_ade6_82d1) | 1);
+                            if side.chance(2) {
+                                Filter::SurfaceBlur {
+                                    radius: radius * 1.5,
+                                    threshold: side.between(0.05, 0.5),
+                                }
+                            } else {
+                                Filter::Median { radius }
                             }
                         } else {
                             Filter::Noise {
