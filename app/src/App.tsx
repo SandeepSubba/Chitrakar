@@ -2971,6 +2971,20 @@ export function App() {
         return;
       }
       if (hit === selected && isPath) {
+        // With alt, the scissors: the path is cut where it is pressed —
+        // the pair to alt on an anchor, which takes the anchor off.
+        if (e.altKey) {
+          try {
+            const parts = session.cut_path_at(hit, x, y, 10 / view.zoom);
+            setSelected(parts[parts.length - 1] ?? hit);
+            setMultiSel([]);
+          } catch {
+            // Not near the outline: nothing to cut.
+            return;
+          }
+          refresh(session);
+          return;
+        }
         try {
           session.insert_anchor(hit, x, y, 10 / view.zoom);
         } catch {
@@ -11017,7 +11031,7 @@ const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => 
         [`${k("Line")}, ${k("Polygon")}, ${k("Star")}`, "Line, polygon, star"],
         [k("Shape"), "Shape — one of the library's: a triangle, an arrow, a callout, a heart"],
         [`${k("Pen")}, ${k("Brush")}`, "Pen, brush"],
-        [k("Node"), "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off"],
+        [k("Node"), "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off, alt-press the outline to cut it there"],
         [k("Paint"), "Paint (a brush that lays pixels)"],
         [shifted("Paint"), "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
         [k("Clone"), "Clone (paint with what is already there, as it is)"],

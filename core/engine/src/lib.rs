@@ -3172,6 +3172,25 @@ impl Session {
         y: f32,
         within: f32,
     ) -> Result<usize, EngineError> {
+        let Some(added) = self.anchored(id, x, y, within)? else {
+            return Ok(0);
+        };
+        let at = added.at;
+        self.replace_path(id, added.shape, added.widths, "Add anchor")?;
+        Ok(at)
+    }
+
+    /// The path with an anchor put on its outline nearest the page point
+    /// `x`, `y`, if one is within `within`: the shape it becomes, the
+    /// widths that go with it, and where the new anchor is. Nothing is
+    /// changed; `None` where the point is not in the layer's space at all.
+    fn anchored(
+        &self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<Option<Anchored>, EngineError> {
         let node = self.doc.node(id)?;
         let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
             return Err(EngineError::BadCommand("not a shape layer".into()));
@@ -3190,7 +3209,7 @@ impl Session {
             return Err(EngineError::BadCommand("a path of one anchor".into()));
         }
         let Some((lx, ly)) = self.point_in_layer(id, false, x, y)? else {
-            return Ok(0);
+            return Ok(None);
         };
         // A smooth path carries no handles: its curve is a Catmull-Rom
         // spline read off the anchors. Splitting a segment is arithmetic
@@ -3266,9 +3285,8 @@ impl Session {
             }
             _ => None,
         };
-        self.replace_path(
-            id,
-            chitrakar_doc::VectorShape::Path {
+        Ok(Some(Anchored {
+            shape: chitrakar_doc::VectorShape::Path {
                 points,
                 closed: *closed,
                 smooth: *smooth,
@@ -3276,9 +3294,8 @@ impl Session {
                 subpaths: subpaths.clone(),
             },
             widths,
-            "Add anchor",
-        )?;
-        Ok(at + 1)
+            at: at + 1,
+        }))
     }
 
     /// Make a rectangle or an ellipse a path of its own outline, with
@@ -3582,7 +3599,58 @@ impl Session {
     /// do the widths of a brushed line. One step in the history; the
     /// answer is the path's layer, and the new one when there is one.
     pub fn split_path(&mut self, id: NodeId, index: usize) -> Result<Vec<NodeId>, EngineError> {
-        let (points, handles, closed, smooth, widths) = self.open_path_parts(id)?;
+        let parts = self.open_path_parts(id)?;
+        let (cmds, made, label) = self.split_commands(id, parts, index)?;
+        self.apply_labeled(Command::Batch(cmds), Some(label.into()))?;
+        Ok(made)
+    }
+
+    /// Cut a path where the page point `x`, `y` lies on its outline,
+    /// within `within`: an anchor put there and the path cut at it, as
+    /// one step — the scissors. The answer is as `split_path`'s.
+    pub fn cut_path_at(
+        &mut self,
+        id: NodeId,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<Vec<NodeId>, EngineError> {
+        // Refused for what a cut refuses, before an anchor is put on.
+        let (_, _, _, smooth, _) = self.open_path_parts(id)?;
+        let added = self
+            .anchored(id, x, y, within)?
+            .ok_or_else(|| EngineError::BadCommand("no outline near that point".into()))?;
+        let chitrakar_doc::VectorShape::Path {
+            points,
+            closed,
+            handles,
+            ..
+        } = &added.shape
+        else {
+            unreachable!("an anchor is only put on a path")
+        };
+        let parts = (
+            points.clone(),
+            padded_handles(handles, points.len()),
+            *closed,
+            smooth,
+            added.widths.clone(),
+        );
+        let (cmds, made, _) = self.split_commands(id, parts, added.at)?;
+        self.apply_labeled(Command::Batch(cmds), Some("Cut the path".into()))?;
+        Ok(made)
+    }
+
+    /// The commands that cut a path, given as its parts, at an anchor,
+    /// the layers it will be, and what the step is called.
+    #[allow(clippy::type_complexity)]
+    fn split_commands(
+        &self,
+        id: NodeId,
+        parts: (Vec<[f32; 2]>, Vec<[f32; 4]>, bool, bool, Option<Vec<f32>>),
+        index: usize,
+    ) -> Result<(Vec<Command>, Vec<NodeId>, &'static str), EngineError> {
+        let (points, handles, closed, smooth, widths) = parts;
         let n = points.len();
         if index >= n {
             return Err(EngineError::BadCommand("there is no such anchor".into()));
@@ -3612,8 +3680,18 @@ impl Session {
             hs[last][3] = 0.0;
             let pts = order.iter().map(|&k| points[k]).collect();
             let widths = widths.map(|w| order.iter().map(|&k| w[k]).collect());
-            self.replace_path(id, path(pts, hs), widths, "Open the path")?;
-            return Ok(vec![id]);
+            let (kind, transform) = self.path_rewritten(id, path(pts, hs), widths)?;
+            return Ok((
+                vec![
+                    Command::SetKind {
+                        id,
+                        kind: Box::new(kind),
+                    },
+                    Command::SetTransform { id, transform },
+                ],
+                vec![id],
+                "Open the path",
+            ));
         }
         if index == 0 || index + 1 >= n {
             return Err(EngineError::BadCommand(
@@ -3650,8 +3728,8 @@ impl Session {
         second.kind = second_kind;
         second.transform = second_transform;
         let new_id = self.doc.peek_next_id();
-        self.apply_labeled(
-            Command::Batch(vec![
+        Ok((
+            vec![
                 Command::SetKind {
                     id,
                     kind: Box::new(kind),
@@ -3662,10 +3740,10 @@ impl Session {
                     index: at + 1,
                     node: Box::new(second),
                 },
-            ]),
-            Some("Cut the path".into()),
-        )?;
-        Ok(vec![id, new_id])
+            ],
+            vec![id, new_id],
+            "Cut the path",
+        ))
     }
 
     /// Join two open paths into one, at the two ends nearest each other:
@@ -8326,6 +8404,14 @@ fn parse_command(json: &str) -> Result<Command, EngineError> {
     serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))
 }
 
+/// A path with an anchor put on its outline, as `Session::anchored`
+/// works it out: the shape, its stroke's widths, and where the anchor is.
+struct Anchored {
+    shape: chitrakar_doc::VectorShape,
+    widths: Option<Vec<f32>>,
+    at: usize,
+}
+
 /// How a copy differs from what it was made from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CopyStyle {
@@ -8589,6 +8675,108 @@ mod tests {
             anchors(&session, one),
             vec![[10.0, 10.0], [30.0, 10.0], [50.0, 10.0], [70.0, 10.0]],
             "bridged across the gap"
+        );
+    }
+
+    /// The scissors cut a path where it is pressed, between its anchors,
+    /// in one step: a line becomes two that meet at the press and draw as
+    /// the one did; a ring opens there; a press off the outline cuts
+    /// nothing and leaves no step behind.
+    #[test]
+    fn scissors_cut_a_path_where_it_is_pressed() {
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut n = Node::vector(
+            "line",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [80.0, 0.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut n.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 4.0,
+                widths: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Butt,
+                join: chitrakar_doc::StrokeJoin::Miter,
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                align: None,
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::None,
+            });
+        }
+        n.transform = Transform::translation(20.0, 40.0);
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(n),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        let whole = session.render().unwrap();
+        let before = session.history_labels().0.len();
+        assert!(
+            session.cut_path_at(id, 50.0, 70.0, 4.0).is_err(),
+            "nowhere near it"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            before,
+            "and no step for it"
+        );
+        let parts = session.cut_path_at(id, 50.0, 41.0, 4.0).unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(session.history_labels().0.len(), before + 1, "one step");
+        // The box each half covers, its stroke's reach taken off by the
+        // whole line's own: the first ends at the press, the second
+        // starts there.
+        let reach = 20.0 - session.bounds_of(parts[0]).unwrap()[0];
+        let ends: Vec<[f32; 2]> = parts
+            .iter()
+            .map(|p| {
+                let b = session.bounds_of(*p).unwrap();
+                [b[0] + reach, b[0] + b[2] - reach]
+            })
+            .collect();
+        assert!(
+            (ends[0][0] - 20.0).abs() < 0.5
+                && (ends[0][1] - 50.0).abs() < 0.5
+                && (ends[1][0] - 50.0).abs() < 0.5
+                && (ends[1][1] - 100.0).abs() < 0.5,
+            "cut at the press: {ends:?}"
+        );
+        let cut = session.render().unwrap();
+        for x in [25u32, 45, 55, 95] {
+            assert_eq!(cut.get(x, 40), whole.get(x, 40), "drawn as it was at {x}");
+        }
+        // A ring opens where it is pressed.
+        session.undo().unwrap();
+        session.join_paths(id, id).unwrap();
+        session.cut_path_at(id, 70.0, 40.0, 4.0).unwrap();
+        let NodeKind::Vector {
+            shape: VectorShape::Path { points, closed, .. },
+            ..
+        } = &session.document().node(id).unwrap().kind
+        else {
+            panic!("a path")
+        };
+        let t = session.document().node(id).unwrap().transform;
+        let first = [points[0][0] + t.e, points[0][1] + t.f];
+        assert!(
+            !closed && (first[0] - 70.0).abs() < 0.5,
+            "opened at the press: {first:?}"
         );
     }
 

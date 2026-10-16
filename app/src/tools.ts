@@ -233,7 +233,7 @@ export const TOOL_ABOUT: Record<Tool, string> = {
   Star: "a star",
   Shape: "one of the library's shapes — an arrow, a callout, a heart — as a path",
   Pen: "a path, straight or smooth, one point at a time",
-  Node: "take hold of a shape's anchors; press its outline to add one, alt-press one to take it off",
+  Node: "take hold of a shape's anchors; press its outline to add one, alt-press one to take it off, alt-press the outline to cut it there",
   Brush: "a freehand stroke that lands as a path",
   Paint: "a brush that lays pixels",
   Eraser: "rub paint out; on any other layer, take a piece out of it",

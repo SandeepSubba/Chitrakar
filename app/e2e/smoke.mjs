@@ -7661,6 +7661,37 @@ assert(
   assert((await rows()) === 2, "one undo is the two again");
 }
 
+// 9o26. The scissors: with the Node tool, alt-pressing a picked line's
+// outline cuts it there, in one step, still drawn where it was.
+{
+  await newDocument(300, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 120) * b.height];
+  await pickTool("Pen");
+  await page.mouse.click(...at(30, 60));
+  await page.waitForTimeout(80);
+  await page.mouse.click(...at(270, 60));
+  await page.waitForTimeout(80);
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  await pickTool("Node");
+  await page.mouse.click(...at(150, 60));
+  await page.waitForTimeout(200);
+  const rows = () => page.locator(".panel ul li").count();
+  assert((await rows()) === 1, "one line, picked");
+  await page.keyboard.down("Alt");
+  await page.mouse.click(...at(120, 60));
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(300);
+  assert(
+    (await rows()) === 2 && (await canvasPixel(100, 60))[3] > 100 && (await canvasPixel(200, 60))[3] > 100,
+    `cut where it was pressed, still drawn (${await rows()} layers)`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 1, "one undo is the one line again");
+}
+
 // 9o9. Trim to the artwork: on a white ground, the page comes in to the
 // shape drawn on it, and one undo gives the page back its size.
 {

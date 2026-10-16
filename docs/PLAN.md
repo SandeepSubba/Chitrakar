@@ -2103,6 +2103,17 @@ without reading anything else.*
     bridged by a straight segment. The second path is brought into the
     first's own space through both transforms. A path joined to itself
     closes, its coincident end dropped.
+  - **The scissors ✅** (`Session::cut_path_at`): with the Node tool,
+    alt-pressing a picked path's outline cuts it there, the pair to
+    alt-pressing an anchor, which takes the anchor off. An anchor is put
+    where the press lands and the path cut at it, as one step.
+    `anchored` (what `insert_anchor` used to do, without applying it)
+    and `split_commands` (what `split_path` does) are shared, so the two
+    halves of the gesture are the same code as the two menu rows.
+    `scissors_cut_a_path_where_it_is_pressed`: a press off the outline
+    cuts nothing and leaves no step; a line pressed mid-way is two
+    meeting at the press, drawn as it was; a ring opens at the press.
+    Cutting at the anchor before the new one fails it. Smoke 9o26.
   - **Limits:** compound paths are refused, since their holes would
     belong to nothing. Each is one step. `path_rewritten` is the old
     `replace_path` body, kept for both and for the cut's second half.

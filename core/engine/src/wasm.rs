@@ -697,6 +697,21 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// The scissors: cut a path where a page point lies on its outline,
+    /// within `within`, as one step; the ids of the layers it is now.
+    pub fn cut_path_at(
+        &mut self,
+        id: f64,
+        x: f32,
+        y: f32,
+        within: f32,
+    ) -> Result<Vec<f64>, JsError> {
+        self.inner
+            .cut_path_at(NodeId(id as u64), x, y, within)
+            .map(|v| v.into_iter().map(|n| n.0 as f64).collect())
+            .map_err(to_js)
+    }
+
     /// Join two open paths at their nearest ends, or close one joined
     /// to itself; the joined layer's id.
     pub fn join_paths(&mut self, a: f64, b: f64) -> Result<f64, JsError> {
