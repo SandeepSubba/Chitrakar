@@ -382,6 +382,34 @@ pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec
             id: frame,
             clipped: false,
         })?;
+        // For the press the frame reaches out by the bleed, for this page
+        // only: a frame cuts what is in it to its box and its box is the
+        // trim, so otherwise its page bled nothing but white. Grown about
+        // its own corner and moved back by as much, with its layers moved
+        // on by the same, everything stays where it was on the page. A
+        // frame with a mask keeps its box: the mask is in the frame's own
+        // space and says where the frame shows, bleed or none.
+        let bleed = marks.bleed();
+        if bleed > 0.0 && node.mask.is_none() {
+            let (bx, by) = (bleed / sx, bleed / sy);
+            let mut grown = node.kind.clone();
+            if let NodeKind::Artboard { width, height, .. } = &mut grown {
+                *width += 2.0 * bx;
+                *height += 2.0 * by;
+            }
+            alone.apply(Command::SetKind {
+                id: frame,
+                kind: Box::new(grown),
+            })?;
+            alone.apply(Command::SetTransform {
+                id: frame,
+                transform: node.transform.compose(Transform::translation(-bx, -by)),
+            })?;
+            for kid in alone.children_of(frame)?.to_vec() {
+                let transform = Transform::translation(bx, by).compose(alone.node(kid)?.transform);
+                alone.apply(Command::SetTransform { id: kid, transform })?;
+            }
+        }
         page.doc = alone;
         page.view = view;
         page.size = size;
@@ -3903,6 +3931,164 @@ mod tests {
         );
         assert_eq!((bled.width, bled.height), (118, 78));
         assert_eq!(px(&bled, 4, 30), [255, 0, 0]);
+    }
+
+    /// A frame's page bleeds what is in the frame: the frame reaches out
+    /// by the bleed for its page, its layers staying where they were, so
+    /// the ground under its artwork, its own colour, and what goes as
+    /// pixels all run on past the trim — and only what is in that frame.
+    #[test]
+    fn a_frames_page_bleeds_what_is_in_the_frame() {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no ghostscript");
+            return;
+        }
+        let colour = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let mut doc = Document::new(300, 200, chitrakar_color::ColorMode::Rgb);
+        doc.meta.dpi = 72.0;
+        let into = |doc: &mut Document, frame: NodeId, node: chitrakar_doc::Node, at: [f32; 2]| {
+            let index = doc.children_of(frame).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(frame).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at[0], at[1]),
+            })
+            .unwrap();
+        };
+        // The first frame: a red ground running twenty past it, a blue
+        // corner mark to say nothing moved, and a soft dab over its right
+        // edge, which goes as pixels.
+        let first = add(
+            &mut doc,
+            chitrakar_doc::Node::artboard("one", 100.0, 80.0, Some(colour(1.0, 1.0, 1.0))),
+            [10.0, 20.0],
+        );
+        let ground = VectorShape::Rect {
+            width: 140.0,
+            height: 120.0,
+            radius: 0.0,
+        };
+        into(
+            &mut doc,
+            first,
+            shape("ground", ground, Some(RED)),
+            [-20.0, -20.0],
+        );
+        let corner = VectorShape::Rect {
+            width: 10.0,
+            height: 10.0,
+            radius: 0.0,
+        };
+        into(
+            &mut doc,
+            first,
+            shape("corner", corner, Some(BLUE)),
+            [0.0, 0.0],
+        );
+        let mut dab = shaded("dab");
+        if let NodeKind::Paint { strokes } = &mut dab.kind {
+            strokes[0].points = vec![[100.0, 40.0]];
+            strokes[0].radii = vec![16.0];
+            strokes[0].color = colour(0.0, 1.0, 0.0);
+        }
+        into(&mut doc, first, dab, [0.0, 0.0]);
+        // The second: its own colour and nothing in it, beside a black
+        // block on the page that is not in it.
+        add(
+            &mut doc,
+            chitrakar_doc::Node::artboard("two", 100.0, 80.0, Some(colour(1.0, 1.0, 0.0))),
+            [160.0, 20.0],
+        );
+        let block = VectorShape::Rect {
+            width: 10.0,
+            height: 80.0,
+            radius: 0.0,
+        };
+        add(
+            &mut doc,
+            shape("block", block, Some(colour(0.0, 0.0, 0.0))),
+            [148.0, 20.0],
+        );
+
+        let pdf = export_pdf_frames_marked(
+            &doc,
+            PrintMarks {
+                bleed: 9.0,
+                crop_marks: false,
+            },
+        )
+        .unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("chitrakar-frame-bleed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("book.pdf"), &pdf).unwrap();
+        let ok = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=png16m",
+                "-r72",
+            ])
+            .arg(format!("-sOutputFile={}", dir.join("page%d.png").display()))
+            .arg(dir.join("book.pdf"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "ghostscript reads it");
+        let page = |n: u32| {
+            crate::decode(&std::fs::read(dir.join(format!("page{n}.png"))).unwrap()).unwrap()
+        };
+        let (one, two) = (page(1), page(2));
+        let _ = std::fs::remove_dir_all(&dir);
+        let px = |png: &crate::SourceImage, x: u32, y: u32| {
+            let i = ((y * png.width + x) * 4) as usize;
+            [png.rgba8[i], png.rgba8[i + 1], png.rgba8[i + 2]]
+        };
+        assert_eq!((one.width, one.height), (118, 98), "the trim and the bleed");
+        assert_eq!(
+            px(&one, 9 + 3, 9 + 3),
+            [0, 0, 255],
+            "the corner where it was"
+        );
+        assert_eq!(
+            px(&one, 9 + 14, 9 + 3),
+            [255, 0, 0],
+            "and the ground beside it"
+        );
+        assert_eq!(
+            px(&one, 4, 40),
+            [255, 0, 0],
+            "the ground runs into the bleed"
+        );
+        assert_eq!(px(&one, 50, 4), [255, 0, 0], "on every side");
+        let past = px(&one, 9 + 100 + 4, 9 + 40);
+        assert!(
+            past[1] > 200 && past[0] < 100,
+            "and the pixels run on past the trim too: {past:?}"
+        );
+        assert_eq!((two.width, two.height), (118, 98));
+        assert_eq!(
+            px(&two, 50, 4),
+            [255, 255, 0],
+            "a frame's own colour bleeds"
+        );
+        assert_eq!(
+            px(&two, 4, 40),
+            [255, 255, 0],
+            "and the block beside it on the page, not in it, does not"
+        );
     }
 
     /// A clone layer goes into a PDF as what it lays.

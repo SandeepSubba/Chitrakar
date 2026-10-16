@@ -2156,11 +2156,19 @@ without reading anything else.*
     for a press profile, so they show on every plate). The page says
     `/TrimBox` and `/BleedBox`, and its MediaBox is the trim, bleed and
     slug. Asked for neither, the PDF is byte-for-byte the one it was.
-  - **Limits:** a frame clips its contents, so a frame's page bleeds
-    only what the document draws outside that frame's clip — usually
-    nothing, white past the trim. Bleed through a frame would need the
-    frame's clip widened by the bleed for the export only.
-    ponytail: kept export setups do not keep the bleed or the marks.
+  - **Frames:** a frame clips its contents to its box, and its box is
+    its page's trim, so at first a frame's page bled only white. For its
+    page the frame now reaches out by the bleed: it grows by twice the
+    bleed about its own corner, moves back by one bleed, and its layers
+    move on by the same, so nothing moves on the page. Its colour, the
+    artwork it holds and its pixel layers all run on past the trim, and
+    nothing outside the frame does. A frame with a mask keeps its box,
+    because the mask is in the frame's own space and says where it shows.
+    `a_frames_page_bleeds_what_is_in_the_frame` (Ghostscript: a ground,
+    a corner mark that must not move, a soft dab over the edge, a second
+    frame's colour, a block beside it that stays out). Not growing, or
+    not moving the layers back, each fail it.
+  - **Limits:** kept export setups do not keep the bleed or the marks.
   - **Tests:** `a_page_for_the_press_bleeds_and_is_marked_where_to_cut`
     (Ghostscript: the sheet is trim, bleed and slug; the ground and a
     soft dab, which goes as pixels, run into the bleed and are cut where
