@@ -478,6 +478,12 @@ pub enum VectorShape {
         points: u32,
         #[serde(default = "whole")]
         inner: f32,
+        /// Each corner rounded off by an arc of this radius, as far as
+        /// the sides either side of it let it go ([`round_corners`]).
+        /// Additive: a polygon written before this had sharp corners,
+        /// which is what nothing means.
+        #[serde(default)]
+        corner: f32,
     },
 }
 
@@ -525,18 +531,127 @@ impl VectorShape {
                 ry,
                 points,
                 inner,
-            } => Some(VectorShape::Path {
-                points: Self::polygon_corners(*rx, *ry, *points, *inner),
-                closed: true,
-                smooth: false,
-                handles: Vec::new(),
-                subpaths: Vec::new(),
-            }),
+                corner,
+            } => {
+                let corners = Self::polygon_corners(*rx, *ry, *points, *inner);
+                // Rounded, the corners are arcs and the path carries the
+                // handles that draw them.
+                let (points, handles) = match round_corners(&corners, &[], true, *corner, None) {
+                    Some(r) => (r.points, r.handles),
+                    None => (corners, Vec::new()),
+                };
+                Some(VectorShape::Path {
+                    points,
+                    closed: true,
+                    smooth: false,
+                    handles,
+                    subpaths: Vec::new(),
+                })
+            }
             VectorShape::Rect { .. } | VectorShape::Ellipse { .. } | VectorShape::Path { .. } => {
                 None
             }
         }
     }
+}
+
+/// A path with corners rounded off: its anchors, their handles, and for
+/// each anchor the one of the old path it came from — a corner rounded is
+/// two, and anything kept per anchor, a brushed line's widths, goes with
+/// both.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Rounded {
+    pub points: Vec<[f32; 2]>,
+    pub handles: Vec<[f32; 4]>,
+    pub from: Vec<usize>,
+}
+
+/// The sharp corners of a path rounded off by arcs of `radius` — every
+/// one, or those `only` names. A corner is an anchor with no handles
+/// whose sides either way are straight; it becomes two anchors where an
+/// arc of the radius would touch those sides, joined by the cubic that
+/// draws the arc (handles `4/3·tan(sweep/4)` of the radius long, which
+/// strays from the circle by under three parts in ten thousand). A corner
+/// takes no more than half of either side, so two rounded corners on one
+/// side meet at its middle rather than crossing, and a radius too big for
+/// the corner is the biggest that fits. An end of an open path is no
+/// corner, and nor is an anchor its sides run straight through.
+///
+/// `None` when nothing was rounded. Handles are offsets from their
+/// anchor, `[in_x, in_y, out_x, out_y]`; `handles` may be empty for a
+/// path drawn with none.
+pub fn round_corners(
+    points: &[[f32; 2]],
+    handles: &[[f32; 4]],
+    closed: bool,
+    radius: f32,
+    only: Option<&[usize]>,
+) -> Option<Rounded> {
+    let n = points.len();
+    if n < 3 || !radius.is_finite() || radius <= 0.0 || (!handles.is_empty() && handles.len() != n)
+    {
+        return None;
+    }
+    let handle = |i: usize| handles.get(i).copied().unwrap_or([0.0; 4]);
+    let flat = |v: f32, w: f32| v.abs() <= 1e-6 && w.abs() <= 1e-6;
+    let mut out = Rounded {
+        points: Vec::with_capacity(n + 8),
+        handles: Vec::with_capacity(n + 8),
+        from: Vec::with_capacity(n + 8),
+    };
+    let mut any = false;
+    for i in 0..n {
+        let p = points[i];
+        let keep = |out: &mut Rounded| {
+            out.points.push(p);
+            out.handles.push(handle(i));
+            out.from.push(i);
+        };
+        let end = !closed && (i == 0 || i == n - 1);
+        if end || only.is_some_and(|o| !o.contains(&i)) {
+            keep(&mut out);
+            continue;
+        }
+        let (prev, next) = ((i + n - 1) % n, (i + 1) % n);
+        let (h, hp, hn) = (handle(i), handle(prev), handle(next));
+        // Sharp, and straight either side: no handle here, none on the
+        // neighbours' ends that face it.
+        let sharp =
+            flat(h[0], h[1]) && flat(h[2], h[3]) && flat(hp[2], hp[3]) && flat(hn[0], hn[1]);
+        let (a, b) = (points[prev], points[next]);
+        let (ua, ub) = ([a[0] - p[0], a[1] - p[1]], [b[0] - p[0], b[1] - p[1]]);
+        let (la, lb) = (ua[0].hypot(ua[1]), ub[0].hypot(ub[1]));
+        if !sharp || la <= 1e-6 || lb <= 1e-6 {
+            keep(&mut out);
+            continue;
+        }
+        let (u, v) = ([ua[0] / la, ua[1] / la], [ub[0] / lb, ub[1] / lb]);
+        // The angle at the corner, between the two sides.
+        let theta = (u[0] * v[0] + u[1] * v[1]).clamp(-1.0, 1.0).acos();
+        if !(1e-3..std::f32::consts::PI - 1e-3).contains(&theta) {
+            keep(&mut out);
+            continue;
+        }
+        let half = (theta / 2.0).tan();
+        let t = (radius / half).min(la.min(lb) / 2.0);
+        if t <= 1e-4 {
+            keep(&mut out);
+            continue;
+        }
+        let r = t * half;
+        let sweep = std::f32::consts::PI - theta;
+        let k = 4.0 / 3.0 * (sweep / 4.0).tan() * r;
+        let t1 = [p[0] + u[0] * t, p[1] + u[1] * t];
+        let t2 = [p[0] + v[0] * t, p[1] + v[1] * t];
+        out.points.extend([t1, t2]);
+        out.handles.extend([
+            [0.0, 0.0, -u[0] * k, -u[1] * k],
+            [-v[0] * k, -v[1] * k, 0.0, 0.0],
+        ]);
+        out.from.extend([i, i]);
+        any = true;
+    }
+    any.then_some(out)
 }
 
 /// Reference to an immutable pixel resource embedded in the document
@@ -2459,6 +2574,79 @@ mod tests {
     /// A polygon's corners: as many as asked, the first straight up,
     /// round the ellipse of its box; a star's every other one pulled in;
     /// and numbers that are no numbers held to what can be drawn.
+    /// A corner rounded is two anchors on its sides and the arc between
+    /// them: the arc on the circle of the radius that touches both sides,
+    /// a radius too big held to half the shorter side, and only corners
+    /// at that — not the ends of an open path, nor an anchor its sides
+    /// run straight through, nor one beside a curve.
+    #[test]
+    fn a_corner_rounded_is_an_arc_between_its_sides() {
+        let square = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let r = round_corners(&square, &[], true, 2.0, None).unwrap();
+        assert_eq!(r.points.len(), 8);
+        assert_eq!(r.from, vec![0, 0, 1, 1, 2, 2, 3, 3]);
+        assert_eq!(&r.points[..2], &[[0.0, 2.0], [2.0, 0.0]]);
+        // The cubic between the first two, at its middle, is on the
+        // circle about (2, 2) of radius 2.
+        let (a, b) = (r.points[0], r.points[1]);
+        let (c1, c2) = (
+            [a[0] + r.handles[0][2], a[1] + r.handles[0][3]],
+            [b[0] + r.handles[1][0], b[1] + r.handles[1][1]],
+        );
+        for t in [0.25f32, 0.5, 0.75] {
+            let u = 1.0 - t;
+            let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+            let p = [
+                w[0] * a[0] + w[1] * c1[0] + w[2] * c2[0] + w[3] * b[0],
+                w[0] * a[1] + w[1] * c1[1] + w[2] * c2[1] + w[3] * b[1],
+            ];
+            let off = ((p[0] - 2.0).hypot(p[1] - 2.0) - 2.0).abs();
+            assert!(off < 1e-3, "{p:?} is {off} off the circle");
+        }
+        // Far too big a radius: each corner takes half of each side, and
+        // the square is a circle.
+        let big = round_corners(&square, &[], true, 100.0, None).unwrap();
+        assert_eq!(&big.points[..2], &[[0.0, 5.0], [5.0, 0.0]]);
+        // One corner, asked for by itself.
+        let one = round_corners(&square, &[], true, 2.0, Some(&[2])).unwrap();
+        assert_eq!(one.from, vec![0, 1, 2, 2, 3]);
+        // An open line: its ends are no corners, its middle is.
+        let line = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]];
+        let bent = round_corners(&line, &[], false, 2.0, None).unwrap();
+        assert_eq!(bent.from, vec![0, 1, 1, 2]);
+        // An anchor its sides run straight through is no corner.
+        let straight = [[0.0, 0.0], [5.0, 0.0], [10.0, 0.0]];
+        assert!(round_corners(&straight, &[], false, 2.0, None).is_none());
+        // A corner with a curve on one side keeps its anchor.
+        let mut curved = [[0.0f32; 4]; 4];
+        curved[1] = [0.0, 0.0, 0.0, 4.0];
+        let kept = round_corners(&square, &curved, true, 2.0, None).unwrap();
+        assert_eq!(
+            kept.from,
+            vec![0, 0, 1, 2, 3, 3],
+            "the corners each side of the curve stay"
+        );
+        // Nothing to round by, nothing rounded.
+        for radius in [0.0, -1.0, f32::NAN] {
+            assert!(round_corners(&square, &[], true, radius, None).is_none());
+        }
+        // A rounded polygon is drawn through the same arcs.
+        let poly = VectorShape::Polygon {
+            rx: 5.0,
+            ry: 5.0,
+            points: 4,
+            inner: 1.0,
+            corner: 1.0,
+        };
+        let Some(VectorShape::Path {
+            points, handles, ..
+        }) = poly.as_path()
+        else {
+            unreachable!()
+        };
+        assert_eq!((points.len(), handles.len()), (8, 8));
+    }
+
     #[test]
     fn a_polygon_has_its_corners_where_a_polygon_does() {
         let five = VectorShape::polygon_corners(10.0, 8.0, 5, 1.0);
@@ -2501,6 +2689,7 @@ mod tests {
             ry: 8.0,
             points: 5,
             inner: 1.0,
+            corner: 0.0,
         })
         .as_path()
         .unwrap() else {

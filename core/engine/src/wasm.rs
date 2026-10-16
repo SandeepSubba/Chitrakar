@@ -1470,6 +1470,22 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Round the corners of the shapes named by `radius`, in one step:
+    /// a rectangle's and a polygon's live, a path's sharp corners
+    /// rewritten as arcs — only the anchor `anchor` when it is not
+    /// negative. How many were rounded.
+    pub fn round_corners(
+        &mut self,
+        ids: &[f64],
+        radius: f32,
+        anchor: i32,
+    ) -> Result<usize, JsError> {
+        let ids: Vec<NodeId> = ids.iter().map(|i| NodeId(*i as u64)).collect();
+        self.inner
+            .round_corners(&ids, radius, usize::try_from(anchor).ok())
+            .map_err(to_js)
+    }
+
     /// Export as SVG markup.
     pub fn export_svg(&self) -> Result<String, JsError> {
         self.inner.export_svg().map_err(to_js)

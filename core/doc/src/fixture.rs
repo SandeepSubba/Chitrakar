@@ -2089,6 +2089,13 @@ impl Rng {
                         } else {
                             1.0
                         },
+                        // Half of them rounded at the corners, drawn after
+                        // everything else the stream gives a polygon.
+                        corner: if side.chance(2) {
+                            side.between(0.5, 3.0)
+                        } else {
+                            0.0
+                        },
                     }
                 } else {
                     VectorShape::Ellipse { rx, ry }

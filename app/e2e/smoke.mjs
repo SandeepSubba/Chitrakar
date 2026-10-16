@@ -7802,6 +7802,61 @@ assert(
   assert((await rows()) === 2, "one undo is the two again");
 }
 
+// 9o25a. Round corners: a pen zigzag's sharp apex rounded off by 20 is
+// an arc well below where the point was, in one step; a polygon's
+// corners are a live radius beside its point count.
+{
+  await newDocument(300, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 120) * b.height];
+  await pickTool("Pen");
+  for (const [x, y] of [
+    [20, 100],
+    [60, 20],
+    [100, 100],
+  ]) {
+    await page.mouse.click(...at(x, y));
+    await page.waitForTimeout(80);
+  }
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  assert((await canvasPixel(60, 22))[3] > 100, "the zigzag comes to a point");
+  await page.locator('input[aria-label="Round by"]').fill("20");
+  await page.click('button:text-is("Round corners")');
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(60, 22))[3] === 0 && (await canvasPixel(60, 45))[3] > 100,
+    `rounded, the point is gone and the arc runs under it (${await canvasPixel(60, 22)} / ${await canvasPixel(60, 45)})`,
+  );
+  assert(
+    (await canvasPixel(25, 90))[3] > 100,
+    "and the line's ends are where they were",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(60, 22))[3] > 100, "one undo and it comes to a point again");
+  // A polygon keeps its corners as a radius of its own.
+  await pickTool("Polygon");
+  await page.mouse.move(...at(150, 10));
+  await page.mouse.down();
+  await page.mouse.move(...at(290, 110), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  assert((await canvasPixel(220, 14))[3] > 100, "the polygon has a point at the top");
+  await setSlider("Corner radius", 40);
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(220, 14))[3] === 0 && (await canvasPixel(220, 40))[3] > 200,
+    `rounded live, the top is an arc (${await canvasPixel(220, 14)})`,
+  );
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

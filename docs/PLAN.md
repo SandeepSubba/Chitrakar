@@ -2258,6 +2258,60 @@ without reading anything else.*
       editing the shadow.
     - Smoke 8x2c: a rect lit from the upper left, the light turned round,
       the angle read back, the highlight recoloured and undone, removed.
+- **Round corners ✅** (`chitrakar_doc::round_corners`,
+  `VectorShape::Polygon::corner`, `Session::round_corners(ids, radius,
+  anchor)`; a polygon's *Corner radius* slider, and *Round by* with a
+  *Round corners* button on a path). A rectangle could round its corners
+  and nothing else could: not a polygon, a star, a pen drawing, or the
+  outline a boolean leaves.
+  - **The geometry:** a corner is an anchor with no handles whose sides
+    either way are straight. It becomes two anchors where a circle of
+    the radius touches those sides, joined by the cubic that draws the
+    arc (handles `4/3·tan(sweep/4)` of the radius long). A corner takes
+    no more than half of either side, so a radius too big gives the
+    biggest arc that fits, and neighbouring arcs meet at a side's middle
+    rather than crossing. These are not corners: the ends of an open
+    path, an anchor its sides run straight through, and an anchor with a
+    curve on either side.
+  - **Live where the shape is a number:** a polygon or star keeps
+    `corner` (serde default 0, so older files are sharp), and `as_path`
+    rounds its corners. Every renderer and exporter already draws a
+    polygon through `as_path` — the CPU, the GPU, SVG and PDF — so none
+    of them changed. *Convert to path* takes the rounded outline, so a
+    rounded star converted is still rounded. A rectangle's own `radius`
+    answers the same command.
+  - **A path is rewritten:** a path keeps no number for this, so its
+    corners become anchors, as cut and join rewrite paths. That is one
+    step, and a brushed line's width at a corner goes to both of its new
+    anchors (`Rounded::from`). A smooth path or a compound one has no
+    such corners and is passed over. With the anchor tool's last-pressed
+    anchor on the one picked path, only that corner is rounded.
+  - **Fixture:** half the random polygons and stars are rounded, drawn
+    after everything else their stream gives a polygon, so every page
+    before is the page it was.
+  - **Found on the way:** `flatten_shape` returned a polygon's
+    `as_path` unflattened, on the old promise that a polygon's path is
+    straight. Rounded, the path is not straight. A rounded diamond was
+    boxed by its anchors, short of the arcs that bulge past them. Drawn
+    under Exclusion, on a surface cut to that box, it lost the sliver
+    past it, and `a_blend_never_changes_what_a_page_covers` caught it on
+    seed 656. `a_rounded_polygon_is_boxed_round_its_arcs` now asks
+    directly, and fails with the old shortcut. The UI mirror now sends
+    `corner` always: an optional field has to appear in the shared
+    fixture, so a silent rename can't hide, and no polygon there has one.
+  - **Tests:**
+    - `a_corner_rounded_is_an_arc_between_its_sides`: on the circle to
+      1e-3; an oversized radius held to half a side; one corner by
+      itself; open ends, straight-through anchors and curved sides left
+      alone; a rounded polygon drawn through the arcs.
+    - `round_corners_rounds_each_shape_the_way_it_keeps_a_corner`: a
+      rectangle, a star, a sharp brushed path and a smooth one at once,
+      with widths carried and one undo; one anchor alone.
+    - Sabotages that each fail one of them: the widths dropped, smooth
+      paths rounded, the half-side clamp dropped, the handles pointing
+      out of the corner, and the panel handing over no radius.
+    - Smoke 9o25a: a pen zigzag's apex rounded by 20 and undone, and a
+      polygon's corner slider.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

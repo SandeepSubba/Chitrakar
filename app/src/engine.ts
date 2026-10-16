@@ -53,7 +53,16 @@ export type VectorShape =
    * corners (3..=100) round the ellipse of `rx` by `ry`, the first
    * straight up; a star's every other corner pulled in to `inner` of the
    * way out. Live: the count and the depth stay numbers. */
-  | { Polygon: { rx: number; ry: number; points: number; inner: number } }
+  | {
+      Polygon: {
+        rx: number;
+        ry: number;
+        points: number;
+        inner: number;
+        /** Each corner rounded off by an arc this wide; 0 is sharp. */
+        corner: number;
+      };
+    }
   | {
       Path: {
         points: [number, number][];

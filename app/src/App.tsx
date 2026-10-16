@@ -4113,7 +4113,9 @@ export function App() {
       // Both live: the count, and a star's depth, stay numbers to
       // change on the panel rather than becoming anchors.
       case "Polygon":
-        shape = { Polygon: { rx: lw / 2, ry: lh / 2, points: polygonCount(sides), inner: 1 } };
+        shape = {
+          Polygon: { rx: lw / 2, ry: lh / 2, points: polygonCount(sides), inner: 1, corner: 0 },
+        };
         break;
       case "Star":
         shape = {
@@ -4122,6 +4124,7 @@ export function App() {
             ry: lh / 2,
             points: polygonCount(sides),
             inner: starDepth(polygonCount(sides)),
+            corner: 0,
           },
         };
         break;
@@ -5391,6 +5394,29 @@ export function App() {
       refresh(session);
     } catch (err) {
       alert(`Repeat: ${err}`);
+    }
+  };
+
+  /** Round the corners of what is picked, by `radius`: each shape the
+   * way it keeps a corner — a rectangle's and a polygon's as their own
+   * live radius, a path's sharp corners rewritten as arcs. With the
+   * anchor tool's last-pressed anchor on the one picked path, only that
+   * corner. One step. */
+  const roundCorners = (radius: number) => {
+    if (!session || selectionSet.length === 0) return;
+    const anchor = pickedAnchorRef.current;
+    const only =
+      anchor && selectionSet.length === 1 && anchor.id === selectionSet[0] ? anchor.idx : -1;
+    try {
+      const n = session.round_corners(new Float64Array(selectionSet), radius, only);
+      if (n === 0) {
+        alert("Round the corners: nothing picked has a sharp corner between straight sides");
+        return;
+      }
+      if (only >= 0) pickedAnchorRef.current = null;
+      refresh(session);
+    } catch (err) {
+      alert(`Round the corners: ${err}`);
     }
   };
 
@@ -10596,6 +10622,7 @@ export function App() {
                   onPickNeutral={() => setPickingNeutral((on) => !on)}
                   pickingNeutral={pickingNeutral}
                   onAutoColour={autoColour}
+                  onRoundCorners={roundCorners}
                   onLoadLookup={() => {
                     lookupFor.current = "replace";
                     lookupInputRef.current?.click();
@@ -12889,6 +12916,9 @@ interface KindPropsProps {
   /** Take each channel of a curves layer to its own ends, which is what
    * pulls a colour cast out of a picture. */
   onAutoColour: () => void;
+  /** Round the corners of a path by this radius (the rest of the shapes
+   * keep a live radius of their own, edited here as one). */
+  onRoundCorners: (radius: number) => void;
 }
 
 /** Parameter editors for the selected node's kind — the panel that makes
@@ -12909,7 +12939,10 @@ function KindProps({
   pickingNeutral,
   onAutoColour,
   onLoadLookup,
+  onRoundCorners,
 }: KindPropsProps) {
+  // How far a path's corners are rounded when asked.
+  const [roundBy, setRoundBy] = useState(8);
   // Which band of colour the panel is showing, when it is showing one.
   const [band, setBand] = useState(0);
   // And which range of tone, when the panel is showing one of those.
@@ -14332,6 +14365,16 @@ function KindProps({
                 {slider("Star depth", 1 - poly.inner, 0, 0.95, 0.01, (d) =>
                   patch({ shape: { Polygon: { ...poly, inner: 1 - d } } }),
                 )}
+                {/* Live, as a rectangle's is: each corner an arc, as far
+                    as the sides either side let it go. */}
+                {slider(
+                  "Corner radius",
+                  poly.corner,
+                  0,
+                  Math.max(1, Math.min(poly.rx, poly.ry)),
+                  0.5,
+                  (r) => patch({ shape: { Polygon: { ...poly, corner: r } } }),
+                )}
               </>
             );
           })()}
@@ -14344,6 +14387,31 @@ function KindProps({
             const curved = path.handles.some((h) => h.some((v) => v !== 0));
             return (
               <>
+                {/* A path keeps no radius of its own: its sharp corners
+                    are rewritten as arcs — the anchor last pressed with
+                    the anchor tool, or all of them. */}
+                {!path.smooth && (path.subpaths ?? []).length === 0 && (
+                  <div className="row">
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={roundBy}
+                      onChange={(e) => {
+                        const r = Number(e.target.value);
+                        if (Number.isFinite(r) && r >= 0) setRoundBy(r);
+                      }}
+                      aria-label="Round by"
+                    />
+                    <button
+                      className="mask-button"
+                      onClick={() => onRoundCorners(roundBy)}
+                      title="Round the sharp corners off by this radius — only the anchor last pressed, if one was"
+                    >
+                      Round corners
+                    </button>
+                  </div>
+                )}
                 <label className="row">
                   <input
                     type="checkbox"

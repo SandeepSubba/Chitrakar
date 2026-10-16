@@ -3319,16 +3319,14 @@ impl Session {
         let (points, handles): (Vec<[f32; 2]>, Vec<[f32; 4]>) = match shape {
             chitrakar_doc::VectorShape::Path { .. } => return Ok(false),
             // A polygon's corners are its anchors, and its sides are
-            // straight: nothing to approximate.
-            chitrakar_doc::VectorShape::Polygon {
-                rx,
-                ry,
-                points,
-                inner,
-            } => (
-                chitrakar_doc::VectorShape::polygon_corners(*rx, *ry, *points, *inner),
-                Vec::new(),
-            ),
+            // straight: nothing to approximate. Rounded, each corner is the
+            // two anchors and the arc between them it draws with.
+            chitrakar_doc::VectorShape::Polygon { .. } => match shape.as_path() {
+                Some(chitrakar_doc::VectorShape::Path {
+                    points, handles, ..
+                }) => (points, handles),
+                _ => return Err(EngineError::BadCommand("not a polygon".into())),
+            },
             chitrakar_doc::VectorShape::Ellipse { rx, ry } => {
                 let (kx, ky) = (KAPPA * rx, KAPPA * ry);
                 (
@@ -3607,6 +3605,126 @@ impl Session {
         let (cmds, made, label) = self.split_commands(id, parts, index)?;
         self.apply_labeled(Command::Batch(cmds), Some(label.into()))?;
         Ok(made)
+    }
+
+    /// Round the corners of the shapes named, by arcs of `radius`, in
+    /// one step — each the way its kind keeps a corner. A rectangle's is
+    /// its own live radius and a polygon's or a star's its live `corner`,
+    /// both numbers to change again; a path's sharp corners are each
+    /// rewritten as the two anchors and the arc between them
+    /// ([`chitrakar_doc::round_corners`]), only the anchor `anchor` when
+    /// one is named, and a brushed line's width at a corner going to
+    /// both of its anchors. A path drawn smooth or with holes has no
+    /// corners of that kind and is passed over, as is anything not a
+    /// shape. The answer is how many were rounded; none is refused.
+    pub fn round_corners(
+        &mut self,
+        ids: &[NodeId],
+        radius: f32,
+        anchor: Option<usize>,
+    ) -> Result<usize, EngineError> {
+        if !radius.is_finite() || radius < 0.0 {
+            return Err(EngineError::BadCommand("a radius is a length".into()));
+        }
+        let mut cmds = Vec::new();
+        for &id in ids {
+            let node = self.doc.node(id)?;
+            let NodeKind::Vector {
+                shape,
+                fill,
+                stroke,
+                gradient,
+            } = &node.kind
+            else {
+                continue;
+            };
+            let live = |shape: chitrakar_doc::VectorShape| NodeKind::Vector {
+                shape,
+                fill: fill.clone(),
+                stroke: stroke.clone(),
+                gradient: gradient.clone(),
+            };
+            match shape.clone() {
+                chitrakar_doc::VectorShape::Rect { width, height, .. } => {
+                    cmds.push(Command::SetKind {
+                        id,
+                        kind: Box::new(live(chitrakar_doc::VectorShape::Rect {
+                            width,
+                            height,
+                            radius,
+                        })),
+                    });
+                }
+                chitrakar_doc::VectorShape::Polygon {
+                    rx,
+                    ry,
+                    points,
+                    inner,
+                    ..
+                } => {
+                    cmds.push(Command::SetKind {
+                        id,
+                        kind: Box::new(live(chitrakar_doc::VectorShape::Polygon {
+                            rx,
+                            ry,
+                            points,
+                            inner,
+                            corner: radius,
+                        })),
+                    });
+                }
+                chitrakar_doc::VectorShape::Path {
+                    points,
+                    closed,
+                    smooth,
+                    handles,
+                    subpaths,
+                } => {
+                    if smooth || !subpaths.is_empty() {
+                        continue;
+                    }
+                    let only = anchor.map(|a| vec![a]);
+                    let Some(rounded) = chitrakar_doc::round_corners(
+                        &points,
+                        &handles,
+                        closed,
+                        radius,
+                        only.as_deref(),
+                    ) else {
+                        continue;
+                    };
+                    let widths = stroke
+                        .as_ref()
+                        .filter(|s| s.widths.len() == points.len())
+                        .map(|s| rounded.from.iter().map(|&i| s.widths[i]).collect());
+                    let (kind, transform) = self.path_rewritten(
+                        id,
+                        chitrakar_doc::VectorShape::Path {
+                            points: rounded.points,
+                            closed,
+                            smooth: false,
+                            handles: rounded.handles,
+                            subpaths: Vec::new(),
+                        },
+                        widths,
+                    )?;
+                    cmds.push(Command::SetKind {
+                        id,
+                        kind: Box::new(kind),
+                    });
+                    cmds.push(Command::SetTransform { id, transform });
+                }
+                chitrakar_doc::VectorShape::Ellipse { .. } => {}
+            }
+        }
+        let count = cmds
+            .iter()
+            .filter(|c| matches!(c, Command::SetKind { .. }))
+            .count();
+        if count > 0 {
+            self.apply_labeled(Command::Batch(cmds), Some("Round the corners".into()))?;
+        }
+        Ok(count)
     }
 
     /// Cut a path where the page point `x`, `y` lies on its outline,
@@ -8564,6 +8682,135 @@ mod tests {
     /// was; joined again it is one line with that anchor once; a square
     /// opened at a corner runs from it round to it; a line joined to
     /// itself closes. Each is one step, and an end is no place to cut.
+    /// Round corners, given a rectangle, a star and two paths at once:
+    /// the rectangle's and the star's are their own live numbers, the
+    /// sharp path's corners become arcs with a brushed width going to
+    /// both anchors of a corner, a smooth path is passed over, and it is
+    /// all one step. Asked for one anchor, only that one.
+    #[test]
+    fn round_corners_rounds_each_shape_the_way_it_keeps_a_corner() {
+        let mut session = Session::new(200, 120, ColorMode::Rgb);
+        let root = session.document().root();
+        let add = |session: &mut Session, shape: VectorShape, widths: Vec<f32>| {
+            let mut n = Node::vector("s", shape);
+            if let NodeKind::Vector { stroke, .. } = &mut n.kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    width: 3.0,
+                    widths,
+                    cap: chitrakar_doc::StrokeCap::Round,
+                    join: chitrakar_doc::StrokeJoin::Round,
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    align: None,
+                    start_marker: chitrakar_doc::Marker::None,
+                    end_marker: chitrakar_doc::Marker::None,
+                });
+            }
+            let index = session.document().children_of(root).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(n),
+                })
+                .unwrap();
+            session.document().children_of(root).unwrap()[index]
+        };
+        let path = |points: Vec<[f32; 2]>, smooth: bool| VectorShape::Path {
+            points,
+            closed: false,
+            smooth,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let rect = add(
+            &mut session,
+            VectorShape::Rect {
+                width: 40.0,
+                height: 30.0,
+                radius: 0.0,
+            },
+            Vec::new(),
+        );
+        let star = add(
+            &mut session,
+            VectorShape::Polygon {
+                rx: 20.0,
+                ry: 20.0,
+                points: 5,
+                inner: 0.5,
+                corner: 0.0,
+            },
+            Vec::new(),
+        );
+        let zigzag = vec![[0.0, 0.0], [20.0, 20.0], [40.0, 0.0], [60.0, 20.0]];
+        let sharp = add(
+            &mut session,
+            path(zigzag.clone(), false),
+            vec![0.2, 0.4, 0.6, 0.8],
+        );
+        let smooth = add(&mut session, path(zigzag.clone(), true), Vec::new());
+        let before = serde_json::to_string(session.document()).unwrap();
+        let rounded = session
+            .round_corners(&[rect, star, sharp, smooth, root], 3.0, None)
+            .unwrap();
+        assert_eq!(rounded, 3, "the rectangle, the star and the sharp path");
+        let shape = |s: &Session, id| match &s.document().node(id).unwrap().kind {
+            NodeKind::Vector { shape, stroke, .. } => (shape.clone(), stroke.clone()),
+            _ => unreachable!(),
+        };
+        assert!(
+            matches!(shape(&session, rect).0, VectorShape::Rect { radius, .. } if radius == 3.0)
+        );
+        assert!(
+            matches!(shape(&session, star).0, VectorShape::Polygon { corner, .. } if corner == 3.0)
+        );
+        let (
+            VectorShape::Path {
+                points, handles, ..
+            },
+            Some(stroke),
+        ) = shape(&session, sharp)
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            points.len(),
+            6,
+            "two corners in the middle, two anchors each"
+        );
+        assert_eq!(handles.len(), 6);
+        assert_eq!(stroke.widths, vec![0.2, 0.4, 0.4, 0.6, 0.6, 0.8]);
+        assert_eq!(
+            shape(&session, smooth).0,
+            path(zigzag.clone(), true),
+            "a smooth path has no corners"
+        );
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Round the corners")
+        );
+        session.undo().unwrap();
+        assert_eq!(
+            serde_json::to_string(session.document()).unwrap(),
+            before,
+            "one step undoes the lot"
+        );
+        // The one anchor asked for.
+        session.round_corners(&[sharp], 3.0, Some(2)).unwrap();
+        let VectorShape::Path { points, .. } = shape(&session, sharp).0 else {
+            unreachable!()
+        };
+        assert_eq!(points.len(), 5);
+        assert!(session.round_corners(&[sharp], f32::NAN, None).is_err());
+    }
+
     #[test]
     fn a_path_cut_and_joined_is_the_path_it_was() {
         let mut session = Session::new(120, 80, ColorMode::Rgb);

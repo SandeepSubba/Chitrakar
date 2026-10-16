@@ -4405,10 +4405,14 @@ pub fn smooth_handles(points: &[[f32; 2]], closed: bool) -> Vec<[f32; 4]> {
 fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     use std::borrow::Cow;
     const STEPS: usize = FLATTEN_STEPS;
-    // A polygon flattens to the path through its corners, which is
-    // already straight.
+    // A polygon flattens to the path through its corners — and, when
+    // its corners are rounded, through the arcs that round them, which
+    // that path draws with handles and so is flattened in its turn. Taken
+    // as already straight, a rounded polygon's box was its anchors' box,
+    // short of the arcs that bulge past them, and a layer drawn on a
+    // surface of its own lost the sliver past it (seed 656).
     if let Some(path) = shape.as_path() {
-        return Cow::Owned(path);
+        return Cow::Owned(flatten_shape(&path).into_owned());
     }
     let VectorShape::Path {
         points,
@@ -15590,6 +15594,7 @@ mod tests {
             ry: 20.0,
             points: 5,
             inner: 0.4,
+            corner: 0.0,
         };
         let path = star.as_path().unwrap();
         let page = |shape: VectorShape| {
@@ -25202,6 +25207,53 @@ mod tests {
             copies > SEEDS as usize / 4,
             "only {copies} of the {masked} masked layers were copies"
         );
+    }
+
+    /// A polygon with its corners rounded is boxed round its arcs, which
+    /// bulge past the anchors either side of each corner: everything it
+    /// covers is inside its bounds.
+    #[test]
+    fn a_rounded_polygon_is_boxed_round_its_arcs() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = chitrakar_doc::Node::vector(
+            "diamond",
+            VectorShape::Polygon {
+                rx: 20.0,
+                ry: 20.0,
+                points: 4,
+                inner: 1.0,
+                corner: 6.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(RED);
+        }
+        node.transform = Transform::translation(10.0, 10.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let Bounds::Rect(x0, y0, x1, y1) = node_bounds(&doc, id).unwrap() else {
+            panic!("a diamond has a box")
+        };
+        let page = render(&doc).unwrap();
+        for y in 0..60 {
+            for x in 0..60 {
+                if page.get(x, y).a > 0.0 {
+                    let (px, py) = (x as f32, y as f32);
+                    assert!(
+                        px + 1.0 >= x0 && px <= x1 && py + 1.0 >= y0 && py <= y1,
+                        "({x}, {y}) is drawn outside the box {x0} {y0} {x1} {y1}"
+                    );
+                }
+            }
+        }
+        // And the box is the arcs', not the sharp diamond's.
+        assert!(x0 > 10.5 && y0 > 10.5, "{x0} {y0}");
     }
 
     /// A blend never changes what a page covers.
