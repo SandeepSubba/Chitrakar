@@ -52,6 +52,10 @@ export type ExportSetup = {
   area: ExportArea;
   scale: number;
   jpegQuality: number;
+  /** For a PDF, the press it was kept for: the bleed in mm and whether
+   * it is marked. A setup kept before these were asked reads as none. */
+  pdfBleed: number;
+  pdfCropMarks: boolean;
 };
 
 export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "pdf", "svg", "tiff"];
@@ -324,6 +328,8 @@ export function clamp(p: Prefs): Prefs {
                 : "page",
             scale: e.scale === 0 ? 0 : n(e.scale, 0.05, 16, 1),
             jpegQuality: n(Math.round(e.jpegQuality), 1, 100, 92),
+            pdfBleed: typeof e.pdfBleed === "number" ? n(e.pdfBleed, 0, 25, 0) : 0,
+            pdfCropMarks: e.pdfCropMarks === true,
           }))
       : [],
     // Paths each once, as many as the menu shows.

@@ -517,7 +517,9 @@ export function ExportDialog({
               st.format === format &&
               st.area === area &&
               st.scale === (set ? 0 : scale) &&
-              (format !== "jpeg" || st.jpegQuality === prefs.jpegQuality);
+              (format !== "jpeg" || st.jpegQuality === prefs.jpegQuality) &&
+              (format !== "pdf" ||
+                (st.pdfBleed === prefs.pdfBleed && st.pdfCropMarks === prefs.pdfCropMarks));
             return (
               <button
                 key={st.name}
@@ -537,6 +539,11 @@ export function ExportDialog({
                     exportArea: st.area,
                     exportScale: st.scale,
                     jpegQuality: st.jpegQuality,
+                    // A PDF kept for a press brings that press back; any
+                    // other setup leaves what the PDF was last asked alone.
+                    ...(st.format === "pdf"
+                      ? { pdfBleed: st.pdfBleed, pdfCropMarks: st.pdfCropMarks }
+                      : {}),
                   });
                 }}
               >
@@ -556,6 +563,8 @@ export function ExportDialog({
                 spec.label,
                 set ? "set" : scale !== 1 && spec.scales ? `${scale}×` : "",
                 format === "jpeg" ? `q${prefs.jpegQuality}` : "",
+                format === "pdf" && prefs.pdfBleed > 0 ? `${prefs.pdfBleed} mm` : "",
+                format === "pdf" && prefs.pdfCropMarks ? "marks" : "",
                 area === "selection" ? "picked" : "",
               ]
                 .filter(Boolean)
@@ -569,6 +578,8 @@ export function ExportDialog({
                 area,
                 scale: set ? 0 : scale,
                 jpegQuality: prefs.jpegQuality,
+                pdfBleed: prefs.pdfBleed,
+                pdfCropMarks: prefs.pdfCropMarks,
               };
               setPrefs({ exportSetups: [...prefs.exportSetups, kept] });
             }}

@@ -2168,7 +2168,12 @@ without reading anything else.*
     a corner mark that must not move, a soft dab over the edge, a second
     frame's colour, a block beside it that stays out). Not growing, or
     not moving the layers back, each fail it.
-  - **Limits:** kept export setups do not keep the bleed or the marks.
+  - **Setups:** a PDF kept as a setup keeps its press. The bleed and
+    the marks are in its name (`PDF 3 mm marks`), come back when it is
+    pressed, and decide whether it is the one in hand. A setup of
+    another format leaves the PDF's settings alone, and a setup kept
+    before these existed reads as no bleed and no marks. Smoke 9bw,
+    which fails if pressing the setup does not bring its press back.
   - **Tests:** `a_page_for_the_press_bleeds_and_is_marked_where_to_cut`
     (Ghostscript: the sheet is trim, bleed and slug; the ground and a
     soft dab, which goes as pixels, run into the bleed and are cut where

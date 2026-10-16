@@ -14623,7 +14623,7 @@ assert(
 }
 
 // 9bw. Exports kept by name, as chips above the formats: a press
-// answers all four of the window's questions at once, + keeps what the
+// answers all of the window's questions at once, + keeps what the
 // window says now under a name made from it, alt-press forgets one.
 {
   await page.keyboard.press("Control+Shift+E");
@@ -14677,6 +14677,37 @@ assert(
     JSON.parse(await page.evaluate(() => localStorage.getItem("chitrakar:prefs"))).exportSetups.length === 2,
     "both are written down",
   );
+  // A PDF kept for a press keeps the press: its bleed and its marks are
+  // in its name and come back with it, and a setup of another format
+  // leaves what the PDF was last asked alone.
+  await page.click('.export-formats .preset:text-is("PDF")');
+  await page.locator('input[aria-label="Bleed"]').fill("3");
+  await page.locator('input[aria-label="Crop marks"]').check();
+  await page.click('button[aria-label="Keep this setup"]');
+  await page.waitForTimeout(100);
+  const press = page.locator('[aria-label="Setups"] button[aria-label="Setup PDF 3 mm marks"]');
+  assert((await press.count()) === 1, "the press is in the setup's name");
+  await page.locator('input[aria-label="Bleed"]').fill("0");
+  await page.locator('input[aria-label="Crop marks"]').uncheck();
+  await page.waitForTimeout(100);
+  assert((await press.getAttribute("aria-pressed")) === "false", "a PDF for no press is not that setup");
+  await press.click();
+  await page.waitForTimeout(100);
+  assert(
+    (await page.locator('input[aria-label="Bleed"]').inputValue()) === "3" &&
+      (await page.locator('input[aria-label="Crop marks"]').isChecked()),
+    "pressed, it brings its press back",
+  );
+  await page.click('[aria-label="Setups"] button[aria-label="Setup PNG"]');
+  await page.click('.export-formats .preset:text-is("PDF")');
+  await page.waitForTimeout(100);
+  assert(
+    (await page.locator('input[aria-label="Bleed"]').inputValue()) === "3",
+    "and a PNG's setup leaves it alone",
+  );
+  await page.locator('input[aria-label="Bleed"]').fill("0");
+  await page.locator('input[aria-label="Crop marks"]').uncheck();
+  await press.click({ modifiers: ["Alt"] });
   await page.click('[aria-label="Setups"] button[aria-label="Setup JPEG 2\u00d7 q80"]', { modifiers: ["Alt"] });
   await page.click('[aria-label="Setups"] button[aria-label="Setup PNG"]', { modifiers: ["Alt"] });
   await page.waitForTimeout(100);
