@@ -1457,6 +1457,19 @@ impl WasmSession {
         self.inner.export_pdf_frames().map_err(to_js)
     }
 
+    /// A PDF for the press: `bleed_mm` past the trim, crop marks when
+    /// asked, the trim and bleed in its boxes; `frames` for a page a frame.
+    pub fn export_pdf_marked(
+        &self,
+        frames: bool,
+        bleed_mm: f32,
+        crop_marks: bool,
+    ) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .export_pdf_marked(frames, bleed_mm, crop_marks)
+            .map_err(to_js)
+    }
+
     /// Export as SVG markup.
     pub fn export_svg(&self) -> Result<String, JsError> {
         self.inner.export_svg().map_err(to_js)

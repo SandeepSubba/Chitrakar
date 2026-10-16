@@ -23,6 +23,10 @@ pub use chitrakar_doc::{
 /// units.
 const DUPLICATE_OFFSET: f32 = 12.0;
 
+/// The most bleed a PDF is given, in millimetres. Presses ask for three
+/// or five; past this it is a mistyped number, not a bleed.
+pub const MOST_BLEED_MM: f32 = 25.0;
+
 /// Carry a nudged copy's mask the same distance the copy moved.
 ///
 /// A mask is authored in its owner's *parent* space — it describes the
@@ -7531,6 +7535,39 @@ impl Session {
     pub fn export_pdf_frames(&self) -> Result<Vec<u8>, EngineError> {
         chitrakar_codecs::export_pdf_frames(&self.doc)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// A PDF for the press: the page (or each frame's page, `frames`)
+    /// carried `bleed_mm` past its trim, with crop marks at its corners
+    /// when asked, and its trim and bleed said in its boxes. Millimetres
+    /// because that is how a printer asks for a bleed; the document's
+    /// resolution turns them into its pixels. Asked for neither, it is
+    /// the PDF [`Session::export_pdf`] writes.
+    pub fn export_pdf_marked(
+        &self,
+        frames: bool,
+        bleed_mm: f32,
+        crop_marks: bool,
+    ) -> Result<Vec<u8>, EngineError> {
+        let dpi = if self.doc.meta.dpi.is_finite() && self.doc.meta.dpi > 0.0 {
+            self.doc.meta.dpi
+        } else {
+            72.0
+        };
+        let marks = chitrakar_codecs::PrintMarks {
+            bleed: if bleed_mm.is_finite() {
+                bleed_mm.clamp(0.0, MOST_BLEED_MM) / 25.4 * dpi
+            } else {
+                0.0
+            },
+            crop_marks,
+        };
+        if frames {
+            chitrakar_codecs::export_pdf_frames_marked(&self.doc, marks)
+        } else {
+            chitrakar_codecs::export_pdf_document_marked(&self.doc, marks)
+        }
+        .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
     /// Export vector layers (and embedded rasters/text) as SVG.
@@ -21742,6 +21779,41 @@ mod tests {
             "{}",
             &pdf[..300]
         );
+    }
+
+    #[test]
+    fn a_bleed_is_asked_for_in_millimetres_and_kept_to_a_bleed() {
+        // An inch-square page at 300 dpi; three millimetres is 8.504
+        // points whatever the resolution.
+        let mut session = Session::new(300, 300, ColorMode::Rgb);
+        session.set_dpi(300.0).unwrap();
+        let text = |frames, mm, marks| {
+            String::from_utf8_lossy(&session.export_pdf_marked(frames, mm, marks).unwrap())
+                .into_owned()
+        };
+        let bled = text(false, 3.0, false);
+        assert!(
+            bled.contains("/MediaBox [0 0 89.008 89.008]")
+                && bled.contains("/TrimBox [8.504 8.504 80.504 80.504]"),
+            "{}",
+            &bled[..400]
+        );
+        assert!(
+            text(true, 3.0, false).contains("/TrimBox [8.504 8.504 80.504 80.504]"),
+            "a document with no frames is its one page, bled the same"
+        );
+        assert!(
+            text(false, 1000.0, false).contains("/TrimBox [70.866 70.866"),
+            "no more than {MOST_BLEED_MM} mm"
+        );
+        for nothing in [0.0, -3.0, f32::NAN] {
+            let plain = text(false, nothing, false);
+            assert!(
+                plain.contains("/MediaBox [0 0 72.000 72.000]") && !plain.contains("/TrimBox"),
+                "{nothing} mm is no bleed"
+            );
+        }
+        assert!(text(false, 0.0, true).contains("/TrimBox [18.000 18.000"));
     }
 
     fn text_in(font: &str) -> Node {

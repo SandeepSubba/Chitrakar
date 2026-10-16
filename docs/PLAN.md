@@ -2133,6 +2133,46 @@ without reading anything else.*
     carry into the first's space, or opening a ring without returning to
     its anchor each fail it. Smoke 9o25: a pen line pressed at its third
     anchor, cut, joined, undone.
+- **A PDF for the press: bleed and crop marks ✅** (`PrintMarks`,
+  `export_pdf_document_marked`, `export_pdf_frames_marked`,
+  `Session::export_pdf_marked(frames, bleed_mm, crop_marks)`; *Bleed*
+  in mm and *Crop marks* beside the PDF in the export window,
+  `prefs.pdfBleed` / `prefs.pdfCropMarks`, which File › *Export PDF of
+  the frames* follows too). A printer asks for artwork that runs past
+  where the sheet is cut and for marks saying where. Before this a PDF
+  stopped at its edge.
+  - **The bleed:** the page is carried `bleed` past its trim on every
+    side. Live vectors are already there, since the content stream was
+    never cut to the page, and the stream is now cut to the bleed
+    instead. What goes as pixels is rendered past the page by the same
+    amount (`place_rendered` draws a surface the trim plus twice the
+    bleed, shifted by it). The bleed is in millimetres at the session
+    and turned into pixels by the document's dpi. It is kept to
+    `MOST_BLEED_MM` (25), and nothing, a negative or NaN is no bleed.
+  - **The marks:** with crop marks, eighteen points of slug past the
+    bleed hold two 0.25 pt lines at each corner, on the lines of the
+    trim, starting three points past the bleed so none prints on the
+    kept sheet. They are in registration (`1 1 1 1 K` when separating
+    for a press profile, so they show on every plate). The page says
+    `/TrimBox` and `/BleedBox`, and its MediaBox is the trim, bleed and
+    slug. Asked for neither, the PDF is byte-for-byte the one it was.
+  - **Limits:** a frame clips its contents, so a frame's page bleeds
+    only what the document draws outside that frame's clip — usually
+    nothing, white past the trim. Bleed through a frame would need the
+    frame's clip widened by the bleed for the export only.
+    ponytail: kept export setups do not keep the bleed or the marks.
+  - **Tests:** `a_page_for_the_press_bleeds_and_is_marked_where_to_cut`
+    (Ghostscript: the sheet is trim, bleed and slug; the ground and a
+    soft dab, which goes as pixels, run into the bleed and are cut where
+    it ends; dark marks on the trim's lines, nothing across the bleed's
+    corner; a bleed with no marks has no slug; asked for nothing, the
+    page it was). Not shifting the pixels, not cutting, or not marking
+    each fail it. It also found the frames export falling back to the
+    unmarked page when there were no frames.
+    `a_bleed_is_asked_for_in_millimetres_and_kept_to_a_bleed` (3 mm is
+    8.504 pt at 300 dpi; capped; 0, −3 and NaN are none). Smoke 9e3: set
+    in the window, exported with the boxes, remembered, and put back.
+    Exporting the plain PDF from the window instead fails it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

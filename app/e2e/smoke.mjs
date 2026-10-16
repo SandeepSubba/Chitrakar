@@ -5222,6 +5222,46 @@ assert(
   );
 }
 
+// 9e3. A page that size for the press: three millimetres of bleed and crop
+// marks, asked for beside the PDF in the export window. 3 mm is 8.504
+// points, and the marks' slug is eighteen past that.
+{
+  await newDocument(600, 400, "rgb", 300);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PDF")');
+  await page.locator('input[aria-label="Bleed"]').fill("3");
+  await page.locator('input[aria-label="Crop marks"]').check();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  const dl = await exportAs("PDF");
+  const text = (await readFile(await dl.path())).toString("latin1");
+  assert(
+    text.includes("/MediaBox [0 0 197.008 149.008]") &&
+      text.includes("/TrimBox [26.504 26.504 170.504 122.504]") &&
+      text.includes("/BleedBox [18.000 18.000 179.008 131.008]"),
+    "the PDF runs 3 mm past its trim, says where to cut, and has room for the marks",
+  );
+  // Remembered, and put back so what follows gets the page it always did.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PDF")');
+  assert(
+    (await page.locator('input[aria-label="Bleed"]').inputValue()) === "3" &&
+      (await page.locator('input[aria-label="Crop marks"]').isChecked()),
+    "the window remembers the press it was asked for",
+  );
+  await page.locator('input[aria-label="Bleed"]').fill("0");
+  await page.locator('input[aria-label="Crop marks"]').uncheck();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  const plain = (await readFile(await (await exportAs("PDF")).path())).toString("latin1");
+  assert(
+    plain.includes("/MediaBox [0 0 144.000 96.000]") && !plain.includes("/TrimBox"),
+    "asked for neither, the page stops at its edge again",
+  );
+}
+
 
 // 9g. The document's name: typed in the bar, it names every file that
 // leaves — the save, and the exports.

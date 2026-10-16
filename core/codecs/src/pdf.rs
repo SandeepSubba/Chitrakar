@@ -197,7 +197,43 @@ const KAPPA: f32 = 0.552_284_8;
 
 /// Draw a document as one PDF page: live vectors where PDF can carry
 /// them, the engine's pixels where it cannot (see the module docs).
+/// What a page is given for the press beyond its own edge: how far the
+/// artwork carries on past the trim, in the document's own pixels, so a
+/// background printed to the edge leaves no white sliver when the sheet
+/// is cut a hair off; and whether the corners are marked where to cut.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PrintMarks {
+    pub bleed: f32,
+    pub crop_marks: bool,
+}
+
+impl PrintMarks {
+    /// The bleed as it is used: nothing below nothing, and nothing for
+    /// what is not a number.
+    fn bleed(&self) -> f32 {
+        if self.bleed.is_finite() {
+            self.bleed.max(0.0)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// How far a crop mark starts from the trim, past the bleed, and how long
+/// it is, in points: the 3 pt off and 12 pt long a press expects.
+const MARK_OFF: f32 = 3.0;
+const MARK_LENGTH: f32 = 12.0;
+/// The room round a page that carries marks, past the bleed.
+const SLUG: f32 = MARK_OFF + MARK_LENGTH + 3.0;
+
 pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
+    export_pdf_document_marked(doc, PrintMarks::default())
+}
+
+/// The document as a page for the press: carried `marks.bleed` past its
+/// edge, the trim and the bleed said in the page's boxes, and crop marks
+/// at its corners when asked for.
+pub fn export_pdf_document_marked(doc: &Document, marks: PrintMarks) -> Result<Vec<u8>, PdfError> {
     let icc = doc.cmyk_profile_bytes();
     let mut page = Page {
         doc: doc.clone(),
@@ -217,6 +253,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
         fonts: Vec::new(),
         view: Transform::default(),
         size: [doc.meta.width as f32, doc.meta.height as f32],
+        marks,
     };
     // 1 catalog and 2 pages: reserved, written last, once every page
     // they list has a number. The pages themselves are pushed at the
@@ -245,6 +282,12 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
 /// outside it is off the page rather than drawn, which is what a frame
 /// means. A document with no frames has one page, as before.
 pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
+    export_pdf_frames_marked(doc, PrintMarks::default())
+}
+
+/// The frames as pages for the press, each carried past its edge and
+/// marked as `export_pdf_document_marked` marks the document.
+pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec<u8>, PdfError> {
     let root = doc.root();
     let frames: Vec<NodeId> = doc
         .children_of(root)
@@ -259,7 +302,7 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         })
         .unwrap_or_default();
     if frames.is_empty() {
-        return export_pdf_document(doc);
+        return export_pdf_document_marked(doc, marks);
     }
     let icc = doc.cmyk_profile_bytes();
     let mut page = Page {
@@ -280,6 +323,7 @@ pub fn export_pdf_frames(doc: &Document) -> Result<Vec<u8>, PdfError> {
         fonts: Vec::new(),
         view: Transform::default(),
         size: [doc.meta.width as f32, doc.meta.height as f32],
+        marks,
     };
     for _ in 0..2 {
         page.objects.push(Vec::new());
@@ -398,6 +442,8 @@ struct Page {
     /// file to embed, the resource name the content uses, and the text
     /// each glyph used so far stands for, for the ToUnicode map.
     fonts: Vec<FontUse>,
+    /// The bleed and crop marks every page is given.
+    marks: PrintMarks,
 }
 
 struct FontUse {
@@ -731,7 +777,10 @@ impl Page {
         // Over what the page shows, from its corner: the samples line up
         // with the page's own pixels, which for a frame start where the
         // frame does.
-        let [pw, ph] = self.size;
+        // Out past the trim by the bleed, so what runs off the page is in
+        // the picture as far as the press is to print it.
+        let bleed = self.marks.bleed();
+        let [pw, ph] = [self.size[0] + 2.0 * bleed, self.size[1] + 2.0 * bleed];
         let (w, h) = (
             (pw * over).ceil().max(1.0) as usize,
             (ph * over).ceil().max(1.0) as usize,
@@ -752,6 +801,8 @@ impl Page {
             Transform {
                 a: over,
                 d: over,
+                e: bleed * over,
+                f: bleed * over,
                 ..Default::default()
             }
             .compose(self.view),
@@ -818,8 +869,8 @@ impl Page {
             "q\n{back}{gs}{} 0 0 {} {} {} cm\n/{name} Do\nQ",
             num(cw as f32 / over),
             num(-(ch as f32) / over),
-            num(x0 as f32 / over),
-            num(y1 as f32 / over)
+            num(x0 as f32 / over - bleed),
+            num(y1 as f32 / over - bleed)
         );
         Ok(())
     }
@@ -2249,17 +2300,67 @@ impl Page {
         };
         let mut kids = String::new();
         let pages = std::mem::take(&mut self.pages);
+        // Past the trim: the bleed, and room for the marks past that.
+        let bleed = self.marks.bleed() * pt;
+        let margin = bleed + if self.marks.crop_marks { SLUG } else { 0.0 };
+        let registration = if self.separate.is_some() {
+            "1 1 1 1 K"
+        } else {
+            "0 G"
+        };
         for (body, view, size) in &pages {
-            let (page_w, page_h) = (size[0] * pt, size[1] * pt);
+            let (trim_w, trim_h) = (size[0] * pt, size[1] * pt);
+            let (page_w, page_h) = (trim_w + 2.0 * margin, trim_h + 2.0 * margin);
             let to_points = Transform {
                 a: pt,
                 d: -pt,
-                f: page_h,
+                e: margin,
+                f: page_h - margin,
                 ..Default::default()
             }
             .compose(*view);
+            // A crop mark at each corner, two short lines on the lines of
+            // the trim, starting past the bleed so none of them prints on
+            // the sheet that is kept — in registration, every ink, so it
+            // shows on every plate.
+            let mut marks = String::new();
+            if self.marks.crop_marks {
+                let _ = writeln!(marks, "q\n0.25 w\n{registration}");
+                let (x0, y0, x1, y1) = (margin, margin, margin + trim_w, margin + trim_h);
+                let (off, far) = (bleed + MARK_OFF, bleed + MARK_OFF + MARK_LENGTH);
+                for (x, sx) in [(x0, -1.0), (x1, 1.0)] {
+                    for (y, sy) in [(y0, -1.0), (y1, 1.0)] {
+                        let _ = writeln!(
+                            marks,
+                            "{} {} m {} {} l S\n{} {} m {} {} l S",
+                            num(x + sx * off),
+                            num(y),
+                            num(x + sx * far),
+                            num(y),
+                            num(x),
+                            num(y + sy * off),
+                            num(x),
+                            num(y + sy * far)
+                        );
+                    }
+                }
+                marks.push_str("Q\n");
+            }
+            // Cut to the bleed: what runs further than the press is to
+            // print would show in the slug, among the marks.
+            let cut = if margin > 0.0 {
+                format!(
+                    "{} {} {} {} re W n\n",
+                    num(margin - bleed),
+                    num(margin - bleed),
+                    num(trim_w + 2.0 * bleed),
+                    num(trim_h + 2.0 * bleed)
+                )
+            } else {
+                String::new()
+            };
             let content = format!(
-                "q\n{} {} {} {} {} {} cm\n{body}Q\n",
+                "q\n{cut}{} {} {} {} {} {} cm\n{body}Q\n{marks}",
                 num(to_points.a),
                 num(to_points.b),
                 num(to_points.c),
@@ -2267,6 +2368,24 @@ impl Page {
                 num(to_points.e),
                 num(to_points.f)
             );
+            // Where the sheet is cut, and how far the artwork runs past
+            // it, said for whatever lays the page out for the press. A
+            // page with neither is its own trim, as it always was.
+            let boxes = if margin > 0.0 {
+                format!(
+                    " /TrimBox [{:.3} {:.3} {:.3} {:.3}] /BleedBox [{:.3} {:.3} {:.3} {:.3}]",
+                    margin,
+                    margin,
+                    margin + trim_w,
+                    margin + trim_h,
+                    margin - bleed,
+                    margin - bleed,
+                    margin + trim_w + bleed,
+                    margin + trim_h + bleed
+                )
+            } else {
+                String::new()
+            };
             // Compressed: the content is text, and a bold no face supplies
             // is drawn as its outlines, which fill a page's worth of it.
             let stream = self.push(&stream_object(
@@ -2275,7 +2394,7 @@ impl Page {
             ));
             let page = self.push(
                 format!(
-                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}] \
+                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.3} {page_h:.3}]{boxes} \
                      /Resources <<{resources} >>{blends} /Contents {stream} 0 R >>"
                 )
                 .as_bytes(),
@@ -3645,6 +3764,145 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A page for the press: carried past its trim by the bleed — live
+    /// vectors and what goes as pixels alike — cut at the bleed, marked at
+    /// its corners in the slug beyond, and its trim and bleed said in its
+    /// boxes. Without marks it is the bleed and no slug; asked for
+    /// nothing, the page it always was.
+    #[test]
+    fn a_page_for_the_press_bleeds_and_is_marked_where_to_cut() {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no ghostscript");
+            return;
+        }
+        let mut doc = Document::new(100, 60, chitrakar_color::ColorMode::Rgb);
+        doc.meta.dpi = 72.0;
+        // A ground that runs twenty past every edge, and a blur over the
+        // lot so the page goes as pixels too.
+        add(
+            &mut doc,
+            shape(
+                "ground",
+                VectorShape::Rect {
+                    width: 140.0,
+                    height: 100.0,
+                    radius: 0.0,
+                },
+                Some(RED),
+            ),
+            [-20.0, -20.0],
+        );
+        // A soft dab across the right edge, which goes as pixels.
+        let mut dab = shaded("dab");
+        if let NodeKind::Paint { strokes } = &mut dab.kind {
+            strokes[0].points = vec![[100.0, 30.0]];
+            strokes[0].radii = vec![16.0];
+            strokes[0].color = BLUE;
+        }
+        add(&mut doc, dab, [0.0, 0.0]);
+        let drawn = |marks: PrintMarks, name: &str| {
+            let pdf = export_pdf_document_marked(&doc, marks).unwrap();
+            let dir =
+                std::env::temp_dir().join(format!("chitrakar-press-{}-{name}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("p.pdf"), &pdf).unwrap();
+            let ok = std::process::Command::new("gs")
+                .args([
+                    "-q",
+                    "-dNOPAUSE",
+                    "-dBATCH",
+                    "-dSAFER",
+                    "-sDEVICE=png16m",
+                    "-r72",
+                ])
+                .arg(format!("-sOutputFile={}", dir.join("p.png").display()))
+                .arg(dir.join("p.pdf"))
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "ghostscript reads it");
+            let png = crate::decode(&std::fs::read(dir.join("p.png")).unwrap()).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            (String::from_utf8_lossy(&pdf).into_owned(), png)
+        };
+        let px = |png: &crate::SourceImage, x: u32, y: u32| {
+            let i = ((y * png.width + x) * 4) as usize;
+            [png.rgba8[i], png.rgba8[i + 1], png.rgba8[i + 2]]
+        };
+        let (text, plain) = drawn(PrintMarks::default(), "plain");
+        assert_eq!(
+            (plain.width, plain.height),
+            (100, 60),
+            "asked for nothing, the page it was"
+        );
+        assert!(!text.contains("/TrimBox"));
+        // A bleed of nine and marks: the slug is eighteen beyond that.
+        let (text, marked) = drawn(
+            PrintMarks {
+                bleed: 9.0,
+                crop_marks: true,
+            },
+            "marked",
+        );
+        let margin = 9 + 18;
+        assert_eq!(
+            (marked.width, marked.height),
+            (100 + 2 * margin, 60 + 2 * margin),
+            "the sheet is the trim, the bleed and the slug"
+        );
+        assert!(
+            text.contains("/TrimBox [27.000 27.000 127.000 87.000]")
+                && text.contains("/BleedBox [18.000 18.000 136.000 96.000]"),
+            "where to cut and how far it runs past it"
+        );
+        let m = margin;
+        assert_eq!(
+            px(&marked, m - 4, m + 30),
+            [255, 0, 0],
+            "the ground runs into the bleed"
+        );
+        assert_eq!(px(&marked, m + 50, m - 4), [255, 0, 0], "on every side");
+        let past = px(&marked, m + 100 + 3, m + 30);
+        assert!(
+            past[2] > 200 && past[0] < 100,
+            "and what goes as pixels runs into it too: {past:?}"
+        );
+        assert_eq!(
+            px(&marked, m - 12, m + 30),
+            [255, 255, 255],
+            "and is cut where the bleed ends"
+        );
+        // The top-left corner's two marks, on the lines of the trim, past
+        // the bleed, and nothing on the trim's corner itself.
+        let dark = |p: [u8; 3]| p.iter().all(|c| *c < 128);
+        assert!(
+            dark(px(&marked, m - 9 - 3 - 6, m)),
+            "a mark along the top edge's line"
+        );
+        assert!(
+            dark(px(&marked, m, m - 9 - 3 - 6)),
+            "and one along the left edge's"
+        );
+        assert!(
+            !dark(px(&marked, m - 9 - 1, m - 9 - 1)),
+            "not across the bleed's corner"
+        );
+        // A bleed and no marks: no slug.
+        let (_, bled) = drawn(
+            PrintMarks {
+                bleed: 9.0,
+                crop_marks: false,
+            },
+            "bled",
+        );
+        assert_eq!((bled.width, bled.height), (118, 78));
+        assert_eq!(px(&bled, 4, 30), [255, 0, 0]);
     }
 
     /// A clone layer goes into a PDF as what it lays.

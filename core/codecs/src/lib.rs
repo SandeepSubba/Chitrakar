@@ -18,7 +18,10 @@ pub use container::{
     load_chitra, load_chitra_with_fonts, save_chitra, save_chitra_with_fonts, ContainerError,
     FontFile, Opened,
 };
-pub use pdf::{export_pdf, export_pdf_document, export_pdf_frames, PdfError};
+pub use pdf::{
+    export_pdf, export_pdf_document, export_pdf_document_marked, export_pdf_frames,
+    export_pdf_frames_marked, PdfError, PrintMarks,
+};
 pub use svg::export_svg;
 pub use svg_import::{import_svg, ImportedSvg};
 pub use tiff_export::{export_cmyk_tiff, TiffError};

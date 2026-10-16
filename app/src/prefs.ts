@@ -88,6 +88,11 @@ export type Prefs = {
   exportScale: number;
   /** JPEG quality, 1–100. */
   jpegQuality: number;
+  /** How far a PDF runs past its trim for the press, in millimetres —
+   * printers ask for three or five; 0 for a page that stops at its edge. */
+  pdfBleed: number;
+  /** Whether a PDF carries crop marks in a slug round its trim. */
+  pdfCropMarks: boolean;
   /** How far the edge of a picked region is softened, in pixels. */
   feather: number;
   /** How readily the subject pick lets go of a colour, 0–1. */
@@ -160,6 +165,8 @@ export const DEFAULTS: Prefs = {
   exportArea: "page",
   exportScale: 1,
   jpegQuality: 92,
+  pdfBleed: 0,
+  pdfCropMarks: false,
   feather: 0,
   subjectTolerance: 0.5,
   hiddenTools: [],
@@ -246,6 +253,9 @@ export function clamp(p: Prefs): Prefs {
     // and the window never hands it to the engine as one.
     exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
     jpegQuality: n(Math.round(p.jpegQuality), 1, 100, 92),
+    // The engine keeps a bleed to 25 mm as well; held here so the field
+    // does not show what will not be written.
+    pdfBleed: n(p.pdfBleed, 0, 25, 0),
     feather: n(p.feather, 0, 500, 0),
     subjectTolerance: n(p.subjectTolerance, 0, 1, 0.5),
     // Only names that are tools, each once, and never the one tool the

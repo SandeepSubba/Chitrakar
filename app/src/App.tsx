@@ -7008,7 +7008,9 @@ export function App() {
   const exportPdfFrames = () => {
     if (!session) return;
     saveAs("PDF export", `${fileName()}-pages.pdf`, "application/pdf", () =>
-      session.export_pdf_frames(),
+      // The bleed and marks the export window was last left asking for:
+      // a brochure goes to the same press as its pages.
+      session.export_pdf_marked(true, prefs.pdfBleed, prefs.pdfCropMarks),
     );
   };
 

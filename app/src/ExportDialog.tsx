@@ -291,7 +291,8 @@ export function ExportDialog({
   const encodeOne = useCallback((scale: number): Uint8Array => {
     switch (format) {
       case "pdf":
-        return session.export_pdf();
+        // Asked for no bleed and no marks, this is the PDF it always was.
+        return session.export_pdf_marked(false, prefs.pdfBleed, prefs.pdfCropMarks);
       case "svg":
         return new TextEncoder().encode(session.export_svg());
       case "tiff":
@@ -337,6 +338,8 @@ export function ExportDialog({
     area,
     hasRegion,
     prefs.jpegQuality,
+    prefs.pdfBleed,
+    prefs.pdfCropMarks,
     session,
     selectionBounds,
   ]);
@@ -423,7 +426,10 @@ export function ExportDialog({
 
   // Asking for a size is about the export as it now stands, so changing
   // any of it puts the question back.
-  useEffect(() => setMeasure(0), [format, area, scale, prefs.jpegQuality]);
+  useEffect(
+    () => setMeasure(0),
+    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks],
+  );
 
   const nameAt = (s: number, slice: string | null = null) =>
     `${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
@@ -663,6 +669,36 @@ export function ExportDialog({
             />
             <span className="hint">{prefs.jpegQuality}</span>
           </label>
+        )}
+
+        {format === "pdf" && (
+          <div className="row" role="group" aria-label="For the press">
+            <label>
+              Bleed
+              <input
+                type="number"
+                min={0}
+                max={25}
+                step={0.5}
+                value={prefs.pdfBleed}
+                onChange={(e) => {
+                  const mm = Number(e.target.value);
+                  if (Number.isFinite(mm)) setPrefs({ pdfBleed: Math.min(25, Math.max(0, mm)) });
+                }}
+                aria-label="Bleed"
+              />
+              <span className="hint">mm</span>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={prefs.pdfCropMarks}
+                onChange={(e) => setPrefs({ pdfCropMarks: e.target.checked })}
+                aria-label="Crop marks"
+              />
+              Crop marks
+            </label>
+          </div>
         )}
 
         </div>
