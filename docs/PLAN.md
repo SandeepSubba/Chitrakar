@@ -1977,10 +1977,16 @@ without reading anything else.*
     underline and strike bands and the SVG exporter's baselines all read
     it, so the letters, their rules and every exporter move together.
     The block's height is the last top plus a step.
-  - **Known:** the box you type into on the canvas is a transparent
-    textarea, and CSS has no paragraph spacing. On a spaced block the
-    caret on a later paragraph sits as far above its letters as the
-    spacing before it, until typing ends and the engine sets the block.
+  - **The canvas typing box (fixed since):** it is a transparent
+    textarea over the engine's letters, and a textarea sets every line
+    in one size and stacks them evenly. Over a block with paragraph
+    spacing, or (later) a run at a size of its own, the caret sat a
+    line away from the letters it was among. Such a block is now typed
+    as it is seen (`inline-text as-typed`): the box shows its own text
+    in the block's colour over the panel's, and the engine sets the
+    block when typing ends. A plain block keeps the invisible box.
+    Smoke 8v1 holds both: a plain block's box is transparent, and a
+    spaced one's shows its text.
   - **Tests:** `paragraph_spacing_opens_a_gap_after_each_paragraph_and_nowhere_else`
     (wrapped lines stay, the next paragraph and only its letters move
     by the gap, the block is that much taller and the ink with it,

@@ -2008,6 +2008,12 @@ body {
   overflow: hidden;
   z-index: 3;
 }
+/* A block the textarea cannot lay out as the engine does is typed as it
+   is seen here, over the panel's colour, and set when typing ends. */
+.inline-text.as-typed {
+  background: var(--panel);
+  box-shadow: 0 0 0 1px var(--border);
+}
 .inline-text::selection {
   background: rgba(88, 130, 255, 0.35);
 }

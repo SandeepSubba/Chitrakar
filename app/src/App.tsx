@@ -9687,10 +9687,19 @@ export function App() {
                 "Srgb" in fill
                   ? `rgb(${fill.Srgb.r * 255}, ${fill.Srgb.g * 255}, ${fill.Srgb.b * 255})`
                   : "currentColor";
+              // A textarea sets every line in one size and stacks them
+              // evenly, so over a block with a run at a size of its own,
+              // or with space after its paragraphs, the caret would be a
+              // line out from the letters drawn under it. Such a block is
+              // typed as plain text in a box of its own, where caret and
+              // letters agree, and set properly when the typing ends.
+              const mirrored =
+                !((spec.paragraph_spacing ?? 0) > 0) &&
+                !(spec.runs ?? []).some((r) => r.size != null);
               return (
                 <textarea
                   ref={inlineRef}
-                  className="inline-text"
+                  className={mirrored ? "inline-text" : "inline-text as-typed"}
                   aria-label="Text on canvas"
                   value={inlineText.value}
                   spellCheck={false}
@@ -9718,6 +9727,7 @@ export function App() {
                     fontStyle: spec.italic ? "italic" : "normal",
                     fontWeight: spec.bold ? "bold" : "normal",
                     caretColor: caret,
+                    ...(mirrored ? {} : { color: caret }),
                   }}
                   onChange={(e) => typeInlineText(e.target.value)}
                   onBlur={() => closeInlineText(true)}

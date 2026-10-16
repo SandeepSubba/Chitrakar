@@ -2333,6 +2333,32 @@ assert(
     (await inkCount(740, 590, 1200, 710)) === inkHello,
     "and the whole typing is one undo step",
   );
+  // A plain block is typed into an invisible box over its own letters.
+  // One the box cannot lay out as the engine does — here, with space
+  // after its paragraphs — shows its text as typed, so the caret and the
+  // letters it is among agree.
+  const opened = async () => {
+    await page.mouse.dblclick(box.x + 780 * sx, box.y + 625 * sy);
+    await page.waitForTimeout(250);
+    const seen = await editor.evaluate((el) => [el.className, getComputedStyle(el).color]);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(200);
+    return seen;
+  };
+  const [plainClass, plainColour] = await opened();
+  assert(
+    plainClass === "inline-text" && plainColour === "rgba(0, 0, 0, 0)",
+    `a plain block's box is invisible over its letters (${plainClass}, ${plainColour})`,
+  );
+  await setSlider("Paragraph spacing", 1);
+  await page.waitForTimeout(200);
+  const [spacedClass, spacedColour] = await opened();
+  assert(
+    spacedClass.includes("as-typed") && spacedColour !== "rgba(0, 0, 0, 0)",
+    `a spaced block is typed as it is seen (${spacedClass}, ${spacedColour})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
 }
 await setSlider("Size", 96);
 const inkBig = await inkCount(740, 560, 1280, 720);
