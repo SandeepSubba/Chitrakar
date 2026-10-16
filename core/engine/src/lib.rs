@@ -3445,6 +3445,29 @@ impl Session {
         widths: Option<Vec<f32>>,
         label: &str,
     ) -> Result<(), EngineError> {
+        let (kind, transform) = self.path_rewritten(id, shape, widths)?;
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::SetKind {
+                    id,
+                    kind: Box::new(kind),
+                },
+                Command::SetTransform { id, transform },
+            ]),
+            Some(label.to_string()),
+        )
+    }
+
+    /// A layer's kind and transform with its path replaced: the anchors
+    /// normalized to a (0, 0) origin and the shift folded into the
+    /// transform, its fill, stroke and gradient kept, and the stroke's
+    /// widths replaced where they are given.
+    fn path_rewritten(
+        &self,
+        id: NodeId,
+        shape: chitrakar_doc::VectorShape,
+        widths: Option<Vec<f32>>,
+    ) -> Result<(NodeKind, Transform), EngineError> {
         let node = self.doc.node(id)?;
         let chitrakar_doc::NodeKind::Vector {
             fill,
@@ -3489,30 +3512,303 @@ impl Session {
             f: t.f + t.b * mx + t.d * my,
             ..t
         };
+        Ok((
+            chitrakar_doc::NodeKind::Vector {
+                shape: chitrakar_doc::VectorShape::Path {
+                    points,
+                    closed,
+                    smooth,
+                    handles,
+                    subpaths,
+                },
+                fill,
+                stroke,
+                gradient,
+            },
+            moved,
+        ))
+    }
+
+    /// A path's anchors, its handles one per anchor, whether it is
+    /// closed and smooth, and its stroke's widths where they line up with
+    /// the anchors. A compound path is refused: its holes are rings of
+    /// their own, and cutting or joining the outline would leave them
+    /// belonging to nothing.
+    #[allow(clippy::type_complexity)]
+    fn open_path_parts(
+        &self,
+        id: NodeId,
+    ) -> Result<(Vec<[f32; 2]>, Vec<[f32; 4]>, bool, bool, Option<Vec<f32>>), EngineError> {
+        let node = self.doc.node(id)?;
+        let NodeKind::Vector { shape, stroke, .. } = &node.kind else {
+            return Err(EngineError::BadCommand("only a path has anchors".into()));
+        };
+        let chitrakar_doc::VectorShape::Path {
+            points,
+            closed,
+            smooth,
+            handles,
+            subpaths,
+        } = shape
+        else {
+            return Err(EngineError::BadCommand(
+                "only a path has anchors; turn the shape into a path first".into(),
+            ));
+        };
+        if !subpaths.is_empty() {
+            return Err(EngineError::BadCommand(
+                "a path with holes in it cannot be cut or joined".into(),
+            ));
+        }
+        let widths = stroke
+            .as_ref()
+            .filter(|s| s.widths.len() == points.len())
+            .map(|s| s.widths.clone());
+        Ok((
+            points.clone(),
+            padded_handles(handles, points.len()),
+            *closed,
+            *smooth,
+            widths,
+        ))
+    }
+
+    /// Cut a path at one of its anchors. A closed path opens there — it
+    /// runs from the anchor all the way round back to it, its two ends
+    /// on the same spot to be pulled apart. An open path is cut in two at
+    /// an anchor between its ends, the second half a layer of its own
+    /// just above the first, looking as the first does. The handles
+    /// either side of the cut stay with the half they belong to, and so
+    /// do the widths of a brushed line. One step in the history; the
+    /// answer is the path's layer, and the new one when there is one.
+    pub fn split_path(&mut self, id: NodeId, index: usize) -> Result<Vec<NodeId>, EngineError> {
+        let (points, handles, closed, smooth, widths) = self.open_path_parts(id)?;
+        let n = points.len();
+        if index >= n {
+            return Err(EngineError::BadCommand("there is no such anchor".into()));
+        }
+        let path =
+            |points: Vec<[f32; 2]>, handles: Vec<[f32; 4]>| chitrakar_doc::VectorShape::Path {
+                points,
+                closed: false,
+                smooth,
+                handles,
+                subpaths: Vec::new(),
+            };
+        if closed {
+            if n < 3 {
+                return Err(EngineError::BadCommand(
+                    "this path has nothing to open".into(),
+                ));
+            }
+            let order: Vec<usize> = (0..n).map(|k| (index + k) % n).chain([index]).collect();
+            let mut hs: Vec<[f32; 4]> = order.iter().map(|&k| handles[k]).collect();
+            // The first end goes on only by its out-handle, the last
+            // comes in only by its in-handle.
+            hs[0][0] = 0.0;
+            hs[0][1] = 0.0;
+            let last = hs.len() - 1;
+            hs[last][2] = 0.0;
+            hs[last][3] = 0.0;
+            let pts = order.iter().map(|&k| points[k]).collect();
+            let widths = widths.map(|w| order.iter().map(|&k| w[k]).collect());
+            self.replace_path(id, path(pts, hs), widths, "Open the path")?;
+            return Ok(vec![id]);
+        }
+        if index == 0 || index + 1 >= n {
+            return Err(EngineError::BadCommand(
+                "an open path is cut between its ends, not at one".into(),
+            ));
+        }
+        let mut first_h = handles[..=index].to_vec();
+        let mut second_h = handles[index..].to_vec();
+        let end = first_h.len() - 1;
+        first_h[end][2] = 0.0;
+        first_h[end][3] = 0.0;
+        second_h[0][0] = 0.0;
+        second_h[0][1] = 0.0;
+        let (first_w, second_w) = match &widths {
+            Some(w) => (Some(w[..=index].to_vec()), Some(w[index..].to_vec())),
+            None => (None, None),
+        };
+        let (kind, transform) =
+            self.path_rewritten(id, path(points[..=index].to_vec(), first_h), first_w)?;
+        let (second_kind, second_transform) =
+            self.path_rewritten(id, path(points[index..].to_vec(), second_h), second_w)?;
+        let parent = self
+            .doc
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root is not a path".into()))?;
+        let at = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .position(|c| *c == id)
+            .unwrap_or(0);
+        let mut second = self.doc.node(id)?.clone();
+        second.name = format!("{} 2", second.name);
+        second.kind = second_kind;
+        second.transform = second_transform;
+        let new_id = self.doc.peek_next_id();
         self.apply_labeled(
             Command::Batch(vec![
                 Command::SetKind {
                     id,
-                    kind: Box::new(chitrakar_doc::NodeKind::Vector {
-                        shape: chitrakar_doc::VectorShape::Path {
-                            points,
-                            closed,
-                            smooth,
-                            handles,
-                            subpaths,
-                        },
-                        fill,
-                        stroke,
-                        gradient,
-                    }),
+                    kind: Box::new(kind),
                 },
-                Command::SetTransform {
-                    id,
-                    transform: moved,
+                Command::SetTransform { id, transform },
+                Command::AddNode {
+                    parent,
+                    index: at + 1,
+                    node: Box::new(second),
                 },
             ]),
-            Some(label.to_string()),
-        )
+            Some("Cut the path".into()),
+        )?;
+        Ok(vec![id, new_id])
+    }
+
+    /// Join two open paths into one, at the two ends nearest each other:
+    /// ends on the same spot become one anchor, ends apart are bridged by
+    /// a straight segment. The first path's look is kept and the second
+    /// layer goes. A path joined to itself is closed, its two ends made
+    /// one where they meet. One step in the history; the answer is the
+    /// joined path's layer.
+    pub fn join_paths(&mut self, a: NodeId, b: NodeId) -> Result<NodeId, EngineError> {
+        /// Within this, two ends are the same place.
+        const MEET: f32 = 0.5;
+        let (pa, mut ha, closed_a, smooth, wa) = self.open_path_parts(a)?;
+        if closed_a {
+            return Err(EngineError::BadCommand(
+                "that path is closed already".into(),
+            ));
+        }
+        let path = |points: Vec<[f32; 2]>, handles: Vec<[f32; 4]>, closed: bool| {
+            chitrakar_doc::VectorShape::Path {
+                points,
+                closed,
+                smooth,
+                handles,
+                subpaths: Vec::new(),
+            }
+        };
+        let near = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).hypot(p[1] - q[1]);
+        if a == b {
+            let n = pa.len();
+            let (mut pts, mut hs, mut ws) = (pa, ha, wa);
+            if n > 2 && near(pts[0], pts[n - 1]) <= MEET {
+                // The last anchor is the first again: its way in is the
+                // first's way in.
+                let last_in = [hs[n - 1][0], hs[n - 1][1]];
+                hs[0][0] = last_in[0];
+                hs[0][1] = last_in[1];
+                pts.pop();
+                hs.pop();
+                if let Some(w) = ws.as_mut() {
+                    w.pop();
+                }
+            }
+            self.replace_path(a, path(pts, hs, true), ws, "Close the path")?;
+            return Ok(a);
+        }
+        let (pb, mut hb, closed_b, _, wb) = self.open_path_parts(b)?;
+        if closed_b {
+            return Err(EngineError::BadCommand(
+                "that path is closed already".into(),
+            ));
+        }
+        if self.doc.parent_of(a) != self.doc.parent_of(b) {
+            return Err(EngineError::BadCommand(
+                "the two paths have to be in the same group".into(),
+            ));
+        }
+        // The second path said in the first's own space.
+        let (ta, tb) = (self.doc.node(a)?.transform, self.doc.node(b)?.transform);
+        let back = chitrakar_render::invert(ta).ok_or_else(|| {
+            EngineError::BadCommand("the first path is flattened to nothing".into())
+        })?;
+        let m = back.compose(tb);
+        let mut pb: Vec<[f32; 2]> = pb
+            .into_iter()
+            .map(|p| [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f])
+            .collect();
+        for h in hb.iter_mut() {
+            *h = [
+                m.a * h[0] + m.c * h[1],
+                m.b * h[0] + m.d * h[1],
+                m.a * h[2] + m.c * h[3],
+                m.b * h[2] + m.d * h[3],
+            ];
+        }
+        let mut pa = pa;
+        let mut wa = wa;
+        let mut wb = wb;
+        // Which ends meet: the first path is to end where the second
+        // begins, so either is turned round as that asks.
+        let ends = [
+            (near(pa[pa.len() - 1], pb[0]), false, false),
+            (near(pa[pa.len() - 1], pb[pb.len() - 1]), false, true),
+            (near(pa[0], pb[0]), true, false),
+            (near(pa[0], pb[pb.len() - 1]), true, true),
+        ];
+        let &(gap, turn_a, turn_b) = ends
+            .iter()
+            .min_by(|x, y| x.0.total_cmp(&y.0))
+            .expect("four pairings");
+        let turned =
+            |pts: &mut Vec<[f32; 2]>, hs: &mut Vec<[f32; 4]>, ws: &mut Option<Vec<f32>>| {
+                pts.reverse();
+                hs.reverse();
+                for h in hs.iter_mut() {
+                    *h = [h[2], h[3], h[0], h[1]];
+                }
+                if let Some(w) = ws.as_mut() {
+                    w.reverse();
+                }
+            };
+        if turn_a {
+            turned(&mut pa, &mut ha, &mut wa);
+        }
+        if turn_b {
+            turned(&mut pb, &mut hb, &mut wb);
+        }
+        let widths = match (&wa, &wb) {
+            (None, None) => None,
+            _ => Some((
+                wa.unwrap_or(vec![1.0; pa.len()]),
+                wb.unwrap_or(vec![1.0; pb.len()]),
+            )),
+        };
+        let (mut pts, mut hs) = (pa, ha);
+        let mut ws = widths.as_ref().map(|(w, _)| w.clone());
+        let skip = if gap <= MEET {
+            // One anchor where the two met: the first's way in, the
+            // second's way on.
+            let end = hs.len() - 1;
+            hs[end][2] = hb[0][2];
+            hs[end][3] = hb[0][3];
+            1
+        } else {
+            0
+        };
+        pts.extend_from_slice(&pb[skip..]);
+        hs.extend_from_slice(&hb[skip..]);
+        if let (Some(w), Some((_, w2))) = (ws.as_mut(), widths.as_ref()) {
+            w.extend_from_slice(&w2[skip..]);
+        }
+        let (kind, transform) = self.path_rewritten(a, path(pts, hs, false), ws)?;
+        self.apply_labeled(
+            Command::Batch(vec![
+                Command::SetKind {
+                    id: a,
+                    kind: Box::new(kind),
+                },
+                Command::SetTransform { id: a, transform },
+                Command::RemoveNode { id: b },
+            ]),
+            Some("Join the paths".into()),
+        )?;
+        Ok(a)
     }
 
     /// Add an empty layer to clone onto at the top of the document.
@@ -8132,6 +8428,168 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// A path cut at an anchor and joined back: an open line cut in two
+    /// at a middle anchor is two lines meeting there, drawn as the one
+    /// was; joined again it is one line with that anchor once; a square
+    /// opened at a corner runs from it round to it; a line joined to
+    /// itself closes. Each is one step, and an end is no place to cut.
+    #[test]
+    fn a_path_cut_and_joined_is_the_path_it_was() {
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        let line = |points: Vec<[f32; 2]>, closed: bool, at: [f32; 2]| {
+            // Curved where it has four anchors, so the halves have to
+            // keep their handles to be drawn as the whole was.
+            let handles = if points.len() == 4 {
+                vec![
+                    [0.0, 0.0, 10.0, 12.0],
+                    [-10.0, 0.0, 10.0, 0.0],
+                    [-10.0, 4.0, 10.0, -4.0],
+                    [-12.0, -8.0, 0.0, 0.0],
+                ]
+            } else {
+                Vec::new()
+            };
+            let mut n = Node::vector(
+                "line",
+                VectorShape::Path {
+                    points,
+                    closed,
+                    smooth: false,
+                    handles,
+                    subpaths: Vec::new(),
+                },
+            );
+            if let NodeKind::Vector { fill, stroke, .. } = &mut n.kind {
+                *fill = None;
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    width: 3.0,
+                    widths: Vec::new(),
+                    cap: chitrakar_doc::StrokeCap::Round,
+                    join: chitrakar_doc::StrokeJoin::Round,
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    align: None,
+                    start_marker: chitrakar_doc::Marker::None,
+                    end_marker: chitrakar_doc::Marker::None,
+                });
+            }
+            n.transform = Transform::translation(at[0], at[1]);
+            n
+        };
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(line(
+                    vec![[0.0, 0.0], [30.0, 10.0], [60.0, 0.0], [90.0, 20.0]],
+                    false,
+                    [10.0, 20.0],
+                )),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        // Every anchor on the page, layer by layer.
+        let anchors = |session: &Session, id: NodeId| -> Vec<[f32; 2]> {
+            let n = session.document().node(id).unwrap();
+            let NodeKind::Vector {
+                shape: VectorShape::Path { points, .. },
+                ..
+            } = &n.kind
+            else {
+                panic!("a path")
+            };
+            let t = n.transform;
+            points
+                .iter()
+                .map(|p| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f])
+                .collect()
+        };
+        let whole = session.render().unwrap();
+        let before = session.history_labels().0.len();
+        let halves = session.split_path(id, 2).unwrap();
+        assert_eq!(halves.len(), 2);
+        assert_eq!(session.history_labels().0.len(), before + 1, "one step");
+        assert_eq!(
+            anchors(&session, halves[0]),
+            vec![[10.0, 20.0], [40.0, 30.0], [70.0, 20.0]]
+        );
+        assert_eq!(
+            anchors(&session, halves[1]),
+            vec![[70.0, 20.0], [100.0, 40.0]]
+        );
+        // Drawn as it was, away from the cut, where the two ends meet.
+        let cut = session.render().unwrap();
+        for (x, y) in [(25u32, 25u32), (55, 25), (85, 30)] {
+            assert_eq!(cut.get(x, y), whole.get(x, y), "at ({x}, {y})");
+        }
+        // Joined given the other way round: still one line, the anchor
+        // they met at once.
+        session.join_paths(halves[1], halves[0]).unwrap();
+        let joined = session.document().children_of(root).unwrap().to_vec();
+        assert_eq!(joined.len(), 1, "one layer again");
+        let mut back = anchors(&session, joined[0]);
+        if back[0] != [10.0, 20.0] {
+            back.reverse();
+        }
+        assert_eq!(
+            back,
+            vec![[10.0, 20.0], [40.0, 30.0], [70.0, 20.0], [100.0, 40.0]]
+        );
+        assert!(
+            session.split_path(joined[0], 0).is_err(),
+            "an end is no place to cut"
+        );
+        // A line joined to itself closes, and a closed one opens at a
+        // corner, running from it round to it.
+        session.join_paths(joined[0], joined[0]).unwrap();
+        let closed =
+            |session: &Session, id: NodeId| match &session.document().node(id).unwrap().kind {
+                NodeKind::Vector {
+                    shape: VectorShape::Path { closed, .. },
+                    ..
+                } => *closed,
+                _ => panic!("a path"),
+            };
+        assert!(closed(&session, joined[0]));
+        session.split_path(joined[0], 1).unwrap();
+        assert!(!closed(&session, joined[0]));
+        let ring = anchors(&session, joined[0]);
+        assert_eq!(ring.len(), 5, "round from the anchor back to it: {ring:?}");
+        assert_eq!(ring[0], ring[4]);
+        // Two lines whose ends do not meet are bridged by a segment.
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        for (i, (pts, at)) in [
+            (vec![[0.0, 0.0], [20.0, 0.0]], [10.0, 10.0]),
+            (vec![[0.0, 0.0], [20.0, 0.0]], [50.0, 10.0]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: i,
+                    node: Box::new(line(pts, false, at)),
+                })
+                .unwrap();
+        }
+        let ids = session.document().children_of(root).unwrap().to_vec();
+        let one = session.join_paths(ids[0], ids[1]).unwrap();
+        assert_eq!(
+            anchors(&session, one),
+            vec![[10.0, 10.0], [30.0, 10.0], [50.0, 10.0], [70.0, 10.0]],
+            "bridged across the gap"
+        );
     }
 
     /// Step and repeat: a row of copies an offset apart, a ring of them

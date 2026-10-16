@@ -7610,6 +7610,57 @@ assert(
   );
 }
 
+// 9o25. Cut a path and join it back: a pen line pressed at a middle
+// anchor and cut there is two lines, still drawn where the one was;
+// the two picked and joined are one again; one undo is the two.
+{
+  await newDocument(300, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 120) * b.height];
+  await pickTool("Pen");
+  for (const [x, y] of [
+    [20, 60],
+    [100, 30],
+    [180, 60],
+    [260, 30],
+  ]) {
+    await page.mouse.click(...at(x, y));
+    await page.waitForTimeout(80);
+  }
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(200);
+  await pickTool("Move");
+  const rows = () => page.locator(".panel ul li").count();
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const onLine = async () => (await canvasPixel(140, 45))[3];
+  assert((await rows()) === 1 && (await onLine()) > 100, "one pen line, drawn");
+  // Press the third anchor without moving it: that is where to cut.
+  const third = await page.locator('[data-anchor="2"]').boundingBox();
+  await page.mouse.move(third.x + third.width / 2, third.y + third.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await menuClick("Layer", "Cut the path at the anchor");
+  await page.waitForTimeout(300);
+  assert(
+    (await rows()) === 2 && (await onLine()) > 100 && (await canvasPixel(220, 45))[3] > 100,
+    `cut in two, still drawn where it was (${await rows()} layers)`,
+  );
+  await page.locator(".panel ul li").first().click();
+  await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
+  await page.waitForTimeout(150);
+  await menuClick("Layer", "Join the paths");
+  await page.waitForTimeout(300);
+  assert(
+    (await rows()) === 1 && (await onLine()) > 100 && (await canvasPixel(220, 45))[3] > 100,
+    "joined, it is one line again",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 2, "one undo is the two again");
+}
+
 // 9o9. Trim to the artwork: on a white ground, the page comes in to the
 // shape drawn on it, and one undo gives the page back its size.
 {

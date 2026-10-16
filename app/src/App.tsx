@@ -5251,6 +5251,43 @@ export function App() {
     }
   };
 
+  /** Cut the picked path at the anchor last pressed: a closed path opens
+   * there, an open one is cut in two. */
+  const cutPath = () => {
+    if (!session || selected === null) return;
+    const anchor = pickedAnchorRef.current;
+    if (!anchor || anchor.id !== selected) {
+      alert("Cut the path: press the anchor to cut at first");
+      return;
+    }
+    try {
+      const parts = session.split_path(selected, anchor.idx);
+      pickedAnchorRef.current = null;
+      setSelected(parts[parts.length - 1] ?? selected);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Cut the path: ${err}`);
+    }
+  };
+
+  /** Join the two picked paths at their nearest ends, or close one. */
+  const joinPaths = () => {
+    if (!session || selectionSet.length === 0 || selectionSet.length > 2) {
+      alert("Join: pick one open path to close, or two to join");
+      return;
+    }
+    const [a, b] = [selectionSet[0], selectionSet[1] ?? selectionSet[0]];
+    try {
+      const id = session.join_paths(a, b);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Join: ${err}`);
+    }
+  };
+
   /** Step and repeat the picked layers: the window asks how, and the
    * copies are picked after it. */
   const repeatSelection = () => {
@@ -5532,6 +5569,9 @@ export function App() {
   /** Anchor editing: index of the path anchor being dragged, with the
    * path's points and transform captured at drag start (each move derives
    * from these, so renormalization never accumulates drift). */
+  /** The anchor last pressed, on which layer: where Cut the path cuts. */
+  const pickedAnchorRef = useRef<{ id: number; idx: number } | null>(null);
+
   const anchorDragRef = useRef<{
     idx: number;
     vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
@@ -5542,6 +5582,8 @@ export function App() {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
+    // The anchor last taken hold of is the one a cut is made at.
+    pickedAnchorRef.current = { id: selected, idx };
     // Alt takes the anchor off rather than moving it — the gesture that
     // pairs with double-clicking the outline to put one on.
     if (e.altKey) {
@@ -7619,6 +7661,8 @@ export function App() {
           ),
         ),
         item("repeat", "duplicate", "Repeat…", repeatSelection),
+        item("cut-path", "node", "Cut the path at the anchor", cutPath),
+        item("join-paths", "node", "Join the paths", joinPaths),
         item("blend-shapes", "shapes", "Blend between the two…", blendSelection),
         item("outline-stroke", "line", "Outline the stroke", outlineStroke),
         item("offset-path", "shapes", "Offset path…", offsetPath),

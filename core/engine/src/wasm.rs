@@ -688,6 +688,24 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Cut a path at an anchor: a closed one opens there, an open one is
+    /// cut in two. The ids of the layers the path is now.
+    pub fn split_path(&mut self, id: f64, index: usize) -> Result<Vec<f64>, JsError> {
+        self.inner
+            .split_path(NodeId(id as u64), index)
+            .map(|v| v.into_iter().map(|n| n.0 as f64).collect())
+            .map_err(to_js)
+    }
+
+    /// Join two open paths at their nearest ends, or close one joined
+    /// to itself; the joined layer's id.
+    pub fn join_paths(&mut self, a: f64, b: f64) -> Result<f64, JsError> {
+        self.inner
+            .join_paths(NodeId(a as u64), NodeId(b as u64))
+            .map(|n| n.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Turn a shape's stroke into a shape of its own; the id of the
     /// layer that took its place (a group of fill and outline when the
     /// shape had a fill).

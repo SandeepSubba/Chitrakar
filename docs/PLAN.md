@@ -2086,6 +2086,36 @@ without reading anything else.*
     half drawn. Leaving the mask behind, or giving every copy the first
     step, each fail it. Smoke 9o24: Escape lays nothing, three copies
     sixty apart make a row of four with clear gaps, one undo.
+- **Cut a path, join paths ✅** (`Session::split_path`, `join_paths`;
+  Layer › *Cut the path at the anchor*, *Join the paths*). The anchor
+  tool could add, take away and move anchors but never open or join a
+  path.
+  - **Cut:** a closed path opens at the anchor last pressed, running
+    from it all the way round back to it, its ends on one spot to be
+    pulled apart. An open path is cut in two at an anchor between its
+    ends, the second half a layer of its own above the first and looking
+    the same. The handles either side of the cut stay with their half,
+    and so do a brushed line's widths.
+  - **Join:** two open paths in one group join at the two ends nearest
+    each other, either path turned round as that asks (its handles
+    swapped in for out). Ends within half a pixel become one anchor,
+    taking the first's way in and the second's way on. Ends apart are
+    bridged by a straight segment. The second path is brought into the
+    first's own space through both transforms. A path joined to itself
+    closes, its coincident end dropped.
+  - **Limits:** compound paths are refused, since their holes would
+    belong to nothing. Each is one step. `path_rewritten` is the old
+    `replace_path` body, kept for both and for the cut's second half.
+  - **Tests:** `a_path_cut_and_joined_is_the_path_it_was` (a curved line
+    cut at a middle anchor is two halves whose anchors are where the
+    one's were and drawn the same away from the cut; joined, given the
+    other way round, it is the four anchors again; an end refused; a
+    line joined to itself closes, then opens at an anchor as five
+    anchors ending where they start; two apart are bridged). Dropping
+    the second half's handles, never merging met ends, skipping the
+    carry into the first's space, or opening a ring without returning to
+    its anchor each fail it. Smoke 9o25: a pen line pressed at its third
+    anchor, cut, joined, undone.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
