@@ -2762,10 +2762,21 @@ fn one(
         if node.mask.is_some() && draws_something_masked(doc, child) {
             return None;
         }
-        node.effects
+        let shadings: Vec<Shading> = node
+            .effects
             .iter()
             .map(|e| effect_of(doc, e, parent, node.opacity))
-            .collect::<Option<_>>()?
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        // A bevel is lit at the stamp, which is the pass a blend mode
+        // takes over to bring a picture down by; the two have not been
+        // taught to share it, so a blended layer's bevel is the CPU's.
+        if node.blend != BlendMode::Normal && shadings.iter().any(|s| s.lit.is_some()) {
+            return None;
+        }
+        shadings
     };
     // A layer held to the one under it shows only where that
     // layer's own alpha does. That alpha is the layer drawn aside,
@@ -3720,7 +3731,10 @@ fn one(
                     Spread::Band { inside, .. } => [2.0, inside, 0.0, 0.0],
                     _ => [if s.invert { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                 };
-                let field = out.push(page_quad(on, owed, said, s.tint, [0.0; 3]));
+                // A bevel's field is heights: the silhouette in white,
+                // its colour coming at the stamp, once it is lit.
+                let built = if s.lit.is_some() { [1.0; 4] } else { s.tint };
+                let field = out.push(page_quad(on, owed, said, built, [0.0; 3]));
                 let mut axes = |first: [f32; 4], second: [f32; 4], tint: [f32; 4]| {
                     let mut steps = out.push(page_quad(on, 1.0, first, [0.0; 4], [0.0; 3]));
                     steps.end = out.push(page_quad(on, 1.0, second, tint, [0.0; 3])).end;
@@ -3764,17 +3778,30 @@ fn one(
                 } else {
                     0..0
                 };
-                let quad = out.push(page_quad(
-                    (down, out.surface),
-                    opacity,
-                    if blended {
-                        [blend_index(node.blend) as f32, 0.0, 0.0, 0.0]
-                    } else {
-                        carried
-                    },
-                    [0.0; 4],
-                    if blended { [0.0; 3] } else { gain },
-                ));
+                let quad = match s.lit {
+                    // Lit at the stamp: where the light comes from in
+                    // place of an offset (a bevel has none), the colour
+                    // of this half, and how high the heights stand and
+                    // which half it is in place of a gain.
+                    Some(lit) => out.push(page_quad(
+                        (down, out.surface),
+                        opacity,
+                        [lit.toward[0], lit.toward[1], 1.0, owed],
+                        s.tint,
+                        [lit.lift, 0.0, lit.part],
+                    )),
+                    None => out.push(page_quad(
+                        (down, out.surface),
+                        opacity,
+                        if blended {
+                            [blend_index(node.blend) as f32, 0.0, 0.0, 0.0]
+                        } else {
+                            carried
+                        },
+                        [0.0; 4],
+                        if blended { [0.0; 3] } else { gain },
+                    )),
+                };
                 Painted {
                     over: s.over,
                     inside: s.inside,
@@ -5317,6 +5344,23 @@ struct Shading {
     /// coverage and the tint's alpha, which is what the coverage is the
     /// field's alpha over. A gain of one is no spread.
     gain: [f32; 2],
+    /// A bevel's half — its highlight or its shadow — when this is one:
+    /// the field is then heights rather than a shadow, and the stamp
+    /// lights them rather than laying them down.
+    lit: Option<Lit>,
+}
+
+/// One half of a bevel as the stamp takes it.
+#[derive(Clone, Copy)]
+struct Lit {
+    /// Toward the light, across the page; how far up it is follows,
+    /// since it is never below.
+    toward: [f32; 2],
+    /// The height of a pixel the layer fully covers, over the layer's
+    /// own opacity — what the CPU renderer reads its heights as.
+    lift: f32,
+    /// One for the highlight, minus one for the shadow.
+    part: f32,
 }
 
 /// How a field is carried out from the silhouette it was built on.
@@ -5341,7 +5385,7 @@ fn effect_of(
     effect: &chitrakar_doc::Effect,
     parent: Transform,
     layer_opacity: f32,
-) -> Option<Shading> {
+) -> Option<Vec<Shading>> {
     use chitrakar_doc::Effect as E;
     let scale = parent.max_scale();
     // An offset is a vector in the layer's parent space, so where it
@@ -5384,7 +5428,54 @@ fn effect_of(
                 },
                 offset: along(*dx, *dy),
                 gain: [chitrakar_doc::spread_gain(*spread), tint[3]],
+                lit: None,
             })
+            .map(|s| vec![s])
+        }
+        // A bevel is heights rather than a shadow: the silhouette in
+        // white, blurred, and lit at the stamp — twice, the highlight and
+        // then the shadow, which never share a pixel, so two Normal
+        // passes lay the same as one.
+        E::Bevel { .. } => {
+            let E::Bevel {
+                size,
+                depth,
+                lx,
+                ly,
+                altitude,
+                highlight,
+                shadow,
+                opacity,
+            } = effect.carried_through(parent)
+            else {
+                return None;
+            };
+            let Some(light) = chitrakar_doc::bevel_light(size, depth, [lx, ly], altitude, 1.0)
+            else {
+                return Some(Vec::new());
+            };
+            if opacity <= 0.0 {
+                return Some(Vec::new());
+            }
+            let lift = light.surface_scale / layer_opacity.max(1e-3);
+            let half = |color: &chitrakar_color::AuthoredColor, part: f32| Shading {
+                over: true,
+                invert: false,
+                inside: true,
+                tint: tinted(color, opacity),
+                spread: match box_radius(light.sigma) {
+                    Some(radius) => Spread::Blurred(radius),
+                    None => Spread::Still,
+                },
+                offset: [0.0; 2],
+                gain: [1.0, 0.0],
+                lit: Some(Lit {
+                    toward: [light.toward[0], light.toward[1]],
+                    lift,
+                    part,
+                }),
+            };
+            Some(vec![half(&highlight, 1.0), half(&shadow, -1.0)])
         }
         // A band hugging the silhouette from outside, whose width is a
         // true distance rather than a blur. The exact Euclidean
@@ -5403,7 +5494,7 @@ fn effect_of(
             // for either of these, and an empty tint says so without a
             // pass arrangement of its own.
             if *opacity <= 0.0 || w <= 0.0 {
-                return Some(Shading {
+                return Some(vec![Shading {
                     over: false,
                     invert: false,
                     inside: false,
@@ -5411,7 +5502,8 @@ fn effect_of(
                     spread: Spread::Still,
                     offset: [0.0; 2],
                     gain: [1.0, 0.0],
-                });
+                    lit: None,
+                }]);
             }
             // Both passes walk out as far as the band reaches, and a
             // band wider than this is more of a walk per pixel than a
@@ -5444,7 +5536,9 @@ fn effect_of(
                 },
                 offset: [0.0; 2],
                 gain: [1.0, 0.0],
+                lit: None,
             })
+            .map(|s| vec![s])
         }
     }
 }
@@ -6813,6 +6907,134 @@ mod tests {
         // edge — it is the whole shape's outline, cut, rather than the
         // outline of the part of the shape that shows.
         assert!(red(54, 22), "the band is the whole shape's, up to the cut");
+    }
+
+    /// A bevel is lit here as the CPU renderer lights it: the silhouette
+    /// in white, blurred into heights, the slope read off its eight
+    /// neighbours and the highlight and the shadow laid by it — on a
+    /// rounded card and a disc, faded, lit from four sides and in a group
+    /// turned and scaled. A blended layer's bevel goes back.
+    #[test]
+    fn a_bevel_lights_what_the_cpu_lights() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let bevel = |angle: f32, size: f32, depth: f32| E::Bevel {
+            size,
+            depth,
+            lx: angle.to_radians().cos(),
+            ly: -angle.to_radians().sin(),
+            altitude: 30.0,
+            highlight: ink(1.0, 0.95, 0.8, 1.0),
+            shadow: ink(0.05, 0.0, 0.1, 1.0),
+            opacity: 0.85,
+        };
+        let page = |opacity: f32, effects: Vec<E>, space: Transform, blend: BlendMode| {
+            let mut doc = Document::new(90, 70, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "back",
+                    VectorShape::Rect {
+                        width: 90.0,
+                        height: 70.0,
+                        radius: 0.0,
+                    },
+                    ink(0.9, 0.9, 0.86, 1.0),
+                ),
+                Transform::default(),
+            );
+            for (shape, at) in [
+                (
+                    VectorShape::Rect {
+                        width: 40.0,
+                        height: 30.0,
+                        radius: 8.0,
+                    },
+                    [8.0, 10.0],
+                ),
+                (VectorShape::Ellipse { rx: 18.0, ry: 18.0 }, [52.0, 26.0]),
+            ] {
+                let id = add(
+                    &mut doc,
+                    filled("card", shape, ink(0.2, 0.45, 0.8, 1.0)),
+                    space.compose(Transform::translation(at[0], at[1])),
+                );
+                doc.apply(Command::SetOpacity { id, opacity }).unwrap();
+                doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+                doc.apply(Command::SetEffects {
+                    id,
+                    effects: effects.clone(),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let turned = Transform {
+            a: 0.9,
+            b: 0.5,
+            c: -0.5,
+            d: 0.9,
+            e: 20.0,
+            f: -8.0,
+        };
+        for (name, effects, space) in [
+            (
+                "from the upper left",
+                vec![bevel(120.0, 6.0, 1.0)],
+                Transform::default(),
+            ),
+            (
+                "from the right",
+                vec![bevel(0.0, 4.0, 2.0)],
+                Transform::default(),
+            ),
+            (
+                "from below",
+                vec![bevel(-90.0, 10.0, 0.6)],
+                Transform::default(),
+            ),
+            (
+                "from the lower left",
+                vec![bevel(225.0, 3.0, 1.0)],
+                Transform::default(),
+            ),
+            ("turned and scaled", vec![bevel(120.0, 5.0, 1.0)], turned),
+        ] {
+            for opacity in [1.0f32, 0.5] {
+                let doc = page(opacity, effects.clone(), space, BlendMode::Normal);
+                assert!(
+                    GpuRenderer::can_render(&doc),
+                    "{name} at {opacity} is drawn rather than handed back"
+                );
+                let apart = |doc: &Document| {
+                    difference(
+                        &gpu.render(doc).unwrap(),
+                        &chitrakar_render::render(doc).unwrap(),
+                    )
+                };
+                // Against the same shapes with no bevel, whose turned
+                // edges the two rasterizers already antialias apart.
+                let (mean, worst) = apart(&doc);
+                let (_, edges) = apart(&page(opacity, vec![], space, BlendMode::Normal));
+                assert!(
+                    mean < 0.001 && worst < edges.max(0.02) + 0.005,
+                    "{name} at {opacity}: mean {mean:.5}, worst {worst:.4} (edges {edges:.4})"
+                );
+            }
+        }
+        let blended = page(
+            1.0,
+            vec![bevel(120.0, 6.0, 1.0)],
+            Transform::default(),
+            BlendMode::Multiply,
+        );
+        assert!(
+            !GpuRenderer::can_render(&blended),
+            "a blended layer's bevel goes back"
+        );
     }
 
     /// An effect on a group, and on a brush layer: built from what the

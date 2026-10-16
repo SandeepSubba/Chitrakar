@@ -1237,6 +1237,82 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                 );
                 over.push(name);
             }
+            chitrakar_doc::Effect::Bevel { .. } => {
+                // The lighting reads its heights a device pixel at a time
+                // and says nothing about the space the filter is in, so
+                // the light and the heights are written as the page has
+                // them, as the engine lights them.
+                let page = chitrakar_render::ancestor_space(doc, id);
+                let chitrakar_doc::Effect::Bevel {
+                    size,
+                    depth,
+                    lx,
+                    ly,
+                    altitude,
+                    highlight,
+                    shadow,
+                    opacity,
+                } = effect.carried_through(page)
+                else {
+                    continue;
+                };
+                let Some(light) = chitrakar_doc::bevel_light(size, depth, [lx, ly], altitude, 1.0)
+                else {
+                    continue;
+                };
+                if opacity <= 0.0 {
+                    continue;
+                }
+                let [lx, ly, lz] = light.toward;
+                let azimuth = ly.atan2(lx).to_degrees();
+                let elevation = lz.clamp(-1.0, 1.0).asin().to_degrees();
+                let flat = lz.clamp(1e-4, 1.0 - 1e-4);
+                // The heights over the layer's own opacity, as the engine
+                // takes them — which SourceAlpha already is, the opacity
+                // being the element's and applied after its filter.
+                blurred(
+                    &mut body,
+                    "SourceAlpha",
+                    light.sigma / scale,
+                    &format!("{name}b"),
+                );
+                let _ = write!(
+                    body,
+                    r#"<feDiffuseLighting in="{name}b" surfaceScale="{}" diffuseConstant="1" lighting-color="white" result="{name}l"><feDistantLight azimuth="{azimuth}" elevation="{elevation}"/></feDiffuseLighting>"#,
+                    light.surface_scale
+                );
+                // How much more the slope is lit than the top, and how much
+                // less: the lit value is in every channel, and a matrix
+                // turns it into the coverage of each, held to one. A
+                // reader rounds the lit value to eight bits, so the top
+                // itself can come out half a step lit or shaded; that half
+                // step is taken off both, or a flat top wears a faint
+                // highlight a curve near black makes plain.
+                let step = 0.5 / 255.0;
+                for (part, color, row) in [
+                    (
+                        "u",
+                        &highlight,
+                        format!(
+                            "{} 0 0 0 {}",
+                            1.0 / (1.0 - flat),
+                            -(flat + step) / (1.0 - flat)
+                        ),
+                    ),
+                    (
+                        "d",
+                        &shadow,
+                        format!("{} 0 0 0 {}", -1.0 / flat, (flat - step) / flat),
+                    ),
+                ] {
+                    let _ = write!(
+                        body,
+                        r#"<feColorMatrix in="{name}l" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {row}" result="{name}{part}a"/><feFlood {}/><feComposite in2="{name}{part}a" operator="in" result="{name}{part}s"/><feComposite in="{name}{part}s" in2="SourceAlpha" operator="in" result="{name}{part}"/>"#,
+                        tint(color, opacity)
+                    );
+                    over.push(format!("{name}{part}"));
+                }
+            }
         }
     }
     if under.is_empty() && over.is_empty() {
@@ -1968,6 +2044,143 @@ mod tests {
         })
         .unwrap();
         doc.children_of(root).unwrap()[index]
+    }
+
+    /// A bevel goes to SVG as the light it is: the silhouette blurred into
+    /// heights, `feDiffuseLighting` under a distant light, and the lit
+    /// value split into the highlight and the shadow by a matrix each. A
+    /// reader draws what the engine draws, inside the shape, to within
+    /// the eight bits a reader's lighting reads its heights at — lit from
+    /// any side, and on a layer in a space scaled by two and turned.
+    #[test]
+    fn a_bevel_goes_to_svg_as_light() {
+        let white = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let black = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        // The fourth in a group turned a quarter and scaled by one and a
+        // half, which turns the light and widens the bevel with it.
+        let turned = Transform {
+            a: 0.0,
+            b: 1.5,
+            c: -1.5,
+            d: 0.0,
+            e: 100.0,
+            f: 5.0,
+        };
+        for (angle, altitude, size, depth, space) in [
+            (120.0f32, 30.0, 6.0, 1.0, None),
+            (-30.0, 50.0, 10.0, 2.0, None),
+            (200.0, 20.0, 3.0, 0.5, None),
+            (60.0, 35.0, 4.0, 1.0, Some(turned)),
+        ] {
+            let mut doc = Document::new(120, 100, ColorMode::Rgb);
+            let (w, h) = if space.is_some() {
+                (40.0, 36.0)
+            } else {
+                (70.0, 60.0)
+            };
+            let id = filled(&mut doc, "r", w, h);
+            if let Some(space) = space {
+                let root = doc.root();
+                let group = doc.peek_next_id();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::group("turned")),
+                })
+                .unwrap();
+                doc.apply(Command::MoveNode {
+                    id,
+                    parent: group,
+                    index: 0,
+                })
+                .unwrap();
+                doc.apply(Command::SetTransform {
+                    id: group,
+                    transform: space,
+                })
+                .unwrap();
+            } else {
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(25.0, 20.0),
+                })
+                .unwrap();
+            }
+            doc.apply(Command::SetEffects {
+                id,
+                effects: vec![chitrakar_doc::Effect::Bevel {
+                    size,
+                    depth,
+                    lx: angle.to_radians().cos(),
+                    ly: -angle.to_radians().sin(),
+                    altitude,
+                    highlight: white.clone(),
+                    shadow: black.clone(),
+                    opacity: 0.8,
+                }],
+            })
+            .unwrap();
+            let svg = export_svg(&doc).unwrap();
+            assert!(svg.contains("<feDiffuseLighting"), "{svg}");
+            let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+            let mut drawn = resvg::tiny_skia::Pixmap::new(120, 100).unwrap();
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut drawn.as_mut(),
+            );
+            let ours = chitrakar_render::render(&doc).unwrap();
+            // Inside the shape, past the edge the two rasterizers each
+            // antialias their own way. And in light, not in eight-bit
+            // sRGB: where the highlight gives way to the shadow both are
+            // a fraction of a percent, which the curve near black turns
+            // into twenty steps for a reader's rounding of the lit value
+            // alone. The worst pixel is where that line falls a pixel
+            // apart; the mean is what a light from the wrong side, or
+            // heights at the wrong scale, would move.
+            let (mut worst, mut at, mut total, mut count) = (0f32, (0, 0), 0f32, 0usize);
+            for y in 2..98u32 {
+                for x in 2..118u32 {
+                    let inside =
+                        (y - 2..=y + 2).all(|y| (x - 2..=x + 2).all(|x| ours.get(x, y).a > 0.999));
+                    if !inside {
+                        continue;
+                    }
+                    let want = ours.get(x, y);
+                    let i = ((y * 120 + x) * 4) as usize;
+                    let got = &drawn.data()[i..i + 3];
+                    let off = [want.r, want.g, want.b]
+                        .iter()
+                        .zip(got)
+                        .map(|(w, g)| {
+                            (chitrakar_color::srgb_to_linear(*g as f32 / 255.0) - w).abs()
+                        })
+                        .fold(0.0, f32::max);
+                    if off > worst {
+                        (worst, at) = (off, (x, y));
+                    }
+                    total += off;
+                    count += 1;
+                }
+            }
+            let mean = total / count.max(1) as f32;
+            eprintln!("WORST {angle} {worst} {at:?} mean {mean} of {count}");
+            assert!(count > 1000, "the shape is there to compare");
+            assert!(
+                worst < 0.12 && mean < 0.01,
+                "lit from {angle}: worst {worst} at {at:?}, mean {mean}"
+            );
+        }
     }
 
     /// The engine draws a rect's or an ellipse's stroke as a band lying

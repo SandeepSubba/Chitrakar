@@ -710,19 +710,42 @@ pub fn everything() -> Fixture {
     .unwrap();
     doc.apply(Command::SetEffects {
         id: words,
-        effects: vec![Effect::InnerShadow {
-            dx: -2.0,
-            dy: 3.0,
-            blur: 1.5,
-            color: chitrakar_color::AuthoredColor::Srgb {
-                r: 0.1,
-                g: 0.0,
-                b: 0.2,
-                a: 1.0,
+        effects: vec![
+            Effect::InnerShadow {
+                dx: -2.0,
+                dy: 3.0,
+                blur: 1.5,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.0,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                opacity: 0.8,
+                spread: 0.5,
             },
-            opacity: 0.8,
-            spread: 0.5,
-        }],
+            // And lit, as lettering is: raised and lit from the upper left.
+            Effect::Bevel {
+                size: 3.0,
+                depth: 1.2,
+                lx: -0.5,
+                ly: -0.866,
+                altitude: 30.0,
+                highlight: chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.95,
+                    b: 0.8,
+                    a: 1.0,
+                },
+                shadow: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.05,
+                    g: 0.0,
+                    b: 0.1,
+                    a: 1.0,
+                },
+                opacity: 0.85,
+            },
+        ],
     })
     .unwrap();
     doc.apply(Command::AddNode {
@@ -2911,33 +2934,44 @@ impl Rng {
             } else {
                 0.0
             };
-            doc.apply(Command::SetEffects {
-                id,
-                effects: vec![match self.upto(3) {
-                    0 => Effect::DropShadow {
-                        dx: self.between(-3.0, 3.0),
-                        dy: self.between(-3.0, 3.0),
-                        blur: self.between(0.0, 2.5),
-                        color: self.color(1.0),
-                        opacity: self.between(0.4, 1.0),
-                        spread: hard,
-                    },
-                    1 => Effect::Outline {
-                        width: self.between(0.5, 3.0),
-                        color: self.color(1.0),
-                        opacity: self.between(0.4, 1.0),
-                    },
-                    _ => Effect::InnerShadow {
-                        dx: self.between(-2.0, 2.0),
-                        dy: self.between(-2.0, 2.0),
-                        blur: self.between(0.0, 2.0),
-                        color: self.color(1.0),
-                        opacity: self.between(0.4, 1.0),
-                        spread: hard,
-                    },
-                }],
-            })
-            .unwrap();
+            let mut effects = vec![match self.upto(3) {
+                0 => Effect::DropShadow {
+                    dx: self.between(-3.0, 3.0),
+                    dy: self.between(-3.0, 3.0),
+                    blur: self.between(0.0, 2.5),
+                    color: self.color(1.0),
+                    opacity: self.between(0.4, 1.0),
+                    spread: hard,
+                },
+                1 => Effect::Outline {
+                    width: self.between(0.5, 3.0),
+                    color: self.color(1.0),
+                    opacity: self.between(0.4, 1.0),
+                },
+                _ => Effect::InnerShadow {
+                    dx: self.between(-2.0, 2.0),
+                    dy: self.between(-2.0, 2.0),
+                    blur: self.between(0.0, 2.0),
+                    color: self.color(1.0),
+                    opacity: self.between(0.4, 1.0),
+                    spread: hard,
+                },
+            }];
+            // A third of them lit as well, over what they had, from the
+            // same side stream: a bevel from any side, at any height.
+            if side.chance(3) {
+                effects.push(Effect::Bevel {
+                    size: side.between(1.0, 6.0),
+                    depth: side.between(0.4, 2.0),
+                    lx: side.between(-1.0, 1.0),
+                    ly: side.between(-1.0, 1.0),
+                    altitude: side.between(15.0, 60.0),
+                    highlight: side.color(1.0),
+                    shadow: side.color(1.0),
+                    opacity: side.between(0.4, 1.0),
+                });
+            }
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
         }
         // Held to the layer below, when there is one and this is not it.
         if self.chance(5) && made.len() > 1 {

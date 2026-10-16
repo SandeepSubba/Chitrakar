@@ -618,6 +618,19 @@ const EFFECT_LABELS: Record<EffectKind, string> = {
   DropShadow: "Drop shadow",
   Outline: "Outline",
   InnerShadow: "Inner shadow",
+  Bevel: "Bevel",
+};
+
+/** The colours each effect is painted in, and what each is called: one
+ * for a shadow or an outline, two for a bevel's light and shade. */
+const EFFECT_COLORS: Record<EffectKind, [string, string][]> = {
+  DropShadow: [["color", "colour"]],
+  Outline: [["color", "colour"]],
+  InnerShadow: [["color", "colour"]],
+  Bevel: [
+    ["highlight", "highlight"],
+    ["shadow", "shadow"],
+  ],
 };
 
 /** The tunable numbers of each effect: [field, label, min, max, step]. */
@@ -643,6 +656,40 @@ const EFFECT_FIELDS: Record<
     ["spread", "Choke", 0, 0.95, 0.01],
     ["opacity", "Strength", 0, 1, 0.01],
   ],
+  Bevel: [
+    ["size", "Size", 0.5, 40, 0.5],
+    ["depth", "Depth", 0.1, 10, 0.1],
+    ["angle", "Angle", -180, 180, 1],
+    ["altitude", "Altitude", 1, 89, 1],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+};
+
+/** A number an effect's row shows that the effect does not store as
+ * one: a bevel's light is kept as a direction, so that it turns with
+ * the layer exactly, and shown as the angle a person thinks of it by —
+ * degrees anticlockwise from the right, as the page is seen. */
+const EFFECT_DERIVED: Partial<
+  Record<
+    EffectKind,
+    Record<
+      string,
+      {
+        read: (body: Record<string, number>) => number;
+        write: (v: number) => Record<string, number>;
+      }
+    >
+  >
+> = {
+  Bevel: {
+    angle: {
+      read: (b) => Math.round((Math.atan2(-b.ly, b.lx) * 180) / Math.PI),
+      write: (v) => ({
+        lx: Math.cos((v * Math.PI) / 180),
+        ly: -Math.sin((v * Math.PI) / 180),
+      }),
+    },
+  },
 };
 
 /** What the picker offers beyond the effects themselves: a glow is a
@@ -657,7 +704,7 @@ const EFFECT_PRESETS: Record<string, string> = {
 function effectTitle(effect: Effect): string {
   const kind = effectKind(effect);
   const body = effectBody(effect) as Record<string, number>;
-  if (kind !== "Outline" && body.dx === 0 && body.dy === 0) {
+  if ((kind === "DropShadow" || kind === "InnerShadow") && body.dx === 0 && body.dy === 0) {
     return kind === "DropShadow" ? "Outer glow" : "Inner glow";
   }
   return EFFECT_LABELS[kind];
@@ -669,8 +716,24 @@ function newEffect(
   kind: EffectKind | keyof typeof EFFECT_PRESETS,
   color: AuthoredColor,
   light: AuthoredColor,
+  white: AuthoredColor,
 ): Effect {
   switch (kind) {
+    case "Bevel":
+      // Lit from the upper left, a little above the page: the light
+      // most pictures are drawn under.
+      return {
+        Bevel: {
+          size: 6,
+          depth: 1,
+          lx: -0.5,
+          ly: -0.866,
+          altitude: 30,
+          highlight: white,
+          shadow: color,
+          opacity: 0.75,
+        },
+      };
     case "OuterGlow":
       return {
         DropShadow: {
@@ -10576,20 +10639,24 @@ export function App() {
                     <div className="effect" key={`${kind}${at}`}>
                       <div className="row effect-head">
                         <span>{effectTitle(effect)}</span>
-                        <input
-                          type="color"
-                          value={colorToHex(
-                            (effect as never)[kind]["color"] as AuthoredColor,
-                          )}
-                          onChange={(e) =>
-                            tuneEffect(at, {
-                              color: cmyk
-                                ? hexToCmykColor(e.target.value)
-                                : hexColor(e.target.value),
-                            })
-                          }
-                          aria-label={`${EFFECT_LABELS[kind]} colour`}
-                        />
+                        {EFFECT_COLORS[kind].map(([field, called]) => (
+                          <input
+                            key={field}
+                            type="color"
+                            value={colorToHex(
+                              (effect as never)[kind][field] as AuthoredColor,
+                            )}
+                            onChange={(e) =>
+                              tuneEffect(at, {
+                                [field]: cmyk
+                                  ? hexToCmykColor(e.target.value)
+                                  : hexColor(e.target.value),
+                              })
+                            }
+                            title={`${EFFECT_LABELS[kind]} ${called}`}
+                            aria-label={`${EFFECT_LABELS[kind]} ${called}`}
+                          />
+                        ))}
                         {/* Order matters: an outline under a drop shadow
                             is not the same picture as one over it. */}
                         <button
@@ -10621,19 +10688,24 @@ export function App() {
                         </button>
                       </div>
                       {EFFECT_FIELDS[kind].map(
-                        ([field, label, min, max, step]) => (
+                        ([field, label, min, max, step]) => {
+                          const derived = EFFECT_DERIVED[kind]?.[field];
+                          const shown = derived ? derived.read(body) : (body[field] ?? 0);
+                          return (
                           <label key={field}>
-                            {label} {(body[field] ?? 0).toFixed(2)}
+                            {label} {shown.toFixed(2)}
                             <input
                               type="range"
                               min={min}
                               max={max}
                               step={step}
-                              value={body[field] ?? 0}
+                              value={shown}
                               onChange={(e) =>
                                 tuneEffect(
                                   at,
-                                  { [field]: Number(e.target.value) },
+                                  derived
+                                    ? derived.write(Number(e.target.value))
+                                    : { [field]: Number(e.target.value) },
                                   true,
                                 )
                               }
@@ -10643,7 +10715,8 @@ export function App() {
                               aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
                             />
                           </label>
-                        ),
+                          );
+                        },
                       )}
                     </div>
                   );
@@ -10660,7 +10733,7 @@ export function App() {
                         cmyk ? hexToCmykColor(hex) : hexColor(hex);
                       setEffects([
                         ...selectedEffects,
-                        newEffect(kind, ink("#000000"), ink("#ffe08a")),
+                        newEffect(kind, ink("#000000"), ink("#ffe08a"), ink("#ffffff")),
                       ]);
                     }}
                     aria-label="Add effect"

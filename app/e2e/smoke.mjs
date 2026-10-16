@@ -3390,6 +3390,81 @@ assert(
   await page.screenshot({ path: join(OUT, "guides.png") });
 }
 
+// 8x2c. Bevel: the layer raised and lit. Lit from the upper left, the
+// inside of its left edge catches the light and the inside of its right
+// edge falls into shade, while the middle is the layer as it was; turn
+// the light round and the two change places; a bevel has two colours,
+// and each is its own.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const sum = (p) => p[0] + p[1] + p[2];
+  const middle = await canvasPixel(300, 200);
+  await page.selectOption('select[aria-label="Add effect"]', "Bevel");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".effect .effect-head span").allTextContents()).join() === "Bevel",
+    "the bevel is listed",
+  );
+  const [left, right] = [await canvasPixel(103, 200), await canvasPixel(497, 200)];
+  assert(
+    sum(left) > sum(middle) + 60 && sum(right) < sum(middle) - 60,
+    `lit from the upper left: the left edge is lit and the right shaded (${left} / ${middle} / ${right})`,
+  );
+  assert(
+    (await canvasPixel(300, 200)).join() === middle.join() &&
+      (await canvasPixel(97, 200))[3] === 0,
+    "the middle is as it was and nothing falls outside",
+  );
+  await setSlider("Bevel angle", -60);
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('input[aria-label="Bevel angle"]').inputValue()) === "-60",
+    "the light is kept as a direction and read back as the angle it was set to",
+  );
+  const [left2, right2] = [await canvasPixel(103, 200), await canvasPixel(497, 200)];
+  assert(
+    sum(left2) < sum(middle) - 60 && sum(right2) > sum(middle) + 60,
+    `turned to the lower right, the two change places (${left2} / ${right2})`,
+  );
+  // The highlight in red: the lit edge goes red, the shaded one does not.
+  await page.locator('input[aria-label="Bevel highlight"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, "#ff0000");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const red = await canvasPixel(497, 200);
+  assert(
+    red[0] - red[1] > right2[0] - right2[1] + 30,
+    `the highlight is its own colour: the lit edge leans red where it was white (${right2} -> ${red})`,
+  );
+  assert(
+    (await page.locator('input[aria-label="Bevel shadow"]').inputValue()) === "#000000",
+    "and the shadow keeps its own",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  const back = await canvasPixel(497, 200);
+  assert(back.join() === right2.join(), `the colour undoes (${back})`);
+  await page.click('button[aria-label="Remove Bevel"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await canvasPixel(103, 200)).join() === middle.join(),
+    "and removed, the edge is the layer again",
+  );
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

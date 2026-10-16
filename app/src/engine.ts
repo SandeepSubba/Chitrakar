@@ -292,10 +292,27 @@ export type Effect =
         /** The same hardening, which inside the shape is a choke. */
         spread?: number;
       };
+    }
+  | {
+      /** The layer raised and lit (`chitrakar_doc::Effect::Bevel`):
+       * `size` how far in the slope runs, `depth` how steep it is,
+       * `(lx, ly)` the way to the light across the page with y down —
+       * a direction, so it turns with the layer exactly — and
+       * `altitude` how high it stands, in degrees. */
+      Bevel: {
+        size: number;
+        depth: number;
+        lx: number;
+        ly: number;
+        altitude: number;
+        highlight: AuthoredColor;
+        shadow: AuthoredColor;
+        opacity: number;
+      };
     };
 
 /** The variant name of an effect — its single key. */
-export type EffectKind = "DropShadow" | "Outline" | "InnerShadow";
+export type EffectKind = "DropShadow" | "Outline" | "InnerShadow" | "Bevel";
 
 export function effectKind(e: Effect): EffectKind {
   return Object.keys(e)[0] as EffectKind;

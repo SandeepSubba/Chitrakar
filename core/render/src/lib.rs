@@ -3371,6 +3371,52 @@ fn draw_effect(
                 Gain::of(*spread, tint),
             );
         }
+        Effect::Bevel { .. } => {
+            // The light's direction and the size carried into device
+            // pixels, as an offset is.
+            let Effect::Bevel {
+                size,
+                depth,
+                lx,
+                ly,
+                altitude,
+                highlight,
+                shadow,
+                opacity,
+            } = effect.carried_through(parent)
+            else {
+                return;
+            };
+            let Some(light) = chitrakar_doc::bevel_light(size, depth, [lx, ly], altitude, 1.0)
+            else {
+                return;
+            };
+            if opacity <= 0.0 {
+                return;
+            }
+            let lit = bevel_field(
+                layer,
+                origin,
+                layer_clip,
+                light,
+                layer_opacity,
+                [
+                    scale_alpha(resolve_color(doc, &highlight), opacity),
+                    scale_alpha(resolve_color(doc, &shadow), opacity),
+                ],
+            );
+            stamp(
+                dst,
+                &lit,
+                origin,
+                (0.0, 0.0),
+                layer_clip,
+                write,
+                blend,
+                Some(layer),
+                None,
+            );
+        }
         Effect::Outline {
             width,
             color,
@@ -3395,6 +3441,64 @@ fn draw_effect(
             );
         }
     }
+}
+
+/// A bevel's light on the layer, before it is kept inside it: the
+/// silhouette blurred into heights, each pixel's slope read off its
+/// neighbours the way SVG's lighting reads it (a Sobel kernel, a quarter
+/// of it, so the slope is twice the height's step), and the highlight or
+/// the shadow laid by how much more or less the slope faces the light
+/// than the flat top does.
+///
+/// The heights are the silhouette over the layer's own opacity, so a
+/// faded layer is faded, not flattened. Past the window the field was
+/// built over there is no height, as there is no shadow.
+fn bevel_field(
+    layer: &Surface,
+    origin: (u32, u32),
+    clip: ClipRect,
+    light: chitrakar_doc::BevelLight,
+    layer_opacity: f32,
+    [hi, lo]: [LinearRgba; 2],
+) -> Surface {
+    let white = LinearRgba {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    let field = silhouette(layer, origin, clip, white, false, light.sigma);
+    let lift = light.surface_scale / layer_opacity.max(1e-3);
+    let height = |x: i64, y: i64| {
+        if x < clip.x0 as i64 || y < clip.y0 as i64 || x >= clip.x1 as i64 || y >= clip.y1 as i64 {
+            return 0.0;
+        }
+        field.pixels[at_in(origin, field.width, x as u32, y as u32)].a
+    };
+    let [lx, ly, lz] = light.toward;
+    let mut out = Surface::new(layer.width, layer.height);
+    for y in clip.y0..clip.y1 {
+        for x in clip.x0..clip.x1 {
+            let (x, y) = (x as i64, y as i64);
+            let h = |dx: i64, dy: i64| height(x + dx, y + dy);
+            let gx = (h(1, -1) + 2.0 * h(1, 0) + h(1, 1)) - (h(-1, -1) + 2.0 * h(-1, 0) + h(-1, 1));
+            let gy = (h(-1, 1) + 2.0 * h(0, 1) + h(1, 1)) - (h(-1, -1) + 2.0 * h(0, -1) + h(1, -1));
+            let (nx, ny) = (-lift * 0.25 * gx, -lift * 0.25 * gy);
+            let lit = (nx * lx + ny * ly + lz) / (nx * nx + ny * ny + 1.0).sqrt();
+            let (up, down) = chitrakar_doc::bevel_shares(lit, lz);
+            if up <= 0.0 && down <= 0.0 {
+                continue;
+            }
+            let i = at_in(origin, out.width, x as u32, y as u32);
+            out.pixels[i] = LinearRgba {
+                r: hi.r * up + lo.r * down,
+                g: hi.g * up + lo.g * down,
+                b: hi.b * up + lo.b * down,
+                a: hi.a * up + lo.a * down,
+            };
+        }
+    }
+    out
 }
 
 /// The layer's silhouette (or, inverted, the hole around it) in one flat
@@ -20428,6 +20532,129 @@ mod tests {
             (away.r - plain.get(38, 38).r).abs() < 0.1 && away.r > shaded.r * 2.0,
             "and the side it is aimed away from is barely touched: {away:?}"
         );
+    }
+
+    #[test]
+    fn a_bevel_lights_the_edges_facing_the_light_and_shades_the_rest() {
+        // Lit from the upper left: the left and top edges, inside, catch
+        // the highlight; the right and bottom ones fall into the shadow;
+        // the flat top between them is as it was, and so is everything
+        // outside.
+        const WHITE: AuthoredColor = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        let bevel = |[lx, ly]: [f32; 2], opacity: f32| chitrakar_doc::Effect::Bevel {
+            size: 4.0,
+            depth: 1.0,
+            lx,
+            ly,
+            altitude: 30.0,
+            highlight: WHITE,
+            shadow: BLACK,
+            opacity,
+        };
+        let plain = square_with(vec![]);
+        let lit = square_with(vec![bevel([-1.0, -1.0], 1.0)]);
+        for (x, y) in [(18, 30), (30, 18), (42, 30), (30, 42)] {
+            assert_eq!(
+                lit.get(x, y),
+                plain.get(x, y),
+                "nothing outside at ({x},{y})"
+            );
+        }
+        assert_eq!(
+            lit.get(30, 30),
+            plain.get(30, 30),
+            "the flat top is left alone"
+        );
+        let red = plain.get(30, 30);
+        for (x, y) in [(21, 30), (30, 21)] {
+            let p = lit.get(x, y);
+            assert!(
+                p.g > 0.2 && p.b > 0.2 && p.a >= 0.999,
+                "({x},{y}) faces the light and is lit: {p:?}"
+            );
+        }
+        for (x, y) in [(38, 30), (30, 38)] {
+            let p = lit.get(x, y);
+            assert!(
+                p.r < red.r - 0.2 && p.g < 0.01,
+                "({x},{y}) faces away and is shaded: {p:?}"
+            );
+        }
+        // The light turned to the lower right turns the bevel with it.
+        let turned = square_with(vec![bevel([1.0, 1.0], 1.0)]);
+        assert!(turned.get(38, 30).g > 0.2 && turned.get(21, 30).r < red.r - 0.2);
+        // Faded, the same light and the same edges, less of it.
+        let faint = square_with(vec![bevel([-1.0, -1.0], 0.5)]);
+        let (full, half) = (lit.get(21, 30).g, faint.get(21, 30).g);
+        assert!(half > 0.0 && half < full, "{half} is less than {full}");
+        // Asked for no size, or lit from no side at all, nothing.
+        for (size, toward) in [(0.0, [-1.0, -1.0]), (4.0, [0.0, 0.0])] {
+            let none = square_with(vec![chitrakar_doc::Effect::Bevel {
+                size,
+                depth: 1.0,
+                lx: toward[0],
+                ly: toward[1],
+                altitude: 30.0,
+                highlight: WHITE,
+                shadow: BLACK,
+                opacity: 1.0,
+            }]);
+            assert_eq!(none.pixels, plain.pixels);
+        }
+    }
+
+    /// A bevel on a group laid on its side keeps its light where the page
+    /// has it: the light is carried through the space it is written in,
+    /// as an offset is — exactly, so turned a quarter and back it is the
+    /// bevel it was to the last bit.
+    #[test]
+    fn a_bevels_light_turns_with_the_space_it_is_written_in() {
+        let bevel = chitrakar_doc::Effect::Bevel {
+            size: 4.0,
+            depth: 1.0,
+            lx: 0.37,
+            ly: -0.81,
+            altitude: 30.0,
+            highlight: BLACK,
+            shadow: BLACK,
+            opacity: 1.0,
+        };
+        let quarter = Transform {
+            a: 0.0,
+            b: 1.0,
+            c: -1.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let back = Transform {
+            a: 0.0,
+            b: -1.0,
+            c: 1.0,
+            d: 0.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        let turned = bevel.carried_through(quarter);
+        let chitrakar_doc::Effect::Bevel { lx, ly, size, .. } = turned else {
+            unreachable!()
+        };
+        // Turned a quarter clockwise as the page is seen (y down).
+        assert_eq!((lx, ly, size), (0.81, 0.37, 4.0));
+        assert_eq!(turned.carried_through(back), bevel, "and back, exactly");
+        let mirror = Transform {
+            a: -1.0,
+            ..Transform::default()
+        };
+        let chitrakar_doc::Effect::Bevel { lx, ly, .. } = bevel.carried_through(mirror) else {
+            unreachable!()
+        };
+        assert_eq!((lx, ly), (-0.37, -0.81), "a mirror flips it");
     }
 
     #[test]

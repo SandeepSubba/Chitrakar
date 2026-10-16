@@ -6632,6 +6632,12 @@ impl Session {
                 chitrakar_doc::Effect::DropShadow { color, .. }
                 | chitrakar_doc::Effect::InnerShadow { color, .. }
                 | chitrakar_doc::Effect::Outline { color, .. } => flat(color),
+                chitrakar_doc::Effect::Bevel {
+                    highlight, shadow, ..
+                } => {
+                    flat(highlight);
+                    flat(shadow);
+                }
             }
         }
         let mut styles = self.doc.styles().to_vec();

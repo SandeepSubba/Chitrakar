@@ -1808,8 +1808,44 @@ fn gained(px: vec4f, gain: vec2f) -> vec4f {
 // `params.xy` is the offset in device pixels. `params.z` is one when the
 // layer's own coverage is to be taken as well, which is what keeps an
 // inner shadow inside the silhouette instead of spilling past it.
+// A bevel's half, lit from its heights: the CPU renderer's
+// `bevel_field`, a pixel at a time. The field is the silhouette blurred
+// into heights; the slope is read off the eight around the pixel with
+// SVG's quarter Sobel, and the highlight (`extra.z` one) or the shadow
+// (minus one) takes the share by which the slope faces the light more,
+// or less, than the flat top does. `params.xy` is toward the light
+// across the page, `extra.x` how high a fully covered pixel stands,
+// `grad` this half's colour; past the surface there is no height, as
+// past the CPU's window there is none.
+fn bevel_lit(in: ImageOut) -> vec4f {
+    let size = vec2i(page.size);
+    let p = vec2i(floor(in.uv * page.size));
+    let h00 = field_tap(p + vec2i(-1, -1), size).a;
+    let h10 = field_tap(p + vec2i(0, -1), size).a;
+    let h20 = field_tap(p + vec2i(1, -1), size).a;
+    let h01 = field_tap(p + vec2i(-1, 0), size).a;
+    let h21 = field_tap(p + vec2i(1, 0), size).a;
+    let h02 = field_tap(p + vec2i(-1, 1), size).a;
+    let h12 = field_tap(p + vec2i(0, 1), size).a;
+    let h22 = field_tap(p + vec2i(1, 1), size).a;
+    let gx = (h20 + 2.0 * h21 + h22) - (h00 + 2.0 * h01 + h02);
+    let gy = (h02 + 2.0 * h12 + h22) - (h00 + 2.0 * h10 + h20);
+    let n = vec2f(-in.extra.x * 0.25 * gx, -in.extra.x * 0.25 * gy);
+    let up = sqrt(max(0.0, 1.0 - dot(in.params.xy, in.params.xy)));
+    let lit = (n.x * in.params.x + n.y * in.params.y + up) / sqrt(dot(n, n) + 1.0);
+    let flat = clamp(up, 1e-4, 1.0 - 1e-4);
+    var share = clamp((flat - lit) / flat, 0.0, 1.0);
+    if in.extra.z > 0.0 {
+        share = clamp((lit - flat) / (1.0 - flat), 0.0, 1.0);
+    }
+    return in.grad * share * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a * in.params.w;
+}
+
 @fragment
 fn fs_effect(in: ImageOut) -> @location(0) vec4f {
+    if in.extra.z != 0.0 {
+        return bevel_lit(in) * in.alpha * mask_cover(in.page, in.mask);
+    }
     var out = gained(field_at(in.uv, vec2f(in.params.x, in.params.y)), in.extra.xy);
     if in.params.z != 0.0 {
         // `params.w` is what the surface still owes its own silhouette,

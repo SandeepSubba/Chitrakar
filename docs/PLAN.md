@@ -2186,6 +2186,78 @@ without reading anything else.*
     8.504 pt at 300 dpi; capped; 0, −3 and NaN are none). Smoke 9e3: set
     in the window, exported with the boxes, remembered, and put back.
     Exporting the plain PDF from the window instead fails it.
+- **Bevel ✅** (`Effect::Bevel { size, depth, lx, ly, altitude,
+  highlight, shadow, opacity }`; *Add effect › Bevel*, with a swatch for
+  each colour and an Angle slider). Photoshop's most-used layer style,
+  and the one look in Affinity's and Canva's effect lists this did not
+  have.
+  - **The model:** the layer's silhouette is blurred by half the size and
+    read as heights, a fully covered pixel standing `depth · size / 2`
+    high. The slope is read off the eight pixels around each one with
+    SVG's quarter Sobel. A distant light at `altitude`, from the direction
+    `(lx, ly)`, then lights it. Where the slope faces the light more than
+    the flat top does, it takes the highlight, by `(lit − flat)/(1 − flat)`.
+    Where it faces away, it takes the shadow, by `(flat − lit)/flat`. The
+    top is left alone, and the two halves never share a pixel. The result
+    is painted over the layer and kept inside it (`bevel_field`,
+    `bevel_light`, `bevel_shares`). The heights are taken over the layer's
+    own opacity, so a faded layer's bevel is fainter but no flatter.
+  - **Why a direction:** the light is a vector in the layer's parent
+    space, carried through transforms the way a shadow's offset is. It
+    was an angle first. Re-derived through `atan2`, it came back a hair
+    off from even an identity carry, and four of the undo audits and
+    *a page turned a quarter and back saves to the same bytes* caught it.
+    The panel shows and sets it as an angle.
+  - **It is SVG's lighting:** `feDiffuseLighting` under an
+    `feDistantLight`, on the blurred SourceAlpha, with the surface scale
+    and the azimuth written as the page has them, because resvg reads
+    heights a device pixel at a time. One `feColorMatrix` per half turns
+    the lit value into coverage, flooded and kept in by SourceAlpha.
+    - The matrices give up half an 8-bit step. A reader rounds the flat
+      top's lit value 0.5 up to 128/255, and without the dead zone the top
+      wore a highlight of 0.4%. The sRGB curve near black turned that
+      into thirteen levels.
+    - The importer reads a highlight/shadow pair over one lighting back as
+      the bevel it was (`lit_half`, `bevel`).
+  - **GPU:** it draws a bevel as two stamps of the shadow machinery. The
+    field is the silhouette in white, blurred by the same three boxes.
+    `bevel_lit` in the effect shader lights each pixel from its eight
+    neighbours, with the light in `params`, the height in `extra.x` and
+    the half in `extra.z`. The two halves are disjoint, so two Normal
+    passes lay what one would. A blended layer's bevel goes back to the
+    CPU, since a blend takes over the stamp's pass.
+  - **PDF:** a bevel is drawn as the picture beside the live layer that
+    every effect is (`effect_pixels`).
+  - **Found on the way:** the SVG importer read a blur in the filter's
+    own units, but placed the layer, and its offsets, on the page. So a
+    shadow from a group scaled by 1.25 came back a box radius too narrow,
+    0.11 apart. `Page::blur` now answers in page units.
+  - **Fixture:** the shared fixture's lettering is bevelled, over its
+    inner shadow. A third of the random pages' effects get a bevel, drawn
+    from the side stream that decides spreads, so every page drawn before
+    is the page it was.
+  - **Tests:**
+    - `a_bevel_lights_the_edges_facing_the_light_and_shades_the_rest`:
+      lit edges, shaded edges, a flat middle and nothing outside; it
+      follows the light, fades with opacity, and draws nothing with no
+      size or no direction.
+    - `a_bevels_light_turns_with_the_space_it_is_written_in`: a quarter
+      turn and back gives the same bits, and a mirror flips it.
+    - `a_bevel_goes_to_svg_as_light`: resvg against the engine, in light
+      rather than 8-bit sRGB, from four sides and in a turned, scaled
+      group. The mean error is under 0.01 and the worst pixel under 0.12,
+      where the terminator falls a pixel apart.
+    - `a_bevel_exported_comes_back_as_itself`: the parameters come back;
+      a turned group is measured against its own bare edges.
+    - `a_bevel_lights_what_the_cpu_lights`: on the GPU, mean under 0.001,
+      worst no more than the bare shapes' own edges.
+    - Sabotages that each fail one of them: the azimuth flipped, the
+      surface scale doubled, the slope's y flipped on the GPU, the opacity
+      left out of the heights, the halves not told apart, the light turned
+      the wrong way, the importer's old blur, and the highlight swatch
+      editing the shadow.
+    - Smoke 8x2c: a rect lit from the upper left, the light turned round,
+      the angle read back, the highlight recoloured and undone, removed.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

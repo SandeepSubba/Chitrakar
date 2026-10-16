@@ -11,11 +11,12 @@ pub mod lut;
 mod node;
 
 pub use node::{
-    conic_turn, convex, focal_offset, focal_ramp, invert_axes, spread_gain, stroke_align,
-    Adjustment, BlendMode, Effect, Filter, Gradient, GradientStop, Guide, Marker, Mask, MaskKind,
-    Node, NodeKind, PaintStroke, Pin, Pinning, Projective, RasterRef, Spread, Stroke, StrokeAlign,
-    StrokeCap, StrokeJoin, StyleRun, TextAlign, TextSpec, Transform, VectorShape, LUMA,
-    MARKER_LENGTH, MARKER_REACH, MITER_LIMIT, SPREAD_MOST,
+    bevel_light, bevel_shares, conic_turn, convex, focal_offset, focal_ramp, invert_axes,
+    spread_gain, stroke_align, Adjustment, BevelLight, BlendMode, Effect, Filter, Gradient,
+    GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke, Pin, Pinning,
+    Projective, RasterRef, Spread, Stroke, StrokeAlign, StrokeCap, StrokeJoin, StyleRun, TextAlign,
+    TextSpec, Transform, VectorShape, BEVEL_DEPTH_MOST, LUMA, MARKER_LENGTH, MARKER_REACH,
+    MITER_LIMIT, SPREAD_MOST,
 };
 
 use chitrakar_color::ColorMode;

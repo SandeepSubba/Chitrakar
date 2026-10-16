@@ -718,12 +718,26 @@ fn effects_of(
             // and what goes over it.
             Kind::Merge(m) => {
                 let at_source = m.inputs().iter().position(|i| *i == Input::SourceGraphic)?;
-                for (k, input) in m.inputs().iter().enumerate() {
+                let inputs = m.inputs();
+                let mut k = 0;
+                while k < inputs.len() {
                     if k == at_source {
+                        k += 1;
                         continue;
                     }
-                    let fx = page.tinted(named(input)?, &named, k > at_source)?;
+                    // A bevel is two over the source — its highlight, then
+                    // its shadow — lit by the one light.
+                    if k > at_source {
+                        if let Some(up) = page.lit_half(named(&inputs[k])?, &named) {
+                            let down = page.lit_half(named(inputs.get(k + 1)?)?, &named)?;
+                            out.push(page.bevel(up, down)?);
+                            k += 2;
+                            continue;
+                        }
+                    }
+                    let fx = page.tinted(named(&inputs[k])?, &named, k > at_source)?;
                     out.push(fx);
+                    k += 1;
                 }
             }
             // A design tool's: the source blended in over the shadows,
@@ -766,6 +780,16 @@ fn effects_of(
     Some((out, fade))
 }
 
+/// Half a bevel, read off the filter: which half, its colour and
+/// opacity, the lighting it was cut from and what that lit.
+struct LitHalf<'a> {
+    highlight: bool,
+    color: AuthoredColor,
+    opacity: f32,
+    light: &'a usvg::filter::Primitive,
+    heights: Option<&'a usvg::filter::Primitive>,
+}
+
 /// A filter's own space carried to the page's.
 struct Page {
     at: usvg::Transform,
@@ -784,6 +808,11 @@ impl Page {
     /// for it (`svg::effect_filter`) — is nearest, so an effect that went
     /// out comes back as itself. The engine blurs by three boxes of one
     /// radius, `r`, and spreads by `√(r(r+1))`.
+    ///
+    /// In the page's units, as an offset is (`offset`): a layer brought
+    /// in stands on the page. This was in the filter's own units, so a
+    /// shadow from a group scaled by one and a quarter came back blurred
+    /// by a radius too few, while its offset came back right.
     fn blur(&self, std_dev: f32) -> f32 {
         let t = self.at;
         let scale = (t.sx.hypot(t.ky)).max(t.kx.hypot(t.sy)).max(1e-6);
@@ -804,7 +833,7 @@ impl Page {
         // The sigma the engine turns into that radius: its box width is
         // the W3C's, `⌊σ·3√(2π)/4 + ½⌋`, halved; `2r` halves to `r`.
         let k = 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0;
-        2.0 * r / k / scale
+        2.0 * r / k
     }
 
     /// One effect from the primitive that makes it, coloured: a flood
@@ -918,6 +947,107 @@ impl Page {
             }
             _ => None,
         }
+    }
+
+    /// Half a bevel as the exporter writes it (`svg::effect_filter`): a
+    /// flood cut to a colour matrix's alpha over `feDiffuseLighting`, kept
+    /// to the source. Which half it is is the matrix's to say — rising
+    /// with the light is the highlight.
+    fn lit_half<'a>(
+        &self,
+        p: &'a usvg::filter::Primitive,
+        named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
+    ) -> Option<LitHalf<'a>> {
+        use usvg::filter::{ColorMatrixKind, CompositeOperator, Input, Kind};
+        let Kind::Composite(c) = p.kind() else {
+            return None;
+        };
+        if c.operator() != CompositeOperator::In || *c.input2() != Input::SourceAlpha {
+            return None;
+        }
+        let (color, opacity, shape) = self.flooded(named(c.input1())?, named)?;
+        let Kind::ColorMatrix(m) = shape.kind() else {
+            return None;
+        };
+        let ColorMatrixKind::Matrix(v) = m.kind() else {
+            return None;
+        };
+        if v[..15].iter().any(|x| x.abs() > 1e-6) || v[16..19].iter().any(|x| x.abs() > 1e-6) {
+            return None;
+        }
+        let light = named(m.input())?;
+        let Kind::DiffuseLighting(d) = light.kind() else {
+            return None;
+        };
+        Some(LitHalf {
+            highlight: v[15] > 0.0,
+            color,
+            opacity,
+            light,
+            heights: named(d.input()),
+        })
+    }
+
+    /// A bevel from its two halves: the light they share, the blur its
+    /// heights were read from, and the colours.
+    fn bevel(&self, up: LitHalf<'_>, down: LitHalf<'_>) -> Option<chitrakar_doc::Effect> {
+        use usvg::filter::{Input, Kind, LightSource};
+        if !up.highlight || down.highlight || up.light.result() != down.light.result() {
+            return None;
+        }
+        let Kind::DiffuseLighting(d) = up.light.kind() else {
+            return None;
+        };
+        let LightSource::DistantLight(light) = d.light_source() else {
+            return None;
+        };
+        // The heights: the source's alpha blurred, as the exporter writes
+        // it — the blur read back as the engine's, which is half the
+        // bevel's size.
+        let blurred = up.heights?;
+        let Kind::GaussianBlur(g) = blurred.kind() else {
+            return None;
+        };
+        if *g.input() != Input::SourceAlpha {
+            return None;
+        }
+        let sigma = self.blur((g.std_dev_x().get() + g.std_dev_y().get()) / 2.0);
+        // The exporter writes the light and the heights as the page has
+        // them, and the page is where a layer brought in stands (as a
+        // shadow's offset is carried there), so they are kept as they
+        // were written: the blur at the page's scale.
+        if sigma.is_nan() || sigma <= 0.0 {
+            return None;
+        }
+        let depth = d.surface_scale() / sigma;
+        // Toward the light across the page, y down: SVG's azimuth is
+        // measured the same way round.
+        let az = light.azimuth.to_radians();
+        // The opacity the two were laid at, and each colour's own share
+        // of it.
+        let opacity = up.opacity.max(down.opacity);
+        if opacity <= 0.0 {
+            return None;
+        }
+        let share = |c: AuthoredColor, o: f32| match c {
+            AuthoredColor::Srgb { r, g, b, .. } => AuthoredColor::Srgb {
+                r,
+                g,
+                b,
+                a: (o / opacity).clamp(0.0, 1.0),
+            },
+            other => other,
+        };
+        Some(chitrakar_doc::Effect::Bevel {
+            size: 2.0 * sigma,
+            depth,
+            lx: az.cos(),
+            ly: az.sin(),
+            altitude: light.elevation,
+            highlight: share(up.color, up.opacity),
+            shadow: share(down.color, down.opacity),
+            opacity,
+        })
     }
 
     /// A flood cut to a shape — `feFlood` then `feComposite in` with the
@@ -4796,6 +4926,140 @@ mod tests {
         }
     }
 
+    /// A bevel goes out as light and comes back as a bevel, beside a
+    /// shadow under it: the same light from the same side at the same
+    /// height, a size and depth that draw the same, on a card on the page
+    /// and on one in a group turned and scaled.
+    #[test]
+    fn a_bevel_exported_comes_back_as_itself() {
+        use chitrakar_doc::Effect;
+        let ink = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let bevel = Effect::Bevel {
+            size: 6.0,
+            depth: 1.5,
+            lx: -0.5,
+            ly: -0.866,
+            altitude: 35.0,
+            highlight: ink(1.0, 1.0, 0.9, 1.0),
+            shadow: ink(0.1, 0.0, 0.2, 0.6),
+            opacity: 0.8,
+        };
+        let turned = chitrakar_doc::Transform {
+            a: 0.0,
+            b: 1.25,
+            c: -1.25,
+            d: 0.0,
+            e: 60.0,
+            f: 4.0,
+        };
+        let page = |space: Option<chitrakar_doc::Transform>, effects: Vec<Effect>| {
+            let mut doc = Document::new(80, 64, ColorMode::Rgb);
+            let root = doc.root();
+            let mut card = Node::vector(
+                "card",
+                VectorShape::Rect {
+                    width: 36.0,
+                    height: 28.0,
+                    radius: 4.0,
+                },
+            );
+            card.transform = chitrakar_doc::Transform::translation(14.0, 12.0);
+            if let NodeKind::Vector { fill, .. } = &mut card.kind {
+                *fill = Some(ink(0.25, 0.45, 0.85, 1.0));
+            }
+            card.effects = effects;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(card),
+            })
+            .unwrap();
+            if let Some(space) = space {
+                let id = doc.children_of(root).unwrap()[0];
+                let group = doc.peek_next_id();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::group("turned")),
+                })
+                .unwrap();
+                doc.apply(Command::MoveNode {
+                    id,
+                    parent: group,
+                    index: 0,
+                })
+                .unwrap();
+                doc.apply(Command::SetTransform {
+                    id: group,
+                    transform: space,
+                })
+                .unwrap();
+            }
+            doc
+        };
+        for space in [None, Some(turned)] {
+            let doc = page(
+                space,
+                vec![
+                    Effect::DropShadow {
+                        dx: 2.0,
+                        dy: 3.0,
+                        blur: 2.0,
+                        color: ink(0.0, 0.0, 0.0, 1.0),
+                        opacity: 0.5,
+                        spread: 0.0,
+                    },
+                    bevel.clone(),
+                ],
+            );
+            let svg = crate::export_svg(&doc).unwrap();
+            let back = import_svg(svg.as_bytes()).unwrap();
+            let fx = &back.shapes[0].effects;
+            assert!(
+                matches!(fx[..], [Effect::DropShadow { .. }, Effect::Bevel { .. }]),
+                "the shadow and the bevel came back: {fx:?}"
+            );
+            if space.is_none() {
+                let Effect::Bevel {
+                    size,
+                    depth,
+                    lx,
+                    ly,
+                    altitude,
+                    opacity,
+                    ..
+                } = fx[1]
+                else {
+                    unreachable!()
+                };
+                // The same way, at a length of one: the length of the
+                // direction says nothing.
+                assert!(
+                    (lx + 0.5).abs() < 0.01
+                        && (ly + 0.866).abs() < 0.01
+                        && (altitude - 35.0).abs() < 0.01
+                        && (opacity - 0.8).abs() < 0.01
+                        && (size - 6.0).abs() < 1.0
+                        && (size * depth - 9.0).abs() < 0.01,
+                    "{:?}",
+                    fx[1]
+                );
+            }
+            // Against the same card with nothing on it, whose turned and
+            // scaled corners come back a little apart on their own.
+            let bare = page(space, Vec::new());
+            let edges = worst_apart(
+                &bare,
+                &brought_in(&crate::export_svg(&bare).unwrap(), 80, 64),
+            );
+            let worst = worst_apart(&doc, &brought_in(&svg, 80, 64));
+            assert!(
+                worst < edges.max(0.02) + 0.01,
+                "the page came back as it was ({space:?}), worst {worst} (edges {edges}); {fx:?}"
+            );
+        }
+    }
+
     /// How far apart two pictures of a page are at worst, premultiplied:
     /// a pixel nearly transparent has no colour worth comparing.
     fn worst_apart(a: &Document, b: &Document) -> f32 {
@@ -4949,6 +5213,7 @@ mod tests {
                     Effect::DropShadow { .. } => "shadow",
                     Effect::Outline { .. } => "outline",
                     Effect::InnerShadow { .. } => "inner",
+                    Effect::Bevel { .. } => "bevel",
                 })
                 .collect::<Vec<_>>()
         };
@@ -4974,8 +5239,8 @@ mod tests {
 
     /// Every blur the engine has comes back at its own radius: what the
     /// exporter writes for it (`√(r(r+1))` at the engine's radius `r`)
-    /// is read back to a blur of that radius, in the page's units and in
-    /// a space scaled by two.
+    /// is read back to a blur of that radius on the page, from a filter
+    /// in the page's units and from one in a space scaled by two.
     #[test]
     fn a_blur_exported_comes_back_at_its_radius() {
         use chitrakar_render::blur::plane_radius;
@@ -4990,7 +5255,7 @@ mod tests {
                 let written = (r * (r + 1.0)).sqrt() / scale;
                 let back = page.blur(written);
                 assert_eq!(
-                    plane_radius(back * scale),
+                    plane_radius(back),
                     plane_radius(blur * scale),
                     "a blur of {blur} at scale {scale} wrote {written} and read {back}"
                 );

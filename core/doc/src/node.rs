@@ -1931,6 +1931,95 @@ pub enum Effect {
         #[serde(default)]
         spread: f32,
     },
+    /// The layer raised off the page and lit: its silhouette, blurred by
+    /// half of `size`, is taken as a height, and a light from the
+    /// direction `(lx, ly)` across the page and `altitude` degrees above
+    /// it falls on it. Where the slope faces the light more than the flat
+    /// top does it is lit in `highlight`; where it faces away, shaded in
+    /// `shadow`; the top itself is left as it is. Painted over the layer
+    /// and kept inside it.
+    ///
+    /// The lighting is SVG's `feDiffuseLighting` under a distant light,
+    /// the heights `depth · size / 2` at full coverage — so it goes to
+    /// SVG as itself. `size` is in the layer's parent space, and so is
+    /// the direction, which is a vector toward the light with y down —
+    /// `(-1, -1)` is the upper left — whose length says nothing. A vector
+    /// rather than an angle for the same reason a shadow's offset is
+    /// one: it goes through a transform exactly, so a page turned a
+    /// quarter and back is the page it was, where an angle worked out
+    /// again through an arctangent came back a hair off.
+    Bevel {
+        size: f32,
+        depth: f32,
+        lx: f32,
+        ly: f32,
+        altitude: f32,
+        highlight: AuthoredColor,
+        shadow: AuthoredColor,
+        opacity: f32,
+    },
+}
+
+/// What a bevel is lit by and how its heights are read, as every
+/// renderer takes them: the unit vector toward the light in device
+/// space with y down, and the surface scale of SVG's lighting — the
+/// height, in device pixels, of a pixel the layer fully covers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BevelLight {
+    pub toward: [f32; 3],
+    pub surface_scale: f32,
+    /// The blur that turns the silhouette into heights, in device pixels.
+    pub sigma: f32,
+}
+
+/// The steepest a bevel's depth is taken as.
+pub const BEVEL_DEPTH_MOST: f32 = 10.0;
+
+/// How a bevel's numbers become light and heights once its size has been
+/// carried into device pixels by `scale`. `None` for a bevel asked for
+/// nothing: no size, no depth, no direction, or something that is not a
+/// number.
+pub fn bevel_light(
+    size: f32,
+    depth: f32,
+    [lx, ly]: [f32; 2],
+    altitude: f32,
+    scale: f32,
+) -> Option<BevelLight> {
+    let size = size * scale;
+    if !(size.is_finite() && size > 0.0 && depth.is_finite() && depth > 0.0) {
+        return None;
+    }
+    let depth = depth.min(BEVEL_DEPTH_MOST);
+    let across = lx.hypot(ly);
+    if !(across.is_finite() && across > 0.0) {
+        return None;
+    }
+    // Off the page altogether the flat top would be as lit as a slope
+    // can be, and straight overhead it would be lit as much as any.
+    let altitude = if altitude.is_finite() {
+        altitude.clamp(1.0, 89.0)
+    } else {
+        30.0
+    };
+    let e = altitude.to_radians();
+    Some(BevelLight {
+        toward: [lx / across * e.cos(), ly / across * e.cos(), e.sin()],
+        surface_scale: depth * size * 0.5,
+        sigma: size * 0.5,
+    })
+}
+
+/// How much of a bevel's highlight and of its shadow a slope takes, from
+/// how much light falls on it (`lit`, the cosine between the slope's
+/// normal and the light) against how much falls on the flat top
+/// (`flat`). The two never overlap: a slope is lit or shaded, never both.
+pub fn bevel_shares(lit: f32, flat: f32) -> (f32, f32) {
+    let flat = flat.clamp(1e-4, 1.0 - 1e-4);
+    (
+        ((lit - flat) / (1.0 - flat)).clamp(0.0, 1.0),
+        ((flat - lit) / flat).clamp(0.0, 1.0),
+    )
 }
 
 /// The most a shadow's spread is taken as. A spread of one would gain
@@ -1981,6 +2070,9 @@ impl Effect {
             Effect::InnerShadow { dx, dy, blur, .. } => {
                 blurred(*blur) + dx.abs().max(dy.abs()) + 2.0
             }
+            // Inside as well, read from the same ring; one more for the
+            // slope's taps either side.
+            Effect::Bevel { size, .. } => blurred(size * 0.5) + 3.0,
         }
     }
 
@@ -2004,6 +2096,13 @@ impl Effect {
                 *blur *= k;
             }
             Effect::Outline { width, .. } => *width *= k,
+            // The light comes from a direction in the space the bevel is
+            // written in, so it turns — and, through a mirror, flips —
+            // with the transform, as an offset does.
+            Effect::Bevel { size, lx, ly, .. } => {
+                *size *= k;
+                (*lx, *ly) = (m.a * *lx + m.c * *ly, m.b * *lx + m.d * *ly);
+            }
         }
         out
     }
@@ -2012,7 +2111,7 @@ impl Effect {
     /// An inner shadow is inside the silhouette, so it has to land on top
     /// of the pixels it is shading.
     pub fn over(&self) -> bool {
-        matches!(self, Effect::InnerShadow { .. })
+        matches!(self, Effect::InnerShadow { .. } | Effect::Bevel { .. })
     }
 
     /// A short name for history labels and the effect list.
@@ -2021,6 +2120,7 @@ impl Effect {
             Effect::DropShadow { .. } => "Drop shadow",
             Effect::Outline { .. } => "Outline",
             Effect::InnerShadow { .. } => "Inner shadow",
+            Effect::Bevel { .. } => "Bevel",
         }
     }
 }
@@ -2095,6 +2195,12 @@ impl Node {
                 Effect::DropShadow { color, .. }
                 | Effect::Outline { color, .. }
                 | Effect::InnerShadow { color, .. } => f(color),
+                Effect::Bevel {
+                    highlight, shadow, ..
+                } => {
+                    f(highlight);
+                    f(shadow);
+                }
             }
         }
         if let Some(mask) = &mut self.mask {
