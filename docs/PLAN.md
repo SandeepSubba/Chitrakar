@@ -2018,6 +2018,50 @@ without reading anything else.*
     undo. A colour that does not blend, or the order taken as asked,
     each fail it. Smoke 9o23: red to blue across a page, purple in the
     middle, redder near the red, gone in one undo.
+- **A size per style run ✅** (`StyleRun::size`, `#[serde(default)]`).
+  A block can hold a headline and the smaller line under it, or one word
+  set large. The runs entry above said "a run's size is the block's:
+  mixing sizes in one block would change where the lines sit, and is a
+  separate thing". This is that thing.
+  - **Shaping:** each piece was already shaped in its own run's
+    styling, so advances, tracking and a thickened bold follow the size
+    with no change.
+  - **Lines:** `text::line_metrics` sizes each line by the tallest of
+    what is set on it (its ascent and its step, per piece, in each
+    piece's own face). Every letter on a line shares that line's
+    baseline, and the line under a big run moves down to make room. An
+    empty line is the size of what is set at its newline.
+    `Layout::ascents` and `SetLine::ascent` carry the baseline.
+  - **Drawing:** the rasterizer and text along a guide draw each glyph
+    at its run's size (`Cut::px`). Underline and strike are as heavy,
+    and as far from the baseline, as the size they rule.
+  - **Export:** `placed` gives each run its own em, which is the size
+    the PDF's `Tf` writes. SVG says `font-size` (`text::em_of`) on a
+    run's piece and puts each line's baseline at its own ascent.
+  - **In the panel:** the Size slider styles the selection when part of
+    the text is picked out, as Bold and colour do, and reads the
+    selection's size. `runs.ts` treats `size` as one more key.
+  - **Found by the audits on the way:** a block's letter-spacing goes to
+    SVG as a length at the block's size, so a run at its own size now
+    says its own (seed 55). Text along a guide went into its `textPath`
+    as one plain string, so every run on a curve came out in the block's
+    own colour; that went unseen until a run was big enough to have flat
+    pixels (opaque page 111). It is cut into tspans by run, as a line is.
+  - **Fixture:** half the random pages' styled runs are set larger or
+    smaller (their own stream).
+  - **Tests:** `a_run_can_set_part_of_a_block_larger` (one baseline, the
+    big size's; the line as tall as a block all that size; the run's em
+    doubled and the rest's as it was; the next word pushed along; the
+    big letters inked higher; the next line a big line down; nonsense
+    sizes are the block's). Block-wide line metrics, block-sized glyphs
+    in the rasterizer, and a block-wide em in `placed` each fail it.
+    `a_run_at_its_own_size_leaves_as_the_engine_sets_it`: resvg's top,
+    foot and right edge match the engine's; leaving `font-size` off, or
+    the block's ascent for the line's, each fail it.
+    `a_run_from_before_run_sizes_has_none`. Smoke 8v2: one word at twice
+    the size makes the block taller and wider by that word, the slider
+    reads the block's size over the other word, and Edit › Undo puts it
+    back.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -2601,6 +2601,30 @@ assert(
       Math.abs((await outline())[0] - plain[0]) < 2,
       `and takes it all off again (${await outline()} vs ${plain})`,
     );
+    // A size over a selection: the first word set larger makes the line
+    // as tall as it, and the block wider by the bigger letters, while the
+    // slider over the other word still reads the block's size.
+    const blockSize = Number(await page.locator('input[aria-label="Size"]').inputValue());
+    await select(0, 4);
+    await setSlider("Size", blockSize * 2);
+    await page.waitForTimeout(300);
+    const sized = await outline();
+    assert(
+      sized[1] > plain[1] * 1.6 && sized[0] > plain[0] * 1.25 && sized[0] < plain[0] * 2,
+      `one word at twice the size: taller, and wider by that word (${plain} -> ${sized})`,
+    );
+    await select(5, 9);
+    await page.waitForTimeout(100);
+    assert(
+      Number(await page.locator('input[aria-label="Size"]').inputValue()) === blockSize,
+      "and over the other word the slider reads the block's size",
+    );
+    await menuClick("Edit", "Undo");
+    await page.waitForTimeout(300);
+    assert(
+      Math.abs((await outline())[1] - plain[1]) < 2,
+      `one undo puts the word back to the block's size (${await outline()} vs ${plain})`,
+    );
     // A colour over a selection paints only there. Where the block sits
     // on the canvas is not this test's business, so it is checked by
     // moving the selection: colour the first word and then the second,

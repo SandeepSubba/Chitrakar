@@ -8728,6 +8728,7 @@ mod tests {
                     underline: Some(true),
                     strike: None,
                     font: None,
+                    size: None,
                 }];
             }),
             Transform::translation(8.0, 10.0),

@@ -508,6 +508,40 @@ fn word_gap(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
     (slack / spaces as f32).max(0.0)
 }
 
+/// A line's ascent and its step to the next, in raster pixels: the
+/// tallest of what is set on it. A block in one size is every line the
+/// block's own; a run set larger makes the line it is on taller, and its
+/// letters share the baseline with the rest of the line. A line with
+/// nothing on it is the size of whatever is set where it starts.
+fn line_metrics(spec: &TextSpec, line: &str, at: usize, scale: f32) -> (f32, f32) {
+    let measure = |styling: &TextSpec| {
+        let font = fonts_for(styling)
+            .font
+            .as_scaled(styling.size.max(0.1) * scale);
+        (font.ascent(), line_step(&font, spec))
+    };
+    if spec.runs.is_empty() {
+        return measure(spec);
+    }
+    // An empty line is asked about the byte after it — its newline —
+    // which is styled by whatever was being typed there.
+    let len = if line.is_empty() {
+        spec.text.len().saturating_sub(at).min(1)
+    } else {
+        line.len()
+    };
+    let pieces = pieces_in(spec, at, len);
+    let mut best: Option<(f32, f32)> = None;
+    for (_, _, run) in pieces {
+        let m = measure(&spec.styling_under(run.map(|i| &spec.runs[i])));
+        best = Some(match best {
+            Some(b) => (b.0.max(m.0), b.1.max(m.1)),
+            None => m,
+        });
+    }
+    best.unwrap_or_else(|| measure(spec))
+}
+
 /// Whether a line is the last of its paragraph: the writer ended it, with
 /// a newline or with the end of the text, rather than the width.
 fn ends_paragraph(spec: &TextSpec, line: &str, at: usize) -> bool {
@@ -564,23 +598,27 @@ fn decoration_bands(spec: &TextSpec, l: &Layout, scale: f32) -> Vec<([f32; 4], O
     if !anywhere {
         return Vec::new();
     }
-    let fonts = fonts_for(spec);
-    let px = spec.size.max(0.1) * scale;
-    let font = fonts.font.as_scaled(px);
-    let em = px * fonts.font.units_per_em().unwrap_or(1000.0) / fonts.font.height_unscaled();
-    let thickness = (em * 0.05).max(scale);
+    // A band is as thick, and sits as far from the baseline, as the
+    // size of what it rules: a run set larger has a heavier line.
+    let em_of = |styling: &TextSpec| {
+        let fonts = fonts_for(styling);
+        styling.size.max(0.1) * scale * fonts.font.units_per_em().unwrap_or(1000.0)
+            / fonts.font.height_unscaled()
+    };
     let mut bands = Vec::new();
     for line_no in 0..l.lines.len() {
         if l.widths[line_no] <= 0.0 {
             continue;
         }
-        let baseline = l.tops[line_no] + font.ascent();
+        let baseline = l.tops[line_no] + l.ascents[line_no];
         let (glyphs, left, width) = set_line(spec, l, line_no, scale);
         // A line with no runs on it is one stretch, the whole of it: the
         // width the layout already measured, rather than one summed back
         // up out of advances.
         for (x0, x1, run) in stretches(spec, &glyphs, left, width) {
             let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
+            let em = em_of(&styling);
+            let thickness = (em * 0.05).max(scale);
             if styling.underline {
                 let y0 = baseline + em * 0.1;
                 bands.push(([x0, y0, x1, y0 + thickness], run));
@@ -805,13 +843,13 @@ fn along_outlines(
     scale: f32,
     phase: [f32; 2],
 ) -> (Vec<(ab_glyph::OutlinedGlyph, u8)>, [f32; 4]) {
-    let px = spec.size.max(0.1) * scale;
     let cuts = Palette::of(spec, scale);
     let (glyphs, _) = along_glyphs(spec, scale);
     let mut out = Vec::with_capacity(glyphs.len());
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     for g in glyphs {
         let cut = cuts.cut(g.run);
+        let px = cut.px;
         let font = cut.fonts.font.as_scaled(px);
         // A glyph on a guide is turned to follow it, so the thickening
         // runs along its own baseline rather than along the page's.
@@ -1011,8 +1049,6 @@ fn cluster_texts(line: &str, clusters: &[usize]) -> Vec<String> {
 
 pub fn placed(spec: &TextSpec) -> PlacedText {
     let l = layout(spec, 1.0);
-    let px = spec.size.max(0.1);
-    let font = fonts_for(spec).font.as_scaled(px);
     // Glyphs are gathered per run and handed over in the order the runs
     // are drawn, so an exporter switches face and colour once a stretch
     // rather than once a letter.
@@ -1038,7 +1074,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
         }
     } else {
         for (line_no, (line, _)) in l.lines.iter().enumerate() {
-            let baseline = l.tops[line_no] + font.ascent();
+            let baseline = l.tops[line_no] + l.ascents[line_no];
             let (shaped, start, _) = set_line(spec, &l, line_no, 1.0);
             let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
             for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
@@ -1075,7 +1111,7 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
                 glyph_count: fonts.font.glyph_count(),
                 name: face_name(&styling),
             },
-            em: px * upem / fonts.font.height_unscaled(),
+            em: styling.size.max(0.1) * upem / fonts.font.height_unscaled(),
             fill: styling.fill.clone(),
             lean: if synthesized_lean(&styling) {
                 SLANT
@@ -1180,6 +1216,9 @@ pub struct SetLine {
     /// Where the line's top sits below the block's: its line steps and
     /// the paragraph spacing before it.
     pub top: f32,
+    /// How far below its top the line's baseline sits: the tallest
+    /// ascent among the sizes set on it.
+    pub ascent: f32,
 }
 
 pub struct SetBlock {
@@ -1191,6 +1230,14 @@ pub struct SetBlock {
     pub inset: f32,
     pub inner: f32,
     pub em: f32,
+}
+
+/// The em a block's face is really scaled to at its size: `size` is the
+/// ascent-to-descent height, and the em is what a font size means
+/// everywhere else — an SVG's `font-size`, a PDF's `Tf`.
+pub fn em_of(spec: &TextSpec) -> f32 {
+    let fonts = fonts_for(spec);
+    spec.size.max(0.1) * fonts.font.units_per_em().unwrap_or(1000.0) / fonts.font.height_unscaled()
 }
 
 pub fn set(spec: &TextSpec) -> SetBlock {
@@ -1208,6 +1255,7 @@ pub fn set(spec: &TextSpec) -> SetBlock {
                 width: l.widths[k],
                 gap: word_gap(spec, &l, k),
                 top: l.tops[k],
+                ascent: l.ascents[k],
             })
             .collect(),
         width: l.width,
@@ -1245,6 +1293,9 @@ struct Layout {
     /// the one before, and a paragraph's spacing more after the last line
     /// of a paragraph.
     tops: Vec<f32>,
+    /// How far below its top each line's baseline sits: the tallest ascent
+    /// among the sizes set on it.
+    ascents: Vec<f32>,
     width: f32,
     height: f32,
     /// Room a synthesized lean takes inside `width`, left and right of
@@ -1273,17 +1324,23 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
     let room = lean_room(spec, &font);
     let gap = spec.paragraph_gap() * spec.size.max(0.1) * scale;
     let mut tops = Vec::with_capacity(lines.len());
+    let mut ascents = Vec::with_capacity(lines.len());
     let mut y = 0f32;
+    let mut last = step;
     for (line, at) in &lines {
+        let (ascent, line_step) = line_metrics(spec, line, *at, scale);
         tops.push(y);
-        y += step;
+        ascents.push(ascent);
+        y += line_step;
+        last = line_step;
         if gap > 0.0 && ends_paragraph(spec, line, *at) && at + line.len() < spec.text.len() {
             y += gap;
         }
     }
     Layout {
-        height: tops.last().map_or(step, |t| t + step).max(1.0),
+        height: tops.last().map_or(step, |t| t + last).max(1.0),
         tops,
+        ascents,
         lines,
         widths,
         width: (width + room.0 + room.1).max(1.0),
@@ -1361,6 +1418,8 @@ fn line_width(line: &str, at: usize, spec: &TextSpec, scale: f32) -> f32 {
 /// the thickening it has to add itself, and which colour its ink is.
 struct Cut {
     fonts: &'static Fonts,
+    /// The size its glyphs are drawn at, in raster pixels.
+    px: f32,
     slant: f32,
     passes: Vec<f32>,
     tint: u8,
@@ -1391,6 +1450,7 @@ impl Palette {
                 });
             cuts.push(Cut {
                 fonts: fonts_for(&styling),
+                px: styling.size.max(0.1) * scale,
                 slant: if synthesized_lean(&styling) {
                     SLANT
                 } else {
@@ -1487,9 +1547,8 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     }
     let (width, height) = (w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32);
     let mut coverage = vec![0f32; (width * height) as usize];
-    // Every metric below comes from the scaled font, so advances, kerning
-    // and line height are all in raster pixels already.
-    let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
+    // Every metric below is in raster pixels already: the layout's for
+    // where lines sit, each run's cut for the size its glyphs are drawn.
     let cuts = Palette::of(spec, scale);
     let mut tint = vec![0u8; if cuts.many() { coverage.len() } else { 0 }];
     // Lay ink down and remember whose it is: where two pieces overlap —
@@ -1508,17 +1567,17 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     };
 
     for line_no in 0..l.lines.len() {
-        let baseline = l.tops[line_no] + font.ascent() + phase[1];
+        let baseline = l.tops[line_no] + l.ascents[line_no] + phase[1];
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
         let (glyphs, start, _) = set_line(spec, &l, line_no, scale);
         let start = start + phase[0];
         for g in glyphs {
             let cut = cuts.cut(g.run);
-            let face = cut.fonts.font.as_scaled(spec.size.max(0.1) * scale);
+            let face = cut.fonts.font.as_scaled(cut.px);
             for shift in &cut.passes {
                 let glyph = g.id.with_scale_and_position(
-                    spec.size.max(0.1) * scale,
+                    cut.px,
                     ab_glyph::point(start + g.x + shift, baseline + g.y),
                 );
                 let outlined = if cut.slant > 0.0 {
@@ -2310,6 +2369,98 @@ mod tests {
         run.fill = Some(RED);
         out.runs = vec![run];
         out
+    }
+
+    /// A run set at its own size: its letters drawn at that size, the
+    /// words after it pushed along by the wider advances, the line as
+    /// tall as its largest run and every letter on it on one baseline —
+    /// and the line under it moved down to make the room.
+    #[test]
+    fn a_run_can_set_part_of_a_block_larger() {
+        let sized = |text: &str, end: usize, size: Option<f32>| {
+            let mut s = spec(text, 20.0);
+            let mut run = chitrakar_doc::StyleRun::over(0, end);
+            run.size = size;
+            s.runs = vec![run];
+            s
+        };
+        let plain = sized("Big word", 3, None);
+        let big = sized("Big word", 3, Some(40.0));
+        let all_big = spec("Big word", 40.0);
+        let (p, b) = (placed(&plain), placed(&big));
+        // One baseline for the whole line, the big run's.
+        let ys: Vec<f32> = b
+            .runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.y))
+            .collect();
+        assert!(
+            ys.iter().all(|y| (y - ys[0]).abs() < 1e-3),
+            "every letter on one baseline: {ys:?}"
+        );
+        assert!(
+            (ys[0] - set(&all_big).lines[0].ascent).abs() < 1e-3,
+            "and it is the big size's baseline"
+        );
+        assert!(
+            (set(&big).height - set(&all_big).height).abs() < 1e-3,
+            "the line is as tall as its largest run"
+        );
+        // The run's em is twice the block's, and the rest is the block's.
+        let ems: Vec<f32> = b.runs.iter().map(|r| r.em).collect();
+        let plain_em = p.runs[0].em;
+        assert!(
+            ems.iter().any(|e| (e - 2.0 * plain_em).abs() < 1e-3)
+                && ems.iter().any(|e| (e - plain_em).abs() < 1e-3),
+            "a run at twice the size, the rest as it was: {ems:?} against {plain_em}"
+        );
+        // The words after it move along by the room the big letters take.
+        let last_x = |t: &PlacedText| {
+            t.runs
+                .iter()
+                .flat_map(|r| r.glyphs.iter())
+                .map(|g| g.x)
+                .fold(f32::MIN, f32::max)
+        };
+        assert!(
+            last_x(&b) > last_x(&p) + 15.0,
+            "{} -> {}",
+            last_x(&p),
+            last_x(&b)
+        );
+        // Drawn bigger: the big run's ink stands taller than the rest.
+        let r = rasterize(&big);
+        let ink_top = |x0: u32, x1: u32| {
+            (0..r.height)
+                .find(|&y| (x0..x1).any(|x| r.sample(x, y) > 0.3))
+                .unwrap_or(r.height)
+        };
+        let split = (b
+            .runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter())
+            .nth(3)
+            .unwrap()
+            .x) as u32;
+        assert!(
+            ink_top(0, split) + 8 < ink_top(split + 4, r.width),
+            "the big letters reach higher: {} against {}",
+            ink_top(0, split),
+            ink_top(split + 4, r.width)
+        );
+        // The line under a big run moves down to make room.
+        let two = sized("Big\nword", 3, Some(40.0));
+        let lines = set(&two).lines;
+        assert!(
+            (lines[1].top - set(&all_big).lines[0].top - set(&spec("x", 40.0)).height).abs() < 1e-3,
+            "the second line starts a big line down: {}",
+            lines[1].top
+        );
+        // A size that is no size is the block's.
+        for nonsense in [Some(0.0), Some(-4.0), Some(f32::NAN)] {
+            let odd = sized("Big word", 3, nonsense);
+            assert_eq!(set(&odd).height, set(&plain).height, "{nonsense:?}");
+        }
     }
 
     /// A run that only changes colour changes nothing about where the

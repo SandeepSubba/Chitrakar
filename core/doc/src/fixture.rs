@@ -627,6 +627,7 @@ pub fn everything() -> Fixture {
                 underline: Some(true),
                 strike: None,
                 font: None,
+                size: None,
             }];
             spec
         })),
@@ -2248,6 +2249,12 @@ impl Rng {
                 // every one of the strings, so its bytes are its letters.
                 if self.chance(3) {
                     let end = text.find(' ').unwrap_or(text.len()).min(2);
+                    // Half of them at a size of their own, larger or
+                    // smaller, out of a stream of their own.
+                    let mut side = Rng((self.0 ^ 0x9b05_688c_2b3e_6c1f) | 1);
+                    let size = side
+                        .chance(2)
+                        .then(|| spec.size * if side.chance(2) { 1.6 } else { 0.6 });
                     spec.runs = vec![StyleRun {
                         start: 0,
                         end,
@@ -2257,6 +2264,7 @@ impl Rng {
                         underline: Some(self.chance(2)),
                         strike: None,
                         font: None,
+                        size,
                     }];
                 }
                 if self.chance(6) {

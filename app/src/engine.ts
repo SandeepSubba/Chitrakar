@@ -323,6 +323,8 @@ export interface StyleRun {
   underline?: boolean | null;
   strike?: boolean | null;
   font?: string | null;
+  /** A size of its own; the line it is on is as tall as its tallest. */
+  size?: number | null;
 }
 
 export interface TextSpec {

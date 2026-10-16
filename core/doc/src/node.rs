@@ -1239,6 +1239,11 @@ pub struct StyleRun {
     pub strike: Option<bool>,
     #[serde(default)]
     pub font: Option<String>,
+    /// A size of its own, as the block's is: document pixels from ascent
+    /// to descent. A line holding a larger run is that much taller, and
+    /// every run on a line sits on the same baseline.
+    #[serde(default)]
+    pub size: Option<f32>,
 }
 
 impl StyleRun {
@@ -1253,6 +1258,7 @@ impl StyleRun {
             underline: None,
             strike: None,
             font: None,
+            size: None,
         }
     }
 
@@ -1265,6 +1271,7 @@ impl StyleRun {
             || self.underline.is_some()
             || self.strike.is_some()
             || self.font.is_some()
+            || self.size.is_some()
     }
 }
 
@@ -1390,6 +1397,10 @@ impl TextSpec {
         }
         if let Some(font) = &run.font {
             spec.font = font.clone();
+        }
+        // A size that is no size is the block's.
+        if let Some(size) = run.size.filter(|s| s.is_finite() && *s > 0.0) {
+            spec.size = size;
         }
         spec
     }
@@ -2250,6 +2261,29 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// A run written before runs had a size has none.
+    #[test]
+    fn a_run_from_before_run_sizes_has_none() {
+        let old = r#"{"start":0,"end":2,"bold":true}"#;
+        let run: super::StyleRun = serde_json::from_str(old).unwrap();
+        assert_eq!(run.size, None);
+        let mut sized = run.clone();
+        sized.size = Some(30.0);
+        assert!(sized.says_anything());
+        let block = super::TextSpec::new(
+            "ab",
+            12.0,
+            super::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        assert_eq!(block.styling_under(Some(&sized)).size, 30.0);
+        assert_eq!(block.styling_under(Some(&run)).size, 12.0);
+    }
+
     /// A block written before paragraph spacing opens without it.
     #[test]
     fn a_block_from_before_paragraph_spacing_opens_without_it() {

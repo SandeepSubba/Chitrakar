@@ -941,18 +941,40 @@ fn write_node(
                 // guide goes into the defs as the renderer flattens it,
                 // with the offset as startOffset.
                 if guide.is_some() {
+                    // Cut where the runs start and stop, as a line is:
+                    // a run along a guide is coloured, sized and set in
+                    // its own cut as it is anywhere else. The text was
+                    // once written whole, and every run on a curve came
+                    // out in the block's own colour.
+                    let along = spec.text.replace('\n', " ");
+                    let mut pieces = String::new();
+                    if spec.runs.is_empty() {
+                        pieces.push_str(&escape_xml(&along));
+                    } else {
+                        for (s, e, run) in spec.pieces() {
+                            let (s, e) = (s.min(along.len()), e.min(along.len()));
+                            if s >= e {
+                                continue;
+                            }
+                            let _ = write!(
+                                pieces,
+                                "<tspan{}>{}</tspan>",
+                                run_attrs(doc, spec, run),
+                                escape_xml(&along[s..e])
+                            );
+                        }
+                    }
                     let _ = write!(
                         out,
-                        r##"<textPath href="#{guide_name}" startOffset="{:.2}">{}</textPath>"##,
+                        r##"<textPath href="#{guide_name}" startOffset="{:.2}">{pieces}</textPath>"##,
                         spec.along_offset,
-                        escape_xml(&spec.text.replace('\n', " "))
                     );
                     let _ = writeln!(out, "</text>");
                     write_bands(doc, &bands, &pad, out);
                     let _ = writeln!(out, "{pad}</g>");
                 } else {
                     for set in &block.lines {
-                        let y = block.ascent + set.top;
+                        let y = set.top + set.ascent;
                         let x = block.inset + (block.inner - set.width) * slack;
                         // A line no style run touches is one tspan, as it
                         // always was. One a run crosses is cut where the
@@ -1824,6 +1846,20 @@ fn run_attrs(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>)
     }
     if let Some(font) = &run.font {
         let _ = write!(out, r#" font-family="{}, sans-serif""#, escape_xml(font));
+    }
+    // A size of its own, said as the em its face is scaled to, which is
+    // what `font-size` means — and what the block's own is written as.
+    if run.size.is_some() {
+        let styling = spec.styling_under(Some(run));
+        let em = chitrakar_render::text::em_of(&styling);
+        let _ = write!(out, r#" font-size="{em:.2}""#);
+        // Tracking is quoted in ems of the size, and the block's is
+        // written as a length at the block's size: a run at its own size
+        // tracks at its own, which a reader can only be told again.
+        let track = styling.letter_spacing * styling.size;
+        if track.abs() > 1e-4 || spec.letter_spacing.abs() > 1e-4 {
+            let _ = write!(out, r#" letter-spacing="{track:.3}""#);
+        }
     }
     // Underline and strike-through are not said here: they are drawn as
     // the engine's own bands beside the text (see the text arm).
@@ -4190,6 +4226,56 @@ mod tests {
         assert!(
             e > below + 20 && e.abs_diff(r) <= 1,
             "the second paragraph starts at row {e} on the page and {r} in a reader"
+        );
+    }
+
+    /// A run set at its own size leaves with that size on its piece, and
+    /// a reader draws the line the engine does: the big letters as tall,
+    /// the small ones on the same baseline, the line ending in the same
+    /// column.
+    #[test]
+    fn a_run_at_its_own_size_leaves_as_the_engine_sets_it() {
+        let mut doc = Document::new(200, 80, ColorMode::Rgb);
+        let root = doc.root();
+        let mut spec = chitrakar_doc::TextSpec::new("Big word", 18.0, RED);
+        let mut run = chitrakar_doc::StyleRun::over(0, 3);
+        run.size = Some(40.0);
+        spec.runs = vec![run];
+        let mut node = Node::text("t", spec.clone());
+        node.transform = chitrakar_doc::Transform::translation(8.0, 6.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"font-size=""#) && svg.matches("font-size=").count() >= 2,
+            "{svg}"
+        );
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let (w, h) = (doc.meta.width as usize, doc.meta.height as usize);
+        let inked = |a: &dyn Fn(usize) -> f32, x: usize, y: usize| a(y * w + x) > 0.5;
+        let edges = |a: &dyn Fn(usize) -> f32| {
+            let top = (0..h)
+                .find(|&y| (0..w).any(|x| inked(a, x, y)))
+                .unwrap_or(0);
+            let bottom = (0..h)
+                .rev()
+                .find(|&y| (0..w).any(|x| inked(a, x, y)))
+                .unwrap_or(0);
+            let right = (0..w)
+                .rev()
+                .find(|&x| (0..h).any(|y| inked(a, x, y)))
+                .unwrap_or(0);
+            (top, bottom, right)
+        };
+        let (e, r) = (edges(&|i| ours.pixels[i].a), edges(&|i| theirs[i]));
+        assert!(
+            e.0.abs_diff(r.0) <= 1 && e.1.abs_diff(r.1) <= 1 && e.2.abs_diff(r.2) <= 1,
+            "top, foot and right edge: the engine {e:?}, a reader {r:?}"
         );
     }
 

@@ -13338,6 +13338,7 @@ function KindProps({
             underline: !!t.underline,
             strike: !!t.strike,
             font: t.font ?? "",
+            size: t.size,
           }),
         },
       };
@@ -13373,9 +13374,19 @@ function KindProps({
             aria-label="Text content"
           />
         </label>
-        {slider("Size", t.size, 8, 200, 1, (v) => ({
-          Text: { ...t, size: v },
-        }))}
+        {/* The block's size, or the selection's when part of the text is
+            picked out: a run of its own size, which makes the line it is
+            on as tall as it needs. A selection of mixed sizes shows the
+            block's until it is given one. */}
+        {(() => {
+          const range = selection();
+          const shown = range
+            ? (rangeSays(t.text, t.runs ?? [], range[0], range[1], "size", t.size) ?? t.size)
+            : t.size;
+          return slider("Size", shown, 8, 200, 1, (v) =>
+            selection() ? styled({ size: v }) : { Text: { ...t, size: v } },
+          );
+        })()}
         <div className="align-bar" role="group" aria-label="Text alignment">
           {(
             [
