@@ -1,0 +1,19 @@
+[package]
+name = "chitrakar-color"
+description = "Color management: pixel formats, color modes, working-space math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+# Pure-Rust ICC engine. Chosen over lcms2 in the Phase 0 spike: compiles to
+# wasm32 (lcms2's C core does not), ~4x faster on bulk transforms, and
+# matches lcms2 within 1/255 (see docs/spikes/color-management.md).
+moxcms = "0.9"
+# For `zeroed_vec` alone: a page-sized surface of these is asked of the
+# allocator as zeroed memory rather than written one pixel at a time, and
+# the safe way to say "this struct is all zeros when its bits are" is a
+# derive rather than a hand-written unsafe block.
+bytemuck = { version = "1", features = ["derive", "extern_crate_alloc"] }
