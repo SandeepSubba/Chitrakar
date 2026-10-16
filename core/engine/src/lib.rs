@@ -3643,6 +3643,152 @@ impl Session {
         Ok(copies)
     }
 
+    /// Step and repeat: `copies` copies of the picked layers, each one
+    /// step on from the last — moved by `dx`, `dy`, turned `degrees`
+    /// about a pivot `pivot` away from the middle of what is picked, and
+    /// scaled by `scale` about that middle. A row of fence posts is an
+    /// offset; a clock face is a turn about a pivot below the mark; a
+    /// shell is a turn and a scale together. Each set of copies is laid
+    /// above the last, so the repeat stacks the way it runs.
+    ///
+    /// The layers have to share a group: the step is said in that
+    /// group's space. A copy's mask goes with it, since a mask is laid in
+    /// the same space; its effects do not turn, because the light a
+    /// shadow falls from belongs to the page rather than the layer. One
+    /// step in the history; the answer is every copy, in order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn repeat_nodes(
+        &mut self,
+        ids: &[NodeId],
+        copies: u32,
+        dx: f32,
+        dy: f32,
+        degrees: f32,
+        scale: f32,
+        pivot: [f32; 2],
+    ) -> Result<Vec<NodeId>, EngineError> {
+        if ids.is_empty() {
+            return Err(EngineError::BadCommand("nothing to repeat".into()));
+        }
+        let all = [dx, dy, degrees, scale, pivot[0], pivot[1]];
+        if all.iter().any(|v| !v.is_finite()) {
+            return Err(EngineError::BadCommand("a step has to be numbers".into()));
+        }
+        let copies = copies.clamp(1, 500);
+        let scale = scale.clamp(0.01, 100.0);
+        let parent = self
+            .doc
+            .parent_of(ids[0])
+            .ok_or_else(|| EngineError::BadCommand("cannot repeat the root".into()))?;
+        let siblings = self.doc.children_of(parent)?.to_vec();
+        let ordered: Vec<NodeId> = siblings
+            .iter()
+            .copied()
+            .filter(|s| ids.contains(s))
+            .collect();
+        if ordered.len() != ids.len() {
+            return Err(EngineError::BadCommand(
+                "repeated layers have to share a group".into(),
+            ));
+        }
+        // The middle of what is picked, in the group's space.
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for id in &ordered {
+            if let Ok(chitrakar_render::Bounds::Rect(a, b, c, d)) =
+                chitrakar_render::bounds_in_parent_space(&self.doc, *id)
+            {
+                (x0, y0, x1, y1) = (x0.min(a), y0.min(b), x1.max(c), y1.max(d));
+            }
+        }
+        let middle = if x0.is_finite() {
+            [(x0 + x1) / 2.0, (y0 + y1) / 2.0]
+        } else {
+            [0.0, 0.0]
+        };
+        let about = |p: [f32; 2], m: Transform| {
+            Transform::translation(p[0], p[1])
+                .compose(m)
+                .compose(Transform::translation(-p[0], -p[1]))
+        };
+        let turn_point = [middle[0] + pivot[0], middle[1] + pivot[1]];
+        let step = |k: u32| {
+            let k = k as f32;
+            let (sin, cos) = (degrees * k).to_radians().sin_cos();
+            let grow = scale.powf(k);
+            Transform::translation(dx * k, dy * k)
+                .compose(about(
+                    turn_point,
+                    Transform {
+                        a: cos,
+                        b: sin,
+                        c: -sin,
+                        d: cos,
+                        e: 0.0,
+                        f: 0.0,
+                    },
+                ))
+                .compose(about(
+                    middle,
+                    Transform {
+                        a: grow,
+                        b: 0.0,
+                        c: 0.0,
+                        d: grow,
+                        e: 0.0,
+                        f: 0.0,
+                    },
+                ))
+        };
+        let mut index = siblings
+            .iter()
+            .position(|s| Some(s) == ordered.last())
+            .map_or(siblings.len(), |i| i + 1);
+        let mut next = self.doc.peek_next_id().0;
+        let mut cmds = Vec::new();
+        let mut made = Vec::with_capacity(copies as usize * ordered.len());
+        for k in 1..=copies {
+            // Each set of copies is a copy of the originals, so a copy
+            // of another picked layer points at the one in its own set.
+            let mut becomes = std::collections::HashMap::new();
+            let mut peek = next;
+            for id in &ordered {
+                self.assign_copy_ids(*id, &mut peek, &mut becomes)?;
+            }
+            let moved = step(k);
+            for id in &ordered {
+                let at = cmds.len();
+                let copy = self.emit_copy(
+                    *id,
+                    parent,
+                    index,
+                    CopyStyle::InPlace,
+                    &mut next,
+                    &becomes,
+                    &mut cmds,
+                )?;
+                if let Some(Command::AddNode { node, .. }) = cmds.get_mut(at) {
+                    node.transform = moved.compose(node.transform);
+                    if let Some(mask) = &mut node.mask {
+                        *mask = mask.carried_through(moved);
+                    }
+                }
+                made.push(copy);
+                index += 1;
+            }
+        }
+        let label = format!(
+            "Repeat {} {copies} time{}",
+            if ordered.len() == 1 {
+                self.doc.node(ordered[0])?.name.clone()
+            } else {
+                format!("{} layers", ordered.len())
+            },
+            if copies == 1 { "" } else { "s" }
+        );
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        Ok(made)
+    }
+
     /// The id every layer of a subtree is about to be given, in the
     /// order [`emit_copy`](Self::emit_copy) will hand them out.
     fn assign_copy_ids(
@@ -7986,6 +8132,118 @@ mod tests {
             }
         }
         worst
+    }
+
+    /// Step and repeat: a row of copies an offset apart, a ring of them
+    /// turned about a pivot, copies shrinking by a scale — each one step
+    /// on from the last, stacked above the originals in the order they
+    /// run, as one step in the history; a copy's mask goes with it.
+    #[test]
+    fn repeating_steps_each_copy_on_from_the_last() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut post = Node::vector(
+            "post",
+            VectorShape::Rect {
+                width: 10.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut post.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.2,
+                b: 0.2,
+                a: 1.0,
+            });
+            *stroke = None;
+        }
+        post.transform = Transform::translation(95.0, 10.0);
+        // Masked to its own left half, so a copy whose mask stayed behind
+        // would show nothing.
+        post.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 5.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(95.0, 10.0),
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(post),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        let middle = |session: &Session, n: NodeId| {
+            let [x, y, w, h] = session.bounds_of(n).unwrap();
+            [x + w / 2.0, y + h / 2.0, w]
+        };
+        // A row: three copies twenty apart.
+        let before = session.history_labels().0.len();
+        let row = session
+            .repeat_nodes(&[id], 3, 20.0, 0.0, 0.0, 1.0, [0.0, 0.0])
+            .unwrap();
+        assert_eq!(session.history_labels().0.len(), before + 1, "one step");
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[id, row[0], row[1], row[2]],
+            "stacked above the original in the order they run"
+        );
+        for (k, c) in row.iter().enumerate() {
+            let m = middle(&session, *c);
+            assert!(
+                (m[0] - (100.0 + 20.0 * (k + 1) as f32)).abs() < 1e-3 && (m[1] - 15.0).abs() < 1e-3,
+                "copy {k} at {m:?}"
+            );
+        }
+        let page = session.render().unwrap();
+        assert!(
+            page.get(158, 15).a > 0.9 && page.get(163, 15).a < 0.1,
+            "the mask went with it"
+        );
+        session.undo().unwrap();
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[id],
+            "undone at once"
+        );
+        // A ring: three more posts a quarter turn apart about a pivot 90
+        // below the post's middle — right, bottom and left of a clock.
+        let ring = session
+            .repeat_nodes(&[id], 3, 0.0, 0.0, 90.0, 1.0, [0.0, 90.0])
+            .unwrap();
+        let want = [[190.0, 105.0], [100.0, 195.0], [10.0, 105.0]];
+        for (c, w) in ring.iter().zip(want) {
+            let m = middle(&session, *c);
+            assert!(
+                (m[0] - w[0]).abs() < 1e-2 && (m[1] - w[1]).abs() < 1e-2,
+                "{m:?} against {w:?}"
+            );
+        }
+        session.undo().unwrap();
+        // Shrinking: each half the last, about the post's own middle.
+        let shrink = session
+            .repeat_nodes(&[id], 2, 0.0, 0.0, 0.0, 0.5, [0.0, 0.0])
+            .unwrap();
+        let sizes: Vec<f32> = shrink.iter().map(|c| middle(&session, *c)[2]).collect();
+        assert!(
+            (sizes[0] - 5.0).abs() < 1e-3 && (sizes[1] - 2.5).abs() < 1e-3,
+            "{sizes:?}"
+        );
+        assert!(
+            session
+                .repeat_nodes(&[id], 3, f32::NAN, 0.0, 0.0, 1.0, [0.0, 0.0])
+                .is_err(),
+            "a step has to be numbers"
+        );
     }
 
     /// A blend lays the shapes between two: a small red square and a

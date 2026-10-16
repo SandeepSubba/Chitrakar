@@ -1161,6 +1161,8 @@ export function App() {
   const [newDocOpen, setNewDocOpen] = useState(false);
   /** The export window, and the preferences window. */
   const [exportOpen, setExportOpen] = useState(false);
+  /** The layers the repeat window is open on, if it is. */
+  const [repeatFor, setRepeatFor] = useState<number[] | null>(null);
   /** The picture the trace window is open on, if it is. */
   const [traceFor, setTraceFor] = useState<{ id: number; name: string } | null>(null);
   const [prefsOpen, setPrefsOpen] = useState(false);
@@ -5249,6 +5251,35 @@ export function App() {
     }
   };
 
+  /** Step and repeat the picked layers: the window asks how, and the
+   * copies are picked after it. */
+  const repeatSelection = () => {
+    if (!session || selectionSet.length === 0) return;
+    setRepeatFor([...selectionSet]);
+  };
+  const repeatAs = (step: RepeatStep) => {
+    if (!session || !repeatFor) return;
+    try {
+      const made = session.repeat_nodes(
+        new Float64Array(repeatFor),
+        step.copies,
+        step.dx,
+        step.dy,
+        step.degrees,
+        step.scale / 100,
+        step.px,
+        step.py,
+      );
+      setRepeatFor(null);
+      const last = made[made.length - 1];
+      if (last !== undefined) setSelected(last);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Repeat: ${err}`);
+    }
+  };
+
   /** The shapes between the two picked ones, as many as asked, in a
    * group between them; the group is picked after it. */
   const blendSelection = () => {
@@ -7587,6 +7618,7 @@ export function App() {
             item(`combine-${op}`, icon, label, () => combineSelection(op)),
           ),
         ),
+        item("repeat", "duplicate", "Repeat…", repeatSelection),
         item("blend-shapes", "shapes", "Blend between the two…", blendSelection),
         item("outline-stroke", "line", "Outline the stroke", outlineStroke),
         item("offset-path", "shapes", "Offset path…", offsetPath),
@@ -8410,6 +8442,13 @@ export function App() {
             setLevelling(false);
             endGesture();
           }}
+        />
+      )}
+      {repeatFor && (
+        <RepeatDialog
+          count={repeatFor.length}
+          onCancel={() => setRepeatFor(null)}
+          onRepeat={repeatAs}
         />
       )}
       {traceFor && session && (
@@ -11299,6 +11338,106 @@ function NewDocDialog({
  * every print asks for — without a single layer having to be moved by
  * hand. Both are one command: a new size, and the shift that decides
  * where the old page sits inside it. */
+/** One step of a repeat, as the window asks for it: how many copies,
+ * and how each is moved, turned and scaled from the one before. */
+type RepeatStep = {
+  copies: number;
+  dx: number;
+  dy: number;
+  degrees: number;
+  /** Per cent of the one before. */
+  scale: number;
+  /** Where the turn is about, from the middle of what is picked. */
+  px: number;
+  py: number;
+};
+
+/** Step and repeat: the copies a row, a ring or a spiral makes, said as
+ * one step — the move, the turn and the scale from each copy to the
+ * next. A ring is a turn about a point away from the middle: twelve
+ * copies at thirty degrees about a point below a mark is a clock face. */
+function RepeatDialog({
+  count,
+  onCancel,
+  onRepeat,
+}: {
+  count: number;
+  onCancel: () => void;
+  onRepeat: (step: RepeatStep) => void;
+}) {
+  const [step, setStep] = useState<RepeatStep>({
+    copies: 3,
+    dx: 40,
+    dy: 0,
+    degrees: 0,
+    scale: 100,
+    px: 0,
+    py: 0,
+  });
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  const field = (key: keyof RepeatStep, label: string, unit: string, min?: number, max?: number) => (
+    <label className="row">
+      {label}
+      <input
+        type="number"
+        value={step[key]}
+        min={min}
+        max={max}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (Number.isFinite(v)) setStep({ ...step, [key]: v });
+        }}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") onRepeat(step);
+        }}
+        aria-label={`Repeat ${label.toLowerCase()}`}
+      />
+      <span className="unit">{unit}</span>
+    </label>
+  );
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Repeat"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Repeat {count === 1 ? "the layer" : `${count} layers`}</h2>
+        {field("copies", "Copies", "", 1, 500)}
+        {field("dx", "Move across", "px")}
+        {field("dy", "Move down", "px")}
+        {field("degrees", "Turn", "°")}
+        {field("scale", "Scale", "%", 1, 10000)}
+        {field("px", "Turn about across", "px")}
+        {field("py", "Turn about down", "px")}
+        <p className="modal-note">
+          Each copy is one step on from the one before: moved, turned about
+          the point that far from the middle of what is picked, and scaled
+          about that middle. A row is a move; a ring is a turn about a
+          point away from the middle — twelve copies at 30° about a point
+          below is a clock face. One step to undo.
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="mask-button primary" onClick={() => onRepeat(step)}>
+            Repeat
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Trace into shapes: how many colours the picture is said in and how
  * closely each outline follows its pixels, with the answer drawn as it is
  * asked — the trace on its own, made by the engine on a page of its own,

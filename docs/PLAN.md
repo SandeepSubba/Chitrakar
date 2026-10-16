@@ -2062,6 +2062,30 @@ without reading anything else.*
     the size makes the block taller and wider by that word, the slider
     reads the block's size over the other word, and Edit › Undo puts it
     back.
+- **Repeat ✅** (`Session::repeat_nodes`, Layer › *Repeat…*). This is
+  step and repeat: copies of the picked layers, each one step on from
+  the last. A step is a move, a turn about a pivot some way from the
+  middle of what is picked, and a scale about that middle. A row is a
+  move; a ring is a turn about a point away from the middle (twelve at
+  30° about a point below a mark is a clock face); a shell is a turn and
+  a scale together.
+  - **Stacking:** each set of copies goes above the last, so the repeat
+    stacks the way it runs, and the whole repeat is one step. Each set
+    is a copy of the originals through `emit_copy`. A copy of another
+    picked layer points at the one in its own set.
+  - **Masks and effects:** the step is said in the group's space, so the
+    layers have to share a group. A copy's mask is laid in that same
+    space and goes with it (`Mask::carried_through`). Its effects do not
+    turn, because the light a shadow falls from is the page's.
+  - **The window:** `RepeatDialog` asks copies, move, turn, scale and
+    the turn's point. Enter repeats, Escape lays nothing.
+  - **Tests:** `repeating_steps_each_copy_on_from_the_last`: a row
+    stacked in order with each copy where its step puts it; a ring of
+    three a quarter turn apart about a pivot below; halving sizes; one
+    undo; a step that is not a number refused; and each copy's masked
+    half drawn. Leaving the mask behind, or giving every copy the first
+    step, each fail it. Smoke 9o24: Escape lays nothing, three copies
+    sixty apart make a row of four with clear gaps, one undo.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

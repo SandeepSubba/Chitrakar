@@ -666,6 +666,28 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Step and repeat: `copies` copies of the layers, each a step on —
+    /// moved `dx`, `dy`, turned `degrees` about a pivot `px`, `py` from
+    /// their middle, scaled by `scale` — as one step; every copy's id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn repeat_nodes(
+        &mut self,
+        ids: &[f64],
+        copies: u32,
+        dx: f32,
+        dy: f32,
+        degrees: f32,
+        scale: f32,
+        px: f32,
+        py: f32,
+    ) -> Result<Vec<f64>, JsError> {
+        let ids: Vec<NodeId> = ids.iter().map(|i| NodeId(*i as u64)).collect();
+        self.inner
+            .repeat_nodes(&ids, copies, dx, dy, degrees, scale, [px, py])
+            .map(|v| v.into_iter().map(|n| n.0 as f64).collect())
+            .map_err(to_js)
+    }
+
     /// Turn a shape's stroke into a shape of its own; the id of the
     /// layer that took its place (a group of fill and outline when the
     /// shape had a fill).

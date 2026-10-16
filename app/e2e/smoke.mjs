@@ -7564,6 +7564,52 @@ assert(
   assert((await canvasPixel(150, 60))[3] === 0, "one undo takes it away");
 }
 
+// 9o24. Repeat: a square picked and repeated three times sixty pixels
+// apart is a row of four; one undo takes the row back to the one; and
+// Escape closes the window with nothing laid.
+{
+  await newDocument(300, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 120) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#2266cc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(20, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(50, 70), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const rows = () => page.locator(".panel ul li").count();
+  assert((await rows()) === 1 && (await canvasPixel(215, 55))[3] === 0, "one square to start");
+  await menuClick("Layer", "Repeat…");
+  const win = page.locator('[role="dialog"][aria-label="Repeat"]');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  assert((await win.count()) === 0 && (await rows()) === 1, "Escape lays nothing");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  await menuClick("Layer", "Repeat…");
+  await win.locator('input[aria-label="Repeat copies"]').fill("3");
+  await win.locator('input[aria-label="Repeat move across"]').fill("60");
+  await win.locator("button", { hasText: "Repeat" }).click();
+  await page.waitForTimeout(400);
+  const third = await canvasPixel(215, 55);
+  assert(
+    (await rows()) === 4 && third[3] === 255 && third[2] > third[0],
+    `a row of four, the last at 200 across (${await rows()} rows, ${third})`,
+  );
+  assert((await canvasPixel(65, 55))[3] === 0, "with the gaps between them clear");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await rows()) === 1 && (await canvasPixel(215, 55))[3] === 0,
+    "one undo takes the whole row back",
+  );
+}
+
 // 9o9. Trim to the artwork: on a white ground, the page comes in to the
 // shape drawn on it, and one undo gives the page back its size.
 {
