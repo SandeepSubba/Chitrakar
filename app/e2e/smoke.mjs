@@ -8214,6 +8214,56 @@ assert(
   assert(leftLow < 20 && rightHigh > 240, `lit from the lower right (${leftLow}, ${rightHigh})`);
 }
 
+// 9o25i. Twirl and pinch: the Filter menu's warps. Black on the left
+// and white on the right, a twirl swings the edge round clockwise about
+// the middle and leaves the corners; turned back, the other way. A
+// white square in the middle, a pinch draws it in and a bulge pushes
+// it out.
+{
+  await newDocument(240, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 120) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#000000", 0, 0, 240, 120);
+  await rect("#ffffff", 120, 0, 240, 120);
+  await page.keyboard.press("Escape");
+  await menuClick("Filter", "Twirl");
+  await page.waitForTimeout(300);
+  const red = async (x, y) => (await canvasPixel(x, y))[0];
+  assert((await red(3, 3)) < 10 && (await red(236, 116)) > 245, "the corners stay");
+  assert(
+    (await red(121, 52)) < 30 && (await red(119, 68)) > 225,
+    `the edge swings clockwise (${await red(121, 52)}, ${await red(119, 68)})`,
+  );
+  await setSlider("Twirl angle", -90);
+  await page.waitForTimeout(300);
+  assert(
+    (await red(121, 52)) > 225 && (await red(119, 68)) < 30,
+    `and back the other way (${await red(121, 52)}, ${await red(119, 68)})`,
+  );
+
+  await newDocument(240, 120, "rgb");
+  await rect("#000000", 0, 0, 240, 120);
+  await rect("#ffffff", 100, 40, 140, 80);
+  await page.keyboard.press("Escape");
+  assert((await red(135, 60)) > 245 && (await red(143, 60)) < 10, "a square in the middle");
+  await menuClick("Filter", "Pinch");
+  await page.waitForTimeout(300);
+  assert((await red(135, 60)) < 30, `a pinch draws it in (${await red(135, 60)})`);
+  await setSlider("Pinch amount", -0.5);
+  await page.waitForTimeout(300);
+  assert((await red(143, 60)) > 225, `a bulge pushes it out (${await red(143, 60)})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

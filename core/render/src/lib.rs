@@ -820,6 +820,16 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let scale = max_scale(ancestor_space(doc, *id));
                 ((halftone_cell(*size) * 0.71 * scale).ceil() as u32).saturating_add(2)
             }
+            // A point inside the circle can be read from anywhere in it:
+            // across the whole of it for a twirl, out to its edge for a
+            // pinch.
+            NodeKind::Filter(Filter::Twirl { radius, center, .. })
+            | NodeKind::Filter(Filter::Pinch { radius, center, .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                let page = (doc.meta.width as f32, doc.meta.height as f32);
+                let (_, reach) = warp_circle(*radius, *center, page);
+                ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
+            }
             // The two readings are the height away each side.
             NodeKind::Filter(Filter::Emboss { height, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8200,6 +8210,34 @@ fn apply_filter(
                 )
             });
         }
+        Filter::Twirl {
+            degrees,
+            radius,
+            center,
+        } => {
+            let page = (doc.meta.width as f32, doc.meta.height as f32);
+            let (mid, reach) = warp_circle(*radius, *center, page);
+            let turn = twirl_turn(*degrees);
+            if reach > 0.0 && turn != 0.0 {
+                warp(doc, mask, dst, clip, opacity, view, |p| {
+                    twirl_source(p, mid, reach, turn)
+                });
+            }
+        }
+        Filter::Pinch {
+            amount,
+            radius,
+            center,
+        } => {
+            let page = (doc.meta.width as f32, doc.meta.height as f32);
+            let (mid, reach) = warp_circle(*radius, *center, page);
+            let power = pinch_power(*amount);
+            if reach > 0.0 && power != 1.0 {
+                warp(doc, mask, dst, clip, opacity, view, |p| {
+                    pinch_source(p, mid, reach, power)
+                });
+            }
+        }
         Filter::Emboss {
             degrees,
             height,
@@ -8260,6 +8298,121 @@ fn apply_filter(
             });
         }
     }
+}
+
+/// A twirl's or a pinch's circle in the filter's own units: its middle,
+/// a share of the page across and down (half and half for no number),
+/// and its radius, a share of half the page's shorter side held to
+/// 0..=4 (one for no number).
+pub fn warp_circle(radius: f32, center: [f32; 2], page: (f32, f32)) -> ([f32; 2], f32) {
+    let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+    let share = if radius.is_finite() {
+        radius.clamp(0.0, 4.0)
+    } else {
+        1.0
+    };
+    (
+        [at(center[0]) * page.0, at(center[1]) * page.1],
+        share * page.0.min(page.1) / 2.0,
+    )
+}
+
+/// How far a twirl turns its middle, in radians: ten turns either way
+/// at the most, and none for no number.
+pub fn twirl_turn(degrees: f32) -> f32 {
+    if degrees.is_finite() {
+        degrees.clamp(-3600.0, 3600.0).to_radians()
+    } else {
+        0.0
+    }
+}
+
+/// The power a pinch raises a point's share of the radius to: one less
+/// half the amount, held to -1..=1 (one for no number).
+pub fn pinch_power(amount: f32) -> f32 {
+    if amount.is_finite() {
+        1.0 - 0.5 * amount.clamp(-1.0, 1.0)
+    } else {
+        1.0
+    }
+}
+
+/// Where a twirl reads the point `here` from: turned back about `mid`
+/// by the turn eased to nothing at `reach` as the square of the way
+/// still to go, so what was there shows turned forward. Outside the
+/// circle, the point itself. The GPU's own, step for step.
+pub fn twirl_source(here: [f32; 2], mid: [f32; 2], reach: f32, turn: f32) -> [f32; 2] {
+    let (dx, dy) = (here[0] - mid[0], here[1] - mid[1]);
+    let r = (dx * dx + dy * dy).sqrt();
+    if r.is_nan() || r >= reach {
+        return here;
+    }
+    let left = 1.0 - r / reach;
+    let (s, c) = (-turn * left * left).sin_cos();
+    [mid[0] + c * dx - s * dy, mid[1] + s * dx + c * dy]
+}
+
+/// Where a pinch reads the point `here` from: along its line from `mid`,
+/// at `reach · (r / reach)^power` where it is `r` away. Outside the
+/// circle, and at its middle, the point itself. The GPU's own.
+pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f32; 2] {
+    let (dx, dy) = (here[0] - mid[0], here[1] - mid[1]);
+    let r = (dx * dx + dy * dy).sqrt();
+    if r.is_nan() || r >= reach || r <= 0.0 {
+        return here;
+    }
+    let k = (r / reach).powf(power) * reach / r;
+    [mid[0] + dx * k, mid[1] + dy * k]
+}
+
+/// A filter that moves the picture rather than recolouring it: every
+/// pixel shows what `source` says it came from, in the filter's own
+/// units, read between the four pixels round it and the edge read again
+/// past the edge. Out to the surface through the inverse's own inverse,
+/// as the halftone goes, which is the one the GPU is handed. Weighed in
+/// by opacity and mask, covered or not — a warp can move the picture
+/// onto where nothing was.
+fn warp(
+    doc: &Document,
+    mask: MaskRef<'_>,
+    dst: &mut Surface,
+    clip: ClipRect,
+    opacity: f32,
+    view: Transform,
+    source: impl Fn([f32; 2]) -> [f32; 2],
+) {
+    let original = blur::snapshot(dst, clip);
+    let Some(inv) = Inverse::of(view) else {
+        return;
+    };
+    let det = inv.a * inv.d - inv.b * inv.c;
+    if det.abs() < 1e-12 {
+        return;
+    }
+    let fwd = [inv.d / det, -inv.b / det, -inv.c / det, inv.a / det];
+    let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+    let px = |x: i64, y: i64| original[(y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize];
+    mix_snapshot(dst, clip, &original, |o, _, x, y| {
+        let weight = opacity * coverage_at(doc, mask, x, y);
+        if weight <= 0.0 {
+            return o;
+        }
+        let (hx, hy) = inv.at(x as f32 + 0.5, y as f32 + 0.5);
+        let s = source([hx, hy]);
+        let dx = fwd[0] * s[0] + fwd[2] * s[1] + inv.e;
+        let dy = fwd[1] * s[0] + fwd[3] * s[1] + inv.f;
+        // Between pixel middles, on the snapshot's own grid; held well
+        // inside what a whole number can say, past which every read is
+        // the edge anyway.
+        let fx = (dx - 0.5 - clip.x0 as f32).clamp(-1e6, 1e6);
+        let fy = (dy - 0.5 - clip.y0 as f32).clamp(-1e6, 1e6);
+        let (bx, by) = (fx.floor(), fy.floor());
+        let (tx, ty) = (fx - bx, fy - by);
+        let (bx, by) = (bx as i64, by as i64);
+        let top = lerp(px(bx, by), px(bx + 1, by), tx);
+        let bottom = lerp(px(bx, by + 1), px(bx + 1, by + 1), tx);
+        lerp(o, lerp(top, bottom, ty), weight)
+    });
 }
 
 /// An emboss's height, in document pixels: nothing below, a hundred at
@@ -20876,6 +21029,122 @@ mod tests {
             bare.pixels.iter().all(|p| p.a == 0.0),
             "nothing covered, nothing printed"
         );
+    }
+
+    /// A twirl turns the picture about its middle, clockwise for a
+    /// positive turn, and leaves what is outside its circle alone and a
+    /// disc centred in it a disc; it can turn the picture onto where
+    /// nothing was. A pinch shrinks a centred disc and a bulge swells it.
+    /// Half opacity is half way.
+    #[test]
+    fn a_twirl_turns_and_a_pinch_squeezes() {
+        let page = |layers: Vec<Box<Node>>, filter: Filter, opacity: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            let n = layers.len();
+            for (index, node) in layers.into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node,
+                })
+                .unwrap();
+            }
+            let mut f = chitrakar_doc::Node::filter("warp", filter);
+            f.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: n,
+                node: Box::new(f),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let at = |s: &Surface, x: u32, y: u32| s.pixels[(y * 64 + x) as usize];
+        let placed = |mut n: Box<Node>, x: f32, y: f32| {
+            n.transform = Transform::translation(x, y);
+            n
+        };
+        // Black on the left, white on the right: the edge runs down
+        // through the middle.
+        let halves = || {
+            vec![
+                filled_rect("black", 64.0, 64.0, BLACK),
+                placed(filled_rect("white", 32.0, 64.0, WHITE), 32.0, 0.0),
+            ]
+        };
+        let twirl = |degrees: f32| Filter::Twirl {
+            degrees,
+            radius: 1.0,
+            center: [0.5, 0.5],
+        };
+        let plain = page(halves(), twirl(0.0), 1.0);
+        let turned = page(halves(), twirl(90.0), 1.0);
+        for (x, y) in [(1, 1), (62, 1), (1, 62), (62, 62)] {
+            assert_eq!(at(&turned, x, y), at(&plain, x, y), "a corner at {x},{y}");
+        }
+        // Clockwise: the edge's top half swings right, so just above
+        // the middle is the black side now and just below it the white.
+        assert!(at(&turned, 32, 27).r < 0.05, "above the middle, black");
+        assert!(at(&turned, 31, 37).r > 0.95, "below it, white");
+        let back = page(halves(), twirl(-90.0), 1.0);
+        assert!(at(&back, 32, 27).r > 0.95, "turned the other way, white");
+        assert!(at(&back, 31, 37).r < 0.05, "and black below");
+
+        let disc = |r: f32| {
+            let mut d = Node::vector("disc", VectorShape::Ellipse { rx: r, ry: r });
+            if let NodeKind::Vector { fill, .. } = &mut d.kind {
+                *fill = Some(WHITE);
+            }
+            // An ellipse is drawn in the box from its corner.
+            d.transform = Transform::translation(32.0 - r, 32.0 - r);
+            vec![filled_rect("black", 64.0, 64.0, BLACK), Box::new(d)]
+        };
+        let still = page(disc(12.0), twirl(0.0), 1.0);
+        let spun = page(disc(12.0), twirl(200.0), 1.0);
+        let off = still
+            .pixels
+            .iter()
+            .zip(&spun.pixels)
+            .map(|(a, b)| (a.r - b.r).abs())
+            .sum::<f32>()
+            / still.pixels.len() as f32;
+        assert!(off < 0.01, "a centred disc stays a disc ({off})");
+
+        // Onto where nothing was: a square in one corner of the circle,
+        // turned a half turn at the middle, reaches round to another.
+        let square = || vec![placed(filled_rect("w", 12.0, 12.0, WHITE), 14.0, 14.0)];
+        let bare = page(square(), twirl(0.0), 1.0);
+        let swung = page(square(), twirl(180.0), 1.0);
+        assert_eq!(at(&bare, 44, 44).a, 0.0);
+        assert!(
+            swung
+                .pixels
+                .iter()
+                .zip(&bare.pixels)
+                .any(|(a, b)| a.a > 0.5 && b.a == 0.0),
+            "turned onto where nothing was"
+        );
+
+        let pinch = |amount: f32| Filter::Pinch {
+            amount,
+            radius: 1.0,
+            center: [0.5, 0.5],
+        };
+        let flat = page(disc(10.0), pinch(0.0), 1.0);
+        assert!(at(&flat, 40, 32).r > 0.95, "inside the disc");
+        assert!(at(&flat, 45, 32).r < 0.05, "outside the disc");
+        let pinched = page(disc(10.0), pinch(1.0), 1.0);
+        assert!(at(&pinched, 40, 32).r < 0.05, "a pinch shrinks it");
+        assert!(at(&pinched, 32, 32).r > 0.95, "its middle stays");
+        let bulged = page(disc(10.0), pinch(-1.0), 1.0);
+        assert!(at(&bulged, 45, 32).r > 0.95, "a bulge swells it");
+        assert!(at(&bulged, 1, 1).r < 0.05, "and leaves the corners");
+
+        let faint = page(disc(10.0), pinch(1.0), 0.5);
+        for ((f, p), u) in faint.pixels.iter().zip(&pinched.pixels).zip(&flat.pixels) {
+            assert!((f.r - (p.r + u.r) / 2.0).abs() < 1e-5, "half way");
+        }
     }
 
     /// An emboss is a grey of half where the picture is flat, lit where

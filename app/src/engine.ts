@@ -234,6 +234,13 @@ export type Filter =
   /** A dot screen: cells `size` across, turned `degrees`, each a black
    * dot as dark as the picture there. */
   | { Halftone: { size: number; degrees: number } }
+  /** The picture turned about `center` (a share of the page), `degrees`
+   * at the middle easing to none at a circle `radius` (a share of half
+   * the page's shorter side) out. */
+  | { Twirl: { degrees: number; radius: number; center: [number, number] } }
+  /** Squeezed toward `center` for a positive `amount` (to 1), swollen
+   * out from it for a negative one, inside the same circle. */
+  | { Pinch: { amount: number; radius: number; center: [number, number] } }
   /** Grey relief: how light the picture is, taken as a height, lit from
    * `degrees` (the page's x axis turning with its y, so 225 is the upper
    * left), read `height` pixels either way, `amount` strong. */

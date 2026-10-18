@@ -4799,6 +4799,16 @@ export function App() {
       name: "Halftone",
       kind: { Filter: { Halftone: { size: 8, degrees: 45 } } },
     },
+    // A whirlpool and a squeeze about the middle of the page, each out
+    // to the largest circle the page holds.
+    twirl: {
+      name: "Twirl",
+      kind: { Filter: { Twirl: { degrees: 90, radius: 1, center: [0.5, 0.5] } } },
+    },
+    pinch: {
+      name: "Pinch",
+      kind: { Filter: { Pinch: { amount: 0.5, radius: 1, center: [0.5, 0.5] } } },
+    },
     // Grey metal lit from the upper left, the way a relief is always lit.
     emboss: {
       name: "Emboss",
@@ -13776,6 +13786,26 @@ function KindProps({
           {slider("Screen angle", p.degrees, 0, 90, 1, (v) => ({
             Filter: { Halftone: { ...p, degrees: v } },
           }))}
+        </>
+      );
+    }
+    if ("Twirl" in filter || "Pinch" in filter) {
+      // The two share a circle — where its middle is and how far out it
+      // reaches — and differ in what happens inside it.
+      const twirl = "Twirl" in filter;
+      const p = twirl ? filter.Twirl : filter.Pinch;
+      const wrap = (next: Partial<typeof p>) =>
+        (twirl
+          ? { Filter: { Twirl: { ...filter.Twirl, ...next } } }
+          : { Filter: { Pinch: { ...filter.Pinch, ...next } } }) as NodeKind;
+      return (
+        <>
+          {twirl
+            ? slider("Twirl angle", filter.Twirl.degrees, -720, 720, 1, (v) => wrap({ degrees: v }))
+            : slider("Pinch amount", filter.Pinch.amount, -1, 1, 0.01, (v) => wrap({ amount: v }))}
+          {slider("Circle size", p.radius, 0.05, 2, 0.01, (v) => wrap({ radius: v }))}
+          {slider("Centre across", p.center[0], 0, 1, 0.01, (v) => wrap({ center: [v, p.center[1]] }))}
+          {slider("Centre down", p.center[1], 0, 1, 0.01, (v) => wrap({ center: [p.center[0], v] }))}
         </>
       );
     }

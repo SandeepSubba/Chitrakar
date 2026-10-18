@@ -1195,6 +1195,37 @@ pub enum Filter {
         #[serde(default = "page_middle")]
         center: [f32; 2],
     },
+    /// What is under it turned about a point, the most at the point and
+    /// less and less out to a circle round it, where it stops: a
+    /// whirlpool. `degrees` is how far the middle turns, the way the
+    /// page's y turns from its x (clockwise on screen) for a positive
+    /// number, easing to nothing at the circle as the square of the way
+    /// still to go. `center` is a share of the page's width and height,
+    /// as a radial blur's is, and `radius` a share of half the page's
+    /// shorter side, so one is the largest circle the page holds. Read
+    /// between pixels, so a turned edge stays smooth.
+    Twirl {
+        degrees: f32,
+        #[serde(default = "one")]
+        radius: f32,
+        #[serde(default = "page_middle")]
+        center: [f32; 2],
+    },
+    /// What is under it squeezed toward a point or swollen out from it,
+    /// inside a circle round it and not past: a positive `amount` (up to
+    /// one) pinches, pulling the picture in toward the middle, and a
+    /// negative one bulges it, as a lens held close does. A point `r`
+    /// from the middle shows what was `R · (r / R)^e` from it, `R` the
+    /// circle's radius and `e` one less half the amount,
+    /// so the circle's edge stays where it was and nothing jumps
+    /// there. `center` and `radius` are a twirl's.
+    Pinch {
+        amount: f32,
+        #[serde(default = "one")]
+        radius: f32,
+        #[serde(default = "page_middle")]
+        center: [f32; 2],
+    },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in
@@ -1943,6 +1974,8 @@ impl Filter {
             | Filter::HighPass { .. }
             | Filter::Halftone { .. }
             | Filter::Emboss { .. }
+            | Filter::Twirl { .. }
+            | Filter::Pinch { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2459,6 +2492,8 @@ impl Node {
                 | Filter::HighPass { .. }
                 | Filter::Halftone { .. }
                 | Filter::Emboss { .. }
+                | Filter::Twirl { .. }
+                | Filter::Pinch { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

@@ -2562,6 +2562,54 @@ without reading anything else.*
       other way, and the shader's.
     - Smoke 9o25h: a white block on black is grey where flat, lit and
       shaded along its edges, and the light angle turns the edges round.
+- **Twirl and pinch ✅** (`Filter::Twirl { degrees, radius, center }`,
+  `Filter::Pinch { amount, radius, center }`, `warp_circle`,
+  `twirl_source`, `pinch_source`; *Filter › Twirl* and *Filter › Pinch*,
+  with the angle or amount, *Circle size*, and the centre across and
+  down). The first filters that move the picture rather than recolour
+  it: Photoshop's Distort › Twirl and Pinch.
+  - **The circle:** both act inside a circle and leave the rest alone.
+    Its middle is a share of the page's width and height, as a radial
+    blur's is. Its radius is a share of half the page's shorter side, so
+    one is the largest circle the page holds.
+  - **Twirl:** the middle turns by `degrees` (clockwise on screen for a
+    positive number), easing to nothing at the circle as the square of
+    the way still to go. A point keeps its distance from the middle, so
+    a centred disc stays a disc.
+  - **Pinch:** a point `r` from the middle shows what was
+    `R · (r / R)^e` from it, `e` one less half the amount. Positive
+    pinches toward the middle and negative bulges out. The circle's edge
+    stays put, so nothing jumps there. Three quarters of the amount was
+    tried first and full strength shrank a disc to a speck.
+  - **Reading back:** each pixel shows the picture where the warp says
+    it came from, read between the four pixels round it, the edge read
+    again past the edge. Out to the surface through the inverse's own
+    inverse, as the halftone goes. A warp is weighed in covered or not,
+    since it can bring the picture onto where nothing was.
+  - **The GPU** draws them as filters of one pixel: kind 19, and kind
+    26 (the next free number). The fragment's early return for an
+    uncovered pixel lets these two through, and the four reads and
+    their mixing are the CPU's lerp, not the sampler's. Inside a frame
+    they go back to the CPU, as every filter that reads elsewhere does.
+    The region-render reach is the circle's diameter.
+  - **Fixture:** half of the random Gaussian blurs are a twirl or a
+    pinch, from a stream of their own. Its constant was checked unique:
+    the first two tried were already other streams' seeds.
+  - **Tests:**
+    - `a_twirl_turns_and_a_pinch_squeezes`: the corners stay; the edge
+      down the middle swings clockwise, and the other way for a negative
+      turn; a centred disc stays a disc; a square turned a half turn
+      lands where nothing was; a pinch shrinks a centred disc and leaves
+      its middle; a bulge swells it; half opacity is half way.
+    - The GPU's one-pixel filters test draws two twirls and two pinches
+      against the CPU, over the two bands and over the top band alone,
+      where a twirl must reach the bare half.
+    - Sabotages that each fail one of them: the CPU's turn reversed, the
+      pinch's power inverted, uncovered pixels skipped on the CPU, the
+      same skip in the shader, and the shader's turn reversed.
+    - Smoke 9o25i: the corners stay and the edge swings clockwise, then
+      back with the angle negative; a square in the middle is drawn in
+      by a pinch and pushed out by a bulge.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

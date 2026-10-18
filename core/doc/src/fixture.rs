@@ -2577,9 +2577,34 @@ impl Rng {
             5 => Box::new(Node::filter(
                 &name,
                 match self.upto(6) {
-                    0 => Filter::GaussianBlur {
-                        sigma: self.between(0.5, 2.5),
-                    },
+                    0 => {
+                        let blur = Filter::GaussianBlur {
+                            sigma: self.between(0.5, 2.5),
+                        };
+                        // Half of them a twirl or a pinch instead, about
+                        // a point anywhere on the page, from a stream of
+                        // their own so no other page moves.
+                        let mut side = Rng((self.0 ^ 0xd1b5_4a32_d192_ed03) | 1);
+                        if side.chance(2) {
+                            let radius = side.between(0.3, 1.5);
+                            let center = [side.between(0.2, 0.8), side.between(0.2, 0.8)];
+                            if side.chance(2) {
+                                Filter::Twirl {
+                                    degrees: side.between(-240.0, 240.0),
+                                    radius,
+                                    center,
+                                }
+                            } else {
+                                Filter::Pinch {
+                                    amount: side.between(-1.0, 1.0),
+                                    radius,
+                                    center,
+                                }
+                            }
+                        } else {
+                            blur
+                        }
+                    }
                     1 => {
                         let pixelate = Filter::Pixelate {
                             size: self.between(2.0, 6.0),

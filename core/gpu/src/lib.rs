@@ -3386,6 +3386,8 @@ fn one(
                         | chitrakar_doc::Filter::HighPass { .. }
                         | chitrakar_doc::Filter::Halftone { .. }
                         | chitrakar_doc::Filter::Emboss { .. }
+                        | chitrakar_doc::Filter::Twirl { .. }
+                        | chitrakar_doc::Filter::Pinch { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5233,6 +5235,34 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
                 ],
                 0.0,
             )
+        }
+        // A function of where a pixel is and of the four pixels round
+        // the point it is read from: the circle and the turn or the power
+        // as the CPU renderer works them out, the middle's last number
+        // riding where a grain's seed would.
+        F::Twirl {
+            degrees,
+            radius,
+            center,
+        } => {
+            let (mid, reach) = chitrakar_render::warp_circle(*radius, *center, (page[0], page[1]));
+            let turn = chitrakar_render::twirl_turn(*degrees);
+            if reach <= 0.0 || turn == 0.0 {
+                return Some(Filtering::Nothing);
+            }
+            point([19.0, turn, reach, mid[0]], mid[1])
+        }
+        F::Pinch {
+            amount,
+            radius,
+            center,
+        } => {
+            let (mid, reach) = chitrakar_render::warp_circle(*radius, *center, (page[0], page[1]));
+            let power = chitrakar_render::pinch_power(*amount);
+            if reach <= 0.0 || power == 1.0 {
+                return Some(Filtering::Nothing);
+            }
+            point([26.0, power, reach, mid[0]], mid[1])
         }
         F::Noise {
             amount,
@@ -10413,6 +10443,54 @@ mod tests {
                 mean < 0.002 && worst < 0.01,
                 "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
             );
+        }
+
+        // A twirl and a pinch read between four pixels, from where the
+        // CPU renderer says the picture came from. Over the two bands,
+        // and over the top one alone, where a twirl brings the picture
+        // round onto what was bare.
+        let warps = [
+            F::Twirl {
+                degrees: 120.0,
+                radius: 1.0,
+                center: [0.5, 0.5],
+            },
+            F::Twirl {
+                degrees: -300.0,
+                radius: 1.5,
+                center: [0.3, 0.6],
+            },
+            F::Pinch {
+                amount: 0.7,
+                radius: 1.0,
+                center: [0.5, 0.5],
+            },
+            F::Pinch {
+                amount: -0.8,
+                radius: 0.8,
+                center: [0.6, 0.4],
+            },
+        ];
+        for filter in warps {
+            for half in [false, true] {
+                let mut doc = with(filter.clone());
+                if half {
+                    let light = doc.children_of(doc.root()).unwrap()[1];
+                    doc.apply(Command::RemoveNode { id: light }).unwrap();
+                }
+                assert!(GpuRenderer::can_render(&doc), "{filter:?} is drawn");
+                let drawn = gpu.render(&doc).unwrap();
+                let reference = chitrakar_render::render(&doc).unwrap();
+                let (mean, worst) = difference(&drawn, &reference);
+                assert!(
+                    mean < 0.002 && worst < 0.03,
+                    "{filter:?} (half {half}): mean channel difference {mean:.5} (worst {worst:.3})"
+                );
+                if half && matches!(filter, F::Twirl { .. }) {
+                    let onto = (0..60).any(|x| (24..40).any(|y| drawn.get(x, y).a > 0.5));
+                    assert!(onto, "{filter:?} turns the picture onto the bare half");
+                }
+            }
         }
 
         // A grid of squares upright on the page is two passes; the

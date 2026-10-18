@@ -1054,6 +1054,16 @@ fn lut_at(r: i32, g: i32, b: i32, n: i32, k: i32) -> vec3f {
     return textureLoad(image, vec2i((b % k) * n + r, (b / k) * n + g), 0).rgb;
 }
 
+// A pixel of what is under the layer, the edge read again past the edge.
+fn texel_at(i: vec2i, size: vec2i) -> vec4f {
+    return textureLoad(backdrop, clamp(i, vec2i(0), size - vec2i(1)), 0);
+}
+
+// The CPU renderer's lerp over a whole pixel, alpha and all.
+fn mix_px(a: vec4f, b: vec4f, t: f32) -> vec4f {
+    return a + (b - a) * t;
+}
+
 // `a + (b - a)·t`, the CPU renderer's own lerp, rather than `mix`, which
 // rounds the other way round.
 fn mix_line(a: vec3f, b: vec3f, t: f32) -> vec3f {
@@ -1064,14 +1074,18 @@ fn mix_line(a: vec3f, b: vec3f, t: f32) -> vec3f {
 fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     let was = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
     let weight = in.alpha * mask_cover(in.page, in.mask);
-    if weight <= 0.0 || was.a <= 0.0 {
+    let kind = i32(in.mode);
+    // A warp moves the picture, so it can bring it onto a pixel where
+    // nothing was; everything else leaves an uncovered pixel as it is.
+    let warps = kind == 19 || kind == 26;
+    if weight <= 0.0 || (was.a <= 0.0 && !warps) {
         return was;
     }
-    let kind = i32(in.mode);
     // Ten to thirteen read a table, fourteen to nineteen are the filters
     // of one pixel, and the rest are numbers again — the adjustments that
-    // came after the filters had taken the next numbers.
-    if kind >= 14 && kind < 20 {
+    // came after the filters had taken the next numbers, and twenty-six,
+    // the pinch, which came after those.
+    if (kind >= 14 && kind < 20) || kind == 26 {
         return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
@@ -1137,6 +1151,38 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let ink = clamp((radius - distance(here, centre)) * sharp + 0.5, 0.0, 1.0) * small;
         let paper = (1.0 - ink) * was.a;
         return mix(was, vec4f(paper, paper, paper, was.a), weight);
+    }
+    if kind == 19 || kind == 26 {
+        // A twirl or a pinch: the CPU renderer's `twirl_source` and
+        // `pinch_source`, then its `warp`, step for step.
+        let mid = vec2f(p.w, e.z);
+        let reach = p.z;
+        let d = here - mid;
+        let r = sqrt(d.x * d.x + d.y * d.y);
+        var src = here;
+        if r < reach {
+            if kind == 19 {
+                let left = 1.0 - r / reach;
+                let t = -p.y * left * left;
+                let s = sin(t);
+                let c = cos(t);
+                src = vec2f(mid.x + c * d.x - s * d.y, mid.y + s * d.x + c * d.y);
+            } else if r > 0.0 {
+                let k = pow(r / reach, p.y) * reach / r;
+                src = vec2f(mid.x + d.x * k, mid.y + d.y * k);
+            }
+        }
+        let det = g.x * g.w - g.y * g.z;
+        let fwd = vec4f(g.w / det, -g.y / det, -g.z / det, g.x / det);
+        let dev = vec2f(fwd.x * src.x + fwd.z * src.y + e.x, fwd.y * src.x + fwd.w * src.y + e.y);
+        let f = clamp(dev - vec2f(0.5), vec2f(-1e6), vec2f(1e6));
+        let base = floor(f);
+        let t = f - base;
+        let i = vec2i(base);
+        let size = vec2i(textureDimensions(backdrop));
+        let top = mix_px(texel_at(i, size), texel_at(i + vec2i(1, 0), size), t.x);
+        let bottom = mix_px(texel_at(i + vec2i(0, 1), size), texel_at(i + vec2i(1, 1), size), t.x);
+        return mix_px(was, mix_px(top, bottom, t.y), weight);
     }
     if kind == 18 {
         // An emboss: the CPU renderer's own, with the offset it rounded.
