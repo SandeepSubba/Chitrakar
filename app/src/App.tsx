@@ -4809,6 +4809,11 @@ export function App() {
       name: "Pinch",
       kind: { Filter: { Pinch: { amount: 0.5, radius: 1, center: [0.5, 0.5] } } },
     },
+    // The picture's edges drawn dark on white.
+    "find-edges": {
+      name: "Find edges",
+      kind: { Filter: { FindEdges: { amount: 1 } } },
+    },
     // Rippled glass: waves a few pixels high, a couple of dozen apart.
     ripple: {
       name: "Ripple",
@@ -13813,6 +13818,11 @@ function KindProps({
           {slider("Centre down", p.center[1], 0, 1, 0.01, (v) => wrap({ center: [p.center[0], v] }))}
         </>
       );
+    }
+    if ("FindEdges" in filter) {
+      return slider("Edge strength", filter.FindEdges.amount, 0, 5, 0.05, (v) => ({
+        Filter: { FindEdges: { amount: v } },
+      }));
     }
     if ("Ripple" in filter) {
       const p = filter.Ripple;

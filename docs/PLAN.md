@@ -2639,6 +2639,37 @@ without reading anything else.*
       swapped.
     - Smoke 9o25j: the edge goes wavy at a crest and a trough, the far
       sides stay, and no height straightens it.
+- **Find edges ✅** (`Filter::FindEdges { amount }`, `edge_step`,
+  `edge_white`; *Filter › Find edges* with *Edge strength*). The
+  picture's edges drawn dark on white, Photoshop's Stylize › Find Edges.
+  - **Channel by channel:** flat ground of any colour goes white; where
+    a channel changes, that channel is taken down by how steeply. The
+    steepness is a Sobel kernel over the eight pixels round, divided by
+    four so a step from nothing to full is one, times the amount, held
+    at nothing. A black edge is where every channel changes; a red
+    square's edge is cyan.
+  - **On the picture, not the screen:** the eight are read a document
+    pixel away, rounded to whole device pixels from the view's scale and
+    never less than one. So the lines keep their weight when the page is
+    zoomed. The GPU is handed that step, rounded from the same
+    `max_scale`, rather than working it out.
+  - **The GPU** draws it as kind 28 among the filters of one pixel, the
+    channels side by side. The region-render reach is the step's
+    diagonal.
+  - **Fixture:** half of the random high passes are edges, from a stream
+    of their own.
+  - **Tests:**
+    - `finding_edges_draws_them_dark_on_white`: flat ground is white
+      inside and out; the edge is dark and two pixels wide; a red
+      square's edge is cyan; no strength is all white; drawn twice the
+      size, the lines are four pixels wide and no wider.
+    - The GPU's one-pixel filters test draws it weak and strong against
+      the CPU, at the page's size and at two and a half times it.
+    - Sabotages that each fail one of them: a fixed one-pixel step (the
+      CPU's and the shader's), one channel read for another, and a
+      kernel row read wrong in the shader.
+    - Smoke 9o25k: flat ground white, the block's edge dark, and no
+      strength white all over.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

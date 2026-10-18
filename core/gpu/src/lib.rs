@@ -3389,6 +3389,7 @@ fn one(
                         | chitrakar_doc::Filter::Twirl { .. }
                         | chitrakar_doc::Filter::Pinch { .. }
                         | chitrakar_doc::Filter::Ripple { .. }
+                        | chitrakar_doc::Filter::FindEdges { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5265,6 +5266,17 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             }
             point([26.0, power, reach, mid[0]], mid[1])
         }
+        // Eight pixels round this one, a document pixel away each way
+        // as the CPU renderer rounds it from the same scale.
+        F::FindEdges { amount } => point(
+            [
+                28.0,
+                chitrakar_render::edge_step(view.max_scale()) as f32,
+                chitrakar_render::edge_amount(*amount),
+                0.0,
+            ],
+            0.0,
+        ),
         F::Ripple {
             amplitude,
             wavelength,
@@ -10516,6 +10528,43 @@ mod tests {
                     assert!(onto, "{filter:?} turns the picture onto the bare half");
                 }
             }
+        }
+
+        // Find edges reads the eight pixels round each one and is the
+        // CPU's, weak and strong.
+        for amount in [0.6, 3.0] {
+            let filter = F::FindEdges { amount };
+            let doc = with(filter.clone());
+            assert!(GpuRenderer::can_render(&doc), "{filter:?} is drawn");
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.002 && worst < 0.01,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            // Two and a half times the size, where a document pixel is
+            // three device pixels as both renderers round it.
+            let view = Transform {
+                a: 2.5,
+                b: 0.0,
+                c: 0.0,
+                d: 2.5,
+                e: 0.0,
+                f: 0.0,
+            };
+            let mut reference = chitrakar_render::Surface::new(150, 100);
+            let clip = reference.full_clip();
+            chitrakar_render::render_region_at(&doc, &mut reference, clip, view).unwrap();
+            let (mean, worst) = difference(
+                &gpu.render_view(&doc, view, (150, 100)).unwrap(),
+                &reference,
+            );
+            assert!(
+                mean < 0.002 && worst < 0.01,
+                "{filter:?} zoomed: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
         }
 
         // A grid of squares upright on the page is two passes; the

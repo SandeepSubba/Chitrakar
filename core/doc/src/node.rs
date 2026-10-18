@@ -1233,6 +1233,15 @@ pub enum Filter {
     /// its. Both in document pixels and anchored to the document, so the
     /// waves stay on the picture when the page is panned or zoomed.
     Ripple { amplitude: f32, wavelength: f32 },
+    /// The picture's edges drawn dark on white, channel by channel:
+    /// flat ground of any colour goes white, and where a channel changes
+    /// that channel is taken down by how steeply, `amount` times — a
+    /// step from nothing to full, at one, all the way. So a black edge
+    /// is where every channel changes and a red picture's edges are
+    /// cyan. The steepness is read across the pixels a document pixel
+    /// away each side (a Sobel kernel), so the lines keep their weight
+    /// on the picture when it is zoomed.
+    FindEdges { amount: f32 },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in
@@ -1984,6 +1993,7 @@ impl Filter {
             | Filter::Twirl { .. }
             | Filter::Pinch { .. }
             | Filter::Ripple { .. }
+            | Filter::FindEdges { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2503,6 +2513,7 @@ impl Node {
                 | Filter::Twirl { .. }
                 | Filter::Pinch { .. }
                 | Filter::Ripple { .. }
+                | Filter::FindEdges { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

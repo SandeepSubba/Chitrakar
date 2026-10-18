@@ -2641,8 +2641,18 @@ impl Rng {
                         // stream of their own so no other page moves.
                         let mut side = Rng((self.0 ^ 0x5be0_cd19_137e_2179) | 1);
                         if side.chance(2) {
-                            Filter::HighPass {
+                            let high = Filter::HighPass {
                                 sigma: side.between(0.5, 3.0),
+                            };
+                            // Half of those the edges alone, from a
+                            // stream of their own again.
+                            let mut edges = Rng((side.0 ^ 0xc2b2_ae3d_27d4_eb4f) | 1);
+                            if edges.chance(2) {
+                                Filter::FindEdges {
+                                    amount: edges.between(0.3, 3.0),
+                                }
+                            } else {
+                                high
                             }
                         } else {
                             sharpen

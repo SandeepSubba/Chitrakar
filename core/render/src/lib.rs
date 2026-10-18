@@ -830,6 +830,13 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let (_, reach) = warp_circle(*radius, *center, page);
                 ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
             }
+            // A document pixel each way, and its corner's diagonal.
+            NodeKind::Filter(Filter::FindEdges { .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                (edge_step(scale) as u32)
+                    .saturating_mul(2)
+                    .saturating_add(2)
+            }
             // A point is read from at most the amplitude away each way.
             NodeKind::Filter(Filter::Ripple { amplitude, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8244,6 +8251,42 @@ fn apply_filter(
                 });
             }
         }
+        Filter::FindEdges { amount } => {
+            let original = blur::snapshot(dst, clip);
+            let step = edge_step(scale);
+            let k = edge_amount(*amount);
+            let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+            let px =
+                |x: i64, y: i64| original[(y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize];
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                if weight <= 0.0 || o.a <= 0.0 {
+                    return o;
+                }
+                let (x, y) = ((x - clip.x0) as i64, (y - clip.y0) as i64);
+                let ring = [
+                    px(x - step, y - step),
+                    px(x, y - step),
+                    px(x + step, y - step),
+                    px(x - step, y),
+                    px(x + step, y),
+                    px(x - step, y + step),
+                    px(x, y + step),
+                    px(x + step, y + step),
+                ];
+                let edge = |c: fn(&LinearRgba) -> f32| edge_white(o.a, ring.map(|p| c(&p)), k);
+                lerp(
+                    o,
+                    LinearRgba {
+                        r: edge(|p| p.r),
+                        g: edge(|p| p.g),
+                        b: edge(|p| p.b),
+                        a: o.a,
+                    },
+                    weight,
+                )
+            });
+        }
         Filter::Ripple {
             amplitude,
             wavelength,
@@ -8380,6 +8423,38 @@ pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f
     }
     let k = (r / reach).powf(power) * reach / r;
     [mid[0] + dx * k, mid[1] + dy * k]
+}
+
+/// How many device pixels away a find-edges reads: a document pixel,
+/// rounded, and never less than one.
+pub fn edge_step(scale: f32) -> i64 {
+    if scale.is_finite() {
+        scale.round().clamp(1.0, 64.0) as i64
+    } else {
+        1
+    }
+}
+
+/// A find-edges' strength, held to 0..=10 and nothing for no number.
+pub fn edge_amount(amount: f32) -> f32 {
+    if amount.is_finite() {
+        amount.clamp(0.0, 10.0)
+    } else {
+        0.0
+    }
+}
+
+/// One channel of a find-edges over a pixel covered `alpha`: the cover
+/// less the steepness of the channel across the eight round it (`ring`,
+/// row by row from the upper left, the middle left out), a Sobel kernel
+/// over four so a step from nothing to full is one, times `amount`,
+/// held at nothing. The GPU's own.
+pub fn edge_white(alpha: f32, ring: [f32; 8], amount: f32) -> f32 {
+    let [a, b, c, d, e, f, g, h] = ring;
+    let gx = (c + 2.0 * e + h) - (a + 2.0 * d + f);
+    let gy = (f + 2.0 * g + h) - (a + 2.0 * b + c);
+    let steep = (gx * gx + gy * gy).sqrt() / 4.0;
+    (alpha - amount * steep).clamp(0.0, alpha)
 }
 
 /// A ripple's amplitude and wavelength, in document pixels: the one
@@ -21197,6 +21272,92 @@ mod tests {
         for ((f, p), u) in faint.pixels.iter().zip(&pinched.pixels).zip(&flat.pixels) {
             assert!((f.r - (p.r + u.r) / 2.0).abs() < 1e-5, "half way");
         }
+    }
+
+    /// Find edges turns flat ground of any colour white and draws an
+    /// edge dark, two pixels wide, channel by channel — a red square's
+    /// edge is cyan — with no strength it is all white, and drawn twice
+    /// the size the lines are twice as wide, a document pixel each way.
+    #[test]
+    fn finding_edges_draws_them_dark_on_white() {
+        let page = |square: AuthoredColor, amount: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("black", 64.0, 64.0, BLACK),
+            })
+            .unwrap();
+            let mut sq = filled_rect("square", 32.0, 32.0, square);
+            sq.transform = Transform::translation(16.0, 16.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: sq,
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(chitrakar_doc::Node::filter(
+                    "edges",
+                    Filter::FindEdges { amount },
+                )),
+            })
+            .unwrap();
+            doc
+        };
+        let edges = render(&page(WHITE, 1.0)).unwrap();
+        let at = |s: &Surface, x: u32, y: u32| s.get(x, y);
+        for (x, y) in [(4, 4), (32, 32), (60, 32)] {
+            assert!(
+                at(&edges, x, y).r > 0.999,
+                "flat ground is white at {x},{y}"
+            );
+        }
+        for x in [15, 16, 47, 48] {
+            assert!(at(&edges, x, 32).r < 0.001, "the edge is dark at {x}");
+        }
+        assert!(
+            at(&edges, 14, 32).r > 0.999 && at(&edges, 17, 32).r > 0.999,
+            "two wide"
+        );
+        let red = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let cyan = at(&render(&page(red, 1.0)).unwrap(), 16, 32);
+        assert!(
+            cyan.r < 0.001 && cyan.g > 0.999 && cyan.b > 0.999,
+            "red's edge is cyan: {cyan:?}"
+        );
+        let none = render(&page(WHITE, 0.0)).unwrap();
+        assert!(
+            none.pixels.iter().all(|p| p.r > 0.999),
+            "no strength, all white"
+        );
+        // Twice the size: a document pixel is two device pixels.
+        let mut big = Surface::new(128, 128);
+        let clip = big.full_clip();
+        let view = Transform {
+            a: 2.0,
+            b: 0.0,
+            c: 0.0,
+            d: 2.0,
+            e: 0.0,
+            f: 0.0,
+        };
+        render_region_at(&page(WHITE, 1.0), &mut big, clip, view).unwrap();
+        for x in [30, 31, 32, 33] {
+            assert!(at(&big, x, 64).r < 0.001, "twice as wide at {x}");
+        }
+        assert!(
+            at(&big, 29, 64).r > 0.999 && at(&big, 34, 64).r > 0.999,
+            "and no wider"
+        );
     }
 
     /// A ripple makes an upright edge wavy down its length, crossing it

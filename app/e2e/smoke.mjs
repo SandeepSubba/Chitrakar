@@ -8303,6 +8303,41 @@ assert(
   );
 }
 
+// 9o25k. Find edges: the Filter menu's line drawing. A white block on
+// black comes out white where either is flat and dark along the block's
+// edge; with no strength it is white all over.
+{
+  await newDocument(240, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 120) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#000000", 0, 0, 240, 120);
+  await rect("#ffffff", 80, 30, 160, 90);
+  await page.keyboard.press("Escape");
+  await menuClick("Filter", "Find edges");
+  await page.waitForTimeout(300);
+  const red = async (x, y) => (await canvasPixel(x, y))[0];
+  const flat = [await red(30, 60), await red(120, 60), await red(210, 60)];
+  assert(flat.every((v) => v > 245), `flat ground is white (${flat})`);
+  const across = [];
+  for (let x = 77; x <= 83; x++) across.push(await red(x, 60));
+  assert(Math.min(...across) < 10, `the edge is dark (${across})`);
+  await setSlider("Edge strength", 0);
+  await page.waitForTimeout(300);
+  const after = [];
+  for (let x = 77; x <= 83; x++) after.push(await red(x, 60));
+  assert(Math.min(...after) > 245, `no strength, white all over (${after})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

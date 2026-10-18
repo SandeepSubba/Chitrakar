@@ -1091,8 +1091,9 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     // Ten to thirteen read a table, fourteen to nineteen are the filters
     // of one pixel, and the rest are numbers again — the adjustments that
     // came after the filters had taken the next numbers, and twenty-six
-    // and twenty-seven, the pinch and the ripple, which came after those.
-    if (kind >= 14 && kind < 20) || kind == 26 || kind == 27 {
+    // to twenty-eight, the pinch, the ripple and find edges, which came
+    // after those.
+    if (kind >= 14 && kind < 20) || (kind >= 26 && kind < 29) {
         return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
@@ -1193,6 +1194,26 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let top = mix_px(texel_at(i, size), texel_at(i + vec2i(1, 0), size), t.x);
         let bottom = mix_px(texel_at(i + vec2i(0, 1), size), texel_at(i + vec2i(1, 1), size), t.x);
         return mix_px(was, mix_px(top, bottom, t.y), weight);
+    }
+    if kind == 28 {
+        // Find edges: the CPU renderer's `edge_white`, a channel at a
+        // time, over the eight pixels a step round this one.
+        let size = vec2i(textureDimensions(backdrop));
+        let px = vec2i(floor(at));
+        let n = i32(p.y);
+        let a = texel_at(px + vec2i(-n, -n), size);
+        let b = texel_at(px + vec2i(0, -n), size);
+        let c = texel_at(px + vec2i(n, -n), size);
+        let d = texel_at(px + vec2i(-n, 0), size);
+        let f = texel_at(px + vec2i(n, 0), size);
+        let gg = texel_at(px + vec2i(-n, n), size);
+        let h = texel_at(px + vec2i(0, n), size);
+        let i = texel_at(px + vec2i(n, n), size);
+        let gx = (c.rgb + 2.0 * f.rgb + i.rgb) - (a.rgb + 2.0 * d.rgb + gg.rgb);
+        let gy = (gg.rgb + 2.0 * h.rgb + i.rgb) - (a.rgb + 2.0 * b.rgb + c.rgb);
+        let steep = sqrt(gx * gx + gy * gy) / 4.0;
+        let white = clamp(vec3f(was.a) - p.z * steep, vec3f(0.0), vec3f(was.a));
+        return mix_px(was, vec4f(white, was.a), weight);
     }
     if kind == 18 {
         // An emboss: the CPU renderer's own, with the offset it rounded.

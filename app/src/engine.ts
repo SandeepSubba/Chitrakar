@@ -241,6 +241,8 @@ export type Filter =
   /** Squeezed toward `center` for a positive `amount` (to 1), swollen
    * out from it for a negative one, inside the same circle. */
   | { Pinch: { amount: number; radius: number; center: [number, number] } }
+  /** The edges dark on white, channel by channel, `amount` strong. */
+  | { FindEdges: { amount: number } }
   /** Rippled glass: moved across by a sine of how far down, and down by
    * one of how far across, `amplitude` high and `wavelength` long. */
   | { Ripple: { amplitude: number; wavelength: number } }
