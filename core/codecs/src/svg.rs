@@ -868,20 +868,15 @@ fn write_node(
                 let decoration = "";
                 // Every line is set from where it starts, however the block
                 // is aligned: the engine has already worked out where that
-                // is. Left to `text-anchor`, a reader measures the line
-                // itself, and readers do not agree on what a line's width
-                // is — a browser counts letter-spacing after the last
-                // letter too, so every right-set line with spacing sat a
-                // space to the left of the page's and every centred one
-                // half a space.
-                let slack = match spec.align {
-                    // A justified line starts at the left edge; what
-                    // carries it to the right one is the gap after each
-                    // space, said as `word-spacing` on its pieces.
-                    chitrakar_doc::TextAlign::Left | chitrakar_doc::TextAlign::Justify => 0.0,
-                    chitrakar_doc::TextAlign::Center => 0.5,
-                    chitrakar_doc::TextAlign::Right => 1.0,
-                };
+                // is (`SetLine::x`, a list's indent and all). Left to
+                // `text-anchor`, a reader measures the line itself, and
+                // readers do not agree on what a line's width is — a
+                // browser counts letter-spacing after the last letter too,
+                // so every right-set line with spacing sat a space to the
+                // left of the page's and every centred one half a space. A
+                // justified line starts at the left edge; what carries it
+                // to the right one is the gap after each space, said as
+                // `word-spacing` on its pieces.
                 // Along a guide, the guide is defined beside the text in
                 // one group that carries the text's placement. SVG reads
                 // a guide in the text's own space, and at least one
@@ -975,7 +970,18 @@ fn write_node(
                 } else {
                     for set in &block.lines {
                         let y = set.top + set.ascent;
-                        let x = block.inset + (block.inner - set.width) * slack;
+                        let x = set.x;
+                        // A list item's marker, on its first baseline,
+                        // in the look of where its paragraph begins.
+                        if let Some(mark) = &set.marker {
+                            let _ = write!(
+                                out,
+                                r#"<tspan x="{:.2}" y="{y:.2}"{}>{}</tspan>"#,
+                                mark.x,
+                                run_attrs(doc, spec, mark.run),
+                                escape_xml(&mark.text)
+                            );
+                        }
                         // A line no style run touches is one tspan, as it
                         // always was. One a run crosses is cut where the
                         // run starts and stops, each piece carrying only
@@ -4404,6 +4410,74 @@ mod tests {
                 "line {k} ({:?}) ends at {e} on the page and {r} in a reader",
                 line.text
             );
+        }
+    }
+
+    /// A list leaves with each marker on its item's first baseline, where
+    /// the engine sets it, and every line of the items in the engine's
+    /// column: a reader inks the marker and the text where the page does,
+    /// numbers ending together.
+    #[test]
+    fn a_list_leaves_as_the_engine_sets_it() {
+        for list in [
+            chitrakar_doc::TextList::Bullet,
+            chitrakar_doc::TextList::Numbered,
+        ] {
+            let mut doc = Document::new(200, 300, ColorMode::Rgb);
+            let root = doc.root();
+            let text: Vec<String> = (1..=11).map(|n| format!("item {n}")).collect();
+            let mut spec = chitrakar_doc::TextSpec::new(text.join("\n"), 18.0, RED);
+            spec.list = list;
+            let mut node = Node::text("t", spec.clone());
+            node.transform = chitrakar_doc::Transform::translation(10.0, 5.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let svg = export_svg(&doc).unwrap();
+            let set = chitrakar_render::text::set(&spec);
+            for line in &set.lines {
+                let mark = line.marker.as_ref().unwrap();
+                assert!(
+                    svg.contains(&format!(">{}</tspan>", escape_xml(&mark.text))),
+                    "{} is written: {svg}",
+                    mark.text
+                );
+            }
+            let theirs = resvg_alpha(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let w = doc.meta.width as usize;
+            for (k, line) in set.lines.iter().enumerate() {
+                let y0 = (5.0 + line.top).ceil() as usize;
+                let y1 = (5.0 + line.top + set.step).floor() as usize;
+                let edge = |a: &dyn Fn(usize) -> f32, from: usize, to: usize, left: bool| {
+                    let xs: Vec<usize> = (from..to).collect();
+                    let mut it: Box<dyn Iterator<Item = &usize>> = if left {
+                        Box::new(xs.iter())
+                    } else {
+                        Box::new(xs.iter().rev())
+                    };
+                    it.find(|&&x| (y0..y1).any(|y| a(y * w + x) > 0.5))
+                        .copied()
+                        .unwrap_or(0)
+                };
+                // The marker's ink: from the block's edge to where the
+                // text starts; the text's: from there on.
+                let split = (10.0 + line.x - 1.0) as usize;
+                for (from, to) in [(0, split), (split, w)] {
+                    for left in [true, false] {
+                        let e = edge(&|i| ours.pixels[i].a, from, to, left);
+                        let r = edge(&|i| theirs[i], from, to, left);
+                        assert!(
+                            e.abs_diff(r) <= 1,
+                            "{list:?} line {k}: the engine inks to {e}, a reader to {r} ({from}..{to}, from the {})",
+                            if left { "left" } else { "right" }
+                        );
+                    }
+                }
+            }
         }
     }
 

@@ -336,6 +336,9 @@ export function effectBody(e: Effect): Record<string, number | AuthoredColor> {
  * a wrapping block's width; without a width it is Left. */
 export type TextAlign = "Left" | "Center" | "Right" | "Justify";
 
+/** Whether a block's paragraphs are a list, and how each is marked. */
+export type TextList = "None" | "Bullet" | "Numbered";
+
 /** A stretch of a block set differently from the rest: the same choices
  * the block itself makes, made again over a range of its text, with
  * `null` meaning "however the block does it". Offsets are into the
@@ -366,6 +369,9 @@ export interface TextSpec {
   /** Space after each paragraph (after a newline, not a wrap), in ems of
    * the size. Absent in what older code built. */
   paragraph_spacing?: number;
+  /** Each paragraph an item of a list, marked in the margin. Absent in
+   * what older code built, which is no list. */
+  list?: TextList;
   /** Wrap width in document pixels; zero fits the text instead. */
   width: number;
   /** The face's registered name; empty is the bundled DejaVu Sans. */

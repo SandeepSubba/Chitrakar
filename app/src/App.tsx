@@ -53,6 +53,7 @@ import {
   Command,
   Effect,
   EffectKind,
+  TextList,
   Gradient,
   GradientSpread,
   GradientStop,
@@ -9836,6 +9837,7 @@ export function App() {
               // letters agree, and set properly when the typing ends.
               const mirrored =
                 !((spec.paragraph_spacing ?? 0) > 0) &&
+                (spec.list ?? "None") === "None" &&
                 !(spec.runs ?? []).some((r) => r.size != null);
               return (
                 <textarea
@@ -13806,6 +13808,22 @@ function KindProps({
             Text: { ...t, paragraph_spacing: v },
           }),
         )}
+        {/* Each paragraph an item: its bullet or number in the margin,
+            its lines hanging beside it. */}
+        <label className="row">
+          List
+          <select
+            value={t.list ?? "None"}
+            onChange={(e) =>
+              onEdit({ Text: { ...t, list: e.target.value as TextList } }, false)
+            }
+            aria-label="List"
+          >
+            <option value="None">None</option>
+            <option value="Bullet">Bullets</option>
+            <option value="Numbered">Numbers</option>
+          </select>
+        </label>
         {/* A row of its own rather than one label around both controls:
             a label labels one control, and a toggle sharing it would be
             what the label points at. */}

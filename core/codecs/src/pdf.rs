@@ -4862,6 +4862,52 @@ mod tests {
         assert!(read.contains("Wave hi"), "the words come back: {read:?}");
     }
 
+    /// A list's markers go into a PDF as the text they are, each on its
+    /// item's line before the item: read back, the numbers come with the
+    /// words. Self-skips without `gs`.
+    #[test]
+    fn a_lists_numbers_are_in_the_pdfs_text() {
+        if std::process::Command::new("gs")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipped: no ghostscript");
+            return;
+        }
+        let mut doc = Document::new(200, 100, chitrakar_color::ColorMode::Rgb);
+        let mut spec = chitrakar_doc::TextSpec::new("Apples\nPears\nPlums", 18.0, BLUE);
+        spec.list = chitrakar_doc::TextList::Numbered;
+        add(&mut doc, chitrakar_doc::Node::text("t", spec), [5.0, 5.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        let dir = std::env::temp_dir().join(format!("chitrakar-pdflist-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pdf_path = dir.join("list.pdf");
+        std::fs::write(&pdf_path, &pdf).unwrap();
+        let out = std::process::Command::new("gs")
+            .args([
+                "-q",
+                "-dNOPAUSE",
+                "-dBATCH",
+                "-dSAFER",
+                "-sDEVICE=txtwrite",
+                "-o",
+                "-",
+            ])
+            .arg(&pdf_path)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(out.status.success(), "ghostscript read the file");
+        let read = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<String> = read
+            .lines()
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines, vec!["1. Apples", "2. Pears", "3. Plums"], "{read:?}");
+    }
+
     /// them back through the ToUnicode map. Self-skips without `gs`.
     #[test]
     fn the_text_in_the_pdf_can_be_read_back() {

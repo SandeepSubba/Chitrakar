@@ -2314,6 +2314,17 @@ impl Rng {
                     });
                     spec.along_offset = self.between(0.0, 10.0);
                 }
+                // A quarter of the blocks in lines a list, bulleted or
+                // numbered, out of a stream of their own: its marker in
+                // the margin and the text set in past it, wrapped or not.
+                let mut side = Rng((self.0 ^ 0x1f83_d9ab_fb41_bd6b) | 1);
+                if spec.along.is_none() && side.chance(4) {
+                    spec.list = if side.chance(2) {
+                        crate::TextList::Bullet
+                    } else {
+                        crate::TextList::Numbered
+                    };
+                }
                 Box::new(Node::text(&name, spec))
             }
             3 => {

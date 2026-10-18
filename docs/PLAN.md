@@ -2356,6 +2356,48 @@ without reading anything else.*
     while dragged, a rectangle cut and drawn where it was, undo and redo,
     and with a piece picked a line past it cutting nothing and one
     through it cutting only it. Ignoring what is picked fails it.
+- **Lists ✅** (`TextSpec::list`: `None`, `Bullet` or `Numbered`;
+  `TextSpec::markers`; *List* among the text settings). Canva's and
+  Affinity's bulleted and numbered text: each paragraph an item, its
+  marker in the margin, and its lines hanging beside it.
+  - **Layout:** `list_marks` sets each item's marker in the style where
+    its paragraph begins. Every line of the block is indented by the
+    widest marker plus half an em, so numbers end in one column, and an
+    item's text starts in one column whatever its alignment. The wrap
+    width shrinks by that indent, and the block is that much wider. An
+    empty paragraph is a gap between items, neither marked nor counted.
+  - **One place for every consumer:** `set_line` adds the marker's
+    glyphs just before an item's first line, after the spacing a
+    justified line is given. So the raster draws markers, and `placed`
+    hands them to the PDF, with no code of their own. A marker glyph is
+    flagged (`Shaped::marker`): it stands for no byte of the block, says
+    its own characters, and lies under no underline. `set` gives each
+    line its x (`SetLine::x`, from `line_start`, which the SVG writer
+    had been working out a second time) and its marker (`SetMarker`).
+    The SVG writes the marker as a tspan of its own, on the item's
+    first baseline, in the look of where the paragraph begins.
+  - **Editing on the canvas:** a list is typed in a plain box, as a
+    block with paragraph spacing is, since a textarea cannot draw markers.
+  - **Fixture:** a quarter of the random blocks in lines are lists, from
+    a stream of their own.
+  - **Tests:**
+    - `a_list_hangs_its_items_beside_their_markers`: the indent, one
+      column of text, the bullet inked in the margin, "9." and "10."
+      ending together, an empty paragraph skipped, a wrapped item hanging
+      within the width, each bullet said once and a number a glyph at a
+      time, no band under a bullet in a styled line, and a non-list
+      untouched.
+    - `a_list_leaves_as_the_engine_sets_it`: resvg inks marker and text
+      within a pixel of the engine, for bullets and numbers.
+    - `a_lists_numbers_are_in_the_pdfs_text`: Ghostscript reads back
+      "1. Apples", "2. Pears", "3. Plums". The first attempt said the
+      whole number on its first glyph and nothing on the second, and
+      Ghostscript printed a control character for that.
+    - Sabotages that each fail one of them: no indent at the line's
+      start, no narrower wrap, bands over markers, no markers in the SVG,
+      and the SVG's lines at the block's edge.
+    - Smoke 9o25c: Bullets and Numbers keep the block's left edge and move
+      the text in past the marks, and undo is one step.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

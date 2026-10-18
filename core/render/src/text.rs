@@ -358,6 +358,7 @@ fn leaned(
 /// One positioned glyph of a shaped line: which glyph, where its origin
 /// sits along the baseline, and how far the pen moves past it — all in
 /// raster pixels at the scale the line was shaped for.
+#[derive(Clone)]
 struct Shaped {
     id: ab_glyph::GlyphId,
     x: f32,
@@ -368,6 +369,9 @@ struct Shaped {
     cluster: usize,
     /// Which of the block's style runs set this glyph, if any.
     run: Option<usize>,
+    /// A list item's marker rather than its text: drawn as any glyph is,
+    /// but standing for no byte of the block, and under no band.
+    marker: bool,
 }
 
 /// Shape one line: the font decides which glyphs the text becomes and where
@@ -466,6 +470,7 @@ fn shape_piece(
             advance: pos.x_advance as f32 * unit + heavier,
             cluster: from + info.cluster as usize,
             run,
+            marker: false,
         });
         *pen += pos.x_advance as f32 * unit + heavier + track;
     }
@@ -475,8 +480,9 @@ fn shape_piece(
 /// lean takes: the x its first glyph's origin lands on. A justified line
 /// starts at the left edge and is widened to the right one instead.
 fn line_start(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
-    let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
+    let slack = l.width - l.room.0 - l.room.1 - l.indent - l.widths[line_no];
     l.room.0
+        + l.indent
         + match spec.align {
             chitrakar_doc::TextAlign::Left | chitrakar_doc::TextAlign::Justify => 0.0,
             chitrakar_doc::TextAlign::Center => slack / 2.0,
@@ -504,7 +510,7 @@ fn word_gap(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
     if spaces == 0 {
         return 0.0;
     }
-    let slack = l.width - l.room.0 - l.room.1 - l.widths[line_no];
+    let slack = l.width - l.room.0 - l.room.1 - l.indent - l.widths[line_no];
     (slack / spaces as f32).max(0.0)
 }
 
@@ -579,7 +585,73 @@ fn set_line(spec: &TextSpec, l: &Layout, line_no: usize, scale: f32) -> (Vec<Sha
         }
         width += gap * n as f32;
     }
+    // A list item's marker, set just before where its first line starts,
+    // ahead of the line's own glyphs. After the spacing a justified line
+    // is given, which is the line's and not the marker's.
+    if let Some(mark) = &l.marks[line_no] {
+        let shift = -(mark.width + list_gap(spec, scale));
+        let mut out: Vec<Shaped> = mark
+            .glyphs
+            .iter()
+            .map(|g| Shaped {
+                x: g.x + shift,
+                ..g.clone()
+            })
+            .collect();
+        out.append(&mut glyphs);
+        glyphs = out;
+    }
     (glyphs, start, width)
+}
+
+/// A list item's marker as it is set: its glyphs from a pen at zero, in
+/// the styling where its paragraph begins, how wide they set, and what
+/// it says.
+#[derive(Clone)]
+struct Mark {
+    glyphs: Vec<Shaped>,
+    width: f32,
+    text: String,
+}
+
+/// The room between a list marker and its item's text: half an em.
+fn list_gap(spec: &TextSpec, scale: f32) -> f32 {
+    0.5 * spec.size.max(0.1) * scale
+}
+
+/// Each paragraph's marker, set, and the indent every line of a list
+/// takes: the widest marker and the room after it, so the items' text
+/// starts in one column and the numbers end in one. Nothing and no
+/// indent for a block that is not a list.
+fn list_marks(spec: &TextSpec, scale: f32) -> (Vec<Option<Mark>>, f32) {
+    let mut para_at = 0usize;
+    let mut widest = None::<f32>;
+    let marks: Vec<Option<Mark>> = spec
+        .markers()
+        .into_iter()
+        .zip(spec.text.split('\n'))
+        .map(|(marker, paragraph)| {
+            let at = para_at;
+            para_at += paragraph.len() + 1;
+            let text = marker?;
+            let run = pieces_in(spec, at, 1).first().and_then(|p| p.2);
+            let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
+            let (mut pen, mut glyphs) = (0f32, Vec::new());
+            shape_piece(&text, 0, &styling, scale, run, &mut pen, &mut glyphs);
+            for g in &mut glyphs {
+                g.marker = true;
+            }
+            let width = (pen - tracking(&styling, scale)).max(0.0);
+            widest = Some(widest.map_or(width, |w: f32| w.max(width)));
+            Some(Mark {
+                glyphs,
+                width,
+                text,
+            })
+        })
+        .collect();
+    let indent = widest.map_or(0.0, |w| w + list_gap(spec, scale));
+    (marks, indent)
 }
 
 /// The bands an underline and a strike-through paint, `[x0, y0, x1, y1]`
@@ -645,7 +717,7 @@ fn stretches(
         return vec![(left, left + width, None)];
     }
     let mut out: Vec<(f32, f32, Option<usize>)> = Vec::new();
-    for g in glyphs {
+    for g in glyphs.iter().filter(|g| !g.marker) {
         let (x0, x1) = (left + g.x, left + g.x + g.advance);
         match out.last_mut() {
             Some(last) if last.2 == g.run => last.1 = last.1.max(x1),
@@ -1076,8 +1148,24 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
         for (line_no, (line, _)) in l.lines.iter().enumerate() {
             let baseline = l.tops[line_no] + l.ascents[line_no];
             let (shaped, start, _) = set_line(spec, &l, line_no, 1.0);
-            let clusters: Vec<usize> = shaped.iter().map(|g| g.cluster).collect();
-            for (g, text) in shaped.iter().zip(cluster_texts(line, &clusters)) {
+            // A marker stands for no byte of the line: its glyphs say the
+            // marker, each its own share of it as a line's glyphs say the
+            // line's, and the line's own glyphs say the line.
+            let texts_of = |marker: bool, text: &str| {
+                let clusters: Vec<usize> = shaped
+                    .iter()
+                    .filter(|g| g.marker == marker)
+                    .map(|g| g.cluster)
+                    .collect();
+                cluster_texts(text, &clusters).into_iter()
+            };
+            let mark = l.marks[line_no].as_ref().map_or("", |m| m.text.as_str());
+            let (mut marked, mut body) = (texts_of(true, mark), texts_of(false, line));
+            let texts: Vec<String> = shaped
+                .iter()
+                .map(|g| if g.marker { marked.next() } else { body.next() }.unwrap_or_default())
+                .collect();
+            for (g, text) in shaped.iter().zip(texts) {
                 push(
                     g.run,
                     PlacedGlyph {
@@ -1219,6 +1307,20 @@ pub struct SetLine {
     /// How far below its top the line's baseline sits: the tallest
     /// ascent among the sizes set on it.
     pub ascent: f32,
+    /// Where the line starts: the x its first glyph's origin lands on,
+    /// given the alignment, a lean's room and a list's indent.
+    pub x: f32,
+    /// A list item's first line's marker.
+    pub marker: Option<SetMarker>,
+}
+
+/// A list item's marker as an exporter writes it: what it says, the x it
+/// starts at on its item's first baseline, and the style run whose look
+/// it takes — the one where its paragraph begins.
+pub struct SetMarker {
+    pub text: String,
+    pub x: f32,
+    pub run: Option<usize>,
 }
 
 pub struct SetBlock {
@@ -1256,6 +1358,12 @@ pub fn set(spec: &TextSpec) -> SetBlock {
                 gap: word_gap(spec, &l, k),
                 top: l.tops[k],
                 ascent: l.ascents[k],
+                x: line_start(spec, &l, k),
+                marker: l.marks[k].as_ref().map(|m| SetMarker {
+                    text: m.text.clone(),
+                    x: line_start(spec, &l, k) - m.width - list_gap(spec, 1.0),
+                    run: m.glyphs.first().and_then(|g| g.run),
+                }),
             })
             .collect(),
         width: l.width,
@@ -1302,11 +1410,18 @@ struct Layout {
     /// the lines: where the first glyph's origin sits, and what the block
     /// holds past the last one's.
     room: (f32, f32),
+    /// How far every line of a list is set in, past its markers; nothing
+    /// for a block that is not a list.
+    indent: f32,
+    /// The marker each line starts with: a list item's first line has its
+    /// item's, every other line none.
+    marks: Vec<Option<Mark>>,
 }
 
 fn layout(spec: &TextSpec, scale: f32) -> Layout {
     let font = fonts_for(spec).font.as_scaled(spec.size.max(0.1) * scale);
     let step = line_step(&font, spec);
+    let (paragraph_marks, indent) = list_marks(spec, scale);
     let lines = lines_of(spec, scale);
     let widths: Vec<f32> = lines
         .iter()
@@ -1317,10 +1432,23 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
     // holds still while the words inside it change; only a word too long
     // to fit pushes past that.
     let width = if spec.width > 0.0 {
-        widest.max(spec.width * scale)
+        (widest + indent).max(spec.width * scale)
     } else {
-        widest
+        widest + indent
     };
+    // A paragraph's marker goes on its first line, which is the one that
+    // starts where the paragraph does.
+    let marks = lines
+        .iter()
+        .map(|(_, at)| {
+            let starts = *at == 0 || spec.text.as_bytes().get(at - 1) == Some(&b'\n');
+            if !starts {
+                return None;
+            }
+            let paragraph = spec.text[..*at].bytes().filter(|b| *b == b'\n').count();
+            paragraph_marks.get(paragraph).cloned().flatten()
+        })
+        .collect();
     let room = lean_room(spec, &font);
     let gap = spec.paragraph_gap() * spec.size.max(0.1) * scale;
     let mut tops = Vec::with_capacity(lines.len());
@@ -1345,6 +1473,8 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
         widths,
         width: (width + room.0 + room.1).max(1.0),
         room,
+        indent,
+        marks,
     }
 }
 
@@ -1358,7 +1488,18 @@ fn layout(spec: &TextSpec, scale: f32) -> Layout {
 /// it was typed, so a run of spaces stays a run of spaces, an indent stays
 /// an indent, and only the single space at a cut is dropped.
 fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
-    let limit = spec.width * scale;
+    // A list's lines are set in past its markers, so they wrap that much
+    // sooner.
+    let indent = if spec.list == chitrakar_doc::TextList::None {
+        0.0
+    } else {
+        list_marks(spec, scale).1
+    };
+    let limit = if spec.width > 0.0 {
+        (spec.width * scale - indent).max(1.0)
+    } else {
+        0.0
+    };
     let mut out = Vec::new();
     let mut para_at = 0usize; // where the paragraph begins in the block
     for paragraph in spec.text.split('\n') {
@@ -1707,6 +1848,126 @@ mod tests {
                 a: 1.0,
             },
         )
+    }
+
+    /// A list: each item's marker in the margin, and every line of the
+    /// block — an item's wrapped lines too — set in one column past the
+    /// widest marker, so numbers end together whatever their width. An
+    /// empty paragraph is a gap, neither marked nor counted. The markers
+    /// are drawn, said once each to an exporter, and never underlined.
+    #[test]
+    fn a_list_hangs_its_items_beside_their_markers() {
+        let mut plain = spec("One\nTwo", 24.0);
+        let mut list = plain.clone();
+        list.list = chitrakar_doc::TextList::Bullet;
+        let (pw, _) = measure(&plain);
+        let (lw, _) = measure(&list);
+        let l = layout(&list, 1.0);
+        assert!(
+            l.indent > 0.0 && (lw - pw - l.indent).abs() < 0.5,
+            "wider by the indent"
+        );
+        let starts: Vec<f32> = (0..2).map(|k| line_start(&list, &l, k)).collect();
+        assert_eq!(starts[0], starts[1]);
+        assert!((starts[0] - l.room.0 - l.indent).abs() < 1e-4);
+        // The bullet is inked in the margin, left of where the text starts.
+        let r = rasterize(&list);
+        let margin: f32 = (0..r.height)
+            .flat_map(|y| (0..(starts[0] as u32)).map(move |x| (x, y)))
+            .map(|(x, y)| r.coverage[(y * r.width + x) as usize])
+            .sum();
+        assert!(margin > 5.0, "the bullet is drawn in the margin: {margin}");
+        // Numbers: nine and ten end together, and an empty paragraph is
+        // a gap between items rather than one.
+        let mut numbered = spec(
+            &(1..=10)
+                .map(|n| format!("item {n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            20.0,
+        );
+        numbered.text.insert_str(0, "first\n\n");
+        numbered.list = chitrakar_doc::TextList::Numbered;
+        let markers = numbered.markers();
+        assert_eq!(markers[0].as_deref(), Some("1."));
+        assert_eq!(markers[1], None, "the empty paragraph is not an item");
+        assert_eq!(markers[11].as_deref(), Some("11."));
+        let block = set(&numbered);
+        let ends: Vec<f32> = block
+            .lines
+            .iter()
+            .filter_map(|line| line.marker.as_ref().map(|m| (m, line.x)))
+            .map(|(m, x)| x - m.x)
+            .collect();
+        assert_eq!(ends.len(), 11);
+        let text_x: Vec<f32> = block.lines.iter().map(|line| line.x).collect();
+        assert!(
+            text_x.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-4),
+            "one column of text"
+        );
+        // "first" is 1., the gap is no item, so line nine says 9.
+        assert_eq!(block.lines[9].marker.as_ref().unwrap().text, "9.");
+        let nine = block.lines[9].marker.as_ref().unwrap().x;
+        let ten = block.lines[10].marker.as_ref().unwrap().x;
+        assert!(
+            ten < nine - 1.0,
+            "\"10.\" starts further left than \"9.\" so the two end together"
+        );
+        // An item that wraps hangs its second line beside the marker.
+        plain = spec("a long item that wraps\nshort", 20.0);
+        plain.width = 140.0;
+        plain.list = chitrakar_doc::TextList::Bullet;
+        let block = set(&plain);
+        assert!(block.lines.len() >= 3, "{}", block.lines.len());
+        assert!(block.lines[0].marker.is_some() && block.lines[1].marker.is_none());
+        assert_eq!(block.lines[0].x, block.lines[1].x);
+        assert!(
+            block
+                .lines
+                .iter()
+                .all(|line| line.x + line.width <= 140.0 + 1.0),
+            "within the width"
+        );
+        // Placed for an exporter: each bullet said once, and an underline
+        // starting where the text does — with a run on the line, so the
+        // band is measured glyph by glyph, as styled text is.
+        list.underline = true;
+        let mut red = chitrakar_doc::StyleRun::over(0, 2);
+        red.fill = Some(AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        });
+        list.runs = vec![red];
+        let placed = placed(&list);
+        let said: Vec<&str> = placed
+            .runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter().map(|g| g.text.as_str()))
+            .filter(|t| *t == "\u{2022}")
+            .collect();
+        assert_eq!(said.len(), 2);
+        // A number is said a glyph at a time, as any text is.
+        let placed_numbers = super::placed(&numbered);
+        let said: String = placed_numbers.runs[0]
+            .glyphs
+            .iter()
+            .take(6)
+            .map(|g| g.text.as_str())
+            .collect();
+        assert!(said.starts_with("1.first"), "{said:?}");
+        assert!(
+            placed
+                .decorations
+                .iter()
+                .all(|(band, _)| band[0] >= starts[0] - 0.5),
+            "no band under a bullet: {:?}",
+            placed.decorations
+        );
+        // Not a list: no indent, no markers, the block it always was.
+        let l = layout(&spec("One\nTwo", 24.0), 1.0);
+        assert!(l.indent == 0.0 && l.marks.iter().all(Option::is_none));
     }
 
     #[test]

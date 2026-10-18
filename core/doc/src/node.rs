@@ -1247,6 +1247,19 @@ impl Guide {
     }
 }
 
+/// Whether a block's paragraphs are the items of a list, and how each is
+/// marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum TextList {
+    /// Paragraphs, as text always was.
+    #[default]
+    None,
+    /// Each item marked with a bullet.
+    Bullet,
+    /// Each item marked with its number, counted from one.
+    Numbered,
+}
+
 /// Where each line sits inside the block's own width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum TextAlign {
@@ -1326,6 +1339,14 @@ pub struct TextSpec {
     /// set the way it always was.
     #[serde(default)]
     pub runs: Vec<StyleRun>,
+    /// Each paragraph an item of a list: its bullet or its number set in
+    /// the margin before its first line, and every line of the block
+    /// indented past the widest of them, so an item's lines hang beside
+    /// its marker. An empty paragraph is a gap between items rather than
+    /// an item, and is neither marked nor counted. Additive: a block
+    /// written before lists were is paragraphs.
+    #[serde(default)]
+    pub list: TextList,
 }
 
 /// A stretch of a block set differently from the rest: the same choices
@@ -1415,7 +1436,28 @@ impl TextSpec {
             along: None,
             along_offset: 0.0,
             runs: Vec::new(),
+            list: TextList::None,
         }
+    }
+
+    /// The marker of each paragraph, in order: a bullet or a number for
+    /// each item of a list, nothing for an empty paragraph and nothing at
+    /// all when the block is not a list.
+    pub fn markers(&self) -> Vec<Option<String>> {
+        let mut item = 0usize;
+        self.text
+            .split('\n')
+            .map(|paragraph| {
+                if self.list == TextList::None || paragraph.is_empty() {
+                    return None;
+                }
+                item += 1;
+                Some(match self.list {
+                    TextList::Bullet => "\u{2022}".to_string(),
+                    _ => format!("{item}."),
+                })
+            })
+            .collect()
     }
 
     /// The line height actually used, guarded against a zero or negative

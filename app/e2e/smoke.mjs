@@ -7922,6 +7922,67 @@ assert(
   assert((await rows()) === 3, `and through it, only it (${await rows()} layers)`);
 }
 
+// 9o25c. A list: each line of a block an item, its bullet in the margin
+// and its text set in past it; numbers the same; one undo for the
+// choice.
+{
+  await newDocument(600, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Text");
+  await page.mouse.click(...at(40, 40));
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.mouse.click(...at(60, 60));
+  await page.waitForTimeout(200);
+  await page.locator('textarea[aria-label="Text content"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    setter.call(el, "Ink\nInk");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  // The ink's leftmost and rightmost columns across the page, in document
+  // pixels.
+  const span = () =>
+    page.evaluate(() => {
+      const el = document.getElementById("engine-canvas");
+      const s = Number(el.dataset.frameScale) || 1;
+      const ox = Number(el.dataset.originX) || 0;
+      const oy = Number(el.dataset.originY) || 0;
+      const [w, h] = [Math.round(600 * s), Math.round(300 * s)];
+      const img = el.getContext("2d").getImageData(Math.round(ox), Math.round(oy), w, h).data;
+      let [lo, hi] = [Infinity, -Infinity];
+      for (let i = 0; i < img.length; i += 4) {
+        if (img[i + 3] > 128) {
+          const x = ((i / 4) % w) / s;
+          lo = Math.min(lo, x);
+          hi = Math.max(hi, x);
+        }
+      }
+      return [lo, hi];
+    });
+  const [lo, hi] = await span();
+  assert(hi > lo + 40, `two lines of ink (${lo}..${hi})`);
+  await page.selectOption('select[aria-label="List"]', "Bullet");
+  await page.waitForTimeout(300);
+  const [lo2, hi2] = await span();
+  assert(
+    Math.abs(lo2 - lo) < 6 && hi2 > hi + 15,
+    `bulleted, the marks sit where the block starts and the text moves in past them (${lo}..${hi} -> ${lo2}..${hi2})`,
+  );
+  await page.selectOption('select[aria-label="List"]', "Numbered");
+  await page.waitForTimeout(300);
+  const [lo3, hi3] = await span();
+  assert(Math.abs(lo3 - lo) < 6 && hi3 > hi + 15, `numbered, the same (${lo3}..${hi3})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator('select[aria-label="List"]').inputValue()) === "Bullet",
+    "one undo is one choice",
+  );
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {
