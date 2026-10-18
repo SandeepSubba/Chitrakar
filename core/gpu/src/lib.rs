@@ -2778,6 +2778,13 @@ fn one(
         }
         shadings
     };
+    // Its colour overlays, folded into one colour and one strength by the
+    // CPU renderer's own arithmetic, for the quad that lays it down.
+    let overlay = if node.effects.is_empty() || rewriting {
+        None
+    } else {
+        chitrakar_render::overlay_tint(doc, &node.effects)
+    };
     // A layer held to the one under it shows only where that
     // layer's own alpha does. That alpha is the layer drawn aside,
     // which is what the CPU renderer does to it — so it arrives
@@ -2964,6 +2971,9 @@ fn one(
         }
     }
     let alone = !shadings.is_empty()
+        // A layer in a colour overlay, which is recoloured where its
+        // surface comes back down.
+        || overlay.is_some()
         // A brush layer always: its strokes go on one after another and
         // an eraser takes off what the ones before it left, which is a
         // conversation among the strokes and not with the page. On a
@@ -3023,7 +3033,10 @@ fn one(
     // for a shadow at no opacity, came out otherwise. So a blended clone
     // goes aside too, as the reference renderer sends it.
     let clone = matches!(node.kind, NodeKind::Clone { .. });
-    let worn = !shadings.is_empty() || (clone && node.blend != BlendMode::Normal);
+    // A clone in a colour overlay goes aside on the same terms: the
+    // recolouring is of the whole of what it laid.
+    let worn =
+        !shadings.is_empty() || (clone && (node.blend != BlendMode::Normal || overlay.is_some()));
     let alone = alone && (worn || !clone);
     if alone {
         out.draws.push(Item::of(Draw::Open));
@@ -3834,9 +3847,17 @@ fn one(
                 // and the effects around it alike.
                 opacity
             },
-            [blend_index(node.blend) as f32, 0.0, 0.0, 0.0],
+            // The overlay rides beside the blend: its strength, and its
+            // colour where a quad's three extra numbers go. None is
+            // nothing, which is every quad that is not this one.
+            [
+                blend_index(node.blend) as f32,
+                overlay.map_or(0.0, |(_, w)| w),
+                0.0,
+                0.0,
+            ],
             [0.0; 4],
-            [0.0; 3],
+            overlay.map_or([0.0; 3], |(c, _)| c),
         ));
         out.draws.push(Item::of(Draw::Close {
             quad,
@@ -5500,6 +5521,9 @@ fn effect_of(
         premultiplied_color(doc, color, opacity)
     };
     match effect {
+        // No pass of its own: it is the layer's own pixels recoloured on
+        // the quad that lays the layer down (`overlay_tint`).
+        E::ColorOverlay { .. } => Some(Vec::new()),
         E::DropShadow {
             dx,
             dy,
@@ -10306,6 +10330,180 @@ mod tests {
     /// where that pixel is on the page, so they ride the same copy-aside
     /// an adjustment does; the other three read a neighbourhood, and the
     /// page goes back to the CPU for them.
+    /// A colour overlay is the layer's own pixels recoloured where its
+    /// surface comes back down, and it is the CPU's: on a shape alone, a
+    /// shape with a shadow too, two overlays at once, a blended shape (the
+    /// other quad that lays a surface down), a faded and masked shape, and
+    /// a group of two that overlap.
+    #[test]
+    fn a_colour_overlay_is_the_cpus() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let overlay = |c: AuthoredColor, opacity: f32| E::ColorOverlay { color: c, opacity };
+        let page = |effects: Vec<E>, blend: BlendMode, faded: bool, group: bool| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    rgb(0.9, 0.85, 0.3),
+                ),
+                Transform::default(),
+            );
+            let id = if group {
+                let root = doc.root();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::group("g")),
+                })
+                .unwrap();
+                let g = doc.children_of(root).unwrap()[1];
+                for (i, (x, c)) in [(6.0, rgb(1.0, 0.0, 0.0)), (20.0, rgb(0.0, 0.6, 0.2))]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut n = filled(
+                        "r",
+                        VectorShape::Rect {
+                            width: 24.0,
+                            height: 20.0,
+                            radius: 4.0,
+                        },
+                        c,
+                    );
+                    n.transform = Transform::translation(x, 8.0 + 4.0 * i as f32);
+                    doc.apply(Command::AddNode {
+                        parent: g,
+                        index: i,
+                        node: n,
+                    })
+                    .unwrap();
+                }
+                g
+            } else {
+                add(
+                    &mut doc,
+                    filled(
+                        "disc",
+                        VectorShape::Ellipse { rx: 17.3, ry: 12.6 },
+                        rgb(1.0, 0.0, 0.0),
+                    ),
+                    Transform::translation(11.4, 7.7),
+                )
+            };
+            doc.apply(Command::SetEffects { id, effects }).unwrap();
+            doc.apply(Command::SetBlendMode { id, blend }).unwrap();
+            if faded {
+                doc.apply(Command::SetOpacity { id, opacity: 0.6 }).unwrap();
+            }
+            doc
+        };
+        let shadow = E::DropShadow {
+            dx: 2.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: rgb(0.1, 0.0, 0.2),
+            opacity: 0.7,
+            spread: 0.0,
+        };
+        let blue = rgb(0.1, 0.2, 1.0);
+        let cases = [
+            (
+                "alone",
+                page(
+                    vec![overlay(blue.clone(), 1.0)],
+                    BlendMode::Normal,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "with a shadow",
+                page(
+                    vec![shadow, overlay(blue.clone(), 0.7)],
+                    BlendMode::Normal,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "two at once",
+                page(
+                    vec![overlay(blue.clone(), 0.5), overlay(rgb(0.0, 0.9, 0.1), 0.4)],
+                    BlendMode::Normal,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "blended",
+                page(
+                    vec![overlay(blue.clone(), 0.8)],
+                    BlendMode::Multiply,
+                    false,
+                    false,
+                ),
+            ),
+            (
+                "faded",
+                page(
+                    vec![overlay(blue.clone(), 1.0)],
+                    BlendMode::Normal,
+                    true,
+                    false,
+                ),
+            ),
+            (
+                "a group",
+                page(
+                    vec![overlay(blue.clone(), 1.0)],
+                    BlendMode::Normal,
+                    false,
+                    true,
+                ),
+            ),
+        ];
+        for (what, doc) in cases {
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            // Held to what the two renderers part by on the same page in
+            // the shape's own colour: the edge of an ellipse is
+            // antialiased each its own way, and the overlay should add
+            // nothing to that.
+            let mut plain = doc.clone();
+            let id = plain.children_of(plain.root()).unwrap()[1];
+            let worn = plain.node(id).unwrap().effects.clone();
+            let kept: Vec<E> = worn
+                .into_iter()
+                .filter(|e| !matches!(e, E::ColorOverlay { .. }))
+                .collect();
+            plain
+                .apply(Command::SetEffects { id, effects: kept })
+                .unwrap();
+            let bare = chitrakar_render::render(&plain).unwrap();
+            let (was_mean, was_worst) = difference(&gpu.render(&plain).unwrap(), &bare);
+            assert!(
+                mean < was_mean + 0.001 && worst < was_worst + 0.01,
+                "{what}: mean channel difference {mean:.5} (worst {worst:.3}), \
+                 against {was_mean:.5} ({was_worst:.3}) without the overlay"
+            );
+            // And it is not the page without the overlay.
+            let (moved, _) = difference(&drawn, &bare);
+            assert!(moved > 0.01, "{what}: the overlay shows ({moved:.4})");
+        }
+    }
+
     #[test]
     fn the_filters_that_read_one_pixel_are_drawn_the_way_the_cpu_draws_them() {
         use chitrakar_doc::Filter as F;

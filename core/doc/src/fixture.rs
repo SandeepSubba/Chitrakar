@@ -3080,6 +3080,15 @@ impl Rng {
                     opacity: side.between(0.4, 1.0),
                 });
             }
+            // A third of them in a colour overlay too, from a stream of
+            // their own so no other page moves.
+            let mut tint = Rng((self.0 ^ 0x94d0_49bb_1331_11eb) | 1);
+            if tint.chance(3) {
+                effects.push(Effect::ColorOverlay {
+                    color: tint.color(1.0),
+                    opacity: tint.between(0.3, 1.0),
+                });
+            }
             doc.apply(Command::SetEffects { id, effects }).unwrap();
         }
         // Held to the layer below, when there is one and this is not it.

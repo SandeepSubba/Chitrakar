@@ -696,6 +696,17 @@ impl Page {
                 }
             }
         }
+        // A colour overlay is the layer's own pixels recoloured, which no
+        // picture beside a live layer can be — laid over it, a soft edge
+        // keeps a ring of the colour it had. So the layer goes as the
+        // pixels the engine draws.
+        if node
+            .effects
+            .iter()
+            .any(|e| matches!(e, chitrakar_doc::Effect::ColorOverlay { .. }))
+        {
+            return Ok(false);
+        }
         // A layer held to the one below it is drawn under a soft mask of
         // that one (`draw_siblings`); whether a run can be is asked of the
         // run, by whoever holds it (`siblings_live`).

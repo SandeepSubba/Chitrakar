@@ -2670,6 +2670,67 @@ without reading anything else.*
       kernel row read wrong in the shader.
     - Smoke 9o25k: flat ground white, the block's edge dark, and no
       strength white all over.
+- **Colour overlay ✅** (`Effect::ColorOverlay { color, opacity }`,
+  `overlay_tint`, `wear_overlay`; *Add effect › Colour overlay* with its
+  colour and strength). The layer in one colour, Photoshop's Color
+  Overlay: a picture, a shape or a group recoloured without touching
+  what it is made of.
+  - **Why it waited:** a first draft painted the colour over the layer
+    after the layer had come down, as the inner shadow is painted. At a
+    soft edge that leaves the layer's own colour under the new one, a
+    ring of it all the way round. The draft sat in a stash for that.
+  - **Recolouring, not painting over:** now it is the layer's own pixels,
+    each premultiplied channel `w` of the way to the colour at the
+    pixel's own cover, before they meet the page and before its other
+    effects. Those are grown from the cover, which this keeps. A red
+    disc overlaid in blue is the blue disc, pixel for pixel.
+  - **Folded into one:** two overlays taken in turn are one toward the
+    mix of the two, weighed by how much of each is left showing.
+    `overlay_tint` folds them, so the GPU, which has one quad to carry
+    them on, gets what taking them in turn gives.
+  - **The GPU:** an overlay sends the layer to a surface of its own; a
+    clone layer counts it as worn and goes aside. The quad that lays the
+    surface back down carries the strength beside the blend and the
+    colour in its three extra numbers. `fs_image` and `fs_blend` recolour
+    what they read, and a strength of none is every other picture.
+  - **SVG** writes it inside the layer's effect filter: the colour cut to
+    the layer's alpha, weighed `w` against what came before at `1 - w` by
+    `feComposite` arithmetic. That is premultiplied and in linear light,
+    as a reader composites and as the engine recolours. The merge lays
+    the recoloured source between what is under and over. The importer
+    reads the chain back, in order, to the source.
+  - **PDF** has no recolouring beside a live layer, so a layer in an
+    overlay goes as the pixels the engine draws.
+  - **One case it does not reach:** an upright frame holding something
+    that reads the page is drawn where it stands rather than from its
+    surface (`frame_in_place`), so an overlay on one is not applied. The
+    GPU hands that page back already.
+  - **Fixture:** a third of the random layers wearing effects wear an
+    overlay too, from a stream of their own. Every cross-renderer, export
+    and round-trip audit passed with them before anything else was
+    written for it.
+  - **Tests:**
+    - `a_colour_overlay_recolours_the_layer_to_its_edge`: the blue disc
+      edge and all, half strength half way, two in turn, a shadow it
+      wears unchanged, and a group one colour where its layers overlap.
+    - `a_colour_overlay_is_the_cpus` (GPU): alone, with a shadow, two at
+      once, blended, faded and a group. Each is held to what the two
+      renderers part by on the same page without the overlay, since an
+      ellipse's edge is antialiased each its own way.
+    - `a_colour_overlay_exported_comes_back_as_itself`: a reader draws
+      blue on black with no red at the edge; a shadow and two overlays
+      come back in turn; the page brought back is the page.
+    - Sabotages that each fail one of them: recolouring without the
+      pixel's cover (CPU and shader), folding two overlays wrongly, no
+      call on the layer, no surface of its own on the GPU, the blended
+      quad not recolouring, the SVG weights not adding to one, the SVG
+      painted over as the draft was (red 123 at the edge), and the
+      importer's order reversed. Two of these first passed, because blue
+      has no red and the fold was checked in red and green only; the
+      test now looks at the channels that can tell.
+    - Smoke 8x2d: listed, the shape the overlay's colour all over with
+      nothing outside changed, a new colour, half strength half way, one
+      undo, and removed.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

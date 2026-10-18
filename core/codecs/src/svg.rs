@@ -1168,9 +1168,30 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
     };
     let mut body = String::new();
     let (mut under, mut over) = (Vec::new(), Vec::new());
+    // What goes down between them: the layer, or the layer in its colour
+    // overlays, each taken over the one before.
+    let mut source = String::from("SourceGraphic");
     for (k, effect) in node.effects.iter().enumerate() {
         let name = format!("fx{k}");
         match effect {
+            // Every pixel of the layer `w` of the way to the colour at its
+            // own cover: the colour cut to the layer, weighed `w` against
+            // the layer at `1 - w` — premultiplied and in linear light,
+            // which is how a reader composites and how the engine
+            // recolours (`wear_overlay`).
+            chitrakar_doc::Effect::ColorOverlay { color, opacity } => {
+                let w = (color.alpha() * opacity).clamp(0.0, 1.0);
+                if w.is_nan() || w <= 0.0 {
+                    continue;
+                }
+                let _ = write!(
+                    body,
+                    r#"<feFlood flood-color="{}" flood-opacity="1"/><feComposite in2="SourceAlpha" operator="in" result="{name}f"/><feComposite in="{name}f" in2="{source}" operator="arithmetic" k1="0" k2="{w}" k3="{}" k4="0" result="{name}"/>"#,
+                    color_hex(doc, color),
+                    1.0 - w
+                );
+                source = name;
+            }
             chitrakar_doc::Effect::DropShadow {
                 dx,
                 dy,
@@ -1321,14 +1342,14 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
             }
         }
     }
-    if under.is_empty() && over.is_empty() {
+    if under.is_empty() && over.is_empty() && source == "SourceGraphic" {
         return None;
     }
     let mut merge = String::from("<feMerge>");
     for n in under
         .iter()
         .map(String::as_str)
-        .chain(["SourceGraphic"])
+        .chain([source.as_str()])
         .chain(over.iter().map(String::as_str))
     {
         let _ = write!(merge, r#"<feMergeNode in="{n}"/>"#);

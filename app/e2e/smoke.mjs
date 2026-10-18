@@ -3465,6 +3465,62 @@ assert(
   );
 }
 
+// 8x2d. Colour overlay: the layer in one colour. Added, the shape goes
+// the overlay's colour all over and nothing outside it changes; a new
+// colour is that colour; at half strength it is half way from the
+// shape's own; one undo is one step back; removed, the shape is itself.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#2266cc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const own = await canvasPixel(300, 200);
+  await page.selectOption('select[aria-label="Add effect"]', "ColorOverlay");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".effect .effect-head span").allTextContents()).join() === "Colour overlay",
+    "the overlay is listed",
+  );
+  const black = [await canvasPixel(300, 200), await canvasPixel(103, 103), await canvasPixel(497, 297)];
+  assert(
+    black.every((p) => p[0] < 3 && p[1] < 3 && p[2] < 3 && p[3] === 255),
+    `the shape is the overlay's colour all over (${black.join(" / ")})`,
+  );
+  assert((await canvasPixel(97, 200))[3] === 0, "and nothing outside it changes");
+  await page.locator('input[aria-label="Colour overlay colour"]').evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    setter.call(el, "#ff0000");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  const red = await canvasPixel(300, 200);
+  assert(red[0] > 250 && red[1] < 3 && red[2] < 3, `a new colour is that colour (${red})`);
+  await setSlider("Colour overlay strength", 0.5);
+  await page.waitForTimeout(300);
+  const half = await canvasPixel(300, 200);
+  // Half way in light: between the shape's own and red, nearer the
+  // brighter of the two on the display's curve.
+  assert(
+    half[0] > own[0] + 60 && half[2] < own[2] - 30 && half[2] > 20,
+    `half strength is half way from its own colour (${own} -> ${half})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(300, 200)).join() === red.join(), "one undo is the full red again");
+  await page.click('button[aria-label="Remove Colour overlay"]');
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(300, 200)).join() === own.join(), "and removed, the shape is itself");
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

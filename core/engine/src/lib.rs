@@ -7101,7 +7101,8 @@ impl Session {
             match effect {
                 chitrakar_doc::Effect::DropShadow { color, .. }
                 | chitrakar_doc::Effect::InnerShadow { color, .. }
-                | chitrakar_doc::Effect::Outline { color, .. } => flat(color),
+                | chitrakar_doc::Effect::Outline { color, .. }
+                | chitrakar_doc::Effect::ColorOverlay { color, .. } => flat(color),
                 chitrakar_doc::Effect::Bevel {
                     highlight, shadow, ..
                 } => {

@@ -717,8 +717,12 @@ fn effects_of(
             // This editor's own: what goes under the source, the source,
             // and what goes over it.
             Kind::Merge(m) => {
-                let at_source = m.inputs().iter().position(|i| *i == Input::SourceGraphic)?;
+                // The source, or the source in its colour overlays.
                 let inputs = m.inputs();
+                let at_source = inputs
+                    .iter()
+                    .position(|i| *i == Input::SourceGraphic || recoloured(i, &named).is_some())?;
+                let overlays = recoloured(&inputs[at_source], &named)?;
                 let mut k = 0;
                 while k < inputs.len() {
                     if k == at_source {
@@ -739,6 +743,7 @@ fn effects_of(
                     out.push(fx);
                     k += 1;
                 }
+                out.extend(overlays);
             }
             // A design tool's: the source blended in over the shadows,
             // each blended in over the ones before it, down to nothing.
@@ -778,6 +783,51 @@ fn effects_of(
         .map(|edge| (2.0 * edge).clamp(0.0, 1.0))
         .filter(|fade| *fade > 1e-3 && *fade < 0.999);
     Some((out, fade))
+}
+
+/// The colour overlays between a merge's under and over, read back off
+/// the chain this editor's exporter writes for them (`svg::effect_filter`):
+/// each a flood cut to the source's alpha, weighed `w` against what came
+/// before at `1 - w`, down to the source itself — none, for the source
+/// alone. In the order they were taken. `None` when the chain is anything
+/// else.
+fn recoloured<'a>(
+    input: &usvg::filter::Input,
+    named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
+) -> Option<Vec<chitrakar_doc::Effect>> {
+    use usvg::filter::{CompositeOperator, Input, Kind};
+    if *input == Input::SourceGraphic {
+        return Some(Vec::new());
+    }
+    let Kind::Composite(c) = named(input)?.kind() else {
+        return None;
+    };
+    let CompositeOperator::Arithmetic { k1, k2, k3, k4 } = c.operator() else {
+        return None;
+    };
+    // The two weights of one mix, and nothing else in it.
+    if k1.abs() > 1e-6
+        || k4.abs() > 1e-6
+        || (k2 + k3 - 1.0).abs() > 1e-4
+        || !(0.0..=1.0).contains(&k2)
+    {
+        return None;
+    }
+    let Kind::Composite(cut) = named(c.input1())?.kind() else {
+        return None;
+    };
+    if cut.operator() != CompositeOperator::In || *cut.input2() != Input::SourceAlpha {
+        return None;
+    }
+    let Kind::Flood(f) = named(cut.input1())?.kind() else {
+        return None;
+    };
+    let mut before = recoloured(c.input2(), named)?;
+    before.push(chitrakar_doc::Effect::ColorOverlay {
+        color: color_of(f.color(), 1.0),
+        opacity: k2 * f.opacity().get(),
+    });
+    Some(before)
 }
 
 /// Half a bevel, read off the filter: which half, its colour and
@@ -4926,6 +4976,122 @@ mod tests {
         }
     }
 
+    /// Colour overlays go out as the layer recoloured inside its filter
+    /// and come back as themselves, beside a shadow, in the order they
+    /// were taken: a reader draws the recoloured layer with no ring of
+    /// its old colour at the soft edge, and the page brought back in is
+    /// the page that went out.
+    #[test]
+    fn a_colour_overlay_exported_comes_back_as_itself() {
+        use chitrakar_doc::Effect;
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let page = |effects: Vec<Effect>| {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let root = doc.root();
+            let mut ground = Node::vector(
+                "ground",
+                VectorShape::Rect {
+                    width: 64.0,
+                    height: 48.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut ground.kind {
+                *fill = Some(ink(0.0, 0.0, 0.0));
+            }
+            let mut disc = Node::vector("disc", VectorShape::Ellipse { rx: 19.3, ry: 14.6 });
+            disc.transform = chitrakar_doc::Transform::translation(12.4, 9.7);
+            if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+                *fill = Some(ink(1.0, 0.0, 0.0));
+            }
+            disc.effects = effects;
+            for (index, node) in [ground, disc].into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        // Wholly blue on black: a reader's soft edge is blue at its
+        // cover, with no red in it anywhere.
+        let svg = crate::export_svg(&page(vec![Effect::ColorOverlay {
+            color: ink(0.0, 0.0, 1.0),
+            opacity: 1.0,
+        }]))
+        .unwrap();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(64, 48).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut drawn.as_mut(),
+        );
+        let reddest = drawn.data().chunks(4).map(|p| p[0]).max().unwrap();
+        let bluest = drawn.data().chunks(4).map(|p| p[2]).max().unwrap();
+        assert!(
+            reddest <= 2 && bluest > 250,
+            "blue with no red ring: red {reddest}, blue {bluest}"
+        );
+
+        let shadow = Effect::DropShadow {
+            dx: 2.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: ink(0.3, 0.3, 0.3),
+            opacity: 0.8,
+            spread: 0.0,
+        };
+        let doc = page(vec![
+            shadow,
+            Effect::ColorOverlay {
+                color: ink(0.0, 0.0, 1.0),
+                opacity: 0.5,
+            },
+            Effect::ColorOverlay {
+                color: ink(0.0, 0.9, 0.1),
+                opacity: 0.4,
+            },
+        ]);
+        let svg = crate::export_svg(&doc).unwrap();
+        let back = import_svg(svg.as_bytes()).unwrap();
+        let fx = &back.shapes[1].effects;
+        let overlays: Vec<f32> = fx
+            .iter()
+            .filter_map(|e| match e {
+                Effect::ColorOverlay { opacity, .. } => Some(*opacity),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            fx.len() == 3
+                && matches!(fx[0], Effect::DropShadow { .. })
+                && overlays.len() == 2
+                && (overlays[0] - 0.5).abs() < 1e-4
+                && (overlays[1] - 0.4).abs() < 1e-4,
+            "the shadow and both overlays, in turn: {fx:?}"
+        );
+        let before = chitrakar_render::render(&doc).unwrap();
+        let after = chitrakar_render::render(&brought_in(&svg, 64, 48)).unwrap();
+        let worst = before
+            .pixels
+            .iter()
+            .zip(&after.pixels)
+            .map(|(p, q)| {
+                (p.r - q.r)
+                    .abs()
+                    .max((p.g - q.g).abs())
+                    .max((p.b - q.b).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 0.02,
+            "the page came back as it was, worst {worst}; {fx:?}"
+        );
+    }
+
     /// A bevel goes out as light and comes back as a bevel, beside a
     /// shadow under it: the same light from the same side at the same
     /// height, a size and depth that draw the same, on a card on the page
@@ -5214,6 +5380,7 @@ mod tests {
                     Effect::Outline { .. } => "outline",
                     Effect::InnerShadow { .. } => "inner",
                     Effect::Bevel { .. } => "bevel",
+                    Effect::ColorOverlay { .. } => "overlay",
                 })
                 .collect::<Vec<_>>()
         };

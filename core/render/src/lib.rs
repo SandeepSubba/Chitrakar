@@ -1762,6 +1762,9 @@ fn lay_clone(
             }
         }
     }
+    if let Some(tint) = overlay_tint(doc, &node.effects) {
+        wear_overlay(&mut laid, (0, 0), region, tint);
+    }
     for effect in node.effects.iter().filter(|e| !e.over()) {
         draw_effect(
             dst,
@@ -1837,6 +1840,9 @@ fn lay_levels(
                 fade(&mut pic, *mask, *space, *opacity);
             }
             Level::Wear(node, space) => {
+                if let Some(tint) = overlay_tint(doc, &node.effects) {
+                    wear_overlay(&mut pic, (0, 0), region, tint);
+                }
                 let mut next = Surface::new(dst.width, dst.height);
                 for effect in node.effects.iter().filter(|e| !e.over()) {
                     draw_effect(
@@ -2402,6 +2408,11 @@ fn draw_layer(
             width: layer.width,
             height: layer.height,
         });
+        // The layer in its overlay's colour before anything meets the
+        // page: the effects are grown from its cover, which this keeps.
+        if let Some(tint) = overlay_tint(doc, &node.effects) {
+            wear_overlay(&mut layer, origin, layer_clip, tint);
+        }
         // Effects behind the layer, then the layer, then the ones that
         // belong on top of it — an inner shadow shades the pixels it sits
         // on, so it cannot be painted before they are there.
@@ -3353,6 +3364,9 @@ fn draw_effect(
         return;
     }
     match effect {
+        // Not drawn beside the layer at all: it is the layer's own
+        // pixels, recoloured before they come down (`wear_overlay`).
+        Effect::ColorOverlay { .. } => {}
         Effect::DropShadow {
             dx,
             dy,
@@ -3820,6 +3834,53 @@ pub fn resolve_color(doc: &Document, color: &AuthoredColor) -> LinearRgba {
         return cms.to_working(*c, *m, *y, *k, *a);
     }
     to_working(color)
+}
+
+/// A layer's colour overlays folded into one: the colour every pixel is
+/// taken toward, straight and in linear light, and how far, `0..=1`.
+/// One overlay is its colour and its opacity times the colour's own
+/// alpha; a second taken over the first is the same as one toward the
+/// mix of the two, weighed by how much of each is left showing — so the
+/// GPU, which has one quad to carry it on, takes them all at once and
+/// gets what taking them in turn gives. `None` for no overlay, or none
+/// that does anything.
+pub fn overlay_tint(doc: &Document, effects: &[Effect]) -> Option<([f32; 3], f32)> {
+    let (mut c, mut w) = ([0.0f32; 3], 0.0f32);
+    for effect in effects {
+        let Effect::ColorOverlay { color, opacity } = effect else {
+            continue;
+        };
+        let p = resolve_color(doc, color);
+        let wi = (p.a * opacity).clamp(0.0, 1.0);
+        if wi.is_nan() || wi <= 0.0 || p.a <= 0.0 {
+            continue;
+        }
+        let straight = [p.r / p.a, p.g / p.a, p.b / p.a];
+        let both = 1.0 - (1.0 - w) * (1.0 - wi);
+        let kept = w * (1.0 - wi);
+        for (c, s) in c.iter_mut().zip(straight) {
+            *c = (*c * kept + s * wi) / both;
+        }
+        w = both;
+    }
+    (w > 0.0).then_some((c, w))
+}
+
+/// A layer's pixels inside `region` taken toward its overlay: each
+/// premultiplied channel `w` of the way to the colour at the pixel's own
+/// cover, which is left as it was. The GPU's own, on the quad that lays
+/// the layer down.
+fn wear_overlay(pic: &mut Surface, origin: (u32, u32), region: ClipRect, tint: ([f32; 3], f32)) {
+    let ([r, g, b], w) = tint;
+    for y in region.y0..region.y1 {
+        for x in region.x0..region.x1 {
+            let i = at_in(origin, pic.width, x, y);
+            let p = &mut pic.pixels[i];
+            p.r += (r * p.a - p.r) * w;
+            p.g += (g * p.a - p.g) * w;
+            p.b += (b * p.a - p.b) * w;
+        }
+    }
 }
 
 fn scale_alpha(px: LinearRgba, s: f32) -> LinearRgba {
@@ -21271,6 +21332,152 @@ mod tests {
         let faint = page(disc(10.0), pinch(1.0), 0.5);
         for ((f, p), u) in faint.pixels.iter().zip(&pinched.pixels).zip(&flat.pixels) {
             assert!((f.r - (p.r + u.r) / 2.0).abs() < 1e-5, "half way");
+        }
+    }
+
+    /// A colour overlay is the layer in one colour, its soft edge and
+    /// all: a red disc overlaid in blue is the blue disc, pixel for pixel,
+    /// with no ring of red where the edge was antialiased (which painting
+    /// the colour over the layer left). Half strength is half way; two
+    /// overlays are the one and then the other; a shadow it wears is the
+    /// shadow it had; and a group overlaid is one colour where its layers
+    /// overlap and where they do not.
+    #[test]
+    fn a_colour_overlay_recolours_the_layer_to_its_edge() {
+        let rgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let (red, blue, green) = (rgb(1.0, 0.0, 0.0), rgb(0.0, 0.0, 1.0), rgb(0.0, 0.8, 0.2));
+        let disc = |fill: AuthoredColor, effects: Vec<Effect>| {
+            let mut doc = Document::new(48, 48, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("ground", 48.0, 48.0, WHITE),
+            })
+            .unwrap();
+            let mut d = Node::vector("disc", VectorShape::Ellipse { rx: 15.3, ry: 11.7 });
+            if let NodeKind::Vector { fill: f, .. } = &mut d.kind {
+                *f = Some(fill);
+            }
+            d.transform = Transform::translation(8.4, 12.2);
+            d.effects = effects;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(d),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let overlay = |color: &AuthoredColor, opacity: f32| Effect::ColorOverlay {
+            color: color.clone(),
+            opacity,
+        };
+        let worst = |a: &Surface, b: &Surface| {
+            a.pixels
+                .iter()
+                .zip(&b.pixels)
+                .map(|(p, q)| {
+                    (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                })
+                .fold(0.0f32, f32::max)
+        };
+        let reds = disc(red.clone(), vec![]);
+        let blues = disc(blue.clone(), vec![]);
+        let greens = disc(green.clone(), vec![]);
+        let over = disc(red.clone(), vec![overlay(&blue, 1.0)]);
+        assert!(
+            worst(&over, &blues) < 1e-5,
+            "the blue disc, edge and all: {}",
+            worst(&over, &blues)
+        );
+        let edge = (0..48 * 48)
+            .filter(|&i| reds.pixels[i].g > 0.01 && reds.pixels[i].g < 0.99)
+            .count();
+        assert!(edge > 20, "there is a soft edge to keep ({edge})");
+        let half = disc(red.clone(), vec![overlay(&blue, 0.5)]);
+        for ((h, r), b) in half.pixels.iter().zip(&reds.pixels).zip(&blues.pixels) {
+            assert!(
+                (h.r - (r.r + b.r) / 2.0).abs() < 1e-5 && (h.b - (r.b + b.b) / 2.0).abs() < 1e-5
+            );
+        }
+        // A quarter red, a quarter blue, half green.
+        let two = disc(red.clone(), vec![overlay(&blue, 0.5), overlay(&green, 0.5)]);
+        for (((t, r), b), g) in two
+            .pixels
+            .iter()
+            .zip(&reds.pixels)
+            .zip(&blues.pixels)
+            .zip(&greens.pixels)
+        {
+            let want = |r: f32, b: f32, g: f32| 0.25 * r + 0.25 * b + 0.5 * g;
+            assert!((t.r - want(r.r, b.r, g.r)).abs() < 1e-5, "two in turn");
+            assert!((t.g - want(r.g, b.g, g.g)).abs() < 1e-5, "two in turn");
+            assert!((t.b - want(r.b, b.b, g.b)).abs() < 1e-5, "two in turn");
+        }
+        let shadow = Effect::DropShadow {
+            dx: 3.0,
+            dy: 3.0,
+            blur: 1.0,
+            color: rgb(0.0, 0.0, 0.0),
+            opacity: 0.6,
+            spread: 0.0,
+        };
+        let shaded = disc(red.clone(), vec![shadow.clone()]);
+        let both = disc(red.clone(), vec![overlay(&blue, 1.0), shadow]);
+        let blue_shaded = disc(
+            blue.clone(),
+            vec![Effect::DropShadow {
+                dx: 3.0,
+                dy: 3.0,
+                blur: 1.0,
+                color: rgb(0.0, 0.0, 0.0),
+                opacity: 0.6,
+                spread: 0.0,
+            }],
+        );
+        assert!(
+            worst(&both, &blue_shaded) < 1e-5,
+            "the shadow it had, under the blue"
+        );
+        assert!(worst(&shaded, &both) > 0.5, "and the disc is blue");
+        // A group of two overlapping rectangles, overlaid: one colour.
+        let mut doc = Document::new(48, 48, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        let mut a = filled_rect("a", 20.0, 20.0, red.clone());
+        a.transform = Transform::translation(4.0, 4.0);
+        let mut b = filled_rect("b", 20.0, 20.0, green.clone());
+        b.transform = Transform::translation(14.0, 14.0);
+        for (index, node) in [a, b].into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: group,
+                index,
+                node,
+            })
+            .unwrap();
+        }
+        doc.apply(Command::SetEffects {
+            id: group,
+            effects: vec![overlay(&blue, 1.0)],
+        })
+        .unwrap();
+        let g = render(&doc).unwrap();
+        for (x, y) in [(8, 8), (18, 18), (30, 30)] {
+            let p = g.get(x, y);
+            assert!(
+                p.b > 0.999 && p.r < 1e-5 && p.g < 1e-5,
+                "one blue at {x},{y}: {p:?}"
+            );
         }
     }
 

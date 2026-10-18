@@ -620,6 +620,7 @@ const EFFECT_LABELS: Record<EffectKind, string> = {
   Outline: "Outline",
   InnerShadow: "Inner shadow",
   Bevel: "Bevel",
+  ColorOverlay: "Colour overlay",
 };
 
 /** The colours each effect is painted in, and what each is called: one
@@ -632,6 +633,7 @@ const EFFECT_COLORS: Record<EffectKind, [string, string][]> = {
     ["highlight", "highlight"],
     ["shadow", "shadow"],
   ],
+  ColorOverlay: [["color", "colour"]],
 };
 
 /** The tunable numbers of each effect: [field, label, min, max, step]. */
@@ -664,6 +666,7 @@ const EFFECT_FIELDS: Record<
     ["altitude", "Altitude", 1, 89, 1],
     ["opacity", "Strength", 0, 1, 0.01],
   ],
+  ColorOverlay: [["opacity", "Strength", 0, 1, 0.01]],
 };
 
 /** A number an effect's row shows that the effect does not store as
@@ -759,6 +762,9 @@ function newEffect(
       };
     case "Outline":
       return { Outline: { width: 4, color, opacity: 1 } };
+    // The whole of the layer in the colour in hand.
+    case "ColorOverlay":
+      return { ColorOverlay: { color, opacity: 1 } };
     case "InnerShadow":
       return { InnerShadow: { dx: 4, dy: 4, blur: 6, color, opacity: 0.5 } };
     default:

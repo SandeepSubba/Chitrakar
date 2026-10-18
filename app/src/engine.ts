@@ -339,10 +339,13 @@ export type Effect =
         shadow: AuthoredColor;
         opacity: number;
       };
-    };
+    }
+  /** The layer in one colour, its soft edge and all: every pixel
+   * `opacity` of the way to `color` at its own cover. */
+  | { ColorOverlay: { color: AuthoredColor; opacity: number } };
 
 /** The variant name of an effect — its single key. */
-export type EffectKind = "DropShadow" | "Outline" | "InnerShadow" | "Bevel";
+export type EffectKind = "DropShadow" | "Outline" | "InnerShadow" | "Bevel" | "ColorOverlay";
 
 export function effectKind(e: Effect): EffectKind {
   return Object.keys(e)[0] as EffectKind;

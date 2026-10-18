@@ -2221,6 +2221,16 @@ pub enum Effect {
         shadow: AuthoredColor,
         opacity: f32,
     },
+    /// The layer in one colour: every pixel of it taken `opacity` of the
+    /// way to `color` (its own alpha weighing in too), keeping how much
+    /// of the pixel the layer covers. Done to the layer's own pixels
+    /// before they meet the page, as Photoshop's colour overlay is, so a
+    /// soft edge is the colour at the edge's cover rather than the colour
+    /// laid over what the edge left — which, painted over, wore a fringe
+    /// of the layer's own colour all the way round. Neither under the
+    /// layer nor over it (`over` says false), and no reach: it is the
+    /// layer.
+    ColorOverlay { color: AuthoredColor, opacity: f32 },
 }
 
 /// What a bevel is lit by and how its heights are read, as every
@@ -2336,6 +2346,8 @@ impl Effect {
             // Inside as well, read from the same ring; one more for the
             // slope's taps either side.
             Effect::Bevel { size, .. } => blurred(size * 0.5) + 3.0,
+            // Nowhere the layer is not.
+            Effect::ColorOverlay { .. } => 0.0,
         }
     }
 
@@ -2366,6 +2378,7 @@ impl Effect {
                 *size *= k;
                 (*lx, *ly) = (m.a * *lx + m.c * *ly, m.b * *lx + m.d * *ly);
             }
+            Effect::ColorOverlay { .. } => {}
         }
         out
     }
@@ -2384,6 +2397,7 @@ impl Effect {
             Effect::Outline { .. } => "Outline",
             Effect::InnerShadow { .. } => "Inner shadow",
             Effect::Bevel { .. } => "Bevel",
+            Effect::ColorOverlay { .. } => "Colour overlay",
         }
     }
 }
@@ -2457,7 +2471,8 @@ impl Node {
             match effect {
                 Effect::DropShadow { color, .. }
                 | Effect::Outline { color, .. }
-                | Effect::InnerShadow { color, .. } => f(color),
+                | Effect::InnerShadow { color, .. }
+                | Effect::ColorOverlay { color, .. } => f(color),
                 Effect::Bevel {
                     highlight, shadow, ..
                 } => {

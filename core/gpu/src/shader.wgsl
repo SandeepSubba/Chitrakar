@@ -384,6 +384,17 @@ fn edge_cover(u: f32) -> f32 {
     return clamp(0.5 + u / w, 0.0, 1.0) * clamp(0.5 + (1.0 - u) / w, 0.0, 1.0);
 }
 
+// A layer's surface coming back down in its colour overlay: each
+// premultiplied channel `w` of the way to `tint` at the pixel's own
+// cover, the CPU renderer's `wear_overlay`. Nothing at a strength of
+// none, which is every picture that is not such a surface.
+fn overlaid(p: vec4f, w: f32, tint: vec3f) -> vec4f {
+    if w <= 0.0 {
+        return p;
+    }
+    return vec4f(p.rgb + (tint * p.a - p.rgb) * w, p.a);
+}
+
 @fragment
 fn fs_image(in: ImageOut) -> @location(0) vec4f {
     let border = edge_cover(in.uv.x) * edge_cover(in.uv.y);
@@ -405,7 +416,7 @@ fn fs_image(in: ImageOut) -> @location(0) vec4f {
     } else {
         sampled = textureSampleLevel(image, image_sampler, clamp(in.uv, vec2f(0.0), vec2f(1.0)), 0.0);
     }
-    return sampled * in.alpha * border * mask_cover(in.page, in.mask);
+    return overlaid(sampled, in.params.y, in.extra) * in.alpha * border * mask_cover(in.page, in.mask);
 }
 
 // A text layer: the whole block rasterized to coverage at the size it
@@ -684,7 +695,7 @@ fn blended(mode: i32, s: vec3f, d: vec3f) -> vec3f {
 
 @fragment
 fn fs_blend(in: ImageOut) -> @location(0) vec4f {
-    let src = textureSampleLevel(image, image_sampler, in.uv, 0.0)
+    let src = overlaid(textureSampleLevel(image, image_sampler, in.uv, 0.0), in.params.y, in.extra)
         * in.alpha
         * mask_cover(in.page, in.mask);
     let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
