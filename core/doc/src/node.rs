@@ -1138,6 +1138,13 @@ pub enum Filter {
     /// in the light the blends are worked in, which is what they leave
     /// alone.
     HighPass { sigma: f32 },
+    /// What is under it as a printer's dot screen: a grid of cells
+    /// `size` document pixels across, turned `degrees`, each a black dot
+    /// on white whose area is how dark the picture is where the cell's
+    /// middle falls — darkness as it looks, on the display's curve. Seen
+    /// from far off the dots are the picture again; close up they are
+    /// the poster's texture. What is not covered stays uncovered.
+    Halftone { size: f32, degrees: f32 },
     /// A smear along one direction: each pixel becomes the average of the
     /// ones on a line through it. What a camera does to a moving thing, or
     /// to a still one while the camera moves, and what a still picture is
@@ -1916,6 +1923,7 @@ impl Filter {
             Filter::GaussianBlur { .. }
             | Filter::Sharpen { .. }
             | Filter::HighPass { .. }
+            | Filter::Halftone { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2430,6 +2438,7 @@ impl Node {
                 Filter::GaussianBlur { .. }
                 | Filter::Sharpen { .. }
                 | Filter::HighPass { .. }
+                | Filter::Halftone { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

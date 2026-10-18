@@ -2580,9 +2580,22 @@ impl Rng {
                     0 => Filter::GaussianBlur {
                         sigma: self.between(0.5, 2.5),
                     },
-                    1 => Filter::Pixelate {
-                        size: self.between(2.0, 6.0),
-                    },
+                    1 => {
+                        let pixelate = Filter::Pixelate {
+                            size: self.between(2.0, 6.0),
+                        };
+                        // Half of them a dot screen instead, from a
+                        // stream of their own so no other page moves.
+                        let mut side = Rng((self.0 ^ 0x1f83_d9ab_5be0_cd19) | 1);
+                        if side.chance(2) {
+                            Filter::Halftone {
+                                size: side.between(3.0, 8.0),
+                                degrees: side.between(0.0, 90.0),
+                            }
+                        } else {
+                            pixelate
+                        }
+                    }
                     2 => {
                         let sharpen = Filter::Sharpen {
                             sigma: self.between(0.5, 2.0),

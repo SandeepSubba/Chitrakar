@@ -8135,6 +8135,41 @@ assert(
   assert((await canvasPixel(63, 100))[3] === 0, "one undo takes it away");
 }
 
+// 9o25g. Halftone: the Filter menu's dot screen. A mid grey comes out
+// black dots on white, about half ink as the eye counts it; a larger
+// dot size lays the dots out differently.
+{
+  await newDocument(240, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 120) * b.height];
+  await setColor("Fill colour", "#808080");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 120), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Escape");
+  await menuClick("Filter", "Halftone");
+  await page.waitForTimeout(300);
+  // Every other pixel of a strip across the middle: how black, on the
+  // display's own scale, and whether it is grey at all.
+  const strip = async () => {
+    const out = [];
+    for (let x = 40; x < 200; x += 2) out.push(await canvasPixel(x, 60));
+    return out;
+  };
+  const dots = await strip();
+  assert(dots.every((p) => p[0] === p[1] && p[1] === p[2]), "black and white only");
+  const inked = dots.reduce((n, p) => n + (255 - p[0]) / 255, 0) / dots.length;
+  assert(inked > 0.3 && inked < 0.7, `about half ink (${inked.toFixed(2)})`);
+  assert(dots.some((p) => p[0] < 40) && dots.some((p) => p[0] > 215), "solid dots and clear paper both");
+  await setSlider("Dot size", 20);
+  await page.waitForTimeout(300);
+  const bigger = await strip();
+  assert(bigger.some((p, i) => p[0] !== dots[i][0]), "a larger dot size lays them out anew");
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

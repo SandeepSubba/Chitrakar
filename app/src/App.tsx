@@ -4794,6 +4794,11 @@ export function App() {
       name: "High pass",
       kind: { Filter: { HighPass: { sigma: 3 } } },
     },
+    // A printer's dot screen, turned the way a black plate's is.
+    halftone: {
+      name: "Halftone",
+      kind: { Filter: { Halftone: { size: 8, degrees: 45 } } },
+    },
     vignette: {
       name: "Vignette",
       kind: { Filter: { Vignette: { amount: 0.5, radius: 0.4, softness: 1 } } },
@@ -13752,6 +13757,19 @@ function KindProps({
           }))}
           {slider("Vignette softness", p.softness, 0, 1, 0.01, (v) => ({
             Filter: { Vignette: { ...p, softness: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Halftone" in filter) {
+      const p = filter.Halftone;
+      return (
+        <>
+          {slider("Dot size", p.size, 2, 60, 1, (v) => ({
+            Filter: { Halftone: { ...p, size: v } },
+          }))}
+          {slider("Screen angle", p.degrees, 0, 90, 1, (v) => ({
+            Filter: { Halftone: { ...p, degrees: v } },
           }))}
         </>
       );

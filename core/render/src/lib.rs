@@ -814,6 +814,12 @@ pub fn filter_reach(doc: &Document) -> u32 {
                     u32::MAX
                 }
             }
+            // A cell's middle can be its half diagonal away from a pixel
+            // in it.
+            NodeKind::Filter(Filter::Halftone { size, .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                ((halftone_cell(*size) * 0.71 * scale).ceil() as u32).saturating_add(2)
+            }
             // Half the line each way, since it is centred on the pixel.
             NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8141,6 +8147,54 @@ fn apply_filter(
                 }
             });
         }
+        Filter::Halftone { size, degrees } => {
+            let original = blur::snapshot(dst, clip);
+            let Some(inv) = Inverse::of(view) else {
+                return;
+            };
+            // Back out of the layer's space onto the surface, worked from
+            // the inverse as the GPU works it — the one it is handed.
+            let det = inv.a * inv.d - inv.b * inv.c;
+            if det.abs() < 1e-12 {
+                return;
+            }
+            let fwd = [inv.d / det, -inv.b / det, -inv.c / det, inv.a / det];
+            // Device pixels to the layer's unit, for an edge a pixel soft.
+            let sharp = 1.0 / det.abs().sqrt().max(1e-6);
+            let cell = halftone_cell(*size);
+            let (sin, cos) = degrees.to_radians().sin_cos();
+            let w = (clip.x1 - clip.x0) as i64;
+            let at = |x: i64, y: i64| {
+                let x = x.clamp(clip.x0 as i64, clip.x1 as i64 - 1);
+                let y = y.clamp(clip.y0 as i64, clip.y1 as i64 - 1);
+                original[((y - clip.y0 as i64) * w + (x - clip.x0 as i64)) as usize]
+            };
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                if weight <= 0.0 || o.a <= 0.0 {
+                    return o;
+                }
+                let (hx, hy) = inv.at(x as f32 + 0.5, y as f32 + 0.5);
+                let ink = halftone_ink([hx, hy], cell, [sin, cos], sharp, |cx, cy| {
+                    // The pixel the cell's middle falls on, a quarter in
+                    // so a middle on a pixel's edge is never a coin toss.
+                    let dx = fwd[0] * cx + fwd[2] * cy + inv.e;
+                    let dy = fwd[1] * cx + fwd[3] * cy + inv.f;
+                    at((dx + 0.25).floor() as i64, (dy + 0.25).floor() as i64)
+                });
+                let paper = (1.0 - ink) * o.a;
+                lerp(
+                    o,
+                    LinearRgba {
+                        r: paper,
+                        g: paper,
+                        b: paper,
+                        a: o.a,
+                    },
+                    weight,
+                )
+            });
+        }
         // The difference from the blur, on a grey of half: premultiplied,
         // so the grey is half of what is covered, and held at nothing
         // below as a sharpen is. Weighed in by the layer's opacity and
@@ -8164,6 +8218,64 @@ fn apply_filter(
             });
         }
     }
+}
+
+/// A halftone's cell, in document pixels: two at the least, and nothing
+/// that is not a number taken as eight.
+pub fn halftone_cell(size: f32) -> f32 {
+    if size.is_finite() {
+        size.max(2.0)
+    } else {
+        8.0
+    }
+}
+
+/// How much ink a halftone lays on the point `here` (in the layer's
+/// space): the dot of the cell it is in, whose area is the darkness of
+/// the picture where `sample` says the cell's middle falls, and whose
+/// edge is a device pixel soft (`sharp` device pixels to the unit). The
+/// GPU's `halftone_ink`, step for step.
+fn halftone_ink(
+    here: [f32; 2],
+    cell: f32,
+    [sin, cos]: [f32; 2],
+    sharp: f32,
+    sample: impl Fn(f32, f32) -> LinearRgba,
+) -> f32 {
+    // Into the turned grid, to the middle of this cell, and back out.
+    let q = [
+        cos * here[0] + sin * here[1],
+        -sin * here[0] + cos * here[1],
+    ];
+    let mid = [
+        ((q[0] / cell).floor() + 0.5) * cell,
+        ((q[1] / cell).floor() + 0.5) * cell,
+    ];
+    let c = [cos * mid[0] - sin * mid[1], sin * mid[0] + cos * mid[1]];
+    let p = sample(c[0], c[1]);
+    let lum = if p.a > 0.0 {
+        (chitrakar_doc::LUMA[0] * p.r + chitrakar_doc::LUMA[1] * p.g + chitrakar_doc::LUMA[2] * p.b)
+            / p.a
+    } else {
+        1.0
+    };
+    // Darkness as it looks: on the display's curve.
+    let dark = 1.0 - chitrakar_color::linear_to_srgb(lum.clamp(0.0, 1.0));
+    // A dot of that share of the cell's area, until it fills the circle
+    // the cell holds (a quarter of π of it); darker than that, the dot
+    // grows on out to the cell's corners, which it reaches at black, so
+    // black is solid ink and the dots close up into a net on the way.
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let radius = if dark <= quarter {
+        cell * (dark / std::f32::consts::PI).sqrt()
+    } else {
+        cell * (0.5 + (dark - quarter) / (1.0 - quarter) * (std::f32::consts::FRAC_1_SQRT_2 - 0.5))
+    };
+    let d = (here[0] - c[0]).hypot(here[1] - c[1]);
+    // A dot under a pixel across fades with its size, or white would
+    // wear a half-grey speck in the middle of every cell.
+    let small = (2.0 * radius * sharp).clamp(0.0, 1.0);
+    ((radius - d) * sharp + 0.5).clamp(0.0, 1.0) * small
 }
 
 /// How many surface pixels a median reaches each way: its radius in
@@ -20559,6 +20671,117 @@ mod tests {
         assert!(
             (away.r - plain.get(38, 38).r).abs() < 0.1 && away.r > shaded.r * 2.0,
             "and the side it is aimed away from is barely touched: {away:?}"
+        );
+    }
+
+    /// A halftone turns what is under it into black dots on white whose
+    /// area is how dark it looks: black is all ink, white none at all —
+    /// not even a speck — and a grey half way up the display's curve is
+    /// half ink; turned, the dots lie in other places; at half opacity it
+    /// is half way from the picture; and what is not covered stays so.
+    #[test]
+    fn a_halftone_is_dots_as_dark_as_the_picture() {
+        let page = |ground: Option<AuthoredColor>, filter: Filter, opacity: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            if let Some(ground) = ground {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: filled_rect("ground", 64.0, 64.0, ground),
+                })
+                .unwrap();
+            }
+            let mut f = chitrakar_doc::Node::filter("dots", filter);
+            f.opacity = opacity;
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(f),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let grey = |v: f32| AuthoredColor::Srgb {
+            r: v,
+            g: v,
+            b: v,
+            a: 1.0,
+        };
+        let dots = Filter::Halftone {
+            size: 8.0,
+            degrees: 0.0,
+        };
+        let ink =
+            |s: &Surface| s.pixels.iter().map(|p| 1.0 - p.r).sum::<f32>() / s.pixels.len() as f32;
+        assert!(
+            ink(&page(Some(grey(0.0)), dots.clone(), 1.0)) > 0.97,
+            "black is all ink"
+        );
+        // Not a speck, even where a cell's middle is a pixel's (cells of
+        // nine put one there, cells of eight never do).
+        for size in [8.0, 9.0] {
+            let white = page(
+                Some(grey(1.0)),
+                Filter::Halftone { size, degrees: 0.0 },
+                1.0,
+            );
+            assert_eq!(ink(&white), 0.0, "white has none at {size}");
+        }
+        let half = page(Some(grey(0.5)), dots.clone(), 1.0);
+        // Ink as the eye counts it: on the display's curve.
+        let shown: f32 = half
+            .pixels
+            .iter()
+            .map(|p| 1.0 - chitrakar_color::linear_to_srgb(p.r))
+            .sum::<f32>()
+            / half.pixels.len() as f32;
+        assert!(
+            (shown - 0.5).abs() < 0.06,
+            "a mid grey is half ink: {shown}"
+        );
+        assert!(
+            half.pixels.iter().all(|p| p.r == p.g && p.g == p.b),
+            "black and white only"
+        );
+        let turned = page(
+            Some(grey(0.5)),
+            Filter::Halftone {
+                size: 8.0,
+                degrees: 45.0,
+            },
+            1.0,
+        );
+        assert_ne!(turned.pixels, half.pixels, "turned, the dots move");
+        let faint = page(
+            Some(grey(1.0)),
+            Filter::Halftone {
+                size: 8.0,
+                degrees: 0.0,
+            },
+            0.5,
+        );
+        assert!(
+            faint.pixels.iter().all(|p| (p.r - 1.0).abs() < 1e-6),
+            "white at any strength is white"
+        );
+        // At half, every pixel half way from the grey to the dots.
+        let mid = page(Some(grey(0.5)), dots.clone(), 0.5);
+        let under = chitrakar_color::srgb_to_linear(0.5);
+        for (m, h) in mid.pixels.iter().zip(&half.pixels) {
+            assert!(
+                (m.r - (under + h.r) / 2.0).abs() < 1e-4,
+                "half way: {} from {} and {}",
+                m.r,
+                under,
+                h.r
+            );
+        }
+        let bare = page(None, dots, 1.0);
+        assert!(
+            bare.pixels.iter().all(|p| p.a == 0.0),
+            "nothing covered, nothing printed"
         );
     }
 

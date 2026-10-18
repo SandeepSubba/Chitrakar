@@ -3384,6 +3384,7 @@ fn one(
                     chitrakar_doc::Filter::GaussianBlur { .. }
                         | chitrakar_doc::Filter::Sharpen { .. }
                         | chitrakar_doc::Filter::HighPass { .. }
+                        | chitrakar_doc::Filter::Halftone { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5202,6 +5203,17 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             radius,
             softness,
         } => point([14.0, *amount, *radius, *softness], 0.0),
+        // A function of one pixel and of one more: the pixel its cell's
+        // middle falls on, read off what is under it.
+        F::Halftone { size, degrees } => point(
+            [
+                17.0,
+                chitrakar_render::halftone_cell(*size),
+                degrees.to_radians(),
+                0.0,
+            ],
+            0.0,
+        ),
         F::Noise {
             amount,
             grain,
@@ -10334,6 +10346,32 @@ mod tests {
                     "{filter:?} holds the middle: {near} against {far}"
                 );
             }
+        }
+
+        // A halftone reads one pixel more — the one its cell's middle
+        // falls on — and is the CPU's dots, upright and turned. A dot's
+        // edge is antialiased its own way at the last bit, so this holds
+        // the mean rather than the worst.
+        for filter in [
+            F::Halftone {
+                size: 6.0,
+                degrees: 0.0,
+            },
+            F::Halftone {
+                size: 9.0,
+                degrees: 37.0,
+            },
+        ] {
+            let doc = with(filter.clone());
+            assert!(GpuRenderer::can_render(&doc), "{filter:?} is drawn");
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
         }
 
         // A grid of squares upright on the page is two passes; the

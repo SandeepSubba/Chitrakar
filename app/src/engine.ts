@@ -231,6 +231,9 @@ export type Filter =
   | { Sharpen: { sigma: number; amount: number } }
   /** The detail alone: what is under it less its blur, on a grey of half. */
   | { HighPass: { sigma: number } }
+  /** A dot screen: cells `size` across, turned `degrees`, each a black
+   * dot as dark as the picture there. */
+  | { Halftone: { size: number; degrees: number } }
   /** Squares of one colour each, the average of what they covered. The
    * grid is anchored in the document, so a block stays the same block
    * when the page is panned or zoomed. */

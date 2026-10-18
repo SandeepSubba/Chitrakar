@@ -1105,6 +1105,39 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
     // anchored to the picture.
     let rel = at - vec2f(e.x, e.y);
     let here = vec2f(g.x * rel.x + g.z * rel.y, g.y * rel.x + g.w * rel.y);
+    if kind == 17 {
+        // A halftone: the CPU renderer's `halftone_ink`, step for step.
+        // Into the turned grid, to the middle of this cell, back out.
+        let cell = p.y;
+        let s = sin(p.z);
+        let c = cos(p.z);
+        let q = vec2f(c * here.x + s * here.y, -s * here.x + c * here.y);
+        let mid = (floor(q / cell) + vec2f(0.5)) * cell;
+        let centre = vec2f(c * mid.x - s * mid.y, s * mid.x + c * mid.y);
+        // Back onto the surface through the inverse's own inverse, the
+        // way the CPU renderer works it, to the pixel the middle falls
+        // on — a quarter in, so a middle on an edge is never a toss.
+        let det = g.x * g.w - g.y * g.z;
+        let fwd = vec4f(g.w / det, -g.y / det, -g.z / det, g.x / det);
+        let dev = vec2f(fwd.x * centre.x + fwd.z * centre.y + e.x, fwd.y * centre.x + fwd.w * centre.y + e.y);
+        let size = vec2i(textureDimensions(backdrop));
+        let texel = clamp(vec2i(floor(dev + vec2f(0.25))), vec2i(0), size - vec2i(1));
+        let under = textureLoad(backdrop, texel, 0);
+        var lum = 1.0;
+        if under.a > 0.0 {
+            lum = dot(vec3f(0.2126, 0.7152, 0.0722), under.rgb) / under.a;
+        }
+        let dark = 1.0 - to_shown(clamp(lum, 0.0, 1.0));
+        var radius = cell * sqrt(dark / 3.14159265);
+        if dark > 0.78539816 {
+            radius = cell * (0.5 + (dark - 0.78539816) / (1.0 - 0.78539816) * (0.70710678 - 0.5));
+        }
+        let sharp = 1.0 / max(sqrt(abs(det)), 1e-6);
+        let small = clamp(2.0 * radius * sharp, 0.0, 1.0);
+        let ink = clamp((radius - distance(here, centre)) * sharp + 0.5, 0.0, 1.0) * small;
+        let paper = (1.0 - ink) * was.a;
+        return mix(was, vec4f(paper, paper, paper, was.a), weight);
+    }
     if kind == 14 {
         // Measured from the page's own middle in the page's own units,
         // so panning slides the picture under the darkening rather than

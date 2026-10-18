@@ -2490,6 +2490,41 @@ without reading anything else.*
     one undo each. The inward offset taken outward fails it. Smoke 9o25f:
     a marquee stroked inside in the ink, nothing outside, the middle
     clear, one undo; a window handing over the wrong side fails it.
+- **Halftone ✅** (`Filter::Halftone { size, degrees }`,
+  `halftone_cell`, `halftone_ink`; *Filter › Halftone* with *Dot size*
+  and *Screen angle*). A printer's dot screen: a grid of cells, turned,
+  each a black dot on white whose area is how dark the picture is under
+  the cell's middle. Seen from far off it is the picture again; close up,
+  it is the poster texture Canva's and Affinity's halftone effects give.
+  - **Darkness as it looks:** darkness is one minus the luminance on the
+    display's curve, so a mid grey on screen is half ink. A dot grows by
+    area until it fills the circle the cell holds (π/4 of the cell).
+    Darker than that, it grows on to the cell's corners, which it reaches
+    at black, so black is solid ink. A dot under a pixel across fades
+    with its size; without that, white wore a half-grey speck wherever a
+    cell's middle was a pixel's. Its edge is a device pixel soft. What is
+    not covered stays uncovered.
+  - **The GPU** draws it among the filters of one pixel (kind 17) with
+    one read more: the pixel the cell's middle falls on, taken off what
+    is under it. That pixel is found through the inverse's own inverse,
+    as the CPU works it, a quarter pixel in, so a middle on a pixel's
+    edge is not settled by rounding. The region-render reach is half a
+    cell's diagonal.
+  - **Fixture:** half of the random pixelates are halftones, from a
+    stream of their own.
+  - **Tests:**
+    - `a_halftone_is_dots_as_dark_as_the_picture`: black is all ink;
+      white has none at cells of eight and of nine (nine puts a cell's
+      middle on a pixel's); a mid grey is half ink on the display's
+      scale, in black and white only; turned, the dots move; half
+      opacity is half way, pixel by pixel; a bare page stays bare.
+    - The GPU's one-pixel filters test draws two halftones, one turned,
+      against the CPU.
+    - Sabotages that each fail one of them: the GPU grid turned the other
+      way, no fade for a sub-pixel dot (which the size-nine page alone
+      catches), and darkness in linear light.
+    - Smoke 9o25g: black and white only, about half ink, solid dots and
+      clear paper, and a new dot size relaying them.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
