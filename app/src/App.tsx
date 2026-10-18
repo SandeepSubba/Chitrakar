@@ -4799,6 +4799,11 @@ export function App() {
       name: "Halftone",
       kind: { Filter: { Halftone: { size: 8, degrees: 45 } } },
     },
+    // Grey metal lit from the upper left, the way a relief is always lit.
+    emboss: {
+      name: "Emboss",
+      kind: { Filter: { Emboss: { degrees: 225, height: 2, amount: 1 } } },
+    },
     vignette: {
       name: "Vignette",
       kind: { Filter: { Vignette: { amount: 0.5, radius: 0.4, softness: 1 } } },
@@ -13770,6 +13775,22 @@ function KindProps({
           }))}
           {slider("Screen angle", p.degrees, 0, 90, 1, (v) => ({
             Filter: { Halftone: { ...p, degrees: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Emboss" in filter) {
+      const p = filter.Emboss;
+      return (
+        <>
+          {slider("Light angle", p.degrees, 0, 360, 1, (v) => ({
+            Filter: { Emboss: { ...p, degrees: v } },
+          }))}
+          {slider("Relief height", p.height, 0.5, 20, 0.5, (v) => ({
+            Filter: { Emboss: { ...p, height: v } },
+          }))}
+          {slider("Relief amount", p.amount, 0, 5, 0.1, (v) => ({
+            Filter: { Emboss: { ...p, amount: v } },
           }))}
         </>
       );

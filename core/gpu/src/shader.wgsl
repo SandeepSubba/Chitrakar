@@ -1138,6 +1138,20 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let paper = (1.0 - ink) * was.a;
         return mix(was, vec4f(paper, paper, paper, was.a), weight);
     }
+    if kind == 18 {
+        // An emboss: the CPU renderer's own, with the offset it rounded.
+        // How much lighter the picture is the offset toward the light
+        // than as far from it, the edge read again past the edge.
+        let size = vec2i(textureDimensions(backdrop));
+        let px = vec2i(floor(at));
+        let step = vec2i(i32(p.y), i32(p.z));
+        let toward = textureLoad(backdrop, clamp(px + step, vec2i(0), size - vec2i(1)), 0);
+        let away = textureLoad(backdrop, clamp(px - step, vec2i(0), size - vec2i(1)), 0);
+        let luma = vec3f(0.2126, 0.7152, 0.0722);
+        let rise = dot(luma, toward.rgb) - dot(luma, away.rgb);
+        let g = clamp(0.5 * was.a - 0.5 * p.w * rise, 0.0, was.a);
+        return mix(was, vec4f(g, g, g, was.a), weight);
+    }
     if kind == 14 {
         // Measured from the page's own middle in the page's own units,
         // so panning slides the picture under the darkening rather than

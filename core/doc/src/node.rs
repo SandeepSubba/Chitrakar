@@ -1145,6 +1145,24 @@ pub enum Filter {
     /// from far off the dots are the picture again; close up they are
     /// the poster's texture. What is not covered stays uncovered.
     Halftone { size: f32, degrees: f32 },
+    /// What is under it pressed into grey metal and lit from one side:
+    /// how light the picture is, taken as a height, and the slope of it
+    /// toward a light that falls from `degrees` — measured as a motion
+    /// blur's direction is, from the page's x axis turning the way its y
+    /// does, so 225 is the upper left. Each pixel is a grey of half less
+    /// how much lighter the picture is `height` document pixels toward
+    /// the light than as far away from it, times `amount`: an edge that
+    /// rises toward the light faces away from it and goes dark, one that
+    /// falls toward it is lit, and flat ground stays the half grey, in
+    /// the light the blends are worked in, that overlay leaves alone.
+    /// The two readings are whole pixels away, the offset rounded once
+    /// for the page rather than at every pixel, so a relief is an edge a
+    /// pixel wide rather than a blur of one.
+    Emboss {
+        degrees: f32,
+        height: f32,
+        amount: f32,
+    },
     /// A smear along one direction: each pixel becomes the average of the
     /// ones on a line through it. What a camera does to a moving thing, or
     /// to a still one while the camera moves, and what a still picture is
@@ -1924,6 +1942,7 @@ impl Filter {
             | Filter::Sharpen { .. }
             | Filter::HighPass { .. }
             | Filter::Halftone { .. }
+            | Filter::Emboss { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2439,6 +2458,7 @@ impl Node {
                 | Filter::Sharpen { .. }
                 | Filter::HighPass { .. }
                 | Filter::Halftone { .. }
+                | Filter::Emboss { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

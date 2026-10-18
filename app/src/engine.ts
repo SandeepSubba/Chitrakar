@@ -234,6 +234,10 @@ export type Filter =
   /** A dot screen: cells `size` across, turned `degrees`, each a black
    * dot as dark as the picture there. */
   | { Halftone: { size: number; degrees: number } }
+  /** Grey relief: how light the picture is, taken as a height, lit from
+   * `degrees` (the page's x axis turning with its y, so 225 is the upper
+   * left), read `height` pixels either way, `amount` strong. */
+  | { Emboss: { degrees: number; height: number; amount: number } }
   /** Squares of one colour each, the average of what they covered. The
    * grid is anchored in the document, so a block stays the same block
    * when the page is panned or zoomed. */

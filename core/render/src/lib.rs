@@ -820,6 +820,11 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let scale = max_scale(ancestor_space(doc, *id));
                 ((halftone_cell(*size) * 0.71 * scale).ceil() as u32).saturating_add(2)
             }
+            // The two readings are the height away each side.
+            NodeKind::Filter(Filter::Emboss { height, .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                ((emboss_height(*height) * scale).ceil() as u32).saturating_add(2)
+            }
             // Half the line each way, since it is centred on the pixel.
             NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8195,6 +8200,43 @@ fn apply_filter(
                 )
             });
         }
+        Filter::Emboss {
+            degrees,
+            height,
+            amount,
+        } => {
+            let original = blur::snapshot(dst, clip);
+            let (ox, oy) = emboss_offset(*degrees, *height, view);
+            let k = emboss_amount(*amount);
+            let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+            // How light the picture is a whole offset away, the edge
+            // read again past the edge, as the smears read it.
+            let lum = |x: i64, y: i64| {
+                let p = original[(y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize];
+                chitrakar_doc::LUMA[0] * p.r
+                    + chitrakar_doc::LUMA[1] * p.g
+                    + chitrakar_doc::LUMA[2] * p.b
+            };
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                if weight <= 0.0 || o.a <= 0.0 {
+                    return o;
+                }
+                let (x, y) = ((x - clip.x0) as i64, (y - clip.y0) as i64);
+                let rise = lum(x + ox, y + oy) - lum(x - ox, y - oy);
+                let g = emboss_grey(o.a, rise, k);
+                lerp(
+                    o,
+                    LinearRgba {
+                        r: g,
+                        g,
+                        b: g,
+                        a: o.a,
+                    },
+                    weight,
+                )
+            });
+        }
         // The difference from the blur, on a grey of half: premultiplied,
         // so the grey is half of what is covered, and held at nothing
         // below as a sharpen is. Weighed in by the layer's opacity and
@@ -8218,6 +8260,57 @@ fn apply_filter(
             });
         }
     }
+}
+
+/// An emboss's height, in document pixels: nothing below, a hundred at
+/// most, and nothing that is not a number taken as none.
+pub fn emboss_height(height: f32) -> f32 {
+    if height.is_finite() {
+        height.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+/// An emboss's strength, held to 0..=10 and nothing for no number.
+pub fn emboss_amount(amount: f32) -> f32 {
+    if amount.is_finite() {
+        amount.clamp(0.0, 10.0)
+    } else {
+        0.0
+    }
+}
+
+/// Where an emboss reads toward its light, in whole device pixels: the
+/// height along the light's direction, carried by the view's linear
+/// part onto the surface and rounded there once. The GPU is handed
+/// these two numbers rather than working them out again, so the two
+/// renderers read the same pixels.
+pub fn emboss_offset(degrees: f32, height: f32, view: Transform) -> (i64, i64) {
+    let t = if degrees.is_finite() {
+        degrees.to_radians()
+    } else {
+        0.0
+    };
+    let h = emboss_height(height);
+    let (dx, dy) = (t.cos() * h, t.sin() * h);
+    let (ox, oy) = (view.a * dx + view.c * dy, view.b * dx + view.d * dy);
+    // A view that is no view is no offset rather than a wild one.
+    let whole = |v: f32| {
+        if v.is_finite() {
+            v.round().clamp(-4096.0, 4096.0) as i64
+        } else {
+            0
+        }
+    };
+    (whole(ox), whole(oy))
+}
+
+/// An emboss's grey over a pixel covered `alpha`: half of what is
+/// covered, less half the `rise` toward the light times the strength,
+/// held between nothing and the cover. The GPU's own, step for step.
+pub fn emboss_grey(alpha: f32, rise: f32, amount: f32) -> f32 {
+    (0.5 * alpha - 0.5 * amount * rise).clamp(0.0, alpha)
 }
 
 /// A halftone's cell, in document pixels: two at the least, and nothing
@@ -20783,6 +20876,91 @@ mod tests {
             bare.pixels.iter().all(|p| p.a == 0.0),
             "nothing covered, nothing printed"
         );
+    }
+
+    /// An emboss is a grey of half where the picture is flat, lit where
+    /// an edge falls toward the light and dark where it rises toward it,
+    /// the other way round with the light on the other side, only the
+    /// grey with no strength, half way from the picture at half opacity,
+    /// and nothing where nothing is covered.
+    #[test]
+    fn an_emboss_lights_the_edges_that_face_the_light() {
+        let page = |square: bool, filter: Filter, opacity: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            let mut index = 0;
+            if square {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: filled_rect("ground", 64.0, 64.0, BLACK),
+                })
+                .unwrap();
+                let mut white = filled_rect("square", 32.0, 32.0, WHITE);
+                white.transform = Transform::translation(16.0, 16.0);
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: white,
+                })
+                .unwrap();
+                index = 2;
+            }
+            let mut f = chitrakar_doc::Node::filter("relief", filter);
+            f.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(f),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let emboss = |degrees: f32, amount: f32| Filter::Emboss {
+            degrees,
+            height: 2.0,
+            amount,
+        };
+        let at = |s: &Surface, x: u32, y: u32| s.pixels[(y * 64 + x) as usize];
+        // The light from the left.
+        let left = page(true, emboss(180.0, 1.0), 1.0);
+        for (x, y) in [(4, 4), (32, 32), (60, 32)] {
+            assert!((at(&left, x, y).r - 0.5).abs() < 1e-6, "flat at {x},{y}");
+        }
+        assert!(
+            at(&left, 16, 32).r > 0.99,
+            "the edge facing the light is lit"
+        );
+        assert!(at(&left, 47, 32).r < 0.01, "the edge facing away is dark");
+        assert!(
+            left.pixels
+                .iter()
+                .all(|p| p.r == p.g && p.g == p.b && p.a == 1.0),
+            "grey, and as covered as it was"
+        );
+        // Along the top and bottom edges the light is level with them.
+        assert!(
+            (at(&left, 32, 16).r - 0.5).abs() < 1e-6,
+            "level with the light"
+        );
+        let right = page(true, emboss(0.0, 1.0), 1.0);
+        assert!(
+            at(&right, 16, 32).r < 0.01,
+            "from the right, the left edge is dark"
+        );
+        assert!(at(&right, 47, 32).r > 0.99, "and the right edge lit");
+        let none = page(true, emboss(180.0, 0.0), 1.0);
+        assert!(
+            none.pixels.iter().all(|p| (p.r - 0.5).abs() < 1e-6),
+            "no strength is the grey alone"
+        );
+        let faint = page(true, emboss(180.0, 1.0), 0.5);
+        let under = page(true, emboss(180.0, 0.0), 0.0);
+        for ((f, l), u) in faint.pixels.iter().zip(&left.pixels).zip(&under.pixels) {
+            assert!((f.r - (l.r + u.r) / 2.0).abs() < 1e-5, "half way");
+        }
+        let bare = page(false, emboss(180.0, 1.0), 1.0);
+        assert!(bare.pixels.iter().all(|p| p.a == 0.0), "nothing covered");
     }
 
     /// A high pass leaves the detail on a grey of half: flat ground is

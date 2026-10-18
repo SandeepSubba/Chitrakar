@@ -3385,6 +3385,7 @@ fn one(
                         | chitrakar_doc::Filter::Sharpen { .. }
                         | chitrakar_doc::Filter::HighPass { .. }
                         | chitrakar_doc::Filter::Halftone { .. }
+                        | chitrakar_doc::Filter::Emboss { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5214,6 +5215,25 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             ],
             0.0,
         ),
+        // A function of one pixel and of two more, a whole offset either
+        // way along the light — the offset the CPU renderer rounds, handed
+        // over as it rounded it rather than worked out again here.
+        F::Emboss {
+            degrees,
+            height,
+            amount,
+        } => {
+            let (ox, oy) = chitrakar_render::emboss_offset(*degrees, *height, view);
+            point(
+                [
+                    18.0,
+                    ox as f32,
+                    oy as f32,
+                    chitrakar_render::emboss_amount(*amount),
+                ],
+                0.0,
+            )
+        }
         F::Noise {
             amount,
             grain,
@@ -10370,6 +10390,27 @@ mod tests {
             );
             assert!(
                 mean < 0.004,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+
+        // An emboss reads two pixels more, a whole offset either way
+        // along the light, and is the CPU's relief to the last bit or
+        // near it: from above across the bands' edge, from the right
+        // along it, and at an angle that rounds to a step of both.
+        for filter in [270.0, 0.0, 37.0].map(|degrees| F::Emboss {
+            degrees,
+            height: 3.0,
+            amount: 2.0,
+        }) {
+            let doc = with(filter.clone());
+            assert!(GpuRenderer::can_render(&doc), "{filter:?} is drawn");
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.002 && worst < 0.01,
                 "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
             );
         }

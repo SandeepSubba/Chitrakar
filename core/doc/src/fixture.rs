@@ -2638,11 +2638,25 @@ impl Rng {
                             motion
                         }
                     }
-                    4 => Filter::Vignette {
-                        amount: self.between(-0.8, 0.8),
-                        radius: self.between(0.1, 0.8),
-                        softness: self.between(0.1, 1.0),
-                    },
+                    4 => {
+                        let vignette = Filter::Vignette {
+                            amount: self.between(-0.8, 0.8),
+                            radius: self.between(0.1, 0.8),
+                            softness: self.between(0.1, 1.0),
+                        };
+                        // Half of them a relief instead, from a stream of
+                        // their own so no other page moves.
+                        let mut side = Rng((self.0 ^ 0x6a09_e667_bb67_ae85) | 1);
+                        if side.chance(2) {
+                            Filter::Emboss {
+                                degrees: side.between(0.0, 360.0),
+                                height: side.between(0.5, 4.0),
+                                amount: side.between(0.2, 3.0),
+                            }
+                        } else {
+                            vignette
+                        }
+                    }
                     // The last slot shared, so the five before it draw as
                     // they did; a median is one page in four of these.
                     // It is the CPU's alone, so the pages that hold one

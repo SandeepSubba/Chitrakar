@@ -2525,6 +2525,43 @@ without reading anything else.*
       catches), and darkness in linear light.
     - Smoke 9o25g: black and white only, about half ink, solid dots and
       clear paper, and a new dot size relaying them.
+- **Emboss ✅** (`Filter::Emboss { degrees, height, amount }`,
+  `emboss_offset`, `emboss_grey`; *Filter › Emboss* with *Light angle*,
+  *Relief height* and *Relief amount*). What is under it pressed into
+  grey metal and lit from one side: how light the picture is, taken as a
+  height, and its slope toward the light. Photoshop's and GIMP's emboss,
+  in grey.
+  - **The relief:** each pixel is a grey of half less half of how much
+    lighter the picture is `height` pixels toward the light than as far
+    away from it, times `amount`, held between nothing and the pixel's
+    cover. An edge that falls toward the light is lit and one that rises
+    toward it is dark; flat ground is the half grey, in the light the
+    blends are worked in, which overlay leaves alone. The light's
+    direction is measured as a motion blur's is, from the page's x axis
+    turning the way its y does, so 225 is the upper left (the preset).
+  - **Whole pixels:** the two readings are a whole offset away. The
+    offset is carried onto the surface by the view and rounded there
+    once, so a relief is an edge a pixel wide, not a blur of one. The
+    GPU is handed those two integers rather than working them out
+    again, so neither renderer can round a half the other way.
+  - **The GPU** draws it among the filters of one pixel (kind 18), with
+    two reads more off what is under it, the edge read again past the
+    edge. Inside a frame it goes back to the CPU, as every filter that
+    reads a neighbour does. The region-render reach is the height.
+  - **Fixture:** half of the random vignettes are reliefs, from a
+    stream of their own.
+  - **Tests:**
+    - `an_emboss_lights_the_edges_that_face_the_light`: flat ground is
+      the grey; the edge facing the light is white and the one facing
+      away black; level with the light, an edge is flat; from the other
+      side the two swap; no strength is the grey alone; half opacity is
+      half way; a bare page stays bare.
+    - The GPU's one-pixel filters test draws three reliefs (from above,
+      from the right, and at 37°) against the CPU, worst and mean.
+    - Sabotages that each fail one of them: the CPU's light turned the
+      other way, and the shader's.
+    - Smoke 9o25h: a white block on black is grey where flat, lit and
+      shaded along its edges, and the light angle turns the edges round.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -8170,6 +8170,50 @@ assert(
   assert(bigger.some((p, i) => p[0] !== dots[i][0]), "a larger dot size lays them out anew");
 }
 
+// 9o25h. Emboss: the Filter menu's relief. A white block on black comes
+// out grey where it is flat, lit along the edge that faces the light
+// and dark along the one that faces away; turning the light round to
+// the other side turns the edges round with it.
+{
+  await newDocument(240, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 120) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#000000", 0, 0, 240, 120);
+  await rect("#ffffff", 80, 30, 160, 90);
+  await page.keyboard.press("Escape");
+  await menuClick("Filter", "Emboss");
+  await page.waitForTimeout(300);
+  // Across each upright edge, the brightest and the darkest it gets.
+  const across = async (x0, x1) => {
+    const v = [];
+    for (let x = x0; x <= x1; x++) v.push((await canvasPixel(x, 60))[0]);
+    return [Math.min(...v), Math.max(...v)];
+  };
+  const flat = [await canvasPixel(30, 60), await canvasPixel(120, 60), await canvasPixel(210, 60)];
+  assert(
+    flat.every((p) => Math.abs(p[0] - 188) < 6 && p[0] === p[1] && p[1] === p[2]),
+    `flat ground is the half grey (${flat.map((p) => p[0])})`,
+  );
+  let [, leftHigh] = await across(77, 83);
+  let [rightLow] = await across(157, 163);
+  assert(leftHigh > 240 && rightLow < 20, `lit from the upper left (${leftHigh}, ${rightLow})`);
+  await setSlider("Light angle", 45);
+  await page.waitForTimeout(300);
+  const [leftLow] = await across(77, 83);
+  const [, rightHigh] = await across(157, 163);
+  assert(leftLow < 20 && rightHigh > 240, `lit from the lower right (${leftLow}, ${rightHigh})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {
