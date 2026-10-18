@@ -8061,6 +8061,49 @@ assert(
   assert(two3 > x3 + 3, `lowered, the 2 hangs below the x (${x3}, ${two3})`);
 }
 
+// 9o25e. High pass: the Filter menu's detail alone. A flat shape comes
+// out the grey of half (188 on screen), its edge lighter or darker
+// than that, the bare page bare; a wider radius reaches further from
+// the edge.
+{
+  await newDocument(400, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 200) * b.height];
+  await setColor("Fill colour", "#2040c0");
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 150), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Escape");
+  await menuClick("Filter", "High pass");
+  await page.waitForTimeout(300);
+  const flat = await canvasPixel(200, 100);
+  assert(
+    flat.slice(0, 3).every((c) => Math.abs(c - 188) <= 3),
+    `the flat middle of the shape is the grey of half (${flat})`,
+  );
+  // The page itself is see-through: half of nothing covered is nothing.
+  const outside = await canvasPixel(20, 20);
+  assert(outside[3] === 0, `and the bare page stays bare (${outside})`);
+  const edge = await canvasPixel(102, 100);
+  assert(Math.abs(edge[2] - 188) > 10, `the shape's edge is detail, off the grey (${edge})`);
+  const reach = async () => {
+    let n = 0;
+    for (let x = 104; x < 140; x += 2) {
+      const p = await canvasPixel(x, 100);
+      if (Math.abs(p[2] - 188) > 3) n++;
+    }
+    return n;
+  };
+  const narrow = await reach();
+  await setSlider("High pass radius", 12);
+  await page.waitForTimeout(300);
+  const wide = await reach();
+  assert(wide > narrow, `a wider radius reaches further in from the edge (${narrow} -> ${wide})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

@@ -3383,6 +3383,7 @@ fn one(
                     filter,
                     chitrakar_doc::Filter::GaussianBlur { .. }
                         | chitrakar_doc::Filter::Sharpen { .. }
+                        | chitrakar_doc::Filter::HighPass { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -3403,7 +3404,11 @@ fn one(
                     ));
                     out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
                 }
-                Filtering::Blur { radius, sharpen } => {
+                Filtering::Blur {
+                    radius,
+                    sharpen,
+                    high_pass,
+                } => {
                     let on = (out.page, out.surface);
                     let axis =
                         |a: f32| page_quad(on, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
@@ -3412,7 +3417,7 @@ fn one(
                     let quad = out.push(page_quad(
                         (out.page, out.surface),
                         alpha,
-                        [sharpen, 0.0, 0.0, 0.0],
+                        [sharpen, if high_pass { 1.0 } else { 0.0 }, 0.0, 0.0],
                         [0.0; 4],
                         [0.0; 3],
                     ));
@@ -5221,6 +5226,7 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             Some(radius) => Filtering::Blur {
                 radius,
                 sharpen: 0.0,
+                high_pass: false,
             },
             // A blur too small to move a pixel does nothing at all, and
             // the CPU renderer returns without touching the page.
@@ -5232,8 +5238,18 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             Some(radius) if *amount != 0.0 => Filtering::Blur {
                 radius,
                 sharpen: *amount,
+                high_pass: false,
             },
             _ => Filtering::Nothing,
+        },
+        // The same blur, the difference from it laid down on a grey of
+        // half. Too small to move a pixel, there is no difference: the
+        // grey alone, which the CPU renderer's own blur of nothing gives
+        // too — so it is drawn rather than skipped.
+        F::HighPass { sigma } => Filtering::Blur {
+            radius: boxes(*sigma).unwrap_or(0.0),
+            sharpen: 0.0,
+            high_pass: true,
         },
         // A grid of squares, each the average of what it covered. The
         // grid is laid out in the document rather than on the page, so
@@ -5572,7 +5588,13 @@ enum Filtering {
     /// Three box passes each way over what is under it, and how much of
     /// the difference to add back — zero for a plain blur, and an
     /// unsharp amount for a sharpen.
-    Blur { radius: f32, sharpen: f32 },
+    Blur {
+        radius: f32,
+        sharpen: f32,
+        /// The difference from the blur on a grey of half, in place of
+        /// the blur or the sharpen.
+        high_pass: bool,
+    },
     /// One pass over what is under it, averaging `taps` samples `step`
     /// apart along a line: a smear, which has an angle and so cannot be
     /// separated into a turn along each axis the way a blur is.
@@ -13562,6 +13584,10 @@ mod tests {
                 sigma: 1.0,
                 amount: -0.6,
             },
+            // The detail alone, and a blur too small to move a pixel,
+            // whose detail is nothing: the grey by itself.
+            F::HighPass { sigma: 2.0 },
+            F::HighPass { sigma: 0.0 },
         ] {
             let doc = with(filter.clone());
             assert!(

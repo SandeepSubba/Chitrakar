@@ -1131,6 +1131,13 @@ pub enum Filter {
     GaussianBlur { sigma: f32 },
     /// Unsharp mask: original + amount × (original − blur(sigma)).
     Sharpen { sigma: f32, amount: f32 },
+    /// The detail alone: what is under it less its blur by `sigma`, on a
+    /// grey of half — flat where nothing changes, lighter and darker
+    /// where edges and texture are. Set to overlay or soft light over a
+    /// copy of the picture it sharpens by just that detail; half is grey
+    /// in the light the blends are worked in, which is what they leave
+    /// alone.
+    HighPass { sigma: f32 },
     /// A smear along one direction: each pixel becomes the average of the
     /// ones on a line through it. What a camera does to a moving thing, or
     /// to a still one while the camera moves, and what a still picture is
@@ -1908,6 +1915,7 @@ impl Filter {
         match self {
             Filter::GaussianBlur { .. }
             | Filter::Sharpen { .. }
+            | Filter::HighPass { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2421,6 +2429,7 @@ impl Node {
             NodeKind::Filter(filter) => match filter {
                 Filter::GaussianBlur { .. }
                 | Filter::Sharpen { .. }
+                | Filter::HighPass { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

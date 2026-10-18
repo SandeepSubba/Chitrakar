@@ -2009,6 +2009,12 @@ fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
     let was = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
     let soft = textureSampleLevel(image, image_sampler, in.uv, 0.0);
     let weight = in.alpha * mask_cover(in.page, in.mask);
+    // A high pass: the difference from the blur on a grey of half of
+    // what is covered, held at nothing below, weighed in as a blur is.
+    if in.params.y != 0.0 {
+        let detail = max(vec3f(0.5 * was.a) + was.rgb - soft.rgb, vec3f(0.0));
+        return mix(was, vec4f(detail, was.a), weight);
+    }
     if in.params.x == 0.0 {
         return mix(was, soft, weight);
     }

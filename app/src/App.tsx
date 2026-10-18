@@ -4765,6 +4765,12 @@ export function App() {
       name: "Sharpen",
       kind: { Filter: { Sharpen: { sigma: 1.5, amount: 0.5 } } },
     },
+    // The detail alone on grey: set to overlay over the picture, it
+    // sharpens by just that.
+    "high-pass": {
+      name: "High pass",
+      kind: { Filter: { HighPass: { sigma: 3 } } },
+    },
     vignette: {
       name: "Vignette",
       kind: { Filter: { Vignette: { amount: 0.5, radius: 0.4, softness: 1 } } },
@@ -13657,6 +13663,12 @@ function KindProps({
           }))}
         </>
       );
+    }
+    if ("HighPass" in filter) {
+      const p = filter.HighPass;
+      return slider("High pass radius", p.sigma, 0.5, 40, 0.5, (v) => ({
+        Filter: { HighPass: { sigma: v } },
+      }));
     }
     if ("Sharpen" in filter) {
       const p = filter.Sharpen;

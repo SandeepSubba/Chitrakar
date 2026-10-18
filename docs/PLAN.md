@@ -2440,6 +2440,34 @@ without reading anything else.*
       keys.
     - Smoke 9o25d: disabled with nothing picked out, raised and read as
       on, back on the line, and lowered.
+- **High pass ✅** (`Filter::HighPass { sigma }`; *Filter › High
+  pass*, a *High pass radius* slider). The detail alone: what is under it,
+  less its blur, on a grey of half. Over a copy of a photograph under
+  overlay or soft light, it sharpens by that detail. That is the
+  photographer's sharpening method, and the texture pass behind most
+  "clarity" looks.
+  - **The grey:** half is grey in the linear light the blends are worked
+    in, which is what overlay leaves alone. It is 188 on screen, where
+    Photoshop's 128 is grey in its gamma. The grey is premultiplied (half
+    of what is covered), so a bare page stays bare. The result is held at
+    nothing below, as a sharpen's is, and weighed in by opacity and mask
+    as a blur is.
+  - **The GPU** draws it with the blur's own six box passes and a flag on
+    the pass that lays the blur back down (`fs_blur_down`'s `params.y`).
+    A radius too small to move a pixel is drawn rather than skipped,
+    because its answer is the grey by itself, not the page unchanged.
+  - **Fixture:** half of the random sharpens are high passes, from a
+    stream of their own.
+  - **Tests:**
+    - `a_high_pass_is_the_detail_on_a_grey_of_half`: flat ground and a
+      flat middle are grey; inside an edge into light it is lighter and
+      outside darker; half opacity is half way; no blur is the grey alone.
+    - The GPU's blur test now draws two high passes, one of them at a
+      radius of nothing, against the CPU. A grey of 0.4 in the shader, or
+      the difference taken the wrong way round, each fail one of them.
+    - Smoke 9o25e: the grey, a bare page left bare, an edge off the grey,
+      and a wider radius reaching further. A slider that does not write
+      the radius fails it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

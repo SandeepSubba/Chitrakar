@@ -820,7 +820,8 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 (((distance.abs() / 2.0) * scale).ceil() as u32).saturating_add(2)
             }
             NodeKind::Filter(Filter::GaussianBlur { sigma })
-            | NodeKind::Filter(Filter::Sharpen { sigma, .. }) => {
+            | NodeKind::Filter(Filter::Sharpen { sigma, .. })
+            | NodeKind::Filter(Filter::HighPass { sigma }) => {
                 // A filter's radius is written in the space it sits in, so
                 // a blur inside a group scaled up reaches further than its
                 // sigma says — and the padding has to know that or the
@@ -8138,6 +8139,28 @@ fn apply_filter(
                     b: un(o.b, blurred.b, o.a),
                     a: o.a,
                 }
+            });
+        }
+        // The difference from the blur, on a grey of half: premultiplied,
+        // so the grey is half of what is covered, and held at nothing
+        // below as a sharpen is. Weighed in by the layer's opacity and
+        // its mask as a blur is.
+        Filter::HighPass { sigma } => {
+            let original = blur::snapshot(dst, clip);
+            blur::gaussian_blur(dst, clip, *sigma * scale, blur::Beyond::Edge);
+            mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                let detail = |ov: f32, bv: f32| (0.5 * o.a + ov - bv).max(0.0);
+                lerp(
+                    o,
+                    LinearRgba {
+                        r: detail(o.r, blurred.r),
+                        g: detail(o.g, blurred.g),
+                        b: detail(o.b, blurred.b),
+                        a: o.a,
+                    },
+                    weight,
+                )
             });
         }
     }
@@ -20536,6 +20559,77 @@ mod tests {
         assert!(
             (away.r - plain.get(38, 38).r).abs() < 0.1 && away.r > shaded.r * 2.0,
             "and the side it is aimed away from is barely touched: {away:?}"
+        );
+    }
+
+    /// A high pass leaves the detail on a grey of half: flat ground is
+    /// that grey, the inside of an edge into something lighter is
+    /// lighter than it and the outside darker, at half opacity it is half
+    /// way from the picture, and with a blur too small to move a pixel
+    /// there is no detail and only the grey.
+    #[test]
+    fn a_high_pass_is_the_detail_on_a_grey_of_half() {
+        let page = |filter: Filter, opacity: f32| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("ground", 60.0, 40.0, BLACK),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: filled_rect("light", 20.0, 20.0, RED),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(20.0, 10.0),
+            })
+            .unwrap();
+            let mut f = chitrakar_doc::Node::filter("f", filter);
+            f.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(f),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let hp = page(Filter::HighPass { sigma: 2.0 }, 1.0);
+        let grey = hp.get(2, 2);
+        assert!(
+            (grey.r - 0.5).abs() < 1e-3 && (grey.g - 0.5).abs() < 1e-3 && grey.a == 1.0,
+            "flat ground is grey: {grey:?}"
+        );
+        assert!(
+            (hp.get(30, 20).r - 0.5).abs() < 1e-3,
+            "and so is the flat middle of the square"
+        );
+        assert!(
+            hp.get(21, 20).r > 0.6,
+            "inside the edge, lighter: {:?}",
+            hp.get(21, 20)
+        );
+        assert!(
+            hp.get(18, 20).r < 0.4,
+            "outside it, darker: {:?}",
+            hp.get(18, 20)
+        );
+        let half = page(Filter::HighPass { sigma: 2.0 }, 0.5);
+        assert!(
+            (half.get(2, 2).r - 0.25).abs() < 1e-3,
+            "at half, half way from black to the grey"
+        );
+        let none = page(Filter::HighPass { sigma: 0.0 }, 1.0);
+        assert!(
+            (none.get(21, 20).r - 0.5).abs() < 1e-3,
+            "no blur, no detail: {:?}",
+            none.get(21, 20)
         );
     }
 

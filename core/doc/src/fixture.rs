@@ -2583,10 +2583,22 @@ impl Rng {
                     1 => Filter::Pixelate {
                         size: self.between(2.0, 6.0),
                     },
-                    2 => Filter::Sharpen {
-                        sigma: self.between(0.5, 2.0),
-                        amount: self.between(0.2, 1.5),
-                    },
+                    2 => {
+                        let sharpen = Filter::Sharpen {
+                            sigma: self.between(0.5, 2.0),
+                            amount: self.between(0.2, 1.5),
+                        };
+                        // Half of them the detail alone instead, from a
+                        // stream of their own so no other page moves.
+                        let mut side = Rng((self.0 ^ 0x5be0_cd19_137e_2179) | 1);
+                        if side.chance(2) {
+                            Filter::HighPass {
+                                sigma: side.between(0.5, 3.0),
+                            }
+                        } else {
+                            sharpen
+                        }
+                    }
                     3 => {
                         let motion = Filter::MotionBlur {
                             distance: self.between(1.0, 6.0),
