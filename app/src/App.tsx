@@ -4809,6 +4809,11 @@ export function App() {
       name: "Pinch",
       kind: { Filter: { Pinch: { amount: 0.5, radius: 1, center: [0.5, 0.5] } } },
     },
+    // Rippled glass: waves a few pixels high, a couple of dozen apart.
+    ripple: {
+      name: "Ripple",
+      kind: { Filter: { Ripple: { amplitude: 4, wavelength: 24 } } },
+    },
     // Grey metal lit from the upper left, the way a relief is always lit.
     emboss: {
       name: "Emboss",
@@ -13806,6 +13811,19 @@ function KindProps({
           {slider("Circle size", p.radius, 0.05, 2, 0.01, (v) => wrap({ radius: v }))}
           {slider("Centre across", p.center[0], 0, 1, 0.01, (v) => wrap({ center: [v, p.center[1]] }))}
           {slider("Centre down", p.center[1], 0, 1, 0.01, (v) => wrap({ center: [p.center[0], v] }))}
+        </>
+      );
+    }
+    if ("Ripple" in filter) {
+      const p = filter.Ripple;
+      return (
+        <>
+          {slider("Ripple height", p.amplitude, 0, 50, 0.5, (v) => ({
+            Filter: { Ripple: { ...p, amplitude: v } },
+          }))}
+          {slider("Wavelength", p.wavelength, 2, 200, 1, (v) => ({
+            Filter: { Ripple: { ...p, wavelength: v } },
+          }))}
         </>
       );
     }

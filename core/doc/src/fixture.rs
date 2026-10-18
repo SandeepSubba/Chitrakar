@@ -2595,10 +2595,21 @@ impl Rng {
                                     center,
                                 }
                             } else {
-                                Filter::Pinch {
+                                let pinch = Filter::Pinch {
                                     amount: side.between(-1.0, 1.0),
                                     radius,
                                     center,
+                                };
+                                // Half of those a ripple, from a stream
+                                // of its own again.
+                                let mut wave = Rng((side.0 ^ 0x7f4a_7c15_e1d2_93b7) | 1);
+                                if wave.chance(2) {
+                                    Filter::Ripple {
+                                        amplitude: wave.between(0.5, 4.0),
+                                        wavelength: wave.between(3.0, 20.0),
+                                    }
+                                } else {
+                                    pinch
                                 }
                             }
                         } else {

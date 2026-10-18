@@ -2610,6 +2610,35 @@ without reading anything else.*
     - Smoke 9o25i: the corners stay and the edge swings clockwise, then
       back with the angle negative; a square in the middle is drawn in
       by a pinch and pushed out by a bulge.
+- **Ripple ✅** (`Filter::Ripple { amplitude, wavelength }`,
+  `ripple_wave`, `ripple_sine`, `ripple_source`; *Filter › Ripple* with
+  *Ripple height* and *Wavelength*). Rippled glass, on the warp the
+  twirl and pinch brought in: every point moved across by a sine of how
+  far down it is and down by one of how far across, so an upright edge
+  goes wavy down its length and a level one along its. Both numbers are
+  in document pixels and anchored to the document.
+  - **The same sine to both renderers:** the wave is the sine of the
+    share of a wavelength past the last whole one, not of the distance
+    itself. A point far out on a big page is then a small number to both
+    renderers, rather than a large one each reduces its own way.
+  - **The GPU** draws it as kind 27, in the twirl's and pinch's branch,
+    and lets it through the early return for uncovered pixels as they
+    are. The region-render reach is the amplitude.
+  - **Fixture:** half of the random pinches are ripples, from a stream
+    of their own.
+  - **Tests:**
+    - `a_ripple_makes_a_straight_edge_wavy`: no amplitude leaves the
+      edge; a crest pulls the white across and a trough the black; away
+      from the edge it is as it was; a level edge waves along its
+      length; half opacity is half way.
+    - The GPU's one-pixel filters test draws two ripples against the
+      CPU, over the two bands and over one, where the ripple must reach
+      the bare half by its amplitude.
+    - Sabotages that each fail one of them: the CPU's waves driven by the
+      wrong axis, the vertical wave's sign flipped, and the shader's axes
+      swapped.
+    - Smoke 9o25j: the edge goes wavy at a crest and a trough, the far
+      sides stay, and no height straightens it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -830,6 +830,12 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let (_, reach) = warp_circle(*radius, *center, page);
                 ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
             }
+            // A point is read from at most the amplitude away each way.
+            NodeKind::Filter(Filter::Ripple { amplitude, .. }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                let (a, _) = ripple_wave(*amplitude, 1.0);
+                ((a * scale).ceil() as u32).saturating_add(2)
+            }
             // The two readings are the height away each side.
             NodeKind::Filter(Filter::Emboss { height, .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8238,6 +8244,17 @@ fn apply_filter(
                 });
             }
         }
+        Filter::Ripple {
+            amplitude,
+            wavelength,
+        } => {
+            let (a, length) = ripple_wave(*amplitude, *wavelength);
+            if a > 0.0 {
+                warp(doc, mask, dst, clip, opacity, view, |p| {
+                    ripple_source(p, a, length)
+                });
+            }
+        }
         Filter::Emboss {
             degrees,
             height,
@@ -8363,6 +8380,41 @@ pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f
     }
     let k = (r / reach).powf(power) * reach / r;
     [mid[0] + dx * k, mid[1] + dy * k]
+}
+
+/// A ripple's amplitude and wavelength, in document pixels: the one
+/// held to 0..=200 and none for no number, the other a pixel at the
+/// least and sixteen for no number.
+pub fn ripple_wave(amplitude: f32, wavelength: f32) -> (f32, f32) {
+    let a = if amplitude.is_finite() {
+        amplitude.clamp(0.0, 200.0)
+    } else {
+        0.0
+    };
+    let length = if wavelength.is_finite() {
+        wavelength.max(1.0)
+    } else {
+        16.0
+    };
+    (a, length)
+}
+
+/// One step of a ripple's wave at `at` along it: the sine of the share
+/// of a wavelength past the last whole one, so a point far out on the
+/// page is the same number to both renderers rather than a sine of
+/// something large. The GPU's own.
+pub fn ripple_sine(at: f32, length: f32) -> f32 {
+    let t = at / length;
+    ((t - t.floor()) * std::f32::consts::TAU).sin()
+}
+
+/// Where a ripple reads the point `here` from: moved across by the wave
+/// at how far down it is, and down by the wave at how far across.
+pub fn ripple_source(here: [f32; 2], amplitude: f32, length: f32) -> [f32; 2] {
+    [
+        here[0] + amplitude * ripple_sine(here[1], length),
+        here[1] + amplitude * ripple_sine(here[0], length),
+    ]
 }
 
 /// A filter that moves the picture rather than recolouring it: every
@@ -21144,6 +21196,70 @@ mod tests {
         let faint = page(disc(10.0), pinch(1.0), 0.5);
         for ((f, p), u) in faint.pixels.iter().zip(&pinched.pixels).zip(&flat.pixels) {
             assert!((f.r - (p.r + u.r) / 2.0).abs() < 1e-5, "half way");
+        }
+    }
+
+    /// A ripple makes an upright edge wavy down its length, crossing it
+    /// a crest's width either way, and a level edge wavy along its; with
+    /// no amplitude it is nothing; half opacity is half way.
+    #[test]
+    fn a_ripple_makes_a_straight_edge_wavy() {
+        let page = |level: bool, filter: Filter, opacity: f32| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("black", 64.0, 64.0, BLACK),
+            })
+            .unwrap();
+            // White on the right, or white below.
+            let (w, h, x, y) = if level {
+                (64.0, 32.0, 0.0, 32.0)
+            } else {
+                (32.0, 64.0, 32.0, 0.0)
+            };
+            let mut white = filled_rect("white", w, h, WHITE);
+            white.transform = Transform::translation(x, y);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: white,
+            })
+            .unwrap();
+            let mut f = chitrakar_doc::Node::filter("ripple", filter);
+            f.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(f),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let ripple = |amplitude: f32| Filter::Ripple {
+            amplitude,
+            wavelength: 16.0,
+        };
+        let at = |s: &Surface, x: u32, y: u32| s.pixels[(y * 64 + x) as usize].r;
+        let flat = page(false, ripple(0.0), 1.0);
+        assert!(at(&flat, 29, 4) < 0.05 && at(&flat, 34, 11) > 0.95);
+        let wavy = page(false, ripple(4.0), 1.0);
+        // A quarter of a wave down, the picture comes from four to the
+        // right, so the white reaches left; three quarters down, from
+        // four to the left, and the black reaches right.
+        assert!(at(&wavy, 29, 4) > 0.95, "a crest pulls the white across");
+        assert!(at(&wavy, 34, 11) < 0.05, "a trough the black");
+        assert!(
+            at(&wavy, 2, 4) < 0.05 && at(&wavy, 61, 11) > 0.95,
+            "away from the edge, as it was"
+        );
+        let level = page(true, ripple(4.0), 1.0);
+        assert!(at(&level, 4, 29) > 0.95, "level, the wave runs along it");
+        assert!(at(&level, 11, 34) < 0.05, "both ways");
+        let faint = page(false, ripple(4.0), 0.5);
+        for ((f, w), u) in faint.pixels.iter().zip(&wavy.pixels).zip(&flat.pixels) {
+            assert!((f.r - (w.r + u.r) / 2.0).abs() < 1e-5, "half way");
         }
     }
 

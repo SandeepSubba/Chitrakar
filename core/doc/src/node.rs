@@ -1226,6 +1226,13 @@ pub enum Filter {
         #[serde(default = "page_middle")]
         center: [f32; 2],
     },
+    /// What is under it seen through rippled glass: every point moved
+    /// across by `amplitude` times a sine of how far down it is, and down
+    /// by the same of how far across, both waves `wavelength` long — so
+    /// an upright edge goes wavy down its length and a level one along
+    /// its. Both in document pixels and anchored to the document, so the
+    /// waves stay on the picture when the page is panned or zoomed.
+    Ripple { amplitude: f32, wavelength: f32 },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in
@@ -1976,6 +1983,7 @@ impl Filter {
             | Filter::Emboss { .. }
             | Filter::Twirl { .. }
             | Filter::Pinch { .. }
+            | Filter::Ripple { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2494,6 +2502,7 @@ impl Node {
                 | Filter::Emboss { .. }
                 | Filter::Twirl { .. }
                 | Filter::Pinch { .. }
+                | Filter::Ripple { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

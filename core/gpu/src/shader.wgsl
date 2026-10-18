@@ -1054,6 +1054,13 @@ fn lut_at(r: i32, g: i32, b: i32, n: i32, k: i32) -> vec3f {
     return textureLoad(image, vec2i((b % k) * n + r, (b / k) * n + g), 0).rgb;
 }
 
+// The CPU renderer's `ripple_sine`: the sine of the share of a
+// wavelength past the last whole one.
+fn ripple_sine(at: f32, length: f32) -> f32 {
+    let t = at / length;
+    return sin((t - floor(t)) * 6.28318530717958647);
+}
+
 // A pixel of what is under the layer, the edge read again past the edge.
 fn texel_at(i: vec2i, size: vec2i) -> vec4f {
     return textureLoad(backdrop, clamp(i, vec2i(0), size - vec2i(1)), 0);
@@ -1077,15 +1084,15 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     let kind = i32(in.mode);
     // A warp moves the picture, so it can bring it onto a pixel where
     // nothing was; everything else leaves an uncovered pixel as it is.
-    let warps = kind == 19 || kind == 26;
+    let warps = kind == 19 || kind == 26 || kind == 27;
     if weight <= 0.0 || (was.a <= 0.0 && !warps) {
         return was;
     }
     // Ten to thirteen read a table, fourteen to nineteen are the filters
     // of one pixel, and the rest are numbers again — the adjustments that
-    // came after the filters had taken the next numbers, and twenty-six,
-    // the pinch, which came after those.
-    if (kind >= 14 && kind < 20) || kind == 26 {
+    // came after the filters had taken the next numbers, and twenty-six
+    // and twenty-seven, the pinch and the ripple, which came after those.
+    if (kind >= 14 && kind < 20) || kind == 26 || kind == 27 {
         return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
@@ -1152,15 +1159,18 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let paper = (1.0 - ink) * was.a;
         return mix(was, vec4f(paper, paper, paper, was.a), weight);
     }
-    if kind == 19 || kind == 26 {
-        // A twirl or a pinch: the CPU renderer's `twirl_source` and
-        // `pinch_source`, then its `warp`, step for step.
+    if kind == 19 || kind == 26 || kind == 27 {
+        // A twirl, a pinch or a ripple: the CPU renderer's
+        // `twirl_source`, `pinch_source` or `ripple_source`, then its
+        // `warp`, step for step.
         let mid = vec2f(p.w, e.z);
         let reach = p.z;
         let d = here - mid;
         let r = sqrt(d.x * d.x + d.y * d.y);
         var src = here;
-        if r < reach {
+        if kind == 27 {
+            src = vec2f(here.x + p.y * ripple_sine(here.y, p.z), here.y + p.y * ripple_sine(here.x, p.z));
+        } else if r < reach {
             if kind == 19 {
                 let left = 1.0 - r / reach;
                 let t = -p.y * left * left;

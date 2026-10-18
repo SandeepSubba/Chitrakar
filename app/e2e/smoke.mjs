@@ -8264,6 +8264,45 @@ assert(
   assert((await red(143, 60)) > 225, `a bulge pushes it out (${await red(143, 60)})`);
 }
 
+// 9o25j. Ripple: the Filter menu's rippled glass. Black on the left
+// and white on the right, the edge goes wavy down its length — white
+// pulled across at one row, black at another — and the corners away
+// from it stay; no height is the edge straight again.
+{
+  await newDocument(240, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 120) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#000000", 0, 0, 240, 120);
+  await rect("#ffffff", 120, 0, 240, 120);
+  await page.keyboard.press("Escape");
+  await menuClick("Filter", "Ripple");
+  await page.waitForTimeout(300);
+  const red = async (x, y) => (await canvasPixel(x, y))[0];
+  // Wavelength 24: a quarter of the way down a wave the picture comes
+  // from four to the right, three quarters down from four to the left.
+  assert(
+    (await red(118, 6)) > 225 && (await red(121, 18)) < 30,
+    `the edge goes wavy (${await red(118, 6)}, ${await red(121, 18)})`,
+  );
+  assert((await red(20, 60)) < 10 && (await red(220, 60)) > 245, "away from it, as it was");
+  await setSlider("Ripple height", 0);
+  await page.waitForTimeout(300);
+  assert(
+    (await red(118, 6)) < 30 && (await red(121, 18)) > 225,
+    `no height, straight again (${await red(118, 6)}, ${await red(121, 18)})`,
+  );
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

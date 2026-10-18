@@ -3388,6 +3388,7 @@ fn one(
                         | chitrakar_doc::Filter::Emboss { .. }
                         | chitrakar_doc::Filter::Twirl { .. }
                         | chitrakar_doc::Filter::Pinch { .. }
+                        | chitrakar_doc::Filter::Ripple { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5263,6 +5264,16 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
                 return Some(Filtering::Nothing);
             }
             point([26.0, power, reach, mid[0]], mid[1])
+        }
+        F::Ripple {
+            amplitude,
+            wavelength,
+        } => {
+            let (a, length) = chitrakar_render::ripple_wave(*amplitude, *wavelength);
+            if a <= 0.0 {
+                return Some(Filtering::Nothing);
+            }
+            point([27.0, a, length, 0.0], 0.0)
         }
         F::Noise {
             amount,
@@ -10470,6 +10481,14 @@ mod tests {
                 radius: 0.8,
                 center: [0.6, 0.4],
             },
+            F::Ripple {
+                amplitude: 3.0,
+                wavelength: 11.0,
+            },
+            F::Ripple {
+                amplitude: 12.0,
+                wavelength: 7.5,
+            },
         ];
         for filter in warps {
             for half in [false, true] {
@@ -10486,8 +10505,14 @@ mod tests {
                     mean < 0.002 && worst < 0.03,
                     "{filter:?} (half {half}): mean channel difference {mean:.5} (worst {worst:.3})"
                 );
-                if half && matches!(filter, F::Twirl { .. }) {
-                    let onto = (0..60).any(|x| (24..40).any(|y| drawn.get(x, y).a > 0.5));
+                if half && matches!(filter, F::Twirl { .. } | F::Ripple { .. }) {
+                    // A ripple reaches no further than its amplitude.
+                    let rows = if matches!(filter, F::Ripple { .. }) {
+                        20..22
+                    } else {
+                        24..40
+                    };
+                    let onto = (0..60).any(|x| rows.clone().any(|y| drawn.get(x, y).a > 0.5));
                     assert!(onto, "{filter:?} turns the picture onto the bare half");
                 }
             }

@@ -241,6 +241,9 @@ export type Filter =
   /** Squeezed toward `center` for a positive `amount` (to 1), swollen
    * out from it for a negative one, inside the same circle. */
   | { Pinch: { amount: number; radius: number; center: [number, number] } }
+  /** Rippled glass: moved across by a sine of how far down, and down by
+   * one of how far across, `amplitude` high and `wavelength` long. */
+  | { Ripple: { amplitude: number; wavelength: number } }
   /** Grey relief: how light the picture is, taken as a height, lit from
    * `degrees` (the page's x axis turning with its y, so 225 is the upper
    * left), read `height` pixels either way, `amount` strong. */
