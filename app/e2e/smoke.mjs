@@ -8104,6 +8104,37 @@ assert(
   assert(wide > narrow, `a wider radius reaches further in from the edge (${narrow} -> ${wide})`);
 }
 
+// 9o25f. A line along what is picked: Select › Stroke what is picked…
+// asks how wide and which side, and draws it as a shape layer in the
+// ink in hand — inside the edge, the middle left alone; one undo.
+{
+  await newDocument(300, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 200) * b.height];
+  await setColor("Fill colour", "#c02020");
+  await pickTool("Select");
+  await page.mouse.move(...at(60, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 150), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await menuClick("Select", "Stroke what is picked…");
+  await page.waitForSelector('[role=dialog][aria-label="Stroke"]');
+  await page.locator('input[aria-label="Stroke width"]').fill("8");
+  await page.selectOption('select[aria-label="Stroke side"]', "inside");
+  await page.click('[role=dialog][aria-label="Stroke"] .primary');
+  await page.waitForTimeout(300);
+  const names = await page.locator(".panel ul li .layer-name").allTextContents();
+  assert(names.some((n) => n.trim() === "Stroked region"), `a layer for the line (${names})`);
+  const inside = await canvasPixel(63, 100);
+  assert(inside[0] > 150 && inside[1] < 80 && inside[3] > 200, `inked just inside the edge (${inside})`);
+  assert((await canvasPixel(56, 100))[3] === 0, "nothing outside it");
+  assert((await canvasPixel(150, 100))[3] === 0, "and the middle is left alone");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(63, 100))[3] === 0, "one undo takes it away");
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

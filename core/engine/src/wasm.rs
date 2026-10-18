@@ -1091,6 +1091,23 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// A line along the edge of what is picked out, as a shape layer: the
+    /// colour as an AuthoredColor's JSON, the width, and which side of the
+    /// edge it lies on — "inside", "centre" or "outside". The new layer.
+    pub fn stroke_selection(
+        &mut self,
+        color_json: &str,
+        width: f32,
+        align: &str,
+    ) -> Result<f64, JsError> {
+        let color =
+            serde_json::from_str(color_json).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        self.inner
+            .stroke_selection(color, width, align)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Scope an adjustment or filter to one layer: the layer and the new
     /// node (as AddNode's node JSON) go into a group together. Returns the
     /// group's id.

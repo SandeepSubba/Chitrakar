@@ -6807,6 +6807,150 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// What is picked out as a path, and the box it sits in on the page:
+    /// the path's anchors relative to the box's corner, like every other
+    /// path's, so a layer drawing it stands at that corner. Inverted, the
+    /// outline is the page's own rectangle with what was picked as a hole
+    /// in it — which `region_rings` says, so neither a fill nor a stroke
+    /// of the rest of the page needs anything special.
+    fn region_outline(
+        &self,
+        region: &chitrakar_doc::Mask,
+    ) -> Result<(VectorShape, [f32; 4]), EngineError> {
+        let rings = self.region_rings(region)?;
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in rings.iter().flatten() {
+            x0 = x0.min(p[0]);
+            y0 = y0.min(p[1]);
+            x1 = x1.max(p[0]);
+            y1 = y1.max(p[1]);
+        }
+        if !x0.is_finite() {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        }
+        let mut rings = rings.into_iter().map(|ring| {
+            ring.into_iter()
+                .map(|p| [p[0] - x0, p[1] - y0])
+                .collect::<Vec<[f32; 2]>>()
+        });
+        let points = rings.next().expect("checked above");
+        Ok((
+            VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: rings.collect(),
+            },
+            [x0, y0, x1, y1],
+        ))
+    }
+
+    /// Draw a line along the edge of what is picked out: a shape layer
+    /// with no fill and a stroke of `width` in `color` lying inside the
+    /// edge, across it or outside it (`align`: "inside", "centre" or
+    /// "outside") — Photoshop's Edit › Stroke, made as artwork rather
+    /// than paint, so the line's colour and width stay numbers to change.
+    ///
+    /// A path is stroked down the middle of its line, so a line to one
+    /// side of the edge is a centred line along the edge moved half a
+    /// width that way (`offset_outline`): inside, its outer side runs
+    /// along the edge, corners and all; outside, its inner side does,
+    /// and its outer corners come out round, as Photoshop's do. A
+    /// softened region is stroked along its outline, the softness being
+    /// no part of where its edge runs. One step; the answer is the new
+    /// layer.
+    pub fn stroke_selection(
+        &mut self,
+        color: chitrakar_color::AuthoredColor,
+        width: f32,
+        align: &str,
+    ) -> Result<NodeId, EngineError> {
+        let Some(region) = self.doc.selection().cloned() else {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        };
+        if !(width.is_finite() && width > 0.0) {
+            return Err(EngineError::BadCommand("a line needs a width".into()));
+        }
+        let align = match align {
+            "inside" => chitrakar_doc::StrokeAlign::Inside,
+            "centre" | "center" => chitrakar_doc::StrokeAlign::Centre,
+            "outside" => chitrakar_doc::StrokeAlign::Outside,
+            other => {
+                return Err(EngineError::BadCommand(format!(
+                    "a line lies inside, centre or outside, not {other:?}"
+                )))
+            }
+        };
+        let (outline, [x0, y0, ..]) = self.region_outline(&region)?;
+        let by = match align {
+            chitrakar_doc::StrokeAlign::Inside => -width / 2.0,
+            chitrakar_doc::StrokeAlign::Centre => 0.0,
+            chitrakar_doc::StrokeAlign::Outside => width / 2.0,
+        };
+        // The edge moved half a width to the side asked for, anchored at
+        // its own corner as every path is.
+        let (shape, [ox, oy]) = match chitrakar_render::offset_outline(&outline, by) {
+            Some(rings) if by != 0.0 && rings.iter().any(|r| r.len() >= 3) => {
+                let rings: Vec<Vec<[f32; 2]>> =
+                    rings.into_iter().filter(|r| r.len() >= 3).collect();
+                let (mut mx, mut my) = (f32::MAX, f32::MAX);
+                for p in rings.iter().flatten() {
+                    mx = mx.min(p[0]);
+                    my = my.min(p[1]);
+                }
+                let mut rings = rings.into_iter().map(|r| {
+                    r.into_iter()
+                        .map(|p| [p[0] - mx, p[1] - my])
+                        .collect::<Vec<_>>()
+                });
+                let points = rings.next().expect("checked above");
+                (
+                    VectorShape::Path {
+                        points,
+                        closed: true,
+                        smooth: false,
+                        handles: Vec::new(),
+                        subpaths: rings.collect(),
+                    },
+                    [mx, my],
+                )
+            }
+            // Asked across the edge, or too narrow a region to move the
+            // edge inside at all: the edge itself.
+            _ => (outline, [0.0, 0.0]),
+        };
+        let mut node = Node::vector("Stroked region", shape);
+        node.transform = Transform::translation(x0 + ox, y0 + oy);
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color,
+                width,
+                widths: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Butt,
+                join: chitrakar_doc::StrokeJoin::Miter,
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                align: Some(chitrakar_doc::StrokeAlign::Centre),
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::None,
+            });
+        }
+        let root = self.doc.root();
+        let index = self.doc.children_of(root)?.len();
+        let id = self.doc.peek_next_id();
+        self.apply_labeled(
+            Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            },
+            Some("Stroke what is picked".into()),
+        )?;
+        Ok(id)
+    }
+
     /// Turn what is picked out into a shape layer of its own, in `color`.
     ///
     /// Filling a region in an editor that cuts pixels would put paint on
@@ -6822,42 +6966,8 @@ impl Session {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
         let feather = region.feather;
-        // Inverted, the outline is the page's own rectangle with what
-        // was picked as a hole in it — which `region_rings` says, so
-        // filling the rest of the page needs nothing special here.
-        let rings = self.region_rings(&region)?;
-        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-        for p in rings.iter().flatten() {
-            x0 = x0.min(p[0]);
-            y0 = y0.min(p[1]);
-            x1 = x1.max(p[0]);
-            y1 = y1.max(p[1]);
-        }
-        if !x0.is_finite() {
-            return Err(EngineError::BadCommand("nothing is picked out".into()));
-        }
-        // Anchors sit relative to the layer's own origin, like every
-        // other path, so the transform carries the position.
-        let mut rings = rings
-            .into_iter()
-            .map(|ring| {
-                ring.into_iter()
-                    .map(|p| [p[0] - x0, p[1] - y0])
-                    .collect::<Vec<[f32; 2]>>()
-            })
-            .collect::<Vec<_>>()
-            .into_iter();
-        let points = rings.next().expect("checked above");
-        let mut node = Node::vector(
-            "Filled region",
-            VectorShape::Path {
-                points,
-                closed: true,
-                smooth: false,
-                handles: Vec::new(),
-                subpaths: rings.collect(),
-            },
-        );
+        let (shape, [x0, y0, x1, y1]) = self.region_outline(&region)?;
+        let mut node = Node::vector("Filled region", shape);
         node.transform = Transform::translation(x0, y0);
         if feather > 0.0 {
             // Three sigma out, which is where a Gaussian has nothing
@@ -20027,6 +20137,88 @@ mod tests {
     /// deleting holds the layer to everything *but* the region, and
     /// cropping is the resize the crop tool already does with the
     /// region standing in for the rectangle.
+    /// A line drawn along what is picked: a shape layer with its outline,
+    /// no fill, and the line on the side asked for — inside the edge,
+    /// across it, or outside it. Nothing picked, no width or a side that
+    /// is not one is refused; one undo takes it away.
+    #[test]
+    fn a_picked_region_is_stroked_on_the_side_asked_for() {
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 0.9,
+            g: 0.1,
+            b: 0.1,
+            a: 1.0,
+        };
+        let pick = |s: &mut Session| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        };
+        let mut session = Session::new(120, 80, ColorMode::Rgb);
+        assert!(
+            session
+                .stroke_selection(ink.clone(), 4.0, "inside")
+                .is_err(),
+            "nothing picked"
+        );
+        pick(&mut session);
+        assert!(
+            session
+                .stroke_selection(ink.clone(), 0.0, "inside")
+                .is_err(),
+            "no width"
+        );
+        assert!(
+            session
+                .stroke_selection(ink.clone(), 4.0, "around")
+                .is_err(),
+            "no such side"
+        );
+        // The left edge is at x 20; its line, four wide, lies at 20..24
+        // inside, 18..22 across, 16..20 outside.
+        for (align, inked, clear) in [("inside", 22, 18), ("centre", 19, 23), ("outside", 18, 22)] {
+            let id = session.stroke_selection(ink.clone(), 4.0, align).unwrap();
+            let node = session.document().node(id).unwrap();
+            let NodeKind::Vector { fill, stroke, .. } = &node.kind else {
+                unreachable!()
+            };
+            assert!(fill.is_none() && stroke.as_ref().is_some_and(|s| s.width == 4.0));
+            let page = session.render().unwrap();
+            assert!(page.get(inked, 25).a > 0.9, "{align}: inked at x {inked}");
+            assert!(page.get(clear, 25).a < 0.1, "{align}: clear at x {clear}");
+            assert!(
+                page.get(40, 25).a < 0.1,
+                "{align}: the middle is not filled"
+            );
+            // The corner at (20, 10): inside, the line fills the corner
+            // of the region; outside, it rounds it — inked two and a bit
+            // out along the diagonal, clear past four.
+            if align == "inside" {
+                assert!(page.get(21, 11).a > 0.9, "inside reaches into the corner");
+            }
+            if align == "outside" {
+                assert!(page.get(18, 8).a > 0.9, "outside covers the corner");
+                assert!(page.get(16, 6).a < 0.1, "and rounds it");
+            }
+            assert_eq!(
+                session.history_labels().0.last().map(String::as_str),
+                Some("Stroke what is picked")
+            );
+            session.undo().unwrap();
+            assert!(
+                session.document().node(id).is_err(),
+                "one undo takes it away"
+            );
+        }
+    }
+
     #[test]
     fn a_picked_region_fills_hides_and_crops() {
         let ink = chitrakar_color::AuthoredColor::Srgb {

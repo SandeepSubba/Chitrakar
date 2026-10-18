@@ -2468,6 +2468,28 @@ without reading anything else.*
     - Smoke 9o25e: the grey, a bare page left bare, an edge off the grey,
       and a wider radius reaching further. A slider that does not write
       the radius fails it.
+- **Stroke what is picked ✅** (`Session::stroke_selection(color, width,
+  align)`; *Select › Stroke what is picked…*, a window asking the width
+  and the side). Photoshop's Edit › Stroke. As fill is here, it is made
+  as artwork rather than paint: a shape layer with no fill and a line in
+  the ink in hand, its colour and width numbers to change afterwards.
+  - **Sides:** a path is stroked down the middle of its line
+    (`stroke_align`), so a line to one side of the edge is a centred line
+    along the edge moved half a width that way (`offset_outline`).
+    Inside, the line's outer side runs along the edge, into the corners;
+    outside, its inner side does, and its outer corners are round, as
+    Photoshop's are. Across, it is the edge itself. A region too narrow
+    to move inside falls back to the edge.
+  - **Shared with fill:** what a region is as a path is now
+    `region_outline`, which fill and stroke both use. A softened region
+    is stroked along its outline.
+  - **Tests:** `a_picked_region_is_stroked_on_the_side_asked_for`: nothing
+    picked, no width and an unknown side are refused; each side inked
+    where it lies and clear on the other side of the edge; the middle
+    unfilled; the inside corner filled and the outside corner rounded;
+    one undo each. The inward offset taken outward fails it. Smoke 9o25f:
+    a marquee stroked inside in the ink, nothing outside, the middle
+    clear, one undo; a window handing over the wrong side fails it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -2033,6 +2033,29 @@ export function App() {
    * which is what the preview API is for: softening is a judgement made
    * by looking, and a slider that could only be judged after committing
    * would be no better than typing a number. */
+  /** A line along the edge of what is picked, asked for in a small
+   * window: how wide and which side, in the ink in hand. */
+  const [strokeOpen, setStrokeOpen] = useState(false);
+  const openStroke = () => {
+    if (!session) return;
+    if (!session.selection_json() || session.selection_json() === "null") {
+      alert("Pick something out first: there is no edge to draw along yet.");
+      return;
+    }
+    setStrokeOpen(true);
+  };
+  const strokeSelection = (width: number, side: string) => {
+    if (!session) return;
+    try {
+      const id = session.stroke_selection(JSON.stringify(currentInk()), width, side) as number;
+      setStrokeOpen(false);
+      setSelected(id as NodeId);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Stroke: ${err}`);
+    }
+  };
   const openFeather = () => {
     if (!session) return;
     if (!session.selection_json() || session.selection_json() === "null") {
@@ -7782,6 +7805,7 @@ export function App() {
         // And what a region is *for*, once there is one.
         item("feather", "mask", "Feather…", openFeather),
         item("fill-picked", "fill", "Fill what is picked", fillSelection),
+        item("stroke-picked", "pen", "Stroke what is picked…", openStroke),
         item("mask-from-picked", "mask", "Mask this layer with what is picked", () =>
           maskFromSelection(false),
         ),
@@ -8649,6 +8673,9 @@ export function App() {
             endGesture();
           }}
         />
+      )}
+      {strokeOpen && (
+        <StrokeDialog onCancel={() => setStrokeOpen(false)} onStroke={strokeSelection} />
       )}
       {repeatFor && (
         <RepeatDialog
@@ -11595,6 +11622,71 @@ type RepeatStep = {
  * one step — the move, the turn and the scale from each copy to the
  * next. A ring is a turn about a point away from the middle: twelve
  * copies at thirty degrees about a point below a mark is a clock face. */
+/** How a line along the edge of what is picked is drawn: its width and
+ * which side of the edge it lies on. Photoshop asks the same two. */
+function StrokeDialog({
+  onCancel,
+  onStroke,
+}: {
+  onCancel: () => void;
+  onStroke: (width: number, side: string) => void;
+}) {
+  const [width, setWidth] = useState(4);
+  const [side, setSide] = useState("inside");
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Stroke"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Stroke what is picked</h2>
+        <label className="row">
+          Width
+          <input
+            type="number"
+            min={0.5}
+            step={0.5}
+            value={width}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) setWidth(v);
+            }}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter" && width > 0) onStroke(width, side);
+            }}
+            aria-label="Stroke width"
+          />
+          <span className="unit">px</span>
+        </label>
+        <label className="row">
+          Where
+          <select value={side} onChange={(e) => setSide(e.target.value)} aria-label="Stroke side">
+            <option value="inside">Inside the edge</option>
+            <option value="centre">Across the edge</option>
+            <option value="outside">Outside the edge</option>
+          </select>
+        </label>
+        <div className="modal-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" disabled={!(width > 0)} onClick={() => onStroke(width, side)}>
+            Stroke
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RepeatDialog({
   count,
   onCancel,
