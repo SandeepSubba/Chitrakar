@@ -15,8 +15,8 @@ pub use node::{
     round_corners, spread_gain, stroke_align, Adjustment, BevelLight, BlendMode, Effect, Filter,
     Gradient, GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke, Pin,
     Pinning, Projective, RasterRef, Rounded, Spread, Stroke, StrokeAlign, StrokeCap, StrokeJoin,
-    StyleRun, TextAlign, TextList, TextSpec, Transform, VectorShape, BEVEL_DEPTH_MOST, LUMA,
-    MARKER_LENGTH, MARKER_REACH, MITER_LIMIT, SPREAD_MOST,
+    StyleRun, TextAlign, TextList, TextSpec, Transform, VectorShape, BASELINE_MOST,
+    BEVEL_DEPTH_MOST, LUMA, MARKER_LENGTH, MARKER_REACH, MITER_LIMIT, SPREAD_MOST,
 };
 
 use chitrakar_color::ColorMode;

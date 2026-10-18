@@ -1380,7 +1380,16 @@ pub struct StyleRun {
     /// every run on a line sits on the same baseline.
     #[serde(default)]
     pub size: Option<f32>,
+    /// How far the run sits above its line's baseline, in its own size:
+    /// a superscript is raised a third or so, a subscript lowered by a
+    /// fifth (negative). The line makes room for it. Additive: a run
+    /// written before this sat on the baseline.
+    #[serde(default)]
+    pub baseline: Option<f32>,
 }
+
+/// The furthest a run is raised or lowered, in its own size.
+pub const BASELINE_MOST: f32 = 1.0;
 
 impl StyleRun {
     /// A run over `start..end` that changes nothing yet.
@@ -1395,7 +1404,17 @@ impl StyleRun {
             strike: None,
             font: None,
             size: None,
+            baseline: None,
         }
+    }
+
+    /// How far the run is raised, in its own size: held to
+    /// ±[`BASELINE_MOST`], and nothing for nothing or for what is no
+    /// number.
+    pub fn shift(&self) -> f32 {
+        self.baseline
+            .filter(|b| b.is_finite())
+            .map_or(0.0, |b| b.clamp(-BASELINE_MOST, BASELINE_MOST))
     }
 
     /// Whether the run asks for anything at all. One that does not is
@@ -1408,6 +1427,7 @@ impl StyleRun {
             || self.strike.is_some()
             || self.font.is_some()
             || self.size.is_some()
+            || self.baseline.is_some()
     }
 }
 

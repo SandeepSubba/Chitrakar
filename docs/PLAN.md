@@ -2398,6 +2398,48 @@ without reading anything else.*
       and the SVG's lines at the block's edge.
     - Smoke 9o25c: Bullets and Numbers keep the block's left edge and move
       the text in past the marks, and undo is one step.
+- **Superscript and subscript ✅** (`StyleRun::baseline`, `shift`,
+  `BASELINE_MOST`; *x²* and *x₂* beside the style toggles). Part of a
+  block raised off its line or lowered, and smaller: x², H₂O, ™ and
+  footnote marks.
+  - **The model:** a run's `baseline` is how far it sits above the line,
+    in its own size, negative to lower it, held to ±1 (serde default:
+    on the line). Shaping moves the run's glyphs by that share of its
+    size, and everything that reads shaped glyphs follows: the raster,
+    `placed` and so the PDF, and the GPU's text.
+  - **The line makes room:** `line_metrics` gives a raised run that much
+    more ascent, which moves the baseline down, and a lowered one that
+    much more below. A small superscript tucks under a line's own ascent
+    and leaves the line as it was.
+  - **SVG:** a run's shift is written as `baseline-shift`, which runs the
+    same way up. A list item's marker takes the look of where its
+    paragraph begins (`run_look`) but not its shift, because the engine
+    leaves markers on the line. Written with the whole run, the bullet of
+    a raised item came out raised in every reader, and the four SVG
+    audits caught it on seed 36.
+  - **The buttons:** each needs some text picked out. Superscript raises
+    it 0.33 at three fifths of the block's size, and subscript lowers it
+    0.2. Each reads as on over its own shift and takes both back off when
+    pressed again. `runs.ts` knows the field, with the block's own value
+    0.
+  - **Editing on the canvas:** a block with a raised run is typed in a
+    plain box, as one with a sized run is.
+  - **Fixture:** a third of the random styled runs are raised or lowered,
+    drawn after their size from the same stream.
+  - **Tests:**
+    - `a_raised_run_sits_above_the_line_and_the_line_makes_room`:
+      measured from the baseline, since from the block's top a raised
+      glyph has not moved — the baseline drops to make room. It inks
+      higher raised and lower lowered, the line grows, nothing is cut
+      off the raster, and a shift of nothing is none.
+    - `a_raised_run_leaves_as_the_engine_sets_it`: resvg inks the
+      shifted rows within one of the engine.
+    - The run algebra's own case in `runs.test.mjs`.
+    - Sabotages that each fail one of them: no room made, the shift the
+      wrong way, no `baseline-shift`, and the field missing from the run
+      keys.
+    - Smoke 9o25d: disabled with nothing picked out, raised and read as
+      on, back on the line, and lowered.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

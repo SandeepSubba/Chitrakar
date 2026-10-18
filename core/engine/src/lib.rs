@@ -14772,6 +14772,7 @@ mod tests {
             strike: None,
             font: None,
             size: None,
+            baseline: None,
         }];
         let mut words = chitrakar_doc::Node::text("words", spec);
         words.transform = Transform::translation(14.0, 20.0);

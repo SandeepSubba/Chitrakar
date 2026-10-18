@@ -9838,7 +9838,7 @@ export function App() {
               const mirrored =
                 !((spec.paragraph_spacing ?? 0) > 0) &&
                 (spec.list ?? "None") === "None" &&
-                !(spec.runs ?? []).some((r) => r.size != null);
+                !(spec.runs ?? []).some((r) => r.size != null || r.baseline != null);
               return (
                 <textarea
                   ref={inlineRef}
@@ -13717,6 +13717,7 @@ function KindProps({
             strike: !!t.strike,
             font: t.font ?? "",
             size: t.size,
+            baseline: 0,
           }),
         },
       };
@@ -13894,6 +13895,40 @@ function KindProps({
           >
             <s>S</s>
           </button>
+          {/* Raised or lowered off the line, and smaller: what is picked
+              out of the text, and again to put it back. */}
+          {(
+            [
+              ["Superscript", 0.33, "x²"],
+              ["Subscript", -0.2, "x₂"],
+            ] as const
+          ).map(([name, rise, glyph]) => {
+            const range = selection();
+            const on =
+              !!range && rangeSays(t.text, t.runs ?? [], range[0], range[1], "baseline", 0) === rise;
+            return (
+              <button
+                key={name}
+                className={on ? "active" : undefined}
+                title={`${name} — pick out some of the text first`}
+                aria-label={name}
+                aria-pressed={on}
+                disabled={!range}
+                onClick={() =>
+                  onEdit(
+                    styled(
+                      on
+                        ? { baseline: null, size: null }
+                        : { baseline: rise, size: Math.round(t.size * 0.6) },
+                    ),
+                    false,
+                  )
+                }
+              >
+                {glyph}
+              </button>
+            );
+          })}
           <select
             id="text-font"
             value={t.font || fonts[0]}

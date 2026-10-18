@@ -8951,6 +8951,7 @@ mod tests {
                     strike: None,
                     font: None,
                     size: None,
+                    baseline: None,
                 }];
             }),
             Transform::translation(8.0, 10.0),

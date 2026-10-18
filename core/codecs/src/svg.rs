@@ -978,7 +978,7 @@ fn write_node(
                                 out,
                                 r#"<tspan x="{:.2}" y="{y:.2}"{}>{}</tspan>"#,
                                 mark.x,
-                                run_attrs(doc, spec, mark.run),
+                                run_look(doc, spec, mark.run),
                                 escape_xml(&mark.text)
                             );
                         }
@@ -1905,6 +1905,22 @@ fn line_pieces<'a>(
 /// What a tspan has to say for its run: only what the run changes, since
 /// SVG inherits the rest from the text element the tspans sit in.
 fn run_attrs(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>) -> String {
+    let mut out = run_look(doc, spec, run);
+    // Raised or lowered: SVG's own shift, a length up from the baseline,
+    // which is the way round the run's is.
+    if let Some(run) = run.and_then(|i| spec.runs.get(i)) {
+        let rise = run.shift() * spec.styling_under(Some(run)).size;
+        if rise.abs() > 1e-4 {
+            let _ = write!(out, r#" baseline-shift="{rise:.2}""#);
+        }
+    }
+    out
+}
+
+/// What a run changes about how its text looks — its colour, weight,
+/// lean, face and size — without where it sits: a list item's marker
+/// takes the look of where its paragraph begins and stays on the line.
+fn run_look(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>) -> String {
     let Some(run) = run.and_then(|i| spec.runs.get(i)) else {
         return String::new();
     };
@@ -4411,6 +4427,85 @@ mod tests {
                 line.text
             );
         }
+    }
+
+    /// A run raised or lowered leaves as `baseline-shift`, and a reader
+    /// inks it where the engine does: the top of a superscript and the
+    /// bottom of a subscript in the same rows, give or take one.
+    #[test]
+    fn a_raised_run_leaves_as_the_engine_sets_it() {
+        for shift in [0.4f32, -0.3] {
+            let mut doc = Document::new(160, 90, ColorMode::Rgb);
+            let root = doc.root();
+            let mut spec = chitrakar_doc::TextSpec::new("x2", 30.0, RED);
+            let mut run = chitrakar_doc::StyleRun::over(1, 2);
+            run.size = Some(20.0);
+            run.baseline = Some(shift);
+            spec.runs = vec![run];
+            let mut node = Node::text("t", spec);
+            node.transform = chitrakar_doc::Transform::translation(20.0, 15.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let svg = export_svg(&doc).unwrap();
+            assert!(svg.contains("baseline-shift="), "{svg}");
+            let theirs = resvg_alpha(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let w = doc.meta.width as usize;
+            // The "2" is right of the middle of the block; its rows.
+            let rows = |a: &dyn Fn(usize) -> f32| -> (usize, usize) {
+                let inked: Vec<usize> = (0..90)
+                    .filter(|&y| (40..100).any(|x| a(y * w + x) > 0.5))
+                    .collect();
+                (inked[0], *inked.last().unwrap())
+            };
+            let (e, r) = (rows(&|i| ours.pixels[i].a), rows(&|i| theirs[i]));
+            assert!(
+                e.0.abs_diff(r.0) <= 1 && e.1.abs_diff(r.1) <= 1,
+                "shifted {shift}: the engine inks rows {e:?}, a reader {r:?}"
+            );
+        }
+        // A list item whose text is all raised keeps its bullet on the
+        // line: the marker takes the look of where its paragraph begins
+        // and not its shift (seed 36 drew it raised in every reader).
+        let mut doc = Document::new(160, 90, ColorMode::Rgb);
+        let root = doc.root();
+        let mut spec = chitrakar_doc::TextSpec::new("Ab", 30.0, RED);
+        spec.list = chitrakar_doc::TextList::Bullet;
+        let mut run = chitrakar_doc::StyleRun::over(0, 2);
+        run.baseline = Some(0.33);
+        spec.runs = vec![run];
+        let mut node = Node::text("t", spec);
+        node.transform = chitrakar_doc::Transform::translation(20.0, 15.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert_eq!(
+            svg.matches("baseline-shift=").count(),
+            1,
+            "the text's, not the marker's: {svg}"
+        );
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let w = doc.meta.width as usize;
+        // The bullet is the ink in the first columns of the block.
+        let rows = |a: &dyn Fn(usize) -> f32| -> Vec<usize> {
+            (0..90)
+                .filter(|&y| (20..34).any(|x| a(y * w + x) > 0.5))
+                .collect()
+        };
+        let (e, r) = (rows(&|i| ours.pixels[i].a), rows(&|i| theirs[i]));
+        assert!(
+            e[0].abs_diff(r[0]) <= 1 && e.last().unwrap().abs_diff(*r.last().unwrap()) <= 1,
+            "the bullet: the engine inks rows {e:?}, a reader {r:?}"
+        );
     }
 
     /// A list leaves with each marker on its item's first baseline, where

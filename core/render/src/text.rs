@@ -387,6 +387,7 @@ fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped
     // for the machinery and shapes exactly as it always did.
     for (from, to, run) in pieces_in(spec, at, line.len()) {
         let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
+        let first = glyphs.len();
         shape_piece(
             &line[from..to],
             from,
@@ -396,6 +397,15 @@ fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped
             &mut pen,
             &mut glyphs,
         );
+        // A run raised off the baseline, or lowered: its glyphs move by
+        // that share of its own size, and the line makes room for them
+        // (`line_metrics`).
+        let rise = raised(spec, run, &styling, scale);
+        if rise != 0.0 {
+            for g in &mut glyphs[first..] {
+                g.y -= rise;
+            }
+        }
     }
     // The last glyph's tracking is not part of the line's width: nothing
     // follows it to be spaced from.
@@ -403,6 +413,13 @@ fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped
         pen -= track;
     }
     (glyphs, pen.max(0.0))
+}
+
+/// How far a run sits above the baseline, in raster pixels: its shift in
+/// its own size. Nothing outside a run.
+fn raised(spec: &TextSpec, run: Option<usize>, styling: &TextSpec, scale: f32) -> f32 {
+    run.and_then(|i| spec.runs.get(i))
+        .map_or(0.0, |r| r.shift() * styling.size.max(0.1) * scale)
 }
 
 /// The block's pieces that fall inside the `len` bytes at `at`, as
@@ -539,7 +556,13 @@ fn line_metrics(spec: &TextSpec, line: &str, at: usize, scale: f32) -> (f32, f32
     let pieces = pieces_in(spec, at, len);
     let mut best: Option<(f32, f32)> = None;
     for (_, _, run) in pieces {
-        let m = measure(&spec.styling_under(run.map(|i| &spec.runs[i])));
+        let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
+        let m = measure(&styling);
+        // Raised, a run stands that much taller over the baseline, which
+        // moves the baseline down; lowered, it hangs that much further
+        // under it. Either way the line steps that much further.
+        let rise = raised(spec, run, &styling, scale);
+        let m = (m.0 + rise.max(0.0), m.1 + rise.abs());
         best = Some(match best {
             Some(b) => (b.0.max(m.0), b.1.max(m.1)),
             None => m,
@@ -1968,6 +1991,64 @@ mod tests {
         // Not a list: no indent, no markers, the block it always was.
         let l = layout(&spec("One\nTwo", 24.0), 1.0);
         assert!(l.indent == 0.0 && l.marks.iter().all(Option::is_none));
+    }
+
+    /// A run raised off the baseline inks higher than it would on it,
+    /// and lowered, lower; the line makes room either way, so nothing is
+    /// cut off the raster, and a run with no shift is the run it was.
+    #[test]
+    fn a_raised_run_sits_above_the_line_and_the_line_makes_room() {
+        let with = |baseline: Option<f32>| {
+            let mut s = spec("x2 y", 30.0);
+            // At the block's own size, so a raise is past the line's own
+            // ascent and the line has to grow for it; a small superscript
+            // tucks under the ascent and leaves the line as it is.
+            let mut run = chitrakar_doc::StyleRun::over(1, 2);
+            run.baseline = baseline;
+            s.runs = vec![run];
+            s
+        };
+        // The topmost and bottommost rows the "2" inks, from the baseline.
+        let rows = |s: &TextSpec| {
+            let r = rasterize(s);
+            let l = layout(s, 1.0);
+            let (glyphs, start, _) = set_line(s, &l, 0, 1.0);
+            let two = glyphs.iter().find(|g| g.cluster == 1).unwrap();
+            let (x0, x1) = (
+                (start + two.x - r.origin.0).floor().max(0.0) as u32,
+                (start + two.x + two.advance - r.origin.0).ceil() as u32,
+            );
+            let inked: Vec<u32> = (0..r.height)
+                .filter(|&y| {
+                    (x0..x1.min(r.width)).any(|x| r.coverage[(y * r.width + x) as usize] > 0.5)
+                })
+                .collect();
+            // Measured from the baseline, which a raise moves down to make
+            // room: from the block's top a raised glyph is where it was.
+            let base = l.tops[0] + l.ascents[0];
+            (
+                inked[0] as f32 + r.origin.1 - base,
+                *inked.last().unwrap() as f32 + r.origin.1 - base,
+                r,
+                l,
+            )
+        };
+        let (top0, bottom0, _, l0) = rows(&with(None));
+        let (top_up, _, up, l_up) = rows(&with(Some(0.4)));
+        let (_, bottom_down, _, l_down) = rows(&with(Some(-0.3)));
+        assert!(top_up < top0 - 4.0, "raised: {top0} -> {top_up}");
+        assert!(
+            bottom_down > bottom0 + 3.0,
+            "lowered: {bottom0} -> {bottom_down}"
+        );
+        assert!(
+            l_up.ascents[0] > l0.ascents[0] + 4.0 && l_up.height > l0.height + 4.0,
+            "the line grows for it"
+        );
+        assert!(l_down.height > l0.height + 3.0 && l_down.ascents[0] == l0.ascents[0]);
+        let first_row: f32 = (0..up.width).map(|x| up.coverage[x as usize]).sum();
+        assert!(first_row < 0.5, "nothing is cut off the top: {first_row}");
+        assert_eq!(rows(&with(Some(0.0))).0, top0, "no shift is no shift");
     }
 
     #[test]

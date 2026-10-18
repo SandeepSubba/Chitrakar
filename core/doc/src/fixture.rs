@@ -628,6 +628,7 @@ pub fn everything() -> Fixture {
                 strike: None,
                 font: None,
                 size: None,
+                baseline: None,
             }];
             spec
         })),
@@ -2295,6 +2296,11 @@ impl Rng {
                         strike: None,
                         font: None,
                         size,
+                        // A third of them raised or lowered off the line,
+                        // drawn after the size from the same stream.
+                        baseline: side
+                            .chance(3)
+                            .then(|| if side.chance(2) { 0.33 } else { -0.2 }),
                     }];
                 }
                 if self.chance(6) {

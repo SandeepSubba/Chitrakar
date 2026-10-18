@@ -223,6 +223,25 @@ check(byteAt("😀", 2) === 4, "and the whole of it is four");
   );
 }
 
+// A raise off the line is a run like any other: kept where it is
+// asked for, read back by rangeSays, and taken off again — with the
+// smaller size it came with — leaving nothing, since a block sits on
+// its line.
+{
+  const block = { size: 30, baseline: 0 };
+  const up = styleRange("x2", [], 1, 2, { baseline: 0.33, size: 18 }, block);
+  check(
+    up.length === 1 && up[0].baseline === 0.33 && up[0].size === 18,
+    `a raised stretch is one run (${JSON.stringify(up)})`,
+  );
+  check(rangeSays("x2", up, 1, 2, "baseline", 0) === 0.33, "and reads as raised");
+  check(rangeSays("x2", up, 0, 1, "baseline", 0) === 0, "and the rest as on the line");
+  const down = styleRange("x2", up, 1, 2, { baseline: null, size: null }, block);
+  check(down.length === 0, `taken off, nothing is left (${JSON.stringify(down)})`);
+  const flat = styleRange("x2", [], 1, 2, { baseline: 0 }, block);
+  check(flat.length === 0, "a shift of nothing is no run");
+}
+
 // ---------------------------------------------------------- rangeSays
 {
   const runs = styleRange("hello world", [], 0, 5, { bold: true });

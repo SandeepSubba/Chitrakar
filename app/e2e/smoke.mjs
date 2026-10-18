@@ -7983,6 +7983,84 @@ assert(
   );
 }
 
+// 9o25d. Superscript and subscript: part of a block picked out and
+// raised off its line, and smaller; pressed again, back on the line;
+// lowered instead with subscript.
+{
+  await newDocument(600, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Text");
+  await page.mouse.click(...at(40, 60));
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.mouse.click(...at(55, 80));
+  await page.waitForTimeout(200);
+  const content = page.locator('textarea[aria-label="Text content"]');
+  await content.evaluate((el) => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    setter.call(el, "x2");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await page.waitForTimeout(300);
+  assert(await page.locator('button[aria-label="Superscript"]').isDisabled(), "with nothing picked out, nothing to raise");
+  const pick = () =>
+    content.evaluate((el) => {
+      el.focus();
+      el.setSelectionRange(1, 2);
+    });
+  // The bottom row the ink reaches on the left of the block (the x) and
+  // on its right (the 2), in document pixels.
+  const bottoms = () =>
+    page.evaluate(() => {
+      const el = document.getElementById("engine-canvas");
+      const s = Number(el.dataset.frameScale) || 1;
+      const ox = Number(el.dataset.originX) || 0;
+      const oy = Number(el.dataset.originY) || 0;
+      const [w, h] = [Math.round(600 * s), Math.round(300 * s)];
+      const img = el.getContext("2d").getImageData(Math.round(ox), Math.round(oy), w, h).data;
+      let [lo, hi] = [Infinity, -Infinity];
+      for (let i = 0; i < img.length; i += 4) {
+        if (img[i + 3] > 128) {
+          lo = Math.min(lo, (i / 4) % w);
+          hi = Math.max(hi, (i / 4) % w);
+        }
+      }
+      const bottom = (x0, x1) => {
+        let b = -1;
+        for (let i = 0; i < img.length; i += 4) {
+          const x = (i / 4) % w;
+          if (img[i + 3] > 128 && x >= x0 && x <= x1) b = Math.max(b, Math.floor(i / 4 / w));
+        }
+        return b / s;
+      };
+      const span = hi - lo;
+      return [bottom(lo, lo + span * 0.4), bottom(lo + span * 0.6, hi)];
+    });
+  const [x0, two0] = await bottoms();
+  assert(Math.abs(x0 - two0) < 3, `on the line, the two sit together (${x0}, ${two0})`);
+  await pick();
+  await page.click('button[aria-label="Superscript"]');
+  await page.waitForTimeout(300);
+  const [x1, two1] = await bottoms();
+  assert(two1 < x1 - 6, `raised, the 2 ends well above the x (${x1}, ${two1})`);
+  await pick();
+  await page.waitForTimeout(50);
+  assert(
+    (await page.locator('button[aria-label="Superscript"]').getAttribute("aria-pressed")) === "true",
+    "the button reads as on over the raised 2",
+  );
+  await page.click('button[aria-label="Superscript"]');
+  await page.waitForTimeout(300);
+  const [x2, two2] = await bottoms();
+  assert(Math.abs(x2 - two2) < 3, `pressed again, back on the line (${x2}, ${two2})`);
+  await pick();
+  await page.click('button[aria-label="Subscript"]');
+  await page.waitForTimeout(300);
+  const [x3, two3] = await bottoms();
+  assert(two3 > x3 + 3, `lowered, the 2 hangs below the x (${x3}, ${two3})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

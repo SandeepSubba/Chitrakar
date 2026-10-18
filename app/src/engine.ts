@@ -354,6 +354,9 @@ export interface StyleRun {
   font?: string | null;
   /** A size of its own; the line it is on is as tall as its tallest. */
   size?: number | null;
+  /** Raised off the line by this share of its own size; lowered when
+   * negative. */
+  baseline?: number | null;
 }
 
 export interface TextSpec {

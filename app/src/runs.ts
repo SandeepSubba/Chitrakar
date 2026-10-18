@@ -18,9 +18,12 @@ export type Styling = {
   font?: string | null;
   /** A size of the run's own, in document pixels as the block's is. */
   size?: number | null;
+  /** How far the run is raised off the line, in its own size; lowered
+   * when negative. */
+  baseline?: number | null;
 };
 
-const KEYS = ["fill", "bold", "italic", "underline", "strike", "font", "size"] as const;
+const KEYS = ["fill", "bold", "italic", "underline", "strike", "font", "size", "baseline"] as const;
 
 /** The byte offset of a UTF-16 index into `text`: the engine counts
  * bytes and a textarea counts code units, and they part company at the
