@@ -7857,6 +7857,71 @@ assert(
   );
 }
 
+// 9o25b. The knife: a line dragged across a rectangle cuts it into the
+// two pieces either side, drawn where it was; with the piece on one
+// side picked, a second line cuts only that one; shift+A walks from the
+// anchor tool to the knife; one undo is one cut.
+{
+  await newDocument(300, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 300) * b.width, b.y + (y / 120) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(40, 30));
+  await page.mouse.down();
+  await page.mouse.move(...at(240, 90), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const rows = () => page.locator(".panel ul li").count();
+  const before = [await canvasPixel(100, 60), await canvasPixel(180, 60)];
+  await pickTool("Node");
+  await page.keyboard.press("Shift+A");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.$eval(".toolbar .tool.active", (el) => el.getAttribute("aria-label"))) === "Knife",
+    "shift+A from the anchor tool is the knife",
+  );
+  // Nothing picked: the line cuts whatever it crosses.
+  await page.keyboard.press("Escape");
+  await page.mouse.move(...at(140, 10));
+  await page.mouse.down();
+  await page.mouse.move(...at(140, 110), { steps: 8 });
+  assert((await page.locator(".knife-line line").count()) === 1, "the line is drawn as it is dragged");
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert(
+    (await rows()) === 2 && (await page.locator(".knife-line").count()) === 0,
+    `cut in two (${await rows()} layers)`,
+  );
+  assert(
+    (await canvasPixel(100, 60)).join() === before[0].join() &&
+      (await canvasPixel(180, 60)).join() === before[1].join(),
+    "and drawn where it was",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 1, "one undo is one cut");
+  await page.keyboard.press("Control+Shift+z");
+  await page.waitForTimeout(300);
+  assert((await rows()) === 2, "and redone");
+  // The left piece picked: a line through the right one cuts nothing,
+  // and one through the left cuts only that.
+  await pickTool("Move");
+  await page.mouse.click(...at(100, 60));
+  await page.waitForTimeout(200);
+  await pickTool("Knife");
+  const cut = async (x) => {
+    await page.mouse.move(...at(x, 10));
+    await page.mouse.down();
+    await page.mouse.move(...at(x, 110), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+  };
+  await cut(200);
+  assert((await rows()) === 2, "with a piece picked, a line past it cuts nothing");
+  await cut(80);
+  assert((await rows()) === 3, `and through it, only it (${await rows()} layers)`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

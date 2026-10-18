@@ -2312,6 +2312,50 @@ without reading anything else.*
       out of the corner, and the panel handing over no radius.
     - Smoke 9o25a: a pen zigzag's apex rounded by 20 and undone, and a
       polygon's corner slider.
+- **The knife ✅** (`Session::knife(ids, a, b)`; the Knife tool, after
+  Node on the rail, shift+A from the anchor tool). Drag a line across
+  shapes and they fall into the pieces either side, Illustrator's and
+  Affinity's knife.
+  - **What it cuts:** every closed shape the line crosses, through
+    `chitrakar_render::boolean`. Each half is the shape intersected with
+    a quad reaching well past it on that side of the line. A half is
+    split into pieces, each an outline plus the holes inside it: a ring
+    is a hole if it sits inside an odd number of the others, and it
+    belongs to the smallest outline round it. So a ring cut through its
+    hole is two U shapes, and cut across its band is a strip and a piece
+    that keeps the hole.
+  - **What a piece is:** a copy of the shape (its look, effects and
+    mask) with its piece's outline, in the shape's place. It is all one
+    step, and the cut layer is in the shape's own group, with the line
+    carried into that group's space. Curves become straight segments, as
+    after any boolean; a brushed width is dropped, since its anchors are
+    gone. Open paths are left to the scissors, and locked layers are
+    left alone.
+  - **What is asked:** what is picked, when anything is; otherwise every
+    visible, unlocked shape on the page. While dragging, the line is drawn
+    over the page, and shift holds it to an eighth of a turn.
+  - **Found on the way:** the booleans could not combine two shapes
+    wound opposite ways. Fragments are chained in the direction their
+    rings run, so a reversed operand gave pieces that met head to head
+    and never closed. Union, intersect and subtract all said `None`, and
+    the editor said their edges overlapped exactly. That is any pen
+    shape drawn anticlockwise against a rectangle. `boolean::oriented`
+    now turns every ring of both operands, before they are cut up, so
+    that what it covers is on the same side: an outline the way a
+    rectangle runs, a hole the other way. Without it,
+    `a_shape_wound_the_other_way_combines_the_same` fails.
+  - **Tests:** `the_knife_cuts_a_shape_into_the_pieces_either_side`:
+    - a rectangle cut down the middle, into two copies twenty across,
+      with the page drawn bit for bit as it was;
+    - one undo, and a miss that changes nothing and records no step;
+    - the ring's two cases, with nothing picked;
+    - a shape in a group turned a quarter, cut where the page line is;
+    - an open path passed over, and a point that is no line refused.
+    Taking the hole grouping away, or not carrying the line into the
+    group's space, each fail it. Smoke 9o25b: shift+A, the line drawn
+    while dragged, a rectangle cut and drawn where it was, undo and redo,
+    and with a piece picked a line past it cutting nothing and one
+    through it cutting only it. Ignoring what is picked fails it.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

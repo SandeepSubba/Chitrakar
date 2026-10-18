@@ -28,6 +28,7 @@ export const TOOLS = [
   "Shape",
   "Pen",
   "Node",
+  "Knife",
   "Brush",
   "Paint",
   "Eraser",
@@ -62,7 +63,7 @@ export const SELECT_TOOLS = ["Select", "Select ellipse", "Lasso", "Wand"] as con
  * where the slot sits rather than which tool is in it. */
 export const RAIL: readonly (readonly Tool[])[] = [
   ["Move", "Select"],
-  ["Frame", "Rect", "Pen", "Node", "Text"],
+  ["Frame", "Rect", "Pen", "Node", "Knife", "Text"],
   ["Brush", "Paint", "Eraser", "Clone", "Heal", "Gradient", "Fill"],
   ["Crop", "Eyedropper"],
   ["Hand", "Zoom"],
@@ -74,6 +75,9 @@ export const RAIL: readonly (readonly Tool[])[] = [
  * plain key meaning one tool, always. */
 export const KEY_FAMILIES: readonly (readonly Tool[])[] = [
   SELECT_TOOLS,
+  // The two that work on a path's outline: shift+A from the anchors to
+  // the knife.
+  ["Node", "Knife"],
   ["Paint", "Eraser"],
   ["Clone", "Heal"],
   ["Gradient", "Fill"],
@@ -173,6 +177,7 @@ export const TOOL_HINT: Record<Tool, string> = {
   Shape: "U",
   Pen: "P",
   Node: "A",
+  Knife: "A",
   Brush: "B",
   Paint: "N",
   Eraser: "N",
@@ -202,6 +207,7 @@ export const TOOL_ICONS: Record<Tool, IconName> = {
   Shape: "shapes",
   Pen: "pen",
   Node: "node",
+  Knife: "knife",
   Brush: "brush",
   Paint: "paint",
   Eraser: "eraser",
@@ -234,6 +240,7 @@ export const TOOL_ABOUT: Record<Tool, string> = {
   Shape: "one of the library's shapes — an arrow, a callout, a heart — as a path",
   Pen: "a path, straight or smooth, one point at a time",
   Node: "take hold of a shape's anchors; press its outline to add one, alt-press one to take it off, alt-press the outline to cut it there",
+  Knife: "drag a line across shapes to cut them into the pieces either side; only the picked ones, when any are",
   Brush: "a freehand stroke that lands as a path",
   Paint: "a brush that lays pixels",
   Eraser: "rub paint out; on any other layer, take a piece out of it",

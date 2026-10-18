@@ -1349,6 +1349,12 @@ export function App() {
     start: [number, number];
     radial: boolean;
   } | null>(null);
+  /** The knife being dragged: where the line started, in document
+   * coordinates. */
+  const knifeRef = useRef<[number, number] | null>(null);
+  /** The line the knife is drawing, shown over the page until it lets
+   * go: start and end, in document coordinates. */
+  const [knifeLine, setKnifeLine] = useState<[number, number, number, number] | null>(null);
   const toolDragRef = useRef<ToolDrag | null>(null);
   const handleDragRef = useRef<HandleDrag | null>(null);
   const panDragRef = useRef<PanDrag | null>(null);
@@ -2114,6 +2120,8 @@ export function App() {
     toolDragRef.current = null;
     handleDragRef.current = null;
     gradToolRef.current = null;
+    knifeRef.current = null;
+    setKnifeLine(null);
     setPenPoints([]);
     if (session.cancel_preview()) refresh(session);
   }, [session, refresh]);
@@ -3004,6 +3012,13 @@ export function App() {
       (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
+    // The knife draws a line; letting go cuts what it crosses.
+    if (tool === "Knife") {
+      knifeRef.current = [x, y];
+      setKnifeLine([x, y, x, y]);
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
     // The node tool is for a shape's anchors, which the Move tool shows
     // but nothing names. A press on a rectangle or an ellipse makes it a
     // path, so its anchors come out; a press on the picked path's own
@@ -3523,6 +3538,21 @@ export function App() {
 
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (pinchRef.current) return; // two fingers are the view's, not a tool's
+    const knifeFrom = knifeRef.current;
+    if (knifeFrom) {
+      let [x, y] = docPoint(e);
+      // Shift holds the line to an eighth of a turn, as it holds a line
+      // drawn with the line tool.
+      if (e.shiftKey) {
+        const [dx, dy] = [x - knifeFrom[0], y - knifeFrom[1]];
+        const step = Math.PI / 4;
+        const a = Math.round(Math.atan2(dy, dx) / step) * step;
+        const r = Math.hypot(dx, dy);
+        [x, y] = [knifeFrom[0] + r * Math.cos(a), knifeFrom[1] + r * Math.sin(a)];
+      }
+      setKnifeLine([knifeFrom[0], knifeFrom[1], x, y]);
+      return;
+    }
     const gradTool = gradToolRef.current;
     if (gradTool && session) {
       if (e.buttons === 0) return;
@@ -3856,6 +3886,26 @@ export function App() {
   // shift adds to what is picked out, alt takes from it.
   const onCanvasPointerUp = (e?: React.PointerEvent) => {
     if (pinchRef.current) return;
+    if (knifeRef.current) {
+      const line = knifeLine;
+      knifeRef.current = null;
+      setKnifeLine(null);
+      if (!session || !line || Math.hypot(line[2] - line[0], line[3] - line[1]) < 2 / view.zoom) {
+        return;
+      }
+      // What is picked, when anything is; else every shape it crosses.
+      try {
+        const made = session.knife(new Float64Array(selectionSet), line[0], line[1], line[2], line[3]);
+        if (made.length > 0) {
+          setSelected(made[made.length - 1]);
+          setMultiSel([...made]);
+          refresh(session);
+        }
+      } catch (err) {
+        alert(`Knife: ${err}`);
+      }
+      return;
+    }
     if (gradToolRef.current && session) {
       // A press that never moved previewed nothing, and commits nothing.
       gradToolRef.current = null;
@@ -9885,6 +9935,16 @@ export function App() {
               ))}
             </svg>
           )}
+          {knifeLine && (
+            <svg className="ants drawing knife-line" aria-hidden="true">
+              <line
+                x1={view.x + knifeLine[0] * view.zoom}
+                y1={view.y + knifeLine[1] * view.zoom}
+                x2={view.x + knifeLine[2] * view.zoom}
+                y2={view.y + knifeLine[3] * view.zoom}
+              />
+            </svg>
+          )}
           {regionDrag && (
             <svg className="ants drawing" aria-hidden="true">
               {regionDrag.points ? (
@@ -11144,6 +11204,7 @@ const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => 
         [k("Shape"), "Shape — one of the library's: a triangle, an arrow, a callout, a heart"],
         [`${k("Pen")}, ${k("Brush")}`, "Pen, brush"],
         [k("Node"), "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off, alt-press the outline to cut it there"],
+        [shifted("Node"), "Knife — drag a line across shapes to cut them in two; only the picked ones when any are; shift holds the angle"],
         [k("Paint"), "Paint (a brush that lays pixels)"],
         [shifted("Paint"), "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
         [k("Clone"), "Clone (paint with what is already there, as it is)"],

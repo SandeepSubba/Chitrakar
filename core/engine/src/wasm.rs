@@ -1486,6 +1486,24 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Cut shapes along the line from (`ax`, `ay`) to (`bx`, `by`) on
+    /// the page — those named, or every visible unlocked shape when none
+    /// is. The pieces, bottom first.
+    pub fn knife(
+        &mut self,
+        ids: &[f64],
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+    ) -> Result<Vec<f64>, JsError> {
+        let ids: Vec<NodeId> = ids.iter().map(|i| NodeId(*i as u64)).collect();
+        self.inner
+            .knife(&ids, [ax, ay], [bx, by])
+            .map(|v| v.into_iter().map(|n| n.0 as f64).collect())
+            .map_err(to_js)
+    }
+
     /// Export as SVG markup.
     pub fn export_svg(&self) -> Result<String, JsError> {
         self.inner.export_svg().map_err(to_js)

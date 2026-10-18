@@ -16,6 +16,7 @@ export type IconName =
   | "ellipse"
   | "pen"
   | "node"
+  | "knife"
   | "text"
   | "undo"
   | "redo"
@@ -211,6 +212,13 @@ const PATHS: Record<IconName, JSX.Element> = {
       <path d="M5 17C8 7 16 17 19 7" />
       <rect x="3" y="15" width="4" height="4" />
       <rect x="17" y="5" width="4" height="4" />
+    </>
+  ),
+  // A blade on a slant, and the line it leaves: the knife.
+  knife: (
+    <>
+      <path d="M6 18 17.5 6.5a2 2 0 0 1 2.8 2.8L9 20.5z" />
+      <path d="M3 21l3-3" />
     </>
   ),
   // A box with its lines drawing apart: a ramp from dense to sparse.

@@ -265,11 +265,55 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
         rings.extend(b.iter().cloned());
         return Some(rings);
     }
-    let fragments = fragments(a, b, op);
+    let (a, b) = (oriented(a), oriented(b));
+    let fragments = fragments(&a, &b, op);
     if fragments.is_empty() {
         return None;
     }
     chain(fragments)
+}
+
+/// The rings turned so that what they cover is on the same side of
+/// every one of them: an outline the way a rectangle's runs, a hole in
+/// it the other way, and an island in the hole the first way again —
+/// by how many of the others each sits inside.
+///
+/// The fragments are chained in the direction their rings run, so two
+/// shapes wound opposite ways gave pieces that met head to head and
+/// never closed: a pen shape drawn anticlockwise could not be combined
+/// with a rectangle, and the complaint was that their edges overlapped
+/// exactly. Which way a hand went round is no part of what a shape
+/// covers.
+fn oriented(rings: &[Ring]) -> Vec<Ring> {
+    let area2 = |ring: &Ring| {
+        let n = ring.len();
+        (0..n)
+            .map(|i| {
+                let (p, q) = (ring[i], ring[(i + 1) % n]);
+                p[0] * q[1] - q[0] * p[1]
+            })
+            .sum::<f32>()
+    };
+    rings
+        .iter()
+        .enumerate()
+        .map(|(i, ring)| {
+            let Some(&first) = ring.first() else {
+                return ring.clone();
+            };
+            let depth = rings
+                .iter()
+                .enumerate()
+                .filter(|(j, other)| *j != i && covers(std::slice::from_ref(*other), first))
+                .count();
+            let want = depth % 2 == 0;
+            let mut ring = ring.clone();
+            if (area2(&ring) > 0.0) != want {
+                ring.reverse();
+            }
+            ring
+        })
+        .collect()
 }
 
 /// The pieces of both outlines that bound what `op` answers, before they
@@ -410,6 +454,39 @@ mod tests {
             y += STEP;
         }
         n as f32 * STEP * STEP
+    }
+
+    /// Which way an outline was drawn round says nothing about what it
+    /// covers, so it changes nothing about what a boolean gives: every
+    /// operation, with either shape wound either way — and with a hole
+    /// wound the same way as its outline, as a file can have it — covers
+    /// what it covers wound the usual way.
+    #[test]
+    fn a_shape_wound_the_other_way_combines_the_same() {
+        let a = vec![square(0.0, 0.0, 20.0)];
+        let b = square(10.0, 5.0, 14.0);
+        let back = |r: &Ring| r.iter().rev().copied().collect::<Ring>();
+        for op in [
+            BoolOp::Union,
+            BoolOp::Intersect,
+            BoolOp::Subtract,
+            BoolOp::Exclude,
+        ] {
+            let want = covered_area(&combine(&a, std::slice::from_ref(&b), op).unwrap());
+            for (x, y) in [
+                (a.clone(), vec![back(&b)]),
+                (vec![back(&a[0])], vec![b.clone()]),
+                (vec![back(&a[0])], vec![back(&b)]),
+            ] {
+                let got = combine(&x, &y, op).map(|r| covered_area(&r));
+                assert_eq!(got, Some(want), "{op:?}");
+            }
+        }
+        // A ring with a hole wound the same way as itself.
+        let holed = vec![square(0.0, 0.0, 20.0), square(5.0, 5.0, 10.0)];
+        let cut = combine(&holed, &[square(10.0, -2.0, 15.0)], BoolOp::Intersect).unwrap();
+        // Ten by thirteen of the ring, less the five by eight of the hole.
+        assert_eq!(covered_area(&cut), 10.0 * 13.0 - 5.0 * 8.0);
     }
 
     /// Two ends a hair apart meet, even where they round to two cells.

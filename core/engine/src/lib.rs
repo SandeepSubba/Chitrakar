@@ -2019,6 +2019,248 @@ impl Session {
         Ok(new_id)
     }
 
+    /// Cut shapes in two along the line through the page points `a` and
+    /// `b` — the knife. Every closed shape named that the line crosses
+    /// falls into the pieces either side of it, each a layer of its own
+    /// where the shape was: a copy of it, its look and its effects and
+    /// all, with the outline of its piece. A piece is an outline and the
+    /// holes inside it, so a ring cut across is two arcs and a donut cut
+    /// through its hole is two halves of a ring. Outlines are straight
+    /// segments afterwards, as after any boolean. A shape the line
+    /// misses, an open path, a locked layer and anything not a shape are
+    /// left as they were. With nothing named, every visible, unlocked
+    /// shape on the page is asked. One step; the answer is the pieces,
+    /// bottom first, and none of them is refused.
+    pub fn knife(
+        &mut self,
+        ids: &[NodeId],
+        a: [f32; 2],
+        b: [f32; 2],
+    ) -> Result<Vec<NodeId>, EngineError> {
+        use chitrakar_render::boolean::{combine_or_nudge, BoolOp};
+        type Ring = Vec<[f32; 2]>;
+        if !(a.iter().chain(&b).all(|v| v.is_finite())) || (a[0] - b[0]).hypot(a[1] - b[1]) < 1e-3 {
+            return Err(EngineError::BadCommand(
+                "a cut is a line between two points".into(),
+            ));
+        }
+        // Shown, and every group round it shown.
+        let shown = |id: NodeId| {
+            let mut cur = Some(id);
+            while let Some(c) = cur {
+                if !self.doc.node(c).is_ok_and(|n| n.visible) {
+                    return false;
+                }
+                cur = self.doc.parent_of(c);
+            }
+            true
+        };
+        let asked: Vec<NodeId> = if ids.is_empty() {
+            self.doc
+                .nodes()
+                .filter(|(id, n)| {
+                    matches!(n.kind, NodeKind::Vector { .. }) && !n.locked && shown(**id)
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        } else {
+            ids.to_vec()
+        };
+        // Whether a point is inside a ring, and how much a ring covers.
+        let within = |ring: &Ring, p: [f32; 2]| {
+            let mut inside = false;
+            let n = ring.len();
+            for i in 0..n {
+                let (q, r) = (ring[i], ring[(i + n - 1) % n]);
+                if (q[1] > p[1]) != (r[1] > p[1])
+                    && p[0] < (r[0] - q[0]) * (p[1] - q[1]) / (r[1] - q[1]) + q[0]
+                {
+                    inside = !inside;
+                }
+            }
+            inside
+        };
+        let area = |ring: &Ring| {
+            let n = ring.len();
+            (0..n)
+                .map(|i| {
+                    let (p, q) = (ring[i], ring[(i + 1) % n]);
+                    p[0] * q[1] - q[0] * p[1]
+                })
+                .sum::<f32>()
+                .abs()
+                / 2.0
+        };
+        // Rings into pieces: every ring inside an even number of the
+        // others is an outline, and a ring inside an odd number is a hole
+        // in the smallest outline round it.
+        let pieces = |rings: Vec<Ring>| -> Vec<Vec<Ring>> {
+            let depth: Vec<usize> = rings
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    rings
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, o)| *j != i && within(o, r[0]))
+                        .count()
+                })
+                .collect();
+            let outers: Vec<usize> = (0..rings.len())
+                .filter(|i| depth[*i].is_multiple_of(2))
+                .collect();
+            let mut out: Vec<Vec<Ring>> = outers.iter().map(|i| vec![rings[*i].clone()]).collect();
+            for (i, ring) in rings.iter().enumerate() {
+                if depth[i].is_multiple_of(2) {
+                    continue;
+                }
+                let home = outers
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, o)| within(&rings[**o], ring[0]))
+                    .min_by(|x, y| area(&rings[*x.1]).total_cmp(&area(&rings[*y.1])))
+                    .map(|(k, _)| k);
+                if let Some(k) = home {
+                    out[k].push(ring.clone());
+                }
+            }
+            out
+        };
+        let mut work = self.doc.clone();
+        let (mut cmds, mut made) = (Vec::new(), Vec::new());
+        for id in asked {
+            let node = work.node(id)?.clone();
+            let NodeKind::Vector {
+                shape,
+                fill,
+                stroke,
+                gradient,
+            } = &node.kind
+            else {
+                continue;
+            };
+            if node.locked
+                || matches!(
+                    shape,
+                    chitrakar_doc::VectorShape::Path { closed: false, .. }
+                )
+            {
+                continue;
+            }
+            let Some(parent) = work.parent_of(id) else {
+                continue;
+            };
+            // The line in the space the shape's outline is carried into:
+            // its parent's.
+            let Some(back) = chitrakar_render::invert(chitrakar_render::ancestor_space(&work, id))
+            else {
+                continue;
+            };
+            let carry = |t: Transform, p: [f32; 2]| {
+                [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f]
+            };
+            let (pa, pb) = (carry(back, a), carry(back, b));
+            let t = node.transform;
+            let rings: Vec<Ring> = chitrakar_render::shape_rings(shape)
+                .into_iter()
+                .map(|ring| ring.into_iter().map(|p| carry(t, p)).collect())
+                .collect();
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for p in rings.iter().flatten() {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            if !(lo[0].is_finite() && hi[0].is_finite()) {
+                continue;
+            }
+            // Each side of the line as a quad reaching well past the shape.
+            let len = (pb[0] - pa[0]).hypot(pb[1] - pa[1]);
+            if len < 1e-6 {
+                continue;
+            }
+            let d = [(pb[0] - pa[0]) / len, (pb[1] - pa[1]) / len];
+            let nrm = [-d[1], d[0]];
+            let far = 2.0
+                * ((hi[0] - lo[0]).hypot(hi[1] - lo[1])
+                    + (pa[0] - (lo[0] + hi[0]) / 2.0).hypot(pa[1] - (lo[1] + hi[1]) / 2.0))
+                + 10.0;
+            let side = |s: f32| -> Ring {
+                let (p0, p1) = (
+                    [pa[0] - d[0] * far, pa[1] - d[1] * far],
+                    [pa[0] + d[0] * far, pa[1] + d[1] * far],
+                );
+                vec![
+                    p0,
+                    p1,
+                    [p1[0] + nrm[0] * far * s, p1[1] + nrm[1] * far * s],
+                    [p0[0] + nrm[0] * far * s, p0[1] + nrm[1] * far * s],
+                ]
+            };
+            let halves: Vec<Vec<Ring>> = [1.0, -1.0]
+                .iter()
+                .map(|s| {
+                    combine_or_nudge(&rings, &[side(*s)], BoolOp::Intersect).unwrap_or_default()
+                })
+                .collect();
+            if halves.iter().any(|h| h.is_empty()) {
+                continue;
+            }
+            let mut index = work
+                .children_of(parent)?
+                .iter()
+                .position(|c| *c == id)
+                .unwrap_or(0);
+            for half in halves {
+                for piece in pieces(half) {
+                    let (mut x0, mut y0) = (f32::MAX, f32::MAX);
+                    for p in piece.iter().flatten() {
+                        x0 = x0.min(p[0]);
+                        y0 = y0.min(p[1]);
+                    }
+                    let shift = |ring: &Ring| -> Ring {
+                        ring.iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
+                    };
+                    // A copy of the shape, so its look and its effects and
+                    // its mask (in the parent's space) come along, as a
+                    // boolean's result does.
+                    let mut cut = node.clone();
+                    cut.kind = NodeKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Path {
+                            points: shift(&piece[0]),
+                            closed: true,
+                            smooth: false,
+                            handles: Vec::new(),
+                            subpaths: piece[1..].iter().map(shift).collect(),
+                        },
+                        fill: fill.clone(),
+                        stroke: stroke.as_ref().map(|s| chitrakar_doc::Stroke {
+                            widths: Vec::new(),
+                            ..s.clone()
+                        }),
+                        gradient: gradient.clone(),
+                    };
+                    cut.transform = Transform::translation(x0, y0);
+                    let add = Command::AddNode {
+                        parent,
+                        index,
+                        node: Box::new(cut),
+                    };
+                    work.apply(add.clone())?;
+                    made.push(work.children_of(parent)?[index]);
+                    cmds.push(add);
+                    index += 1;
+                }
+            }
+            let remove = Command::RemoveNode { id };
+            work.apply(remove.clone())?;
+            cmds.push(remove);
+        }
+        if !cmds.is_empty() {
+            self.apply_labeled(Command::Batch(cmds), Some("Cut with the knife".into()))?;
+        }
+        Ok(made)
+    }
+
     /// The shapes between two: `steps` of them, each its share of the
     /// way from one outline to the other and from one look to the other
     /// — fill, line, fade — in a group laid just above the lower of the
@@ -8682,6 +8924,206 @@ mod tests {
     /// was; joined again it is one line with that anchor once; a square
     /// opened at a corner runs from it round to it; a line joined to
     /// itself closes. Each is one step, and an end is no place to cut.
+    /// The knife: a line across a shape cuts it into the pieces either
+    /// side, each a copy of it with its piece's outline, and the page is
+    /// drawn as it was. A ring cut through its hole is two pieces with no
+    /// hole; cut across its band only, a strip and a piece that keeps the
+    /// hole. A line that misses changes nothing; a shape in a turned group
+    /// is cut where the line crosses it on the page; open paths are passed
+    /// over; one undo puts it back.
+    #[test]
+    fn the_knife_cuts_a_shape_into_the_pieces_either_side() {
+        let red = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let add = |session: &mut Session, parent: NodeId, shape: VectorShape, at: Transform| {
+            let mut n = Node::vector("cut me", shape);
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(red.clone());
+            }
+            n.transform = at;
+            let index = session.document().children_of(parent).unwrap().len();
+            session
+                .apply(Command::AddNode {
+                    parent,
+                    index,
+                    node: Box::new(n),
+                })
+                .unwrap();
+            session.document().children_of(parent).unwrap()[index]
+        };
+        let page = |s: &Session| s.render().unwrap().pixels.clone();
+        // A rectangle cut down the middle, on a pixel boundary.
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        let root = session.document().root();
+        let rect = VectorShape::Rect {
+            width: 40.0,
+            height: 20.0,
+            radius: 0.0,
+        };
+        let id = add(
+            &mut session,
+            root,
+            rect.clone(),
+            Transform::translation(10.0, 10.0),
+        );
+        let before = page(&session);
+        let made = session.knife(&[id], [30.0, -5.0], [30.0, 50.0]).unwrap();
+        assert_eq!(made.len(), 2, "two halves");
+        assert!(
+            session.document().node(id).is_err(),
+            "in place of the shape"
+        );
+        for piece in &made {
+            let n = session.document().node(*piece).unwrap();
+            assert_eq!(n.name, "cut me", "each a copy of it");
+            let Bounds::Rect(x0, _, x1, _) =
+                chitrakar_render::node_bounds(session.document(), *piece).unwrap()
+            else {
+                unreachable!()
+            };
+            assert!(
+                (x1 - x0 - 20.0).abs() < 1e-3,
+                "each half is twenty across: {x0} {x1}"
+            );
+        }
+        assert_eq!(page(&session), before, "and the page is drawn as it was");
+        assert_eq!(
+            session.history_labels().0.last().map(String::as_str),
+            Some("Cut with the knife")
+        );
+        session.undo().unwrap();
+        assert_eq!(
+            session.document().children_of(root).unwrap(),
+            &[id],
+            "one undo puts it back"
+        );
+        // A line that misses: nothing, and no step.
+        let steps = session.history_labels().0.len();
+        assert!(session
+            .knife(&[id], [70.0, 0.0], [70.0, 60.0])
+            .unwrap()
+            .is_empty());
+        assert_eq!(session.history_labels().0.len(), steps);
+
+        // A square ring, cut through its hole and then across its band.
+        let ring = |session: &mut Session| {
+            let mut s = Session::new(80, 60, ColorMode::Rgb);
+            std::mem::swap(session, &mut s);
+            let root = session.document().root();
+            add(
+                session,
+                root,
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0]],
+                    closed: true,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: vec![vec![[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]]],
+                },
+                Transform::translation(10.0, 10.0),
+            )
+        };
+        let holes = |s: &Session, id: NodeId| match &s.document().node(id).unwrap().kind {
+            NodeKind::Vector {
+                shape: VectorShape::Path { subpaths, .. },
+                ..
+            } => subpaths.len(),
+            _ => unreachable!(),
+        };
+        let mut session = Session::new(1, 1, ColorMode::Rgb);
+        let id = ring(&mut session);
+        let made = session.knife(&[], [0.0, 30.0], [80.0, 30.0]).unwrap();
+        assert_eq!(
+            made.len(),
+            2,
+            "with nothing named, the shape the line crosses"
+        );
+        assert!(
+            made.iter().all(|p| holes(&session, *p) == 0),
+            "two halves of a ring, no hole"
+        );
+        let _ = id;
+        let mut session = Session::new(1, 1, ColorMode::Rgb);
+        let id = ring(&mut session);
+        let made = session.knife(&[id], [0.0, 15.0], [80.0, 15.0]).unwrap();
+        assert_eq!(made.len(), 2);
+        let mut kept: Vec<usize> = made.iter().map(|p| holes(&session, *p)).collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            vec![0, 1],
+            "a strip, and the rest keeping its hole: {kept:?}"
+        );
+
+        // In a group turned a quarter: cut where the line is on the page.
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("turned")),
+            })
+            .unwrap();
+        let group = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 0.0,
+                    b: 1.0,
+                    c: -1.0,
+                    d: 0.0,
+                    e: 70.0,
+                    f: 10.0,
+                },
+            })
+            .unwrap();
+        // Forty across and twenty down in the group is twenty across and
+        // forty down on the page, at x 50..70, y 10..50.
+        let id = add(&mut session, group, rect, Transform::default());
+        let before = page(&session);
+        let made = session.knife(&[id], [0.0, 30.0], [80.0, 30.0]).unwrap();
+        assert_eq!(made.len(), 2);
+        for piece in &made {
+            let Bounds::Rect(_, y0, _, y1) =
+                chitrakar_render::node_bounds(session.document(), *piece).unwrap()
+            else {
+                unreachable!()
+            };
+            assert!(
+                (y1 - y0 - 20.0).abs() < 1e-3,
+                "each twenty down the page: {y0} {y1}"
+            );
+        }
+        assert_eq!(page(&session), before);
+        // An open path is no shape to cut.
+        let line = add(
+            &mut session,
+            root,
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [60.0, 60.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+            Transform::default(),
+        );
+        assert!(session
+            .knife(&[line], [0.0, 30.0], [80.0, 30.0])
+            .unwrap()
+            .is_empty());
+        assert!(
+            session.knife(&[line], [5.0, 5.0], [5.0, 5.0]).is_err(),
+            "a point is no line"
+        );
+    }
+
     /// Round corners, given a rectangle, a star and two paths at once:
     /// the rectangle's and the star's are their own live numbers, the
     /// sharp path's corners become arcs with a brushed width going to
