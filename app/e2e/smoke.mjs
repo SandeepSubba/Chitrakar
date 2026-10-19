@@ -8500,6 +8500,51 @@ assert(
   assert(wider < line, `a larger brush takes it further down (${line} -> ${wider})`);
 }
 
+// 9o25m. Lens correction: the Filter menu's straightening. A level black
+// band near the top of a white page bows when the lens is corrected:
+// drawing the corners in lifts its ends above its middle, and the other
+// way drops them.
+{
+  await newDocument(240, 160, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 160) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#ffffff", 0, 0, 240, 160);
+  await rect("#000000", 0, 18, 240, 24);
+  await page.keyboard.press("Escape");
+  // Where the band is down a column: the darkness-weighed row.
+  const band = async (x) => {
+    let [sum, weight] = [0, 0];
+    for (let y = 0; y < 60; y++) {
+      const ink = 255 - (await canvasPixel(x, y))[0];
+      sum += ink * y;
+      weight += ink;
+    }
+    return sum / Math.max(weight, 1);
+  };
+  const level = (await band(120)) - (await band(4));
+  assert(Math.abs(level) < 0.5, `level to begin with (${level.toFixed(2)})`);
+  await menuClick("Filter", "Lens correction");
+  await page.waitForTimeout(300);
+  await setSlider("Distortion", 1);
+  await page.waitForTimeout(300);
+  const lifted = (await band(120)) - (await band(4));
+  assert(lifted > 2, `corners drawn in lift the ends (${lifted.toFixed(2)})`);
+  await setSlider("Distortion", -1);
+  await page.waitForTimeout(300);
+  const dropped = (await band(4)) - (await band(120));
+  assert(dropped > 2, `pushed out, they drop (${dropped.toFixed(2)})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

@@ -2604,9 +2604,19 @@ impl Rng {
                                 // of its own again.
                                 let mut wave = Rng((side.0 ^ 0x7f4a_7c15_e1d2_93b7) | 1);
                                 if wave.chance(2) {
-                                    Filter::Ripple {
+                                    let ripple = Filter::Ripple {
                                         amplitude: wave.between(0.5, 4.0),
                                         wavelength: wave.between(3.0, 20.0),
+                                    };
+                                    // Half of those a lens correction,
+                                    // from a stream of their own again.
+                                    let mut lens = Rng((wave.0 ^ 0x3d4e_9a61_c07b_5e29) | 1);
+                                    if lens.chance(2) {
+                                        Filter::LensCorrection {
+                                            amount: lens.between(-1.0, 1.0),
+                                        }
+                                    } else {
+                                        ripple
                                     }
                                 } else {
                                     pinch

@@ -830,6 +830,14 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let (_, reach) = warp_circle(*radius, *center, page);
                 ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
             }
+            // The most a point moves is at the corner: a third of the
+            // amount of the half diagonal.
+            NodeKind::Filter(Filter::LensCorrection { amount }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                let page = (doc.meta.width as f32, doc.meta.height as f32);
+                let (_, far) = lens_middle(page);
+                ((lens_k(*amount).abs() * far * scale).ceil() as u32).saturating_add(2)
+            }
             // A square's far corner, the radius away each way.
             NodeKind::Filter(Filter::OilPaint { radius }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8372,6 +8380,16 @@ fn apply_filter(
                 )
             });
         }
+        Filter::LensCorrection { amount } => {
+            let k = lens_k(*amount);
+            if k != 0.0 {
+                let page = (doc.meta.width as f32, doc.meta.height as f32);
+                let (mid, far) = lens_middle(page);
+                warp(doc, mask, dst, clip, opacity, view, |p| {
+                    lens_source(p, mid, far, k)
+                });
+            }
+        }
         Filter::Ripple {
             amplitude,
             wavelength,
@@ -8656,6 +8674,33 @@ pub fn edge_white(alpha: f32, ring: [f32; 8], amount: f32) -> f32 {
     let gy = (f + 2.0 * g + h) - (a + 2.0 * b + c);
     let steep = (gx * gx + gy * gy).sqrt() / 4.0;
     (alpha - amount * steep).clamp(0.0, alpha)
+}
+
+/// A lens correction's strength: a third of the amount, held to −1..=1,
+/// and none for no number.
+pub fn lens_k(amount: f32) -> f32 {
+    if amount.is_finite() {
+        amount.clamp(-1.0, 1.0) / 3.0
+    } else {
+        0.0
+    }
+}
+
+/// The page's middle and how far its corner is from it, which a lens
+/// correction measures every point against.
+pub fn lens_middle(page: (f32, f32)) -> ([f32; 2], f32) {
+    let mid = [page.0 / 2.0, page.1 / 2.0];
+    (mid, (mid[0] * mid[0] + mid[1] * mid[1]).sqrt().max(1e-3))
+}
+
+/// Where a lens correction reads the point `here` from: along its line
+/// from `mid`, `1 − k ρ²` of the way, `ρ` its share of the way out to
+/// the corner `far` away. The GPU's own.
+pub fn lens_source(here: [f32; 2], mid: [f32; 2], far: f32, k: f32) -> [f32; 2] {
+    let (dx, dy) = (here[0] - mid[0], here[1] - mid[1]);
+    let rho2 = (dx * dx + dy * dy) / (far * far);
+    let s = 1.0 - k * rho2;
+    [mid[0] + dx * s, mid[1] + dy * s]
 }
 
 /// A ripple's amplitude and wavelength, in document pixels: the one
@@ -21810,6 +21855,92 @@ mod tests {
             at(&big, 29, 64).r > 0.999 && at(&big, 34, 64).r > 0.999,
             "and no wider"
         );
+    }
+
+    /// A lens correction bows a level line near the top: drawing the
+    /// corners in (positive, which undoes a barrel) lifts its ends above
+    /// its middle, pushing them out (negative, a pincushion) drops them;
+    /// a dot at the page's middle stays put, and nothing moves for none.
+    #[test]
+    fn a_lens_correction_bows_lines_about_the_middle() {
+        let page = |amount: f32| {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let root = doc.root();
+            let mut line = filled_rect("line", 64.0, 1.0, BLACK);
+            line.transform = Transform::translation(0.0, 8.0);
+            let mut dot = filled_rect("dot", 2.0, 2.0, BLACK);
+            dot.transform = Transform::translation(31.0, 23.0);
+            for (index, node) in [filled_rect("ground", 64.0, 48.0, WHITE), line, dot]
+                .into_iter()
+                .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node,
+                })
+                .unwrap();
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(chitrakar_doc::Node::filter(
+                    "lens",
+                    Filter::LensCorrection { amount },
+                )),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        // Where the line is down a column: the darkest weighed row.
+        let line_at = |s: &Surface, x: u32| {
+            let (mut sum, mut weight) = (0.0f32, 0.0f32);
+            for y in 0..20 {
+                let ink = 1.0 - s.get(x, y).r;
+                sum += ink * y as f32;
+                weight += ink;
+            }
+            sum / weight.max(1e-6)
+        };
+        let none = page(0.0);
+        assert!(
+            (line_at(&none, 2) - line_at(&none, 32)).abs() < 0.01,
+            "level to begin with"
+        );
+        let barrel = page(1.0);
+        let lift = line_at(&barrel, 32) - line_at(&barrel, 2);
+        assert!(lift > 1.0, "corners drawn in lift the ends: {lift}");
+        let pin = page(-1.0);
+        let drop = line_at(&pin, 2) - line_at(&pin, 32);
+        assert!(drop > 1.0, "corners pushed out drop them: {drop}");
+        for s in [&barrel, &pin] {
+            assert!(
+                s.get(31, 23).r < 0.01 && s.get(32, 24).r < 0.01,
+                "the middle stays"
+            );
+        }
+        let flat = page(0.0);
+        let plain = {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let root = doc.root();
+            let mut line = filled_rect("line", 64.0, 1.0, BLACK);
+            line.transform = Transform::translation(0.0, 8.0);
+            let mut dot = filled_rect("dot", 2.0, 2.0, BLACK);
+            dot.transform = Transform::translation(31.0, 23.0);
+            for (index, node) in [filled_rect("ground", 64.0, 48.0, WHITE), line, dot]
+                .into_iter()
+                .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node,
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap()
+        };
+        assert_eq!(flat.pixels, plain.pixels, "none moves nothing");
     }
 
     /// A ripple makes an upright edge wavy down its length, crossing it

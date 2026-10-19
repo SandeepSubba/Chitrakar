@@ -241,6 +241,9 @@ export type Filter =
   /** Squeezed toward `center` for a positive `amount` (to 1), swollen
    * out from it for a negative one, inside the same circle. */
   | { Pinch: { amount: number; radius: number; center: [number, number] } }
+  /** A lens's bowing taken out about the page's middle: positive draws
+   * the corners in (undoing a barrel), negative pushes them out. */
+  | { LensCorrection: { amount: number } }
   /** Thick strokes (Kuwahara): each pixel the average of the smoothest
    * of four squares `radius` past it, so edges are kept. */
   | { OilPaint: { radius: number } }

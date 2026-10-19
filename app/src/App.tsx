@@ -4875,6 +4875,11 @@ export function App() {
       name: "Pinch",
       kind: { Filter: { Pinch: { amount: 0.5, radius: 1, center: [0.5, 0.5] } } },
     },
+    // A wide lens's outward bowing taken out, a little.
+    lens: {
+      name: "Lens correction",
+      kind: { Filter: { LensCorrection: { amount: 0.3 } } },
+    },
     // Thick strokes: flat within the edges, the edges kept.
     "oil-paint": {
       name: "Oil paint",
@@ -13916,6 +13921,11 @@ function KindProps({
           {slider("Centre down", p.center[1], 0, 1, 0.01, (v) => wrap({ center: [p.center[0], v] }))}
         </>
       );
+    }
+    if ("LensCorrection" in filter) {
+      return slider("Distortion", filter.LensCorrection.amount, -1, 1, 0.01, (v) => ({
+        Filter: { LensCorrection: { amount: v } },
+      }));
     }
     if ("OilPaint" in filter) {
       return slider("Brush size", filter.OilPaint.radius, 1, 20, 0.5, (v) => ({

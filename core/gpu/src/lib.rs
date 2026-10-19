@@ -3404,6 +3404,7 @@ fn one(
                         | chitrakar_doc::Filter::Ripple { .. }
                         | chitrakar_doc::Filter::FindEdges { .. }
                         | chitrakar_doc::Filter::OilPaint { .. }
+                        | chitrakar_doc::Filter::LensCorrection { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5307,6 +5308,15 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             ],
             0.0,
         ),
+        // A warp about the page's middle, out to its corner.
+        F::LensCorrection { amount } => {
+            let k = chitrakar_render::lens_k(*amount);
+            if k == 0.0 {
+                return Some(Filtering::Nothing);
+            }
+            let (mid, far) = chitrakar_render::lens_middle((page[0], page[1]));
+            point([30.0, k, far, mid[0]], mid[1])
+        }
         F::Ripple {
             amplitude,
             wavelength,
@@ -10708,6 +10718,8 @@ mod tests {
                 amplitude: 12.0,
                 wavelength: 7.5,
             },
+            F::LensCorrection { amount: 0.8 },
+            F::LensCorrection { amount: -1.0 },
         ];
         for filter in warps {
             for half in [false, true] {
@@ -10840,6 +10852,28 @@ mod tests {
             m < 5e-4 && w < 0.005,
             "the mosaic is near enough one picture to both: {m} {w}"
         );
+        // A lens correction over it, where every point that moves shows:
+        // two bands meeting at the page's middle barely move under a
+        // lens, which bends about that middle.
+        for amount in [0.8, -1.0] {
+            let mut doc = mosaic();
+            let root = doc.root();
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(Node::filter("lens", F::LensCorrection { amount })),
+            })
+            .unwrap();
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.002 && worst < 0.03,
+                "lens correction {amount} over a mosaic: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
         for radius in [1.0, 2.0, 5.0, 8.0] {
             let mut doc = mosaic();
             let root = doc.root();

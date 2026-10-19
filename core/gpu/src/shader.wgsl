@@ -1095,16 +1095,16 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     let kind = i32(in.mode);
     // A warp moves the picture, so it can bring it onto a pixel where
     // nothing was; everything else leaves an uncovered pixel as it is.
-    let warps = kind == 19 || kind == 26 || kind == 27;
+    let warps = kind == 19 || kind == 26 || kind == 27 || kind == 30;
     if weight <= 0.0 || (was.a <= 0.0 && !warps) {
         return was;
     }
     // Ten to thirteen read a table, fourteen to nineteen are the filters
     // of one pixel, and the rest are numbers again — the adjustments that
     // came after the filters had taken the next numbers, and twenty-six
-    // to twenty-nine, the pinch, the ripple, find edges and oil paint,
-    // which came after those.
-    if (kind >= 14 && kind < 20) || (kind >= 26 && kind < 30) {
+    // to thirty, the pinch, the ripple, find edges, oil paint and lens
+    // correction, which came after those.
+    if (kind >= 14 && kind < 20) || (kind >= 26 && kind < 31) {
         return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
@@ -1171,7 +1171,7 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let paper = (1.0 - ink) * was.a;
         return mix(was, vec4f(paper, paper, paper, was.a), weight);
     }
-    if kind == 19 || kind == 26 || kind == 27 {
+    if kind == 19 || kind == 26 || kind == 27 || kind == 30 {
         // A twirl, a pinch or a ripple: the CPU renderer's
         // `twirl_source`, `pinch_source` or `ripple_source`, then its
         // `warp`, step for step.
@@ -1182,6 +1182,11 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         var src = here;
         if kind == 27 {
             src = vec2f(here.x + p.y * ripple_sine(here.y, p.z), here.y + p.y * ripple_sine(here.x, p.z));
+        } else if kind == 30 {
+            // A lens correction: `lens_source`, the corner `reach` away.
+            let rho2 = (d.x * d.x + d.y * d.y) / (reach * reach);
+            let s = 1.0 - p.y * rho2;
+            src = vec2f(mid.x + d.x * s, mid.y + d.y * s);
         } else if r < reach {
             if kind == 19 {
                 let left = 1.0 - r / reach;

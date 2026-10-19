@@ -2811,6 +2811,36 @@ without reading anything else.*
     - Smoke 8x2e: none without alt; alt over the other layer is the gap
       between them; over nothing, the four distances to the page; and
       gone when alt is let go.
+- **Lens correction ✅** (`Filter::LensCorrection { amount }`, `lens_k`,
+  `lens_middle`, `lens_source`; *Filter › Lens correction* with
+  *Distortion*). A wide lens's bowing taken out: what it bends outward
+  (barrel) or inward (pincushion) made straight again, on the warp the
+  twirl brought in. Photoshop's Lens Correction › Remove Distortion, in
+  its one-number form.
+  - **The bend:** a point a share `ρ` of the way from the page's middle
+    to its corner shows what was `ρ · (1 − k ρ²)` along the same line, `k`
+    a third of the amount (held to −1..=1). Positive draws the corners in
+    to undo a barrel; negative pushes them out to undo a pincushion,
+    where past the page's edge the edge is read again. The middle stays
+    put.
+  - **The GPU** draws it as kind 30 in the warps' branch. The region
+    reach is the most a point moves: a third of the amount of the half
+    diagonal.
+  - **Fixture:** half of the random ripples are lens corrections, from a
+    stream of their own.
+  - **Tests:**
+    - `a_lens_correction_bows_lines_about_the_middle`: a level line near
+      the top bows up at its ends for a positive amount and down for a
+      negative one, a dot at the middle stays, and none moves nothing.
+    - The GPU's one-pixel filters test draws two among the warps and two
+      over the mosaic. The two bands meet at the page's middle, which a
+      lens barely moves, so the bend turned the wrong way in the shader
+      only nudged the worst pixel there (0.059); over the mosaic it moves
+      the mean to 0.147.
+    - Sabotages that each fail one of them: the bend's sign flipped (CPU
+      and shader), and the middle taken at the page's corner.
+    - Smoke 9o25m: a level band bows up at its ends when the corners are
+      drawn in, and down when they are pushed out.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

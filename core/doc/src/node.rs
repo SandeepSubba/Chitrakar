@@ -1253,6 +1253,15 @@ pub enum Filter {
     /// wins only by a clear margin, the first of them otherwise, so two
     /// equally smooth sides of an edge are not decided by rounding.
     OilPaint { radius: f32 },
+    /// A lens's bowing taken out: what a wide lens bends outward
+    /// (barrel) or inward (pincushion) made straight again. A point a
+    /// share `ρ` of the way from the page's middle to its corner shows
+    /// what was `ρ · (1 − k ρ²)` along the same line, `k` a third of
+    /// `amount` (held to −1..=1): positive draws the corners in to undo
+    /// a barrel, negative pushes them out to undo a pincushion. The
+    /// middle stays where it was; past the page's edge the edge is read
+    /// again.
+    LensCorrection { amount: f32 },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in
@@ -2006,6 +2015,7 @@ impl Filter {
             | Filter::Ripple { .. }
             | Filter::FindEdges { .. }
             | Filter::OilPaint { .. }
+            | Filter::LensCorrection { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2542,6 +2552,7 @@ impl Node {
                 | Filter::Ripple { .. }
                 | Filter::FindEdges { .. }
                 | Filter::OilPaint { .. }
+                | Filter::LensCorrection { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }
