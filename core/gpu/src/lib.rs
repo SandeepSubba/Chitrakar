@@ -3403,6 +3403,7 @@ fn one(
                         | chitrakar_doc::Filter::Pinch { .. }
                         | chitrakar_doc::Filter::Ripple { .. }
                         | chitrakar_doc::Filter::FindEdges { .. }
+                        | chitrakar_doc::Filter::OilPaint { .. }
                         | chitrakar_doc::Filter::MotionBlur { .. }
                         | chitrakar_doc::Filter::RadialBlur { .. }
                         | chitrakar_doc::Filter::Pixelate { .. }
@@ -5287,6 +5288,14 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             }
             point([26.0, power, reach, mid[0]], mid[1])
         }
+        // The window round each pixel, walked once in the fragment; past
+        // a radius of eight that is more of a walk than a pass should be,
+        // and the page goes back, as a median's does.
+        F::OilPaint { radius } => match chitrakar_render::oil_radius(*radius, view.max_scale()) {
+            0 => Filtering::Nothing,
+            r if r > MEDIAN_MOST => return None,
+            r => point([29.0, r as f32, 0.0, 0.0], 0.0),
+        },
         // Eight pixels round this one, a document pixel away each way
         // as the CPU renderer rounds it from the same scale.
         F::FindEdges { amount } => point(
@@ -10726,6 +10735,144 @@ mod tests {
                     assert!(onto, "{filter:?} turns the picture onto the bare half");
                 }
             }
+        }
+
+        // Oil paint walks the window round each pixel and is the CPU's,
+        // small and as large as it is drawn here; larger goes back.
+        for radius in [1.0, 3.0, 8.0] {
+            let filter = F::OilPaint { radius };
+            let doc = with(filter.clone());
+            assert!(GpuRenderer::can_render(&doc), "{filter:?} is drawn");
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.002 && worst < 0.01,
+                "{filter:?}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+        }
+        assert!(!GpuRenderer::can_render(&with(F::OilPaint { radius: 9.0 })));
+        // A black square on nothing: what is covered counts as well as how
+        // light it is, in both.
+        {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "black",
+                    VectorShape::Rect {
+                        width: 30.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+                Transform::translation(15.0, 10.0),
+            );
+            add(
+                &mut doc,
+                Box::new(Node::filter("paint", F::OilPaint { radius: 3.0 })),
+                Transform::default(),
+            );
+            let drawn = gpu.render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &chitrakar_render::render(&doc).unwrap());
+            assert!(
+                mean < 0.002 && worst < 0.01,
+                "oil paint on nothing: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            assert!(drawn.get(15, 10).a > 0.999, "the corner stays covered");
+        }
+        // And over grain, where every square differs from the next and
+        // the choosing is what is being compared.
+        // And over a mosaic, where every square differs from the next
+        // and the choosing is what is being compared. Even squares on
+        // whole pixels come to this backend's surfaces a thousandth or so
+        // off the CPU renderer's floats, which can move a square's
+        // variance past the margin where two squares are nearly as
+        // smooth: there either is a right answer, and the two renderers
+        // can take different ones. So this holds the mean, and how few
+        // pixels part by more than a little — a choosing turned the wrong
+        // way round, or squares counted wrong, parts most of them.
+        let mosaic = || {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let mut seed = 0x2545_f491u32;
+            for y in (0..40).step_by(2) {
+                for x in (0..60).step_by(2) {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let v = (seed % 1000) as f32 / 1000.0;
+                    let lean = ((seed >> 10) % 1000) as f32 / 1000.0;
+                    add(
+                        &mut doc,
+                        filled(
+                            "m",
+                            VectorShape::Rect {
+                                width: 2.0,
+                                height: 2.0,
+                                radius: 0.0,
+                            },
+                            AuthoredColor::Srgb {
+                                r: v,
+                                g: (v + lean) / 2.0,
+                                b: 1.0 - v,
+                                a: 1.0,
+                            },
+                        ),
+                        Transform::translation(x as f32, y as f32),
+                    );
+                }
+            }
+            doc
+        };
+        let bare = mosaic();
+        let (m, w) = difference(
+            &gpu.render(&bare).unwrap(),
+            &chitrakar_render::render(&bare).unwrap(),
+        );
+        assert!(
+            m < 5e-4 && w < 0.005,
+            "the mosaic is near enough one picture to both: {m} {w}"
+        );
+        for radius in [1.0, 2.0, 5.0, 8.0] {
+            let mut doc = mosaic();
+            let root = doc.root();
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(Node::filter("paint", F::OilPaint { radius })),
+            })
+            .unwrap();
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            let apart = drawn
+                .pixels
+                .iter()
+                .zip(&reference.pixels)
+                .filter(|(p, q)| {
+                    (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        > 0.02
+                })
+                .count() as f32
+                / drawn.pixels.len() as f32;
+            assert!(
+                mean < 0.002 && apart < 0.02,
+                "oil paint {radius} over a mosaic: mean channel difference {mean:.5} (worst {worst:.3}), {:.2}% of pixels apart",
+                apart * 100.0
+            );
+            let (moved, _) = difference(&drawn, &chitrakar_render::render(&bare).unwrap());
+            assert!(moved > 0.002, "the mosaic is painted over ({moved:.4})");
         }
 
         // Find edges reads the eight pixels round each one and is the

@@ -1242,6 +1242,17 @@ pub enum Filter {
     /// away each side (a Sobel kernel), so the lines keep their weight
     /// on the picture when it is zoomed.
     FindEdges { amount: f32 },
+    /// What is under it as though painted in thick strokes: flat where
+    /// a stroke would be, and edged where the picture is (the Kuwahara
+    /// filter). Round each pixel stand four squares `radius` document
+    /// pixels a side past it, one in each corner, overlapping on the
+    /// pixel's own row and column; the pixel becomes the average of the
+    /// square whose light, and whose cover, vary least — so an edge is
+    /// never averaged across, since a square that straddles it varies
+    /// most, and the edge of what is covered is an edge too. A square
+    /// wins only by a clear margin, the first of them otherwise, so two
+    /// equally smooth sides of an edge are not decided by rounding.
+    OilPaint { radius: f32 },
     /// Squares of one colour each, the average of what they covered:
     /// what a face or a number is taken out of a picture with. `size` is
     /// the square's side in document pixels, and the grid is anchored in
@@ -1994,6 +2005,7 @@ impl Filter {
             | Filter::Pinch { .. }
             | Filter::Ripple { .. }
             | Filter::FindEdges { .. }
+            | Filter::OilPaint { .. }
             | Filter::MotionBlur { .. }
             | Filter::RadialBlur { .. }
             | Filter::Pixelate { .. }
@@ -2529,6 +2541,7 @@ impl Node {
                 | Filter::Pinch { .. }
                 | Filter::Ripple { .. }
                 | Filter::FindEdges { .. }
+                | Filter::OilPaint { .. }
                 | Filter::MotionBlur { .. }
                 | Filter::RadialBlur { .. }
                 | Filter::Pixelate { .. }

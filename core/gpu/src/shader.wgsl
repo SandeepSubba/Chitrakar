@@ -1102,9 +1102,9 @@ fn fs_adjust(in: ImageOut) -> @location(0) vec4f {
     // Ten to thirteen read a table, fourteen to nineteen are the filters
     // of one pixel, and the rest are numbers again — the adjustments that
     // came after the filters had taken the next numbers, and twenty-six
-    // to twenty-eight, the pinch, the ripple and find edges, which came
-    // after those.
-    if (kind >= 14 && kind < 20) || (kind >= 26 && kind < 29) {
+    // to twenty-nine, the pinch, the ripple, find edges and oil paint,
+    // which came after those.
+    if (kind >= 14 && kind < 20) || (kind >= 26 && kind < 30) {
         return filtered(kind, in.params, in.grad, in.extra, in.page, was, weight);
     }
     // Straight alpha in, premultiplied out, which is where the
@@ -1205,6 +1205,54 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let top = mix_px(texel_at(i, size), texel_at(i + vec2i(1, 0), size), t.x);
         let bottom = mix_px(texel_at(i + vec2i(0, 1), size), texel_at(i + vec2i(1, 1), size), t.x);
         return mix_px(was, mix_px(top, bottom, t.y), weight);
+    }
+    if kind == 29 {
+        // Oil paint: the CPU renderer's `oil_painted`. The window walked
+        // once, each pixel counted into every corner square it is in, then
+        // the smoothest square's average — by the same clear margin.
+        let size = vec2i(textureDimensions(backdrop));
+        let px = vec2i(floor(at));
+        let r = i32(p.y);
+        var sums: array<vec4f, 4>;
+        var light: array<vec4f, 4>;
+        for (var dy = -r; dy <= r; dy = dy + 1) {
+            for (var dx = -r; dx <= r; dx = dx + 1) {
+                let q = texel_at(px + vec2i(dx, dy), size);
+                let l = dot(vec3f(0.2126, 0.7152, 0.0722), q.rgb);
+                let two = vec4f(l, l * l, q.a, q.a * q.a);
+                if dx <= 0 && dy <= 0 {
+                    sums[0] = sums[0] + q;
+                    light[0] = light[0] + two;
+                }
+                if dx >= 0 && dy <= 0 {
+                    sums[1] = sums[1] + q;
+                    light[1] = light[1] + two;
+                }
+                if dx <= 0 && dy >= 0 {
+                    sums[2] = sums[2] + q;
+                    light[2] = light[2] + two;
+                }
+                if dx >= 0 && dy >= 0 {
+                    sums[3] = sums[3] + q;
+                    light[3] = light[3] + two;
+                }
+            }
+        }
+        let count = f32((r + 1) * (r + 1));
+        var best = 3.4e38;
+        var mean = was;
+        for (var k = 0; k < 4; k = k + 1) {
+            // Lit unevenly or covered unevenly: black and nothing are
+            // equally dark.
+            let m = light[k].x / count;
+            let c = light[k].z / count;
+            let v = (light[k].y / count - m * m) + (light[k].w / count - c * c);
+            if v < best - 1e-4 {
+                best = v;
+                mean = sums[k] / count;
+            }
+        }
+        return mix_px(was, mean, weight);
     }
     if kind == 28 {
         // Find edges: the CPU renderer's `edge_white`, a channel at a

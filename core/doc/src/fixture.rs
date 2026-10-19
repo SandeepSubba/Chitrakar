@@ -2719,7 +2719,14 @@ impl Rng {
                                     threshold: side.between(0.05, 0.5),
                                 }
                             } else {
-                                Filter::Median { radius }
+                                // Half of the medians an oil paint, from
+                                // a stream of their own again.
+                                let mut paint = Rng((side.0 ^ 0x8f1b_3c5d_e2a4_9067) | 1);
+                                if paint.chance(2) {
+                                    Filter::OilPaint { radius }
+                                } else {
+                                    Filter::Median { radius }
+                                }
                             }
                         } else {
                             Filter::Noise {

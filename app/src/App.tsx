@@ -4815,6 +4815,11 @@ export function App() {
       name: "Pinch",
       kind: { Filter: { Pinch: { amount: 0.5, radius: 1, center: [0.5, 0.5] } } },
     },
+    // Thick strokes: flat within the edges, the edges kept.
+    "oil-paint": {
+      name: "Oil paint",
+      kind: { Filter: { OilPaint: { radius: 4 } } },
+    },
     // The picture's edges drawn dark on white.
     "find-edges": {
       name: "Find edges",
@@ -13824,6 +13829,11 @@ function KindProps({
           {slider("Centre down", p.center[1], 0, 1, 0.01, (v) => wrap({ center: [p.center[0], v] }))}
         </>
       );
+    }
+    if ("OilPaint" in filter) {
+      return slider("Brush size", filter.OilPaint.radius, 1, 20, 0.5, (v) => ({
+        Filter: { OilPaint: { radius: v } },
+      }));
     }
     if ("FindEdges" in filter) {
       return slider("Edge strength", filter.FindEdges.amount, 0, 5, 0.05, (v) => ({

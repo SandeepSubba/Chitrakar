@@ -2731,6 +2731,59 @@ without reading anything else.*
     - Smoke 8x2d: listed, the shape the overlay's colour all over with
       nothing outside changed, a new colour, half strength half way, one
       undo, and removed.
+- **Oil paint ✅** (`Filter::OilPaint { radius }`, `oil_radius`,
+  `oil_painted`; *Filter › Oil paint* with *Brush size*). The Kuwahara
+  filter, Photoshop's Oil Paint in its plainest form: flat where a
+  stroke would be, edged where the picture is.
+  - **The squares:** round each pixel stand four squares, `radius`
+    document pixels a side past it, one in each corner, overlapping on
+    the pixel's own row and column. The pixel becomes the average of the
+    square whose light, and whose cover, vary least. A square that
+    straddles an edge varies most, so an edge is never averaged across:
+    a sharp one stays exactly where it was. Stripes a pixel wide become
+    their average, and a lone speck fades to its share of a square.
+  - **Cover counts as well as light:** a first version measured light
+    alone. Black and nothing are equally dark, so a square reaching past
+    the page into the transparent margin of a view looked as smooth as
+    one inside it, won by coming first, and the page's top and left
+    edges went half covered on screen. The smoke block's screenshot
+    showed it; a black square on a bare page now asks for it on both
+    renderers, and the browser asserts the page's rim stays covered.
+  - **Ties:** a square wins only by a margin (`OIL_MARGIN`, 10⁻⁴ in light
+    squared), the first of them otherwise, so two equally smooth sides
+    are not decided by rounding.
+  - **The CPU** gets every square's sum from one picture of
+    `(r+1)`-square sums, slid along the rows and then down the columns
+    in double precision, so a wide brush costs what a narrow one does.
+  - **The GPU** draws it as kind 29, walking the window once and adding
+    each pixel to every square it is in. Past a radius of eight device
+    pixels the page goes back, as a median's does.
+  - **What the GPU cannot promise:** its surfaces carry a picture a
+    thousandth or so off the CPU's floats, which moves a square's
+    variance past the margin where two squares are nearly as smooth.
+    There either answer is right, and the two renderers can take
+    different ones. So its test over a mosaic holds the mean and how few
+    pixels part, not the worst. Grain was tried first and is worse for
+    the same reason: the two grains themselves part by a thousandth.
+  - **Fixture:** half of the random medians are oil paints, from a
+    stream of their own (the first constant tried was already a seed).
+  - **Tests:**
+    - `oil_paint_flattens_within_an_edge_and_keeps_the_edge`: the edge
+      stays; stripes flatten; a speck fades and its neighbours keep the
+      ground; half opacity is half way; a radius under half a pixel does
+      nothing; a black square on nothing stays covered to its corners and
+      nothing spills past it.
+    - The GPU's one-pixel filters test: two bands at radii one, three
+      and eight; nine handed back; a mosaic at one, two, five and eight;
+      a black square on nothing.
+    - Sabotages that each fail one of them: the roughest square chosen
+      (CPU and shader), one corner for every square, the sliding window
+      off by one, the centre row counted into the wrong squares, cover
+      left out of the shader's measure, and the CPU's (in the browser
+      too, where the rim went to 106 of 255).
+    - Smoke 9o25l: a two-pixel line fades and a larger brush fades it
+      more, a block's edge stays, and the page's rim stays black and
+      covered.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

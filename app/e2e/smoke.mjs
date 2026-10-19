@@ -8394,6 +8394,63 @@ assert(
   assert(Math.min(...after) > 245, `no strength, white all over (${after})`);
 }
 
+// 9o25l. Oil paint: the Filter menu's thick strokes. On black, a white
+// line two pixels wide is too fine to be a stroke and fades, while a
+// white block's edge stays exactly where it was; a larger brush takes
+// the line further down.
+{
+  await newDocument(240, 120, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 240) * b.width, b.y + (y / 120) * b.height];
+  const rect = async (hex, x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#000000", 0, 0, 240, 120);
+  // Drawn wider and typed down to two: a drag that short is a click.
+  await rect("#ffffff", 60, 0, 70, 120);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  // The fields keep a shape's proportions until told not to.
+  const keep = page.locator('button[aria-label="Keep the proportions"]');
+  const tied = (await keep.getAttribute("aria-pressed")) === "true";
+  if (tied) await keep.click();
+  await page.locator('input[aria-label="W size"]').fill("2");
+  await page.locator('input[aria-label="W size"]').press("Enter");
+  await page.waitForTimeout(250);
+  if (tied) await keep.click();
+  await rect("#ffffff", 160, 0, 240, 120);
+  await page.keyboard.press("Escape");
+  const red = async (x, y) => (await canvasPixel(x, y))[0];
+  assert((await red(60, 60)) > 245 && (await red(61, 60)) > 245, "a white line to begin with");
+  await menuClick("Filter", "Oil paint");
+  await page.waitForTimeout(400);
+  const line = Math.max(await red(60, 60), await red(61, 60));
+  assert(line < 200, `the line is too fine to be a stroke and fades (${line})`);
+  assert(
+    (await red(159, 60)) < 10 && (await red(160, 60)) > 245 && (await red(200, 60)) > 245,
+    `the block's edge stays where it was (${await red(159, 60)}, ${await red(160, 60)})`,
+  );
+  // Black at the page's own edges, where the squares reach past it into
+  // nothing: what is covered counts, so nothing is not taken for black.
+  const rim = [await canvasPixel(30, 0), await canvasPixel(0, 60), await canvasPixel(30, 119)];
+  assert(
+    rim.every((p) => p[0] < 10 && p[3] === 255),
+    `the page's edges stay black and covered (${rim.join(" / ")})`,
+  );
+  await setSlider("Brush size", 10);
+  await page.waitForTimeout(400);
+  const wider = Math.max(await red(60, 60), await red(61, 60));
+  assert(wider < line, `a larger brush takes it further down (${line} -> ${wider})`);
+}
+
 // 9o26. The scissors: with the Node tool, alt-pressing a picked line's
 // outline cuts it there, in one step, still drawn where it was.
 {

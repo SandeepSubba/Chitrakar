@@ -830,6 +830,13 @@ pub fn filter_reach(doc: &Document) -> u32 {
                 let (_, reach) = warp_circle(*radius, *center, page);
                 ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
             }
+            // A square's far corner, the radius away each way.
+            NodeKind::Filter(Filter::OilPaint { radius }) => {
+                let scale = max_scale(ancestor_space(doc, *id));
+                (oil_radius(*radius, scale) as u32)
+                    .saturating_mul(2)
+                    .saturating_add(2)
+            }
             // A document pixel each way, and its corner's diagonal.
             NodeKind::Filter(Filter::FindEdges { .. }) => {
                 let scale = max_scale(ancestor_space(doc, *id));
@@ -8312,6 +8319,23 @@ fn apply_filter(
                 });
             }
         }
+        Filter::OilPaint { radius } => {
+            let r = oil_radius(*radius, scale);
+            if r == 0 {
+                return;
+            }
+            let original = blur::snapshot(dst, clip);
+            let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
+            let painted = oil_painted(&original, w, h, r);
+            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+                let weight = opacity * coverage_at(doc, mask, x, y);
+                if weight <= 0.0 {
+                    return o;
+                }
+                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                lerp(o, painted[at], weight)
+            });
+        }
         Filter::FindEdges { amount } => {
             let original = blur::snapshot(dst, clip);
             let step = edge_step(scale);
@@ -8484,6 +8508,122 @@ pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f
     }
     let k = (r / reach).powf(power) * reach / r;
     [mid[0] + dx * k, mid[1] + dy * k]
+}
+
+/// An oil paint's square, in device pixels past the pixel: the radius
+/// at the view's scale, rounded, sixty-four at the most.
+pub fn oil_radius(radius: f32, scale: f32) -> usize {
+    let r = radius * scale;
+    if r.is_finite() {
+        r.round().clamp(0.0, 64.0) as usize
+    } else {
+        0
+    }
+}
+
+/// How much smoother a square has to be than the best before it, in
+/// light squared, to be the one an oil paint takes: rounding never
+/// decides between two that are as smooth as each other.
+pub const OIL_MARGIN: f32 = 1e-4;
+
+/// An oil paint over a `w`×`h` snapshot: every pixel the average of the
+/// smoothest of its four corner squares, `r` past it each way, the edge
+/// read again past the edge. The squares' sums come from one picture of
+/// every `(r+1)`-square's sum, worked by sliding along the rows and then
+/// down the columns in double precision — a square at each corner of a
+/// pixel is the square whose corner is that far up and left of it — so a
+/// wide radius costs what a narrow one does. The choosing is the GPU's,
+/// step for step.
+fn oil_painted(original: &[LinearRgba], w: usize, h: usize, r: usize) -> Vec<LinearRgba> {
+    let (wi, hi, ri) = (w as i64, h as i64, r as i64);
+    let n = r + 1;
+    // The picture's seven numbers a pixel — its four channels, how light
+    // it is and that squared, and its cover squared — on a grid reaching
+    // `r` past it on every side, the edge repeated.
+    let (gw, gh) = (w + 2 * r, h + 2 * r);
+    let at = |x: i64, y: i64| original[(y.clamp(0, hi - 1) * wi + x.clamp(0, wi - 1)) as usize];
+    let six = |p: LinearRgba| {
+        let l = (chitrakar_doc::LUMA[0] * p.r
+            + chitrakar_doc::LUMA[1] * p.g
+            + chitrakar_doc::LUMA[2] * p.b) as f64;
+        let a = p.a as f64;
+        [p.r as f64, p.g as f64, p.b as f64, a, l, l * l, a * a]
+    };
+    // Along each row: the sum of the n starting at each column.
+    let across_w = gw + 1 - n;
+    let mut across = vec![[0.0f64; 7]; across_w * gh];
+    for gy in 0..gh {
+        let y = gy as i64 - ri;
+        let mut run = [0.0f64; 7];
+        for gx in 0..gw {
+            let v = six(at(gx as i64 - ri, y));
+            for k in 0..7 {
+                run[k] += v[k];
+            }
+            if gx >= n {
+                let old = six(at(gx as i64 - n as i64 - ri, y));
+                for k in 0..7 {
+                    run[k] -= old[k];
+                }
+            }
+            if gx + 1 >= n {
+                across[gy * across_w + gx + 1 - n] = run;
+            }
+        }
+    }
+    // Down each column of those: the square whose top left is there.
+    let down_h = gh + 1 - n;
+    let mut squares = vec![[0.0f32; 7]; across_w * down_h];
+    for gx in 0..across_w {
+        let mut run = [0.0f64; 7];
+        for gy in 0..gh {
+            let v = across[gy * across_w + gx];
+            for k in 0..7 {
+                run[k] += v[k];
+            }
+            if gy >= n {
+                let old = across[(gy - n) * across_w + gx];
+                for k in 0..7 {
+                    run[k] -= old[k];
+                }
+            }
+            if gy + 1 >= n {
+                let cell = &mut squares[(gy + 1 - n) * across_w + gx];
+                for k in 0..7 {
+                    cell[k] = run[k] as f32;
+                }
+            }
+        }
+    }
+    let count = (n * n) as f32;
+    let mut out = Vec::with_capacity(w * h);
+    for y in 0..h {
+        for x in 0..w {
+            // The squares' top lefts on the grid, which starts `r` up and
+            // left of the picture: up and left of the pixel, up and right,
+            // down and left, down and right.
+            let corners = [(x, y), (x + r, y), (x, y + r), (x + r, y + r)];
+            let mut best = (f32::INFINITY, [0.0f32; 4]);
+            for (cx, cy) in corners {
+                let s = squares[cy * across_w + cx];
+                // How unevenly lit and how unevenly covered: black and
+                // nothing are equally dark, and a square reaching from
+                // one into the other is not smooth.
+                let mean = s[4] / count;
+                let cover = s[3] / count;
+                let var = (s[5] / count - mean * mean) + (s[6] / count - cover * cover);
+                if var < best.0 - OIL_MARGIN {
+                    best = (
+                        var,
+                        [s[0] / count, s[1] / count, s[2] / count, s[3] / count],
+                    );
+                }
+            }
+            let [r, g, b, a] = best.1;
+            out.push(LinearRgba { r, g, b, a });
+        }
+    }
+    out
 }
 
 /// How many device pixels away a find-edges reads: a document pixel,
@@ -21478,6 +21618,111 @@ mod tests {
                 p.b > 0.999 && p.r < 1e-5 && p.g < 1e-5,
                 "one blue at {x},{y}: {p:?}"
             );
+        }
+    }
+
+    /// An oil paint keeps an edge exactly where it was — every pixel
+    /// either side takes the square on its own side — and flattens what
+    /// is too fine to be a stroke: stripes a pixel wide become their
+    /// average, a lone speck fades to a share of itself and its
+    /// neighbours keep the ground; flat ground stays flat, half opacity
+    /// is half way, and a radius too small to reach a pixel does nothing.
+    #[test]
+    fn oil_paint_flattens_within_an_edge_and_keeps_the_edge() {
+        let grey = |v: f32| AuthoredColor::Srgb {
+            r: v,
+            g: v,
+            b: v,
+            a: 1.0,
+        };
+        let page = |layers: Vec<(f32, f32, f32, f32, AuthoredColor)>, radius: f32, opacity: f32| {
+            let mut doc = Document::new(64, 32, ColorMode::Rgb);
+            let root = doc.root();
+            let n = layers.len();
+            for (index, (x, y, w, h, c)) in layers.into_iter().enumerate() {
+                let mut node = filled_rect("r", w, h, c);
+                node.transform = Transform::translation(x, y);
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node,
+                })
+                .unwrap();
+            }
+            let mut f = chitrakar_doc::Node::filter("paint", Filter::OilPaint { radius });
+            f.opacity = opacity;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: n,
+                node: Box::new(f),
+            })
+            .unwrap();
+            render(&doc).unwrap()
+        };
+        let halves = || {
+            vec![
+                (0.0, 0.0, 64.0, 32.0, BLACK),
+                (32.0, 0.0, 32.0, 32.0, WHITE),
+            ]
+        };
+        let edge = page(halves(), 3.0, 1.0);
+        for y in [0, 16, 31] {
+            assert!(
+                edge.get(31, y).r < 1e-6 && edge.get(32, y).r > 1.0 - 1e-6,
+                "the edge stays at {y}"
+            );
+            assert!(edge.get(29, y).r < 1e-6 && edge.get(34, y).r > 1.0 - 1e-6);
+        }
+        // Stripes a pixel wide on the left half: their average.
+        let mut striped = vec![(0.0, 0.0, 64.0, 32.0, grey(0.2))];
+        for x in (0..32).step_by(2) {
+            striped.push((x as f32, 0.0, 1.0, 32.0, grey(0.8)));
+        }
+        let before = page(striped.clone(), 0.0, 1.0);
+        let after = page(striped, 3.0, 1.0);
+        let spread = |s: &Surface| {
+            let row: Vec<f32> = (8..24).map(|x| s.get(x, 16).r).collect();
+            row.iter().cloned().fold(f32::MIN, f32::max)
+                - row.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        assert!(spread(&before) > 0.3, "the stripes are there to begin with");
+        assert!(spread(&after) < 0.02, "and flattened: {}", spread(&after));
+        // A lone speck on flat ground.
+        let speck = vec![
+            (0.0, 0.0, 64.0, 32.0, grey(0.3)),
+            (40.0, 16.0, 1.0, 1.0, WHITE),
+        ];
+        let flat_value = chitrakar_color::srgb_to_linear(0.3);
+        let faded = page(speck, 2.0, 1.0);
+        let at_speck = faded.get(40, 16).r;
+        assert!(at_speck < flat_value + 0.15, "the speck fades: {at_speck}");
+        for (x, y) in [(41, 16), (39, 16), (40, 15), (40, 17), (10, 10)] {
+            assert!(
+                (faded.get(x, y).r - flat_value).abs() < 1e-5,
+                "the ground is kept at {x},{y}"
+            );
+        }
+        let half = page(halves(), 3.0, 0.5);
+        let none = page(halves(), 0.0, 1.0);
+        for ((h, e), n) in half.pixels.iter().zip(&edge.pixels).zip(&none.pixels) {
+            assert!((h.r - (e.r + n.r) / 2.0).abs() < 1e-5, "half way");
+        }
+        let tiny = page(halves(), 0.3, 1.0);
+        assert_eq!(tiny.pixels, none.pixels, "too small to reach a pixel");
+        // A black square on nothing: black and nothing are equally dark,
+        // so what is covered has to count as well as how light it is, or
+        // a square reaching past the edge into nothing is as smooth as
+        // one inside, wins by coming first, and the corner goes half
+        // covered.
+        let alone = page(vec![(16.0, 8.0, 32.0, 16.0, BLACK)], 3.0, 1.0);
+        for (x, y) in [(16, 8), (47, 8), (16, 23), (47, 23), (30, 15)] {
+            assert!(
+                alone.get(x, y).a > 1.0 - 1e-6,
+                "covered to its corner at {x},{y}"
+            );
+        }
+        for (x, y) in [(15, 8), (16, 7), (48, 23), (47, 24)] {
+            assert!(alone.get(x, y).a < 1e-6, "and nothing past it at {x},{y}");
         }
     }
 
