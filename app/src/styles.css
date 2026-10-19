@@ -1333,6 +1333,39 @@ body {
   }
 }
 
+/* The distances shown with alt held: a line each, its length on a label
+   in the middle, and the box measured to outlined. Drawn over the
+   picture, so in its own colours rather than the chrome's. */
+.measures {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.measures line,
+.measures .measure-to {
+  stroke: #f24e1e;
+  stroke-width: 1;
+  fill: none;
+}
+
+.measures .measure-to {
+  stroke-dasharray: 3 3;
+}
+
+.measures .measure rect {
+  fill: #f24e1e;
+}
+
+.measures text {
+  fill: #fff;
+  font: 11px/1 system-ui, sans-serif;
+  text-anchor: middle;
+}
+
 /* The other layers picked beside the one the handles are on: the same
    line, dashed and half-strength, so what a drag will carry along is
    visible without competing with the box being resized. */

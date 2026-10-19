@@ -89,7 +89,8 @@ test:unit` in `app/`, a second or two, and it is where a change to runs
 should be tried first. It transpiles the TypeScript with the esbuild
 that vite already brings, so there is nothing to install. Most of it is
 a property over random strings and random edits, with emoji and accents
-in the alphabet on purpose.
+in the alphabet on purpose. `app/e2e/measure.test.mjs` runs beside it the same way, over
+`src/measure.ts`: the distances the Move tool shows with alt held.
 
 The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1400 pixel-level
 assertions driving the built app in headless Chromium; it has caught real

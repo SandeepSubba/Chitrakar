@@ -2784,6 +2784,33 @@ without reading anything else.*
     - Smoke 9o25l: a two-pixel line fades and a larger brush fades it
       more, a block's edge stays, and the page's rim stays black and
       covered.
+- **Distances with alt ✅** (`app/src/measure.ts`: `gapsBetween`,
+  `boxOf`, `union`; the Move tool's overlay, `measureAt`). With a layer
+  picked and alt held, the Move tool shows how far it is from the layer
+  under the pointer, and over nothing, from the frame it sits in or the
+  page: a red line each, its length on a label in the person's units,
+  and the box measured to outlined. Figma's and Illustrator's alt-hover
+  redlines.
+  - **What is measured:** side by side on an axis, the gap between them
+    on it, drawn through the middle of the stretch they share. One wholly
+    inside the other, how far in from each of the four sides. Overlapping
+    without either holding the other, nothing on that axis. The first
+    version took "inside on one axis" as inside; the unit test caught a
+    narrower box below another showing how far in from its sides rather
+    than only how far below, so it is whole nesting or nothing.
+  - **When:** on every pointer move over the canvas with the Move tool,
+    nothing pressed and alt held; pressing alt without moving shows them
+    where the pointer last was, and letting go takes them away. What is
+    picked, and anything travelling with it, is not something to measure
+    to.
+  - **Tests:**
+    - `e2e/measure.test.mjs` (in `npm run test:unit`): twenty checks over
+      side by side either way, above and below, apart on both axes,
+      inside and holding, overlapping, touching, flush on three sides,
+      and boxes from `bounds_of`.
+    - Smoke 8x2e: none without alt; alt over the other layer is the gap
+      between them; over nothing, the four distances to the page; and
+      gone when alt is let go.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -3521,6 +3521,55 @@ assert(
   assert((await canvasPixel(300, 200)).join() === own.join(), "and removed, the shape is itself");
 }
 
+// 8x2e. Distances: with a layer picked and alt held, the Move tool shows
+// how far it is from the layer under the pointer — the gap between two
+// side by side — and, over nothing, how far in from each side of the
+// page it sits. Let go of alt and they are gone; without alt there are
+// none.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (x0, y0, x1, y1) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect(50, 50, 150, 150);
+  await rect(200, 80, 300, 120);
+  await pickTool("Move");
+  // The first one drawn, which is the lower of the two in the list.
+  await page.locator(".panel ul li").last().click();
+  await page.waitForTimeout(200);
+  const overlay = page.locator('svg[aria-label="Distances"]');
+  const labels = async () =>
+    (await overlay.locator("text").allTextContents()).map(Number).sort((p, q) => p - q);
+  await page.mouse.move(...at(250, 100));
+  await page.waitForTimeout(150);
+  assert((await overlay.count()) === 0, "no distances without alt");
+  await page.keyboard.down("Alt");
+  await page.waitForTimeout(150);
+  let got = await labels();
+  assert(
+    got.length === 1 && Math.abs(got[0] - 50) <= 1,
+    `over the other layer, the gap between them (${got})`,
+  );
+  await page.mouse.move(...at(350, 250), { steps: 3 });
+  await page.waitForTimeout(150);
+  got = await labels();
+  const want = [50, 50, 150, 250];
+  assert(
+    got.length === 4 && got.every((v, i) => Math.abs(v - want[i]) <= 1),
+    `over nothing, how far in from each side of the page (${got})`,
+  );
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(150);
+  assert((await overlay.count()) === 0, "let go of alt and they are gone");
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

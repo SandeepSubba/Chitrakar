@@ -24,6 +24,7 @@ import {
   type Outgoing,
 } from "./files";
 import { SHAPE_PRESETS, presetPath } from "./shapes";
+import { boxOf, gapsBetween, union, type Box, type Gap } from "./measure";
 import {
   ALWAYS_SHOWN,
   KEY_FAMILIES,
@@ -1362,6 +1363,13 @@ export function App() {
   /** The line the knife is drawing, shown over the page until it lets
    * go: start and end, in document coordinates. */
   const [knifeLine, setKnifeLine] = useState<[number, number, number, number] | null>(null);
+  /** The distances shown with alt held over the canvas: from what is
+   * picked to what the pointer is over, or to the frame or page round
+   * it — and the box they are measured to, outlined. */
+  const [measures, setMeasures] = useState<{ gaps: Gap[]; to: Box } | null>(null);
+  /** Where the pointer last was over the canvas, in document units, so
+   * pressing alt without moving shows the distances there. */
+  const lastPointer = useRef<[number, number] | null>(null);
   const toolDragRef = useRef<ToolDrag | null>(null);
   const handleDragRef = useRef<HandleDrag | null>(null);
   const panDragRef = useRef<PanDrag | null>(null);
@@ -3566,8 +3574,60 @@ export function App() {
     return [x, y, cw, ch];
   };
 
+  /** The distances from what is picked to what is at `(x, y)`, with alt
+   * held and the Move tool in hand and nothing being dragged. Over
+   * another layer they are to that layer; over nothing, or over what is
+   * picked or anything travelling with it, to the frame the picked
+   * layers sit in, or to the page. */
+  const measureAt = (x: number, y: number, alt: boolean) => {
+    const clear = () => setMeasures((m) => (m ? null : m));
+    if (!session || !alt || tool !== "Move" || selectionSet.length === 0) return clear();
+    const a = union(
+      selectionSet.map((id) => boxOf(session.bounds_of(id))).filter((b): b is Box => b !== null),
+    );
+    if (!a) return clear();
+    const hit = session.hit_test(x, y) as NodeId | undefined;
+    let to: Box | null = null;
+    if (hit !== undefined && !selectionSet.some((id) => relatedTo(hit, id))) {
+      to = boxOf(session.bounds_of(hit));
+    }
+    if (!to) {
+      const frame = session.frame_at((a[0] + a[2]) / 2, (a[1] + a[3]) / 2);
+      if (frame >= 0 && !selectionSet.includes(frame as NodeId)) {
+        to = boxOf(session.bounds_of(frame));
+      }
+    }
+    to = to ?? [0, 0, docSize[0], docSize[1]];
+    setMeasures({ gaps: gapsBetween(a, to), to });
+  };
+
+  // Alt pressed over the canvas shows the distances where the pointer
+  // already is, and let go of, takes them away — without a move between.
+  useEffect(() => {
+    const onAlt = (e: KeyboardEvent) => {
+      if (e.key !== "Alt") return;
+      const at = lastPointer.current;
+      if (e.type === "keyup" || !at) {
+        setMeasures((m) => (m ? null : m));
+        return;
+      }
+      measureAt(at[0], at[1], true);
+    };
+    window.addEventListener("keydown", onAlt);
+    window.addEventListener("keyup", onAlt);
+    return () => {
+      window.removeEventListener("keydown", onAlt);
+      window.removeEventListener("keyup", onAlt);
+    };
+  });
+
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (pinchRef.current) return; // two fingers are the view's, not a tool's
+    {
+      const at = docPoint(e);
+      lastPointer.current = at;
+      measureAt(at[0], at[1], e.altKey && e.buttons === 0);
+    }
     const knifeFrom = knifeRef.current;
     if (knifeFrom) {
       let [x, y] = docPoint(e);
@@ -10009,6 +10069,33 @@ export function App() {
                     .join(" ")}
                 />
               ))}
+            </svg>
+          )}
+          {measures && (
+            <svg className="measures" aria-label="Distances">
+              <rect
+                className="measure-to"
+                x={view.x + measures.to[0] * view.zoom}
+                y={view.y + measures.to[1] * view.zoom}
+                width={(measures.to[2] - measures.to[0]) * view.zoom}
+                height={(measures.to[3] - measures.to[1]) * view.zoom}
+              />
+              {measures.gaps.map((g, i) => {
+                const [x1, y1] = [view.x + g.from[0] * view.zoom, view.y + g.from[1] * view.zoom];
+                const [x2, y2] = [view.x + g.to[0] * view.zoom, view.y + g.to[1] * view.zoom];
+                const label = String(inUnits(g.length, units, docDpi));
+                const [mx, my] = [(x1 + x2) / 2, (y1 + y2) / 2];
+                const w = label.length * 7 + 8;
+                return (
+                  <g key={i} className="measure">
+                    <line x1={x1} y1={y1} x2={x2} y2={y2} />
+                    <rect x={mx - w / 2} y={my - 8} width={w} height={16} rx={3} />
+                    <text x={mx} y={my + 4}>
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
             </svg>
           )}
           {knifeLine && (
