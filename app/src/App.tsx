@@ -25,6 +25,7 @@ import {
 } from "./files";
 import { SHAPE_PRESETS, presetPath } from "./shapes";
 import { boxOf, gapsBetween, union, type Box, type Gap } from "./measure";
+import { matchesIn, replaceIn, type FindOptions } from "./findReplace";
 import {
   ALWAYS_SHOWN,
   KEY_FAMILIES,
@@ -84,6 +85,7 @@ import {
   nodePayload,
   sendCommand,
   sendPreview,
+  type TextSpec,
 } from "./engine";
 
 /** The colour a ramp shows partway between two stops.
@@ -1051,6 +1053,8 @@ export function App() {
    * be grey, for the white balance to be worked out from. */
   const [pickingNeutral, setPickingNeutral] = useState(false);
   const [straightenOpen, setStraightenOpen] = useState(false);
+  /** Edit › Find and replace, open. */
+  const [findOpen, setFindOpen] = useState(false);
   /** The angle the straighten panel is showing, and whether it is
    * waiting for a line to be drawn along something level. */
   const [straightenBy, setStraightenBy] = useState(0);
@@ -4972,6 +4976,61 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** Every text layer's block, read from the engine, beside its id. */
+  const textBlocks = (): { id: NodeId; spec: TextSpec }[] => {
+    if (!session) return [];
+    const out: { id: NodeId; spec: TextSpec }[] = [];
+    for (const l of layers) {
+      if (l.kind !== "text") continue;
+      try {
+        const kind = JSON.parse(session.kind_json(l.id)) as NodeKind;
+        if (typeof kind === "object" && "Text" in kind) out.push({ id: l.id as NodeId, spec: kind.Text });
+      } catch {
+        // A layer gone between the list and the read is not text to search.
+      }
+    }
+    return out;
+  };
+
+  /** How many times the words are in the document's text, and in how
+   * many layers, for the window to say before anything is replaced. */
+  const findInText = (find: string, opts: FindOptions): { matches: number; layers: number } => {
+    let [matches, inLayers] = [0, 0];
+    for (const { spec } of textBlocks()) {
+      const n = matchesIn(spec.text, find, opts).length;
+      matches += n;
+      if (n > 0) inLayers += 1;
+    }
+    return { matches, layers: inLayers };
+  };
+
+  /** Every match in every text layer replaced, as one step of history,
+   * each block's styling carried across its own replacements. How many
+   * were replaced. */
+  const replaceInText = (find: string, replace: string, opts: FindOptions): number => {
+    if (!session) return 0;
+    const cmds: Command[] = [];
+    let total = 0;
+    for (const { id, spec } of textBlocks()) {
+      const r = replaceIn(spec.text, spec.runs ?? [], find, replace, opts);
+      if (r.count === 0) continue;
+      total += r.count;
+      cmds.push({ SetKind: { id, kind: { Text: { ...spec, text: r.text, runs: r.runs } } } });
+    }
+    if (cmds.length === 0) return 0;
+    try {
+      session.apply_as(
+        JSON.stringify(cmds.length === 1 ? cmds[0] : { Batch: cmds }),
+        `Replace “${find}” with “${replace}”`,
+      );
+      refresh(session);
+    } catch (err) {
+      alert(`Replace: ${err}`);
+      return 0;
+    }
+    return total;
+  };
+
   /** Turn the page as the slider is dragged, so a crooked horizon can be
    * laid level by eye. Every step starts from where the gesture began
    * rather than from the last one — turning by a degree ten times is not
@@ -5335,6 +5394,9 @@ export function App() {
             return;
           case "copy-style":
             copyStyle();
+            return;
+          case "find-replace":
+            setFindOpen(true);
             return;
           case "paste-style":
             pasteStyle();
@@ -7888,6 +7950,8 @@ export function App() {
         SEP,
         item("copy-style", "copy", "Copy style", copyStyle, hint("copy-style")),
         item("paste-style", "paste", "Paste style", pasteStyle, hint("paste-style")),
+        SEP,
+        item("find-replace", "text", "Find and replace…", () => setFindOpen(true), hint("find-replace")),
       ],
     },
     {
@@ -8764,6 +8828,16 @@ export function App() {
             session?.commit_preview();
             refresh(session!);
           }}
+        />
+      )}
+      {findOpen && (
+        <FindReplaceDialog
+          count={findInText}
+          onReplace={(find, replace, opts) => {
+            const n = replaceInText(find, replace, opts);
+            if (n > 0) setFindOpen(false);
+          }}
+          onCancel={() => setFindOpen(false)}
         />
       )}
       {straightenOpen && (
@@ -11788,6 +11862,88 @@ type RepeatStep = {
  * copies at thirty degrees about a point below a mark is a clock face. */
 /** How a line along the edge of what is picked is drawn: its width and
  * which side of the edge it lies on. Photoshop asks the same two. */
+/** Edit › Find and replace: words looked for across every text layer
+ * and put right in all of them at once, as one step of history. Says
+ * how many it found, and in how many layers, as the words are typed. */
+function FindReplaceDialog({
+  count,
+  onReplace,
+  onCancel,
+}: {
+  count: (find: string, opts: FindOptions) => { matches: number; layers: number };
+  onReplace: (find: string, replace: string, opts: FindOptions) => void;
+  onCancel: () => void;
+}) {
+  const [find, setFind] = useState("");
+  const [replace, setReplace] = useState("");
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const opts = { matchCase, wholeWord };
+  const found = count(find, opts);
+  const go = () => {
+    if (found.matches > 0) onReplace(find, replace, opts);
+  };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  const field = (label: string, value: string, set: (v: string) => void, focus: boolean) => (
+    <label className="row">
+      {label}
+      <input
+        type="text"
+        value={value}
+        autoFocus={focus}
+        onChange={(e) => set(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") go();
+          if (e.key === "Escape") onCancel();
+        }}
+        aria-label={label}
+      />
+    </label>
+  );
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Find and replace"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Find and replace</h2>
+        {field("Find", find, setFind, true)}
+        {field("Replace with", replace, setReplace, false)}
+        <label className="row check">
+          <input type="checkbox" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+          Match case
+        </label>
+        <label className="row check">
+          <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
+          Whole words
+        </label>
+        <p className="found" aria-live="polite" aria-label="Found">
+          {find.length === 0
+            ? "Every text layer is searched."
+            : found.matches === 0
+              ? "Not found in any text layer."
+              : `${found.matches} found in ${found.layers} ${found.layers === 1 ? "layer" : "layers"}.`}
+        </p>
+        <div className="modal-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" disabled={found.matches === 0} onClick={go}>
+            Replace all
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StrokeDialog({
   onCancel,
   onStroke,

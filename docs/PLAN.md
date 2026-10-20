@@ -2870,6 +2870,38 @@ without reading anything else.*
       at its right edge; to the key, the key unmoved and the other's
       edge on its edge; to each other, the rightmost; and the choice
       written to the preferences.
+- **Find and replace ✅** (`app/src/findReplace.ts`: `matchesIn`,
+  `replaceIn`; *Edit › Find and replace…*, Ctrl+F;
+  `Session::apply_json_as`). Words looked for across every text layer
+  and put right in all of them at once. The window counts as the words
+  are typed, "4 found in 2 layers", with *Match case* and *Whole words*,
+  and *Replace all* is one step of history under its own name,
+  "Replace “fish” with “cat”".
+  - **Styling kept:** a block's styling is byte ranges over its text, and
+    every replacement moves the ranges after it. Each is carried through
+    `shiftRuns` one replacement at a time — the arithmetic a keystroke
+    already goes through — so a bold word after the replacements is
+    still that word, a bold word replaced is the replacement in bold, and
+    a run over only what was taken away goes with it.
+  - **Finding:** the words literally (a dot is a dot), never overlapping;
+    case-insensitive by the pattern's own flag rather than by lowering
+    both sides, which can change a string's length; a whole word is not
+    beside a letter, a digit or an underscore of any script, so `café`
+    is a word.
+  - **The label:** a batch of edits to several layers is named "Edit 2
+    layers" by the history, which says nothing about what was done, so a
+    command can now arrive with a label of the caller's own
+    (`apply_json_as`, wasm `apply_as`).
+  - **Tests:**
+    - `e2e/findReplace.test.mjs` (in `npm run test:unit`): sixteen checks
+      over case, whole words, accents, literal dots, overlap, growing
+      replacements, and runs before, on and after what is replaced,
+      past accents and emoji, and over what is taken away.
+    - Sabotages that each fail it: the runs not carried, and the running
+      shift between replacements dropped ("two fcat").
+    - Smoke 8x2g: two text layers; counted as typed and again with case
+      minded; both changed with the capital left alone; one step of
+      history under its own name; one undo puts both back.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

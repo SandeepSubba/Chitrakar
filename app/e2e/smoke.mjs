@@ -3646,6 +3646,87 @@ assert(
   await alignTo.selectOption("selection");
 }
 
+// 8x2g. Find and replace: across every text layer at once. The window
+// counts as the words are typed, and again with case minded; Replace
+// all changes both layers in one step of history, under its own name,
+// and one undo puts both back.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const content = page.locator('textarea[aria-label="Text content"]');
+  const setWords = async (words) => {
+    await content.evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    }, words);
+    await page.waitForTimeout(250);
+  };
+  const rows = page.locator(".panel ul li");
+  // A new block, picked in the list — the newest is at its top — and
+  // given its words.
+  const addText = async (y, said) => {
+    await pickTool("Text");
+    await page.mouse.click(...at(80, y));
+    await page.waitForTimeout(300);
+    await rows.first().click();
+    await page.waitForTimeout(200);
+    await setWords(said);
+  };
+  await addText(100, "one fish two fish");
+  await addText(260, "red fish blue Fish");
+  assert((await rows.count()) === 2, `two text layers (${await rows.count()})`);
+  // What each layer says, top of the list first.
+  const words = async () => {
+    const out = [];
+    for (let i = 0; i < (await rows.count()); i++) {
+      await rows.nth(i).click();
+      await page.waitForTimeout(150);
+      out.push(await content.inputValue());
+    }
+    return out;
+  };
+  await page.keyboard.press("Escape");
+  await menuClick("Edit", "Find and replace…");
+  const dialog = page.locator('[role="dialog"][aria-label="Find and replace"]');
+  assert(await dialog.isVisible(), "the window opens");
+  await dialog.locator('input[aria-label="Find"]').fill("fish");
+  const found = dialog.locator('[aria-label="Found"]');
+  assert(
+    (await found.textContent()).includes("4 found in 2 layers"),
+    `counted as it is typed (${await found.textContent()})`,
+  );
+  await dialog.getByLabel("Match case").check();
+  assert(
+    (await found.textContent()).includes("3 found in 2 layers"),
+    `and again with case minded (${await found.textContent()})`,
+  );
+  await dialog.locator('input[aria-label="Replace with"]').fill("cat");
+  await dialog.getByRole("button", { name: "Replace all" }).click();
+  await page.waitForTimeout(300);
+  assert(!(await dialog.isVisible()), "replaced, the window closes");
+  const after = await words();
+  assert(
+    after.includes("one cat two cat") && after.includes("red cat blue Fish"),
+    `both layers changed, the capital left (${after.join(" | ")})`,
+  );
+  const history = await page.locator(".history li, .panel .history button, .history-list li").allTextContents();
+  assert(
+    history.some((h) => h.includes("Replace “fish” with “cat”")),
+    `one step of history under its own name (${history.slice(-3).join(" | ")})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  const back = await words();
+  assert(
+    back.includes("one fish two fish") && back.includes("red fish blue Fish"),
+    `one undo puts both back (${back.join(" | ")})`,
+  );
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

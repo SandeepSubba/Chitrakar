@@ -32,6 +32,7 @@ export const COMMANDS = [
   { id: "duplicate", label: "Duplicate", group: "Edit", chord: "mod+d", typing: true },
   { id: "copy-style", label: "Copy style", group: "Edit", chord: "mod+alt+c" },
   { id: "paste-style", label: "Paste style", group: "Edit", chord: "mod+alt+v" },
+  { id: "find-replace", label: "Find and replace…", group: "Edit", chord: "mod+f" },
   { id: "select-all", label: "Select all", group: "Select", chord: "mod+a" },
   { id: "pick-inverse", label: "Pick out the rest instead", group: "Select", chord: "mod+shift+i" },
   { id: "group", label: "Group", group: "Layer", chord: "mod+g" },

@@ -427,6 +427,25 @@ body {
   font-size: 0.8rem;
 }
 
+/* A row that is a box to tick: the box first, where it is read from,
+   rather than pushed to the far side like a field. */
+.modal .row.check input {
+  margin: 0;
+  width: auto;
+}
+
+/* Find and replace: words want more room than a number does, and the
+   count of what was found sits under them, quietly. */
+.modal .row input[type="text"] {
+  width: 12rem;
+}
+
+.modal .found {
+  margin: 0.2rem 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .preset-list {
   display: flex;
   flex-direction: column;

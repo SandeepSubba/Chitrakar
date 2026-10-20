@@ -987,6 +987,13 @@ impl Session {
         self.apply(parse_command(json)?)
     }
 
+    /// The same, under a label of the caller's own for the history: what
+    /// the person did, said the way they would say it, where the command
+    /// alone could only say which layers it touched.
+    pub fn apply_json_as(&mut self, json: &str, label: &str) -> Result<(), EngineError> {
+        self.apply_labeled(parse_command(json)?, Some(label.to_string()))
+    }
+
     /// Apply a command as part of an in-flight gesture (drag preview). The
     /// document updates and re-renders, but history records nothing until
     /// [`commit_preview`](Self::commit_preview); the first preview of a

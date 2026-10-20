@@ -75,6 +75,12 @@ impl WasmSession {
         self.inner.apply_json(command_json).map_err(to_js)
     }
 
+    /// A command under a history label of the caller's own (see
+    /// `Session::apply_json_as`).
+    pub fn apply_as(&mut self, command_json: &str, label: &str) -> Result<(), JsError> {
+        self.inner.apply_json_as(command_json, label).map_err(to_js)
+    }
+
     /// Apply a command as a live drag preview (no history until commit).
     pub fn preview(&mut self, command_json: &str) -> Result<(), JsError> {
         self.inner.preview_json(command_json).map_err(to_js)
