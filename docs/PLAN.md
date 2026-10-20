@@ -3022,6 +3022,24 @@ without reading anything else.*
     pulled up it is tall, down it is half, a short pull leaves it, a tap
     toggles, pulled down from half it goes and the bar's button says so;
     at 844×390 the side overlay, no grip.
+- **A phone's browser** (Phase 4): `100dvh`, no pull-to-refresh,
+  `viewport-fit=cover` with the editor clear of the notch, a web app
+  manifest and the bar's colour following the theme.
+  - **Tests:** smoke 11e at 390×844 with touch: the viewport covers;
+    overscroll is none; the editor is the window's height and the rail
+    on it; the manifest says standalone and Chitrakar, its icons decode
+    at the sizes it gives; the theme-color meta is the bar's colour.
+- **Offline** (Phase 4): a service worker keeps what the page loads.
+  - **Tests:** smoke 11f on a phone page: the page, its script, the
+    engine and the fonts are kept; offline, the reload opens the editor
+    and a rect drawn is a layer. With the worker's fallback taken out,
+    the offline reload never shows the canvas.
+- **Pictures given to the app** (Phase 4): the manifest's share target
+  and file handlers.
+  - **Tests:** smoke 11g: the share form posted to share-target opens
+    the page with the picture placed by name, the address plain again,
+    the worker's store emptied, and a reload placing nothing; a picture
+    handed over through the launch queue is placed.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -9963,6 +9981,42 @@ chitrakar/
   while a tap toggles between the two heights and a pull too short to
   mean it does nothing. Held sideways it is the side overlay still,
   since there the width is what is spare. Smoke 11d.
+- A phone's browser ✅. The page was `100vh` tall, which a phone's
+  browser counts to include the strip behind its own toolbar — so the
+  tool rail along the bottom sat partly under it; it is the height that
+  shows now (`100dvh`). A drag down from the top of the page was
+  Android Chrome's pull-to-refresh, which throws away whatever has not
+  been saved; it is not any more. The viewport runs under the notch
+  (`viewport-fit=cover`), which is what makes the safe-area padding the
+  stylesheet already had mean anything, and the editor keeps clear of
+  the notch on a phone held either way. And it can be added to a home
+  screen and opens as an app: a manifest, the shell's own icons, and the
+  browser's bar taking the app's colour, following the theme. Smoke 11e.
+- Offline ✅: put on a home screen it is an app, and an app opens with
+  no signal. A service worker (`app/public/sw.js`, registered by
+  `src/offline.ts` in a built page in a browser — not the shell, whose
+  files are on the machine, nor the dev server) keeps what a visit
+  loads. Files under assets/ are named by their contents, so a kept one
+  answers first; the page, the manifest and the fonts go to the network
+  first, so a new version is never held back by an old copy, and the
+  kept one answers only when the network does not. A worker does not
+  serve the visit that installed it, so the page tells it what that
+  visit loaded once it is in charge; kept assets the page no longer
+  loads go then, so the cache does not grow by a build on every update.
+  Smoke 11f reloads with the network off and draws a rect.
+- Pictures given to the app ✅. Installed, it is in the phone's own
+  share sheet: "Share → Chitrakar" from the photos app posts the picture
+  to `share-target` (`share_target` in the manifest), which no page can
+  receive — the service worker takes it, keeps the files, and opens the
+  page with `?shared`; the page places them as it places a drop
+  (`takeFiles`, the one way in for a drop, a share and a launch) and puts
+  the address back so a reload takes nothing twice. And it can be the
+  app that opens a `.chitra` or a picture from the system's files
+  (`file_handlers`, read through the launch queue). Writing the test
+  turned up the suite's own server answering 404 for "/?shared=1" — it
+  stripped the query after deciding whether the path was the root — and
+  the worker now falls back to the kept page for any navigation a host
+  has no page for. Smoke 11g.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

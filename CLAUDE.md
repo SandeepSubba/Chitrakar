@@ -106,8 +106,19 @@ one Menus button and the bar is one row (smoke 11a); the suite's
 `menuItem` goes through the drawer whenever there is no menubar. On a
 touch screen a long press opens the canvas's menu and a pen rejects the
 palm (smoke 11b). The shell compiles for Android and iOS (CI jobs
-`shell-android`, `shell-ios`); there is no `gen/android` or `gen/apple`
-yet.
+`shell-android`, `shell-ios`), and CI's `android-apk` generates the
+Android project with `tauri android init` and keeps a debug APK as an
+artifact; nothing under `gen/android` or `gen/apple` is committed.
+
+In a browser the built page is an installable app:
+`app/public/manifest.webmanifest` (share target, file handlers) and a
+service worker, `app/public/sw.js`, registered by `src/offline.ts` only
+in a production build outside the shell. It keeps what a visit loads
+so the editor opens offline — content-named `assets/` cache-first,
+everything else network-first — and takes shares posted to
+`share-target`, opening the page with `?shared` (`takeShared`). Drops,
+shares and launches all go through `takeFiles` in App.tsx. Smoke
+11e–11g; the suite's main page runs under the worker too.
 
 The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1400 pixel-level
 assertions driving the built app in headless Chromium; it has caught real

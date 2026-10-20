@@ -29,6 +29,7 @@ import { SHAPE_PRESETS, presetPath } from "./shapes";
 import { boxOf, gapsBetween, union, type Box, type Gap } from "./measure";
 import { matchesIn, replaceIn, type FindOptions } from "./findReplace";
 import { FingerTaps, NONE_HELD, afterPress, wear, type Held } from "./touch";
+import { onLaunch, takeShared } from "./offline";
 import {
   ALWAYS_SHOWN,
   KEY_FAMILIES,
@@ -1408,6 +1409,9 @@ export function App() {
     const apply = () => {
       document.documentElement.dataset.theme =
         prefs.theme === "system" ? (system.matches ? "light" : "dark") : prefs.theme;
+      // A phone's own bar above the page takes the colour of the app's.
+      const bar = getComputedStyle(document.documentElement).getPropertyValue("--panel").trim();
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", bar);
     };
     apply();
     system.addEventListener("change", apply);
@@ -7758,7 +7762,13 @@ export function App() {
    * placing them would put them into the session the open just replaced. */
   const onHostDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    const files = Array.from(e.dataTransfer.files);
+    takeFiles(Array.from(e.dataTransfer.files));
+  };
+
+  /** Files handed to the page — dropped on it, shared to it from another
+   * app, opened with it from a phone's files: a document opens, and
+   * every picture is placed. */
+  const takeFiles = (files: File[]) => {
     const doc = files.find((f) => f.name.toLowerCase().endsWith(".chitra"));
     if (doc) {
       // Opening by dropping is still opening: what has not been saved
@@ -7797,6 +7807,22 @@ export function App() {
     }
   };
   const onShellDropRef = useRef(onShellDrop);
+  const takeFilesRef = useRef(takeFiles);
+  takeFilesRef.current = takeFiles;
+
+  // Files given to the app as an app on a phone or a desktop: shared to
+  // it from another app's share sheet (the service worker keeps them and
+  // opens the page with `?shared`), or opened with it from the system's
+  // files (the launch queue). Taken once there is an engine to take them.
+  const tookGiven = useRef(false);
+  useEffect(() => {
+    if (isTauri() || !session || tookGiven.current) return;
+    tookGiven.current = true;
+    takeShared()
+      .then((files) => files.length > 0 && takeFilesRef.current(files))
+      .catch((err) => console.warn("shared files:", err));
+    onLaunch((files) => takeFilesRef.current(files));
+  }, [session]);
   onShellDropRef.current = onShellDrop;
   /** Whether there is work nobody has written down, for a question asked
    * from outside a render — the window being closed. */

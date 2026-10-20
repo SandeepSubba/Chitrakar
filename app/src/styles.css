@@ -63,6 +63,14 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  /* A drag down from the top of the page is not a reload. Android's
+     Chrome takes one for pull-to-refresh, which here throws away
+     whatever has not been saved. */
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -74,7 +82,15 @@ body {
 .editor {
   display: flex;
   flex-direction: column;
+  /* The height that is there to draw in. A phone's browser counts the
+     strip behind its own toolbar as part of 100vh, which put the tool
+     rail along the bottom partly under that toolbar; 100dvh is what is
+     showing. The first line is for a browser that does not know it. */
   height: 100vh;
+  height: 100dvh;
+  /* Clear of a notch and the rounded corners, on a phone held either
+     way; zero everywhere else. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
 }
 
 /* Chrome. Two influences, deliberately: the density and dark neutrals of a

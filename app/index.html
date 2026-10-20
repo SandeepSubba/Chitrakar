@@ -2,7 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover: the page runs under a phone's notch and
+         rounded corners, and the stylesheet keeps clear of them with
+         env(safe-area-inset-*), which reads zero without it. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- The browser's own bar takes the colour of the app's; the app
+         sets it again when the theme is chosen. -->
+    <meta name="theme-color" content="#2a2a30" />
+    <!-- Added to a home screen, it opens as an app rather than a tab. -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="apple-touch-icon" href="./icons/icon-256.png" />
+    <link rel="icon" type="image/png" href="./icons/icon-256.png" />
     <title>Chitrakar</title>
   </head>
   <body>

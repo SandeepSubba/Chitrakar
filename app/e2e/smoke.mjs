@@ -76,7 +76,10 @@ const MIME = {
 };
 
 const server = createServer(async (req, res) => {
-  const path = req.url === "/" ? "/index.html" : req.url.split("?")[0];
+  // The address without its query: "/?shared=1" is the page as much as
+  // "/" is.
+  const bare = req.url.split("?")[0];
+  const path = bare === "/" ? "/index.html" : bare;
   try {
     const body = await readFile(join(DIST, path));
     res.writeHead(200, { "content-type": MIME[extname(path)] ?? "application/octet-stream" });
@@ -13816,6 +13819,195 @@ assert(
     `held sideways, the layers come from the side, with no grip (${box.x} ${box.width}×${box.height})`,
   );
   await phone.close();
+}
+
+// 11e. A phone's browser: the page runs under the notch and keeps clear
+// of it, a drag down from the top is not a reload, the page is the
+// height that is showing rather than the height behind the browser's
+// toolbar, and it can be put on a home screen and opened as an app.
+{
+  const phone = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const pp = await phone.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForTimeout(600);
+  const got = await pp.evaluate(async () => {
+    const viewport = document.querySelector('meta[name="viewport"]')?.getAttribute("content") ?? "";
+    const link = document.querySelector('link[rel="manifest"]');
+    const manifest = link ? await (await fetch(link.href)).json() : null;
+    const icons = manifest
+      ? await Promise.all(
+          manifest.icons.map(async (i) => {
+            const r = await fetch(new URL(i.src, link.href));
+            const b = await createImageBitmap(await r.blob());
+            return `${b.width}x${b.height}` === i.sizes;
+          }),
+        )
+      : [];
+    const panel = getComputedStyle(document.documentElement).getPropertyValue("--panel").trim();
+    return {
+      cover: viewport.includes("viewport-fit=cover"),
+      manifest,
+      icons,
+      overscroll: getComputedStyle(document.documentElement).overscrollBehaviorY,
+      themeColor: document.querySelector('meta[name="theme-color"]')?.getAttribute("content"),
+      panel,
+      editor: document.querySelector(".editor").getBoundingClientRect().height,
+      rail: document.querySelector('nav[aria-label="Tools"]').getBoundingClientRect().bottom,
+      inner: window.innerHeight,
+    };
+  });
+  assert(got.cover, "the page runs under the notch, to keep clear of it itself");
+  assert(got.overscroll === "none", `a drag down from the top is not a reload (${got.overscroll})`);
+  assert(
+    Math.abs(got.editor - got.inner) < 1 && got.rail <= got.inner + 0.5,
+    `the editor is the height that shows, and the rail is on it (${got.editor}, ${got.rail} of ${got.inner})`,
+  );
+  assert(
+    got.manifest?.display === "standalone" && got.manifest?.name === "Chitrakar",
+    "it can be added to a home screen and opens as an app",
+  );
+  assert(got.icons.length >= 2 && got.icons.every(Boolean), `with icons the sizes it says (${got.icons})`);
+  assert(got.themeColor === got.panel, `the browser's bar takes the app's colour (${got.themeColor} for ${got.panel})`);
+  await phone.close();
+}
+
+// 11f. Opened from a home screen with no signal, the editor still
+// opens and still draws: what a visit loads is kept by a service worker
+// once it is in charge, and answers when the network does not. The
+// page still comes from the network first while there is one, so a
+// new version is not held back by an old copy.
+{
+  const phone = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const pp = await phone.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  // Kept once the worker has been told what the visit loaded.
+  let kept = [];
+  for (let i = 0; i < 60; i++) {
+    kept = await pp.evaluate(async () => {
+      if (!(await caches.has("chitrakar"))) return [];
+      const c = await caches.open("chitrakar");
+      return (await c.keys()).map((r) => new URL(r.url).pathname);
+    });
+    if (kept.some((p) => p.endsWith(".wasm")) && kept.includes("/")) break;
+    await pp.waitForTimeout(250);
+  }
+  assert(
+    kept.includes("/") && kept.some((p) => p.endsWith(".wasm")) && kept.some((p) => /\/assets\/index-.*\.js$/.test(p)),
+    `the page, its script and its engine are kept (${kept.length} files)`,
+  );
+  assert(
+    kept.some((p) => p.startsWith("/fonts/")),
+    "and the fonts text is set in",
+  );
+  await phone.setOffline(true);
+  await pp.reload();
+  await pp.waitForSelector("#engine-canvas", { timeout: 15000 });
+  await pp.waitForTimeout(800);
+  const b = await pp.locator("#engine-page").boundingBox();
+  assert(b && b.width > 50, "with no network the editor opens, its page and all");
+  await pp.locator('.toolbar button[aria-label="Rect"]').first().click();
+  await pp.mouse.move(b.x + 20, b.y + 20);
+  await pp.mouse.down();
+  await pp.mouse.move(b.x + 120, b.y + 90, { steps: 4 });
+  await pp.mouse.up();
+  await pp.waitForTimeout(300);
+  await pp.tap('button[aria-label="Layers panel"]');
+  await pp.waitForTimeout(300);
+  assert(
+    (await pp.locator(".panel ul li .layer-name").count()) === 1,
+    "and its engine draws: a rect drawn offline is a layer",
+  );
+  await phone.setOffline(false);
+  await phone.close();
+}
+
+// 11g. Pictures given to the app as an app: shared to it from another
+// app's share sheet — a form posted to share-target, which the service
+// worker takes, keeps and opens the page to — and opened with it from
+// the system's files, through the launch queue. Either way a picture is
+// placed, as a drop places one.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1024, height: 768 } });
+  const pp = await ctx.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForFunction(() => !!navigator.serviceWorker?.controller, null, { timeout: 15000 });
+  const names = () => pp.locator(".panel ul li .layer-name").allTextContents();
+  // A share: the form the system posts, with a picture in it.
+  await pp.evaluate(async () => {
+    const c = new OffscreenCanvas(40, 30);
+    const g = c.getContext("2d");
+    g.fillStyle = "#e03020";
+    g.fillRect(0, 0, 40, 30);
+    const blob = await c.convertToBlob({ type: "image/png" });
+    const form = document.createElement("form");
+    form.method = "post";
+    form.enctype = "multipart/form-data";
+    form.action = "./share-target";
+    const input = document.createElement("input");
+    input.type = "file";
+    input.name = "files";
+    const dt = new DataTransfer();
+    dt.items.add(new File([blob], "sunset.png", { type: "image/png" }));
+    input.files = dt.files;
+    form.append(input);
+    document.body.append(form);
+    window.__before = true;
+    form.submit();
+  });
+  // A new page, the one the worker opened to take the share.
+  await pp.waitForFunction(() => !window.__before && !!document.getElementById("engine-canvas"), null, {
+    timeout: 15000,
+  });
+  let got = [];
+  for (let i = 0; i < 40 && got.length === 0; i++) {
+    await pp.waitForTimeout(250);
+    got = await names();
+  }
+  assert(got.length === 1 && /sunset/.test(got[0]), `a picture shared to the app is placed (${got})`);
+  assert(!new URL(pp.url()).searchParams.has("shared"), "and the address is plain again, so a reload takes nothing twice");
+  const left = await pp.evaluate(async () => (await (await caches.open("chitrakar-shared")).keys()).length);
+  assert(left === 0, `and the worker keeps nothing of it after (${left})`);
+  await pp.reload();
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForTimeout(800);
+  assert((await names()).length === 0, "a reload takes nothing");
+  await ctx.close();
+
+  // Opened with the app from the system's files: the launch queue.
+  const ctx2 = await browser.newContext({ viewport: { width: 1024, height: 768 } });
+  await ctx2.addInitScript(() => {
+    // Chromium has a launch queue of its own, read-only; this one stands
+    // in for the system handing a file over.
+    Object.defineProperty(window, "launchQueue", {
+      configurable: true,
+      value: { setConsumer: (fn) => (window.__launch = fn) },
+    });
+  });
+  const lp = await ctx2.newPage();
+  await lp.goto("http://localhost:8123/");
+  await lp.waitForSelector("#engine-canvas");
+  await lp.waitForFunction(() => typeof window.__launch === "function", null, { timeout: 10000 });
+  await lp.evaluate(async () => {
+    const c = new OffscreenCanvas(20, 20);
+    c.getContext("2d").fillRect(0, 0, 20, 20);
+    const blob = await c.convertToBlob({ type: "image/png" });
+    window.__launch({ files: [{ getFile: async () => new File([blob], "shore.png", { type: "image/png" }) }] });
+  });
+  await lp.waitForTimeout(800);
+  const opened = await lp.locator(".panel ul li .layer-name").allTextContents();
+  assert(opened.length === 1 && /shore/.test(opened[0]), `a picture opened with the app is placed (${opened})`);
+  await ctx2.close();
 }
 
 // 9aw. Dissolving a group answers for what the group itself was
