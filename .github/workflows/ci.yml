@@ -200,15 +200,15 @@ jobs:
       - run: npm ci
         working-directory: app
       - name: Generate the Android project and build the APK
-        working-directory: shells/tauri/src-tauri
+        working-directory: shells/tauri
+        # Through `npm run tauri` (shells/tauri/package.json): the Gradle
+        # build calls the CLI back the way it was started, and a package
+        # script is the one way it knows how to call back from inside
+        # gen/android.
         run: |
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
-          # By an absolute path: the Gradle build calls the CLI back the
-          # way it was first started, from inside gen/android, where a
-          # relative path to it no longer leads anywhere.
-          TAURI="node $GITHUB_WORKSPACE/app/node_modules/@tauri-apps/cli/tauri.js"
-          $TAURI android init --ci --skip-targets-install
-          $TAURI android build --ci --debug --apk --target aarch64
+          npm run tauri -- android init --ci --skip-targets-install
+          npm run tauri -- android build --ci --debug --apk --target aarch64
       - uses: actions/upload-artifact@v4
         with:
           name: chitrakar-android-debug
