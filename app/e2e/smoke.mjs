@@ -3727,6 +3727,64 @@ assert(
   );
 }
 
+// 8x2h. A style kept off text sets text: a block set large and bold,
+// kept as a style, gives another block its size and its weight while
+// that block keeps its own words; the chip says so in bold; one undo.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  const content = page.locator('textarea[aria-label="Text content"]');
+  const rows = page.locator(".panel ul li");
+  const addText = async (y, said) => {
+    await pickTool("Text");
+    await page.mouse.click(...at(60, y));
+    await page.waitForTimeout(300);
+    await rows.first().click();
+    await page.waitForTimeout(200);
+    await content.evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+      setter.call(el, v);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    }, said);
+    await page.waitForTimeout(250);
+  };
+  await addText(80, "Title");
+  await addText(260, "small words");
+  const size = () => page.locator('input[aria-label="Size"]').inputValue().then(Number);
+  const bold = () => page.locator('button[aria-label="Bold"]').getAttribute("aria-pressed");
+  // The first block, last in the list: large and bold, then kept.
+  await rows.last().click();
+  await page.waitForTimeout(200);
+  await setSlider("Size", 90);
+  await page.click('button[aria-label="Bold"]');
+  await page.waitForTimeout(250);
+  await page.click('button[aria-label="Keep as a style"]');
+  await page.waitForTimeout(250);
+  const chip = page.locator('button[aria-label="Style Style 1"]');
+  assert((await chip.count()) === 1, "kept as a style");
+  const weight = await chip.locator("span").evaluate((el) => getComputedStyle(el).fontWeight);
+  assert(Number(weight) >= 700, `the chip says bold the way text would (${weight})`);
+  // Given to the other block.
+  await rows.first().click();
+  await page.waitForTimeout(200);
+  const before = [await size(), await bold()];
+  await chip.click();
+  await page.waitForTimeout(300);
+  const after = [await size(), await bold(), await content.inputValue()];
+  assert(
+    after[0] === 90 && before[0] !== 90 && after[1] === "true" && after[2] === "small words",
+    `set the same way, its words its own (${before} -> ${after})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await size()) === before[0] && (await bold()) === before[1],
+    `one undo sets it back (${await size()}, ${await bold()})`,
+  );
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

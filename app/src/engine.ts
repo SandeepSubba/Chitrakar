@@ -493,6 +493,24 @@ export interface Look {
   effects: Effect[];
   opacity: number;
   blend: BlendMode;
+  /** How a block of text is set, when the look was taken off one —
+   * given to text, passed over by anything else, absent otherwise. */
+  text?: TextLook | null;
+}
+/** A block of text's own settings, without its words: what a paragraph
+ * style is (`chitrakar_doc::TextLook`). */
+export interface TextLook {
+  font: string;
+  size: number;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  strike: boolean;
+  align: TextAlign;
+  line_height: number;
+  letter_spacing: number;
+  paragraph_spacing: number;
+  list: TextList;
 }
 export interface KeptStyle {
   name: string;

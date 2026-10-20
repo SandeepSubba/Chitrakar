@@ -348,6 +348,7 @@ pub fn everything() -> Fixture {
                 effects: Vec::new(),
                 opacity: 0.8,
                 blend: BlendMode::Multiply,
+                text: None,
             },
         }],
     })
@@ -3861,6 +3862,21 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                     effects: Vec::new(),
                     opacity: 1.0,
                     blend: BlendMode::Normal,
+                    // Taken from a block of text, so the style carries
+                    // how it was set and the wire is asked to say so.
+                    text: Some(crate::TextLook {
+                        font: String::new(),
+                        size: 18.0,
+                        bold: true,
+                        italic: false,
+                        underline: false,
+                        strike: false,
+                        align: crate::TextAlign::Center,
+                        line_height: 1.3,
+                        letter_spacing: 0.5,
+                        paragraph_spacing: 4.0,
+                        list: crate::TextList::Bullet,
+                    }),
                 },
             }],
         },

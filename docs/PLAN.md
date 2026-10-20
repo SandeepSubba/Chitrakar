@@ -2902,6 +2902,39 @@ without reading anything else.*
     - Smoke 8x2g: two text layers; counted as typed and again with case
       minded; both changed with the capital left alone; one step of
       history under its own name; one undo puts both back.
+- **Styles that set type ✅** (`Look::text`, `TextLook::of` / `give`).
+  A look taken off a block of text now says how it is set — face, size,
+  weight, slant, underline, strike, alignment, line height, letter and
+  paragraph spacing, list — as well as what it is painted with. So a
+  style kept off a heading is a paragraph style. Given to another block
+  it sets that block the same way, and the block's words, the styling of
+  parts of them, its width and its path stay its own. Copy style and
+  paste style carry it the same way.
+  - **Only where it means something:** a shape given such a style takes
+    its paint and changes no shape. A look taken off a shape has no type
+    in it, so it changes no text's type. The field is left out of the
+    file when absent: a document that never kept one writes what it
+    always wrote, and a look written before this reads as one that says
+    nothing about type.
+  - **The chip** of a style that sets type shows its name in that weight
+    and slant, and its title says what it sets ("set text in 90px
+    bold").
+  - **The wire's mirror:** the TypeScript side declares `Look.text` and
+    `TextLook`, so the shared commands' kept style ("cool") now carries
+    type, and the audit that holds the UI's vocabulary to serde's sees
+    every name.
+  - **Tests:**
+    - `a_style_kept_off_text_sets_other_text_the_same_way`: kept as it is
+      set; another block set the same way and painted the same, with its
+      words, runs and width its own; a shape keeps its shape; one undo;
+      a shape's look carries no type and leaves a block's type alone; a
+      look written before reads.
+    - Sabotages that each fail it: no type read off a text layer, and the
+      size not given.
+    - Smoke 8x2h: a block set at 90 and bold, kept; the chip bold; the
+      other block given it goes from 48 to 90 and bold, its words its
+      own; one undo. (The first draft set 48, which was already the
+      default, so that check proved nothing until the number changed.)
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

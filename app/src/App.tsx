@@ -9479,7 +9479,13 @@ export function App() {
                     background: st.look.fill ? colorToHex(st.look.fill) : "transparent",
                     borderColor: st.look.stroke ? colorToHex(st.look.stroke.color) : undefined,
                   }}
-                  title={`${st.name} — give this look to what is picked; shift-click to keep the picked layer's look under this name, alt-click to forget it`}
+                  title={`${st.name} — give this look to what is picked${
+                    st.look.text
+                      ? `, and set text in ${st.look.text.size}px${st.look.text.bold ? " bold" : ""}${
+                          st.look.text.italic ? " italic" : ""
+                        }`
+                      : ""
+                  }; shift-click to keep the picked layer's look under this name, alt-click to forget it`}
                   aria-label={`Style ${st.name}`}
                   onClick={(e) => {
                     if (e.altKey) forgetStyle(st.name);
@@ -9487,7 +9493,20 @@ export function App() {
                     else applyStyle(st.name);
                   }}
                 >
-                  <span>{st.name.replace(/^Style /, "")}</span>
+                  {/* A style taken off text says so the way text would:
+                      its name in that weight and slant. */}
+                  <span
+                    style={
+                      st.look.text
+                        ? {
+                            fontWeight: st.look.text.bold ? 700 : 400,
+                            fontStyle: st.look.text.italic ? "italic" : "normal",
+                          }
+                        : undefined
+                    }
+                  >
+                    {st.name.replace(/^Style /, "")}
+                  </span>
                 </button>
               ))}
               {selected !== null && (

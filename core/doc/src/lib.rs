@@ -335,6 +335,68 @@ pub struct Look {
     pub effects: Vec<Effect>,
     pub opacity: f32,
     pub blend: BlendMode,
+    /// How a block of text is set, when the look was taken from one: its
+    /// face, size, weight and spacing — what a paragraph style is. Given
+    /// to text and passed over by anything else; absent from a look
+    /// taken from a shape, so a look that says nothing about type changes
+    /// no type. Left out of the file when absent, so a document that has
+    /// never kept one writes what it always wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<TextLook>,
+}
+
+/// How a block of text is set, without its words or where it stands
+/// (`Look::text`). What a style or a pasted look carries from one block
+/// of text to another: the block's own settings, not the styling of
+/// parts of it, which belongs to its words.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextLook {
+    pub font: String,
+    pub size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strike: bool,
+    pub align: TextAlign,
+    pub line_height: f32,
+    pub letter_spacing: f32,
+    pub paragraph_spacing: f32,
+    pub list: TextList,
+}
+
+impl TextLook {
+    /// How `spec` is set.
+    pub fn of(spec: &TextSpec) -> TextLook {
+        TextLook {
+            font: spec.font.clone(),
+            size: spec.size,
+            bold: spec.bold,
+            italic: spec.italic,
+            underline: spec.underline,
+            strike: spec.strike,
+            align: spec.align,
+            line_height: spec.line_height,
+            letter_spacing: spec.letter_spacing,
+            paragraph_spacing: spec.paragraph_spacing,
+            list: spec.list,
+        }
+    }
+
+    /// `spec` set this way: its words, its runs, its width and its path
+    /// are its own and stay.
+    pub fn give(&self, spec: &mut TextSpec) {
+        spec.font = self.font.clone();
+        spec.size = self.size;
+        spec.bold = self.bold;
+        spec.italic = self.italic;
+        spec.underline = self.underline;
+        spec.strike = self.strike;
+        spec.align = self.align;
+        spec.line_height = self.line_height;
+        spec.letter_spacing = self.letter_spacing;
+        spec.paragraph_spacing = self.paragraph_spacing;
+        spec.list = self.list;
+    }
 }
 
 /// A look kept by name in the document — Affinity's styles, Photoshop's

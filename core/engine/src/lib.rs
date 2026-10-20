@@ -7122,6 +7122,12 @@ impl Session {
             chitrakar_doc::NodeKind::Text(spec) => (Some(spec.fill.clone()), None, None),
             _ => (None, None, None),
         };
+        // A block of text says how it is set as well as what it is
+        // painted with; nothing else has type to say anything about.
+        let text = match &node.kind {
+            chitrakar_doc::NodeKind::Text(spec) => Some(chitrakar_doc::TextLook::of(spec)),
+            _ => None,
+        };
         Ok(chitrakar_doc::Look {
             fill,
             stroke,
@@ -7129,6 +7135,7 @@ impl Session {
             effects: node.effects.clone(),
             opacity: node.opacity,
             blend: node.blend,
+            text,
         })
     }
 
@@ -7429,8 +7436,9 @@ impl Session {
     /// Give that look to every layer named, in one entry.
     ///
     /// A layer takes what it can carry: a shape takes the fill, the
-    /// stroke and the gradient, a block of text takes the fill alone,
-    /// and everything takes the effects, the opacity and the blend.
+    /// stroke and the gradient, a block of text takes the fill and how
+    /// another block was set, and everything takes the effects, the
+    /// opacity and the blend.
     /// Nothing takes another layer's shape — that is not what a style
     /// is.
     pub fn paste_style(&mut self, json: &str, ids: &[NodeId]) -> Result<(), EngineError> {
@@ -7473,13 +7481,22 @@ impl Session {
                         }),
                     });
                 }
-                chitrakar_doc::NodeKind::Text(spec) if paints => {
-                    if let Some(ref fill) = style.fill {
-                        let mut spec = spec.clone();
-                        spec.fill = fill.clone();
+                // A block of text takes the fill, and — from a look taken
+                // off another block — how that one is set: its face, size,
+                // weight and spacing. Its words, the styling of parts of
+                // them, its width and its path stay its own.
+                chitrakar_doc::NodeKind::Text(spec) if paints || style.text.is_some() => {
+                    let mut set = spec.clone();
+                    if let (true, Some(fill)) = (paints, &style.fill) {
+                        set.fill = fill.clone();
+                    }
+                    if let Some(look) = &style.text {
+                        look.give(&mut set);
+                    }
+                    if &set != spec {
                         cmds.push(Command::SetKind {
                             id,
-                            kind: Box::new(chitrakar_doc::NodeKind::Text(spec)),
+                            kind: Box::new(chitrakar_doc::NodeKind::Text(set)),
                         });
                     }
                 }
@@ -17472,6 +17489,122 @@ mod tests {
         assert_eq!(once.len(), 1, "the group, and only the group");
         assert_eq!(c.document().node(once[0]).unwrap().name, "pair");
         assert_eq!(c.document().children_of(once[0]).unwrap().len(), 2);
+    }
+
+    /// A style kept off a block of text keeps how it is set, and given to
+    /// another block sets that one the same way while its words, the
+    /// styling of parts of them and its width stay its own; given to a
+    /// shape it changes no shape; a look taken off a shape changes no
+    /// type; and a look written before looks carried type still reads.
+    #[test]
+    fn a_style_kept_off_text_sets_other_text_the_same_way() {
+        let mut s = Session::new(300, 200, ColorMode::Rgb);
+        let root = s.document().root();
+        let ink = AuthoredColor::Srgb {
+            r: 0.1,
+            g: 0.2,
+            b: 0.7,
+            a: 1.0,
+        };
+        let mut heading = chitrakar_doc::TextSpec::new("Heading", 30.0, ink.clone());
+        heading.bold = true;
+        heading.align = chitrakar_doc::TextAlign::Center;
+        heading.letter_spacing = 2.0;
+        heading.line_height = 1.4;
+        heading.list = chitrakar_doc::TextList::Bullet;
+        let mut body = chitrakar_doc::TextSpec::new(
+            "plain words here",
+            12.0,
+            AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        body.width = 140.0;
+        body.runs = vec![chitrakar_doc::StyleRun {
+            start: 6,
+            end: 11,
+            fill: None,
+            bold: None,
+            italic: Some(true),
+            underline: None,
+            strike: None,
+            font: None,
+            size: None,
+            baseline: None,
+        }];
+        for (index, spec) in [heading.clone(), body.clone()].into_iter().enumerate() {
+            s.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(chitrakar_doc::Node::text("t", spec)),
+            })
+            .unwrap();
+        }
+        let ids = s.document().children_of(root).unwrap().to_vec();
+        let (a, b) = (ids[0], ids[1]);
+        let rect = add_rect(&mut s, "r", 20.0, 20.0);
+        let text_of = |s: &Session, id| match &s.document().node(id).unwrap().kind {
+            chitrakar_doc::NodeKind::Text(spec) => spec.clone(),
+            other => panic!("not text: {other:?}"),
+        };
+
+        s.keep_style("Heading", a).unwrap();
+        let kept = s.document().styles()[0].look.text.clone();
+        assert_eq!(
+            kept,
+            Some(chitrakar_doc::TextLook::of(&heading)),
+            "kept as it is set"
+        );
+        s.apply_style("Heading", &[b, rect]).unwrap();
+        let set = text_of(&s, b);
+        assert!(
+            set.size == 30.0
+                && set.bold
+                && set.align == chitrakar_doc::TextAlign::Center
+                && set.letter_spacing == 2.0
+                && set.line_height == 1.4
+                && set.list == chitrakar_doc::TextList::Bullet,
+            "set the same way: {set:?}"
+        );
+        assert_eq!(set.fill, heading.fill, "and painted the same");
+        assert_eq!(set.text, body.text, "its words are its own");
+        assert_eq!(set.runs, body.runs, "so is the styling of parts of them");
+        assert_eq!(set.width, body.width, "and its width");
+        assert!(
+            matches!(
+                s.document().node(rect).unwrap().kind,
+                chitrakar_doc::NodeKind::Vector {
+                    shape: VectorShape::Rect { width, .. },
+                    ..
+                } if width == 20.0
+            ),
+            "a shape keeps its shape"
+        );
+        s.undo().unwrap();
+        assert_eq!(text_of(&s, b), body, "one undo");
+
+        // A look off a shape says nothing about type.
+        let shape_look = s.copy_style(rect).unwrap();
+        assert!(
+            !shape_look.contains("\"text\""),
+            "no type in a shape's look: {shape_look}"
+        );
+        s.paste_style(&shape_look, &[b]).unwrap();
+        let painted = text_of(&s, b);
+        assert!(
+            painted.size == 12.0 && !painted.bold,
+            "the type is left as it was"
+        );
+        // And a look written before looks carried type reads as one that
+        // says nothing about it.
+        let old: chitrakar_doc::Look = serde_json::from_str(
+            r#"{"fill":null,"stroke":null,"gradient":null,"effects":[],"opacity":1.0,"blend":"Normal"}"#,
+        )
+        .unwrap();
+        assert_eq!(old.text, None);
     }
 
     /// Aligned to the page, two layers each go to the page's edge or its
