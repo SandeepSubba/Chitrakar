@@ -107,8 +107,8 @@ one Menus button and the bar is one row (smoke 11a); the suite's
 touch screen a long press opens the canvas's menu and a pen rejects the
 palm (smoke 11b). The shell compiles for Android and iOS (CI jobs
 `shell-android`, `shell-ios`), and CI's `android-apk` generates the
-Android project with `tauri android init` and keeps a debug APK as an
-artifact; nothing under `gen/android` or `gen/apple` is committed.
+Android project with `tauri android init` and keeps an optimised APK,
+signed with a throwaway key made on the runner, as an artifact; nothing under `gen/android` or `gen/apple` is committed.
 
 In a browser the built page is an installable app:
 `app/public/manifest.webmanifest` (share target, file handlers) and a

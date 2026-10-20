@@ -177,10 +177,15 @@ jobs:
     # An installable build for a phone, every time: the Android project
     # is generated here, where the runner has the SDK and the NDK, rather
     # than committed — `tauri android init` writes it from tauri.conf.json,
-    # so there is nothing in it to keep in step by hand. The APK is a
-    # debug one, signed with the throwaway debug key, kept as an
-    # artifact to download and install.
-    name: Android debug APK
+    # so there is nothing in it to keep in step by hand.
+    #
+    # A release build, optimised: the debug one was 135 MB and ran the
+    # engine unoptimised, which on a phone is the difference between a
+    # filter that answers and one that does not. Signed with a key made
+    # here and thrown away with the runner — enough to install it, and no
+    # secret to keep; a store build wants a key of its own. Each run's key
+    # is new, so installing one over another needs the old one removed.
+    name: Android APK (release, test-signed)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -208,9 +213,21 @@ jobs:
         run: |
           export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npm run tauri -- android init --ci --skip-targets-install
-          npm run tauri -- android build --ci --debug --apk --target aarch64
+          npm run tauri -- android build --ci --apk --target aarch64
+      - name: Sign it with a throwaway key
+        run: |
+          unsigned=$(find shells/tauri/src-tauri/gen/android/app/build/outputs/apk -name '*release-unsigned.apk' | head -1)
+          test -n "$unsigned"
+          tools=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          keytool -genkeypair -keystore test.jks -storepass chitrakar -keypass chitrakar \
+            -alias test -keyalg RSA -keysize 2048 -validity 3650 -dname "CN=Chitrakar test build"
+          "$tools/zipalign" -f 4 "$unsigned" aligned.apk
+          mkdir -p out
+          "$tools/apksigner" sign --ks test.jks --ks-pass pass:chitrakar --out out/chitrakar-arm64.apk aligned.apk
+          "$tools/apksigner" verify out/chitrakar-arm64.apk
+          ls -l out
       - uses: actions/upload-artifact@v4
         with:
-          name: chitrakar-android-debug
-          path: shells/tauri/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          name: chitrakar-android-arm64
+          path: out/chitrakar-arm64.apk
           if-no-files-found: error

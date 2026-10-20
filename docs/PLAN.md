@@ -9973,12 +9973,16 @@ chitrakar/
   building for an iPhone would have compiled the Vision Swift for macOS
   into the iOS link. It reads `CARGO_CFG_TARGET_OS` now. An installable
   Android build ✅: CI's `android-apk` job runs `tauri android init`
-  where the runner has the SDK and builds a debug APK for arm64, kept as
-  an artifact (it took starting the CLI through `npm run tauri`, from
+  where the runner has the SDK and builds an APK for arm64, kept as
+  an artifact — a release build, optimised, signed with a key made on the
+  runner and thrown away with it (the debug one was 135 MB and ran the
+  engine unoptimised); each run's key is new, so one installs over
+  another only once the old is removed (it took starting the CLI through `npm run tauri`, from
   `shells/tauri/package.json`, since the Gradle build calls the CLI
   back the way it was started) — the Android project is generated from tauri.conf.json
   each time rather than committed, so it has nothing in it to keep in
-  step by hand. Still to do: a signed release build, which wants a key;
+  step by hand. Still to do: a store build, signed with a key that is
+  kept — the owner's to make and hold as a CI secret;
   and iOS past compiling, which wants a Mac with Xcode and a team to
   sign for.
 - The layers as a sheet ✅: on a phone held upright the panel came
