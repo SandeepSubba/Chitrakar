@@ -3570,6 +3570,82 @@ assert(
   assert((await overlay.count()) === 0, "let go of alt and they are gone");
 }
 
+// 8x2f. Align to: with two layers picked the align bar asks what they
+// line up with. To each other, right aligns them to the rightmost; to
+// the page, to the page's right edge; to the key layer, to the one
+// wearing the handles, which stays where it is. The choice is kept.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const rect = async (x0, y0, x1, y1) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect(40, 40, 100, 80);
+  await rect(150, 150, 250, 200);
+  await pickTool("Move");
+  // The first one drawn leads — it wears the handles — and the other is
+  // picked beside it.
+  const rows = page.locator(".panel ul li");
+  await rows.last().click();
+  await rows.first().click({ modifiers: ["Control"] });
+  await page.waitForTimeout(200);
+  const field = (label) => page.locator(`input[aria-label="${label}"]`);
+  const lead = async () => [Number(await field("X position").inputValue()), Number(await field("W size").inputValue())];
+  const alignTo = page.locator('select[aria-label="Align to"]');
+  assert((await alignTo.count()) === 1, "two picked, the bar asks what to align to");
+  // A layer's right edge, read off the page: the last covered column on
+  // its row.
+  const rightEdge = async (y) => {
+    let last = -1;
+    for (let x = 0; x < 400; x += 1) if ((await canvasPixel(x, y))[3] > 128) last = x;
+    return last;
+  };
+  await alignTo.selectOption("page");
+  await page.click('button[aria-label="Align right edges"]');
+  await page.waitForTimeout(300);
+  assert(
+    (await rightEdge(60)) >= 398 && (await rightEdge(175)) >= 398,
+    `to the page, both at its right edge (${await rightEdge(60)}, ${await rightEdge(175)})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  await alignTo.selectOption("key");
+  const before = await lead();
+  await page.click('button[aria-label="Align right edges"]');
+  await page.waitForTimeout(300);
+  const after = await lead();
+  assert(
+    Math.abs(after[0] - before[0]) < 0.01,
+    `to the key layer, the key stays (${before} -> ${after})`,
+  );
+  assert(
+    Math.abs((await rightEdge(175)) - (await rightEdge(60))) <= 1,
+    `and the other's right edge is the key's (${await rightEdge(175)}, ${await rightEdge(60)})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  await alignTo.selectOption("selection");
+  await page.click('button[aria-label="Align right edges"]');
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await rightEdge(60)) - 249) <= 1,
+    `to each other, to the rightmost of them (${await rightEdge(60)})`,
+  );
+  // Kept with the person's other ways of working, where a fresh visit
+  // reads it.
+  await alignTo.selectOption("key");
+  await page.waitForTimeout(200);
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs") || "{}").alignTo);
+  assert(kept === "key", `the choice is kept (${kept})`);
+  await alignTo.selectOption("selection");
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

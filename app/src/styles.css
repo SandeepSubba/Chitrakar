@@ -542,6 +542,12 @@ body {
   color: var(--text);
 }
 
+/* What the buttons line layers up with: a row of its own under them. */
+.align-bar .align-to {
+  grid-column: 1 / -1;
+  margin-top: 0.2rem;
+}
+
 .brush-size {
   /* As wide as a tool, border and all, so the rail is as wide with a
      paint tool in hand as without. */

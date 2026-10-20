@@ -318,6 +318,18 @@ struct Painting {
     on_mask: bool,
 }
 
+/// What layers are aligned against (`Session::align_nodes_to`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignTo {
+    /// The box round everything picked — or, for one layer, the frame it
+    /// sits in or the page.
+    Selection,
+    /// Each layer's own frame, or the page.
+    Page,
+    /// One layer's box, which does not move.
+    Key(NodeId),
+}
+
 pub struct Session {
     doc: Document,
     undo: Vec<HistoryEntry>,
@@ -4872,6 +4884,18 @@ impl Session {
     }
 
     pub fn align_nodes(&mut self, ids: &[NodeId], mode: &str) -> Result<(), EngineError> {
+        self.align_nodes_to(ids, mode, AlignTo::Selection)
+    }
+
+    /// Align or space out layers against a chosen box (`AlignTo`): the
+    /// box round what is picked, the frame or page each sits in, or one
+    /// key layer that stays where it is while the rest line up with it.
+    pub fn align_nodes_to(
+        &mut self,
+        ids: &[NodeId],
+        mode: &str,
+        to: AlignTo,
+    ) -> Result<(), EngineError> {
         let ids = &self.without_nested(ids)[..];
         // Spacing evenly is a statement about the gaps between layers,
         // so it needs layers to have gaps between; the rest is a
@@ -4897,6 +4921,16 @@ impl Session {
         if boxes.is_empty() || (spreading && boxes.len() < 2) {
             return Err(EngineError::BadCommand("nothing to align".into()));
         }
+        // A key layer's box, which everything lines up with and which is
+        // not moved: it is the one the others are being lined up *to*.
+        let key = match to {
+            AlignTo::Key(k) => Some(
+                self.bounds_of(k)
+                    .map(|b| [b[0], b[1], b[0] + b[2], b[1] + b[3]])
+                    .ok_or_else(|| EngineError::BadCommand("the key layer has no box".into()))?,
+            ),
+            _ => None,
+        };
         // What the alignment is measured against: the box round
         // everything picked, or — for one layer, which has nothing to be
         // picked out of — the frame it sits in, or the page.
@@ -4920,6 +4954,13 @@ impl Session {
         match mode {
             "left" | "center-h" | "right" | "top" | "middle-v" | "bottom" => {
                 for (id, b) in &boxes {
+                    // Each to its own frame or page, to the key, or to
+                    // the box round them all.
+                    let union = match to {
+                        AlignTo::Page => self.ground_of(*id),
+                        AlignTo::Key(_) => key.unwrap_or(union),
+                        AlignTo::Selection => union,
+                    };
                     let (dx, dy) = match mode {
                         "left" => (union[0] - b[0], 0.0),
                         "right" => (union[2] - b[2], 0.0),
@@ -4947,8 +4988,23 @@ impl Session {
                 });
                 // The outermost two stay put and the rest space evenly
                 // between them, which is what makes the result stable if you
-                // run it twice.
-                let (first, last) = (centre(&boxes[0].1), centre(&boxes[boxes.len() - 1].1));
+                // run it twice. Spread over the page, the outermost two go
+                // to its edges first — the first's near edge on the page's
+                // near edge, the last's far edge on its far edge. A key
+                // has nothing to add: the outermost already stay.
+                let (mut first, mut last) =
+                    (centre(&boxes[0].1), centre(&boxes[boxes.len() - 1].1));
+                if to == AlignTo::Page {
+                    let ground = self.ground_of(boxes[0].0);
+                    let (b0, b1) = (&boxes[0].1, &boxes[boxes.len() - 1].1);
+                    if horizontal {
+                        first = ground[0] + (b0[2] - b0[0]) / 2.0;
+                        last = ground[2] - (b1[2] - b1[0]) / 2.0;
+                    } else {
+                        first = ground[1] + (b0[3] - b0[1]) / 2.0;
+                        last = ground[3] - (b1[3] - b1[1]) / 2.0;
+                    }
+                }
                 let step = (last - first) / (boxes.len() - 1) as f32;
                 for (i, (id, b)) in boxes.iter().enumerate() {
                     let want = first + step * i as f32;
@@ -17409,6 +17465,110 @@ mod tests {
         assert_eq!(once.len(), 1, "the group, and only the group");
         assert_eq!(c.document().node(once[0]).unwrap().name, "pair");
         assert_eq!(c.document().children_of(once[0]).unwrap().len(), 2);
+    }
+
+    /// Aligned to the page, two layers each go to the page's edge or its
+    /// middle rather than to each other's; spread over the page, the
+    /// outermost two go to its edges and the middle one between. Aligned
+    /// to a key layer, the others line up with the key's box and the key
+    /// does not move — even when it is not among those being moved.
+    #[test]
+    fn layers_align_to_the_page_or_to_a_key_layer() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let place = |s: &mut Session, name: &str, x: f32, y: f32, w: f32| {
+            let id = add_rect(s, name, w, 10.0);
+            s.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, y),
+            })
+            .unwrap();
+            id
+        };
+        let a = place(&mut session, "a", 20.0, 10.0, 10.0);
+        let b = place(&mut session, "b", 60.0, 40.0, 30.0);
+        let c = place(&mut session, "c", 120.0, 70.0, 20.0);
+        let x0 = |s: &Session, id| s.bounds_of(id).unwrap()[0];
+        let right = |s: &Session, id| {
+            let bb = s.bounds_of(id).unwrap();
+            bb[0] + bb[2]
+        };
+        let mid = |s: &Session, id| {
+            let bb = s.bounds_of(id).unwrap();
+            bb[0] + bb[2] / 2.0
+        };
+
+        session
+            .align_nodes_to(&[a, b], "right", AlignTo::Page)
+            .unwrap();
+        for id in [a, b] {
+            assert!(
+                (right(&session, id) - 200.0).abs() < 1e-3,
+                "to the page's right edge"
+            );
+        }
+        session.undo().unwrap();
+        session
+            .align_nodes_to(&[a, b], "center-h", AlignTo::Page)
+            .unwrap();
+        for id in [a, b] {
+            assert!(
+                (mid(&session, id) - 100.0).abs() < 1e-3,
+                "on the page's middle"
+            );
+        }
+        session.undo().unwrap();
+        // The same two to each other: to the rightmost of them, not the page.
+        session
+            .align_nodes_to(&[a, b], "right", AlignTo::Selection)
+            .unwrap();
+        assert!(
+            (right(&session, a) - 90.0).abs() < 1e-3,
+            "to each other, the page is not asked"
+        );
+        session.undo().unwrap();
+
+        session
+            .align_nodes_to(&[a, b, c], "distribute-h", AlignTo::Page)
+            .unwrap();
+        assert!(
+            x0(&session, a).abs() < 1e-3,
+            "the first to the page's left edge"
+        );
+        assert!(
+            (right(&session, c) - 200.0).abs() < 1e-3,
+            "the last to its right edge"
+        );
+        assert!(
+            (mid(&session, b) - (mid(&session, a) + mid(&session, c)) / 2.0).abs() < 1e-3,
+            "and the middle one between"
+        );
+        assert_cache_matches_fresh(&mut session);
+        session.undo().unwrap();
+
+        // The middle one as the key: the others line up with it, and it
+        // stays where it was.
+        let before = session.bounds_of(b).unwrap();
+        session
+            .align_nodes_to(&[a, b, c], "left", AlignTo::Key(b))
+            .unwrap();
+        for id in [a, c] {
+            assert!(
+                (x0(&session, id) - 60.0).abs() < 1e-3,
+                "to the key's left edge"
+            );
+        }
+        assert_eq!(session.bounds_of(b).unwrap(), before, "the key stays");
+        session.undo().unwrap();
+        // A key that is not among those moved — locked, say — still holds
+        // them, and is still not moved.
+        session
+            .align_nodes_to(&[a, c], "bottom", AlignTo::Key(b))
+            .unwrap();
+        for id in [a, c] {
+            let bb = session.bounds_of(id).unwrap();
+            assert!((bb[1] + bb[3] - 50.0).abs() < 1e-3, "to the key's bottom");
+        }
+        assert_eq!(session.bounds_of(b).unwrap(), before);
     }
 
     #[test]

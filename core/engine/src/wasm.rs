@@ -233,6 +233,25 @@ impl WasmSession {
         self.inner.align_nodes(&ids, mode).map_err(to_js)
     }
 
+    /// The same against a chosen box (see `Session::align_nodes_to`):
+    /// `to` is "selection", "page" or "key", and `key` the key layer's id
+    /// when it is the key.
+    pub fn align_nodes_to(
+        &mut self,
+        ids: Vec<f64>,
+        mode: &str,
+        to: &str,
+        key: f64,
+    ) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.into_iter().map(|i| NodeId(i as u64)).collect();
+        let to = match to {
+            "page" => crate::AlignTo::Page,
+            "key" if key >= 0.0 => crate::AlignTo::Key(NodeId(key as u64)),
+            _ => crate::AlignTo::Selection,
+        };
+        self.inner.align_nodes_to(&ids, mode, to).map_err(to_js)
+    }
+
     /// The colour the page shows at a document point, as four bytes of
     /// straight sRGB with alpha; empty off the page.
     pub fn color_at(&self, x: f32, y: f32) -> Vec<u8> {

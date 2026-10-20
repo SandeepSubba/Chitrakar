@@ -27,6 +27,10 @@ export type Units = "px" | "mm" | "in";
 /** How the chrome is coloured: as the system says, or dark or light
  * whatever it says. */
 export type Theme = "system" | "dark" | "light";
+/** What the align buttons line layers up with: each other, the frame or
+ * page each sits in, or the key layer — the picked one wearing the
+ * handles, which stays put. */
+export type AlignTo = "selection" | "page" | "key";
 export type ExportFormat = "png" | "jpeg" | "webp" | "pdf" | "svg" | "tiff";
 /** A frame exports at the multiple the *frame* asks for, under a name
  * the frame gives it, so it stays a row on the menu rather than a
@@ -66,6 +70,9 @@ export type Prefs = {
   /** The chrome's colours: the system's choice, or one of the two
    * outright. The page is the page under either. */
   theme: Theme;
+  /** What the align buttons line layers up with. A way of working, so
+   * it is remembered rather than asked each time. */
+  alignTo: AlignTo;
   /** In the desktop app, draw the page with the graphics card: the
    * shell keeps a mirror of the document and draws each frame there,
    * and the webview draws a frame itself whenever the card cannot draw
@@ -155,6 +162,7 @@ export const withRecent = (recent: string[], path: string): string[] =>
 export const DEFAULTS: Prefs = {
   units: "px",
   theme: "system",
+  alignTo: "selection",
   gpuFrames: false,
   grid: 0,
   showGuides: true,
@@ -246,6 +254,7 @@ export function clamp(p: Prefs): Prefs {
         : "page",
     exportFormat: EXPORT_FORMATS.includes(p.exportFormat) ? p.exportFormat : "png",
     theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
+    alignTo: p.alignTo === "page" || p.alignTo === "key" ? p.alignTo : "selection",
     grid: n(Math.round(p.grid), 0, 512, 0),
     snap: n(Math.round(p.snap), 0, 64, 6),
     nudge: n(p.nudge, 0.1, 100, 1),

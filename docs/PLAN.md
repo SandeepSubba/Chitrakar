@@ -2841,6 +2841,35 @@ without reading anything else.*
       and shader), and the middle taken at the page's corner.
     - Smoke 9o25m: a level band bows up at its ends when the corners are
       drawn in, and down when they are pushed out.
+- **Align to the page or a key layer ✅** (`Session::align_nodes_to`,
+  `AlignTo { Selection, Page, Key }`, `prefs.alignTo`; the align bar's
+  *Align to* row). With two or more layers picked, the align buttons line
+  them up with each other as before, with the frame or page each sits in,
+  or with a key layer. The key is the picked one wearing the handles: the
+  others line up with its box, and it does not move, even when it is not
+  among the layers being moved (locked, say). Illustrator's Align To
+  Selection / Artboard / Key Object.
+  - **Spacing evenly:** to the page, the outermost two go to its edges
+    first, the first's near edge on the page's near edge and the last's
+    far edge on its far edge, and the rest space evenly between. To a key
+    it is as before, since the outermost two already stay put.
+  - **One layer alone** still goes to what it sits in, whichever is
+    chosen: it is its own key. So the choice is only offered from two.
+  - **Remembered:** the choice is a way of working, so it is a
+    preference, read back against its three values like the theme.
+  - **Tests:**
+    - `layers_align_to_the_page_or_to_a_key_layer`: two to the page's
+      right edge and its middle; the same two to each other, where the
+      page is not asked; spread over the page, the first and last at its
+      edges and the middle between; the others to a key's left edge with
+      the key unmoved; and a key outside the moved set still holding
+      them.
+    - Sabotages that each fail it: Page falling back to the selection's
+      box, Key doing the same, and the page spread skipping the edges.
+    - Smoke 8x2f: the choice offered with two picked; to the page, both
+      at its right edge; to the key, the key unmoved and the other's
+      edge on its edge; to each other, the rightmost; and the choice
+      written to the preferences.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -9,7 +9,7 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
-import { usePrefs, withRecent, withRecentColor } from "./prefs";
+import { usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
 import {
   DOCUMENTS,
   baseName,
@@ -5450,8 +5450,15 @@ export function App() {
   const alignSelection = (mode: string) => {
     const least = mode.startsWith("distribute") ? 2 : 1;
     if (!session || movableSelection.length < least) return;
+    // What they line up with: each other, the page, or the key — the
+    // picked layer wearing the handles, which stays put. One layer on its
+    // own has no others and is its own key, so it goes to what it sits
+    // in whichever is chosen.
+    const alone = selectionSet.length < 2;
+    const to = alone ? "selection" : prefs.alignTo;
+    const key = to === "key" && selected !== null ? selected : -1;
     try {
-      session.align_nodes(new Float64Array(movableSelection), mode);
+      session.align_nodes_to(new Float64Array(movableSelection), mode, to, key);
       refresh(session);
     } catch (err) {
       alert(`Align: ${err}`);
@@ -10562,18 +10569,42 @@ export function App() {
                 // to make that obvious.
                 const spread = mode.startsWith("distribute");
                 const alone = selectionSet.length < 2;
+                const title = spread
+                  ? prefs.alignTo === "page" && !alone
+                    ? `${label}, the outermost to the ${alignGround()}'s edges`
+                    : label
+                  : alone || prefs.alignTo === "page"
+                    ? `${label} to the ${alignGround()}`
+                    : prefs.alignTo === "key"
+                      ? `${label} to the layer with the handles`
+                      : label;
                 return (
                   <button
                     key={mode}
                     onClick={() => alignSelection(mode)}
                     disabled={spread && alone}
-                    title={alone && !spread ? `${label} to the ${alignGround()}` : label}
+                    title={title}
                     aria-label={label}
                   >
                     <Icon name={icon} size={16} />
                   </button>
                 );
               })}
+              {/* What they line up with. One layer alone always goes to
+                  what it sits in, so the choice waits for two. */}
+              {selectionSet.length >= 2 && (
+                <select
+                  className="align-to"
+                  aria-label="Align to"
+                  title="What the buttons line layers up with"
+                  value={prefs.alignTo}
+                  onChange={(e) => setPrefs({ alignTo: e.target.value as AlignTo })}
+                >
+                  <option value="selection">To each other</option>
+                  <option value="key">To the key layer</option>
+                  <option value="page">To the {alignGround()}</option>
+                </select>
+              )}
             </div>
           )}
           {selectionSet.length >= 2 && (
