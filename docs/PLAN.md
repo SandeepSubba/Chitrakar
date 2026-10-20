@@ -2935,6 +2935,49 @@ without reading anything else.*
       other block given it goes from 48 to 90 and bold, its words its
       own; one undo. (The first draft set 48, which was already the
       default, so that check proved nothing until the number changed.)
+- **Styles that are followed ✅** (`Node::style`,
+  `Command::SetStyleLink`, `Session::followers_of`; the panel's *Follows
+  the style … Detach* row and the ringed chip). A style was copied onto
+  a layer and forgotten, so changing it changed nothing already given
+  it. Now a layer given a style, or the layer one was kept from, follows
+  it. Keep the style again under the same name (shift-click its chip)
+  and every other follower takes the new look in the same step — "Keep
+  the style button, and 2 layers following it" — which one undo takes
+  back. Affinity's and Figma's linked styles: change the button once and
+  every button changes.
+  - **Letting go:** forgetting a style lets its followers go with their
+    look kept. *Detach* in the panel lets one go: it keeps the look and
+    stops following. Edits to a follower's own look are its own until
+    the style is kept again, which gives it the style's look — what
+    following means.
+  - **In the file:** which style a layer follows is in the file and comes
+    back; left out when a layer follows none, so a document that never
+    linked one writes what it always wrote.
+  - **A new command:** `SetStyleLink { id, style }`, with its inverse,
+    its slot (`style`), no repaint (the look comes with commands of its
+    own), and a label ("b follows button", "Detach b from its style").
+    The fixture names it and holds two of it, link and unlink, and its
+    document has a layer following "warm", so every audit — commands,
+    the wire and its TypeScript mirror, the container's inventory — is
+    asked of one.
+  - **Tests:**
+    - `layers_given_a_style_follow_it_when_it_is_kept_again`: the layer
+      kept from follows; layers given it follow; kept again, both take
+      the new look in one step under its label, and one undo takes it
+      back; a detached layer is left alone; the links survive save and
+      load; forgotten, the followers follow nothing and keep the look.
+    - Sabotages that each fail it: followers not given the new look, no
+      link on giving a style, and forgetting leaving the links.
+    - Smoke 8x2i: kept, given, the chip ringed; the first repainted and
+      the style kept again turns the other too; detached, it stays as
+      the style moves on.
+    - `a_style_kept_by_name_gives_its_look_to_another_layer` said the
+      old behaviour — a layer given the style kept its old look when the
+      style was kept again — and now says the new one: it follows to the
+      newer look, and keeps that when the style is forgotten. The
+      fixture's unlink first named a layer following nothing, which the
+      audit that applies each command alone rightly called a command
+      that proves nothing; it unlinks the layer following "warm" now.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

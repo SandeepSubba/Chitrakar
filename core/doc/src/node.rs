@@ -2172,6 +2172,14 @@ pub struct Node {
     /// every layer did before it existed.
     #[serde(default)]
     pub pinned: Pinning,
+    /// The kept style the layer follows (`Document::styles`, by name):
+    /// when that style is kept again with a new look, this layer takes
+    /// the new look with it. Given by `Session::apply_style`, let go of
+    /// by detaching it or by forgetting the style. Left out of the file
+    /// when the layer follows none, so a document that never linked one
+    /// writes what it always wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 /// A live effect attached to a layer. Effects are rendered from the layer's
@@ -2590,6 +2598,7 @@ impl Node {
             locked: false,
             clipped: false,
             pinned: Pinning::default(),
+            style: None,
         }
     }
 

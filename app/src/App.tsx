@@ -9474,7 +9474,9 @@ export function App() {
               {styles.map((st) => (
                 <button
                   key={st.name}
-                  className="swatch style-chip"
+                  className={
+                    selectedLayer?.style === st.name ? "swatch style-chip followed" : "swatch style-chip"
+                  }
                   style={{
                     background: st.look.fill ? colorToHex(st.look.fill) : "transparent",
                     borderColor: st.look.stroke ? colorToHex(st.look.stroke.color) : undefined,
@@ -10720,6 +10722,23 @@ export function App() {
           )}
           {selectedLayer && (
             <div className="layer-props">
+              {/* A layer following a kept style says which, and can be
+                  let go of it: kept again, the style's look comes here
+                  too, which is the point of following one and the
+                  surprise if it was forgotten. */}
+              {selectedLayer.style && (
+                <div className="row copy-of">
+                  <span>Follows the style {selectedLayer.style}</span>
+                  <button
+                    type="button"
+                    onClick={() => run({ SetStyleLink: { id: selectedLayer.id, style: null } })}
+                    aria-label="Detach from the style"
+                    title="Keep this look, but stop following the style"
+                  >
+                    Detach
+                  </button>
+                </div>
+              )}
               {/* A live copy says what it follows, and takes you there:
                   what the copy draws is not in the copy, so the panel has
                   to point at where it is. */}

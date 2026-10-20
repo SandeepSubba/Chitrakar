@@ -862,6 +862,7 @@ impl Document {
             | Command::SetOpacity { .. }
             | Command::SetVisible { .. }
             | Command::SetLocked { .. }
+            | Command::SetStyleLink { .. }
             | Command::SetClipped { .. }
             | Command::SetPinning { .. }
             | Command::SetBlendMode { .. }
@@ -1010,6 +1011,11 @@ impl Document {
                 let prev = node.locked;
                 node.locked = locked;
                 Ok(Command::SetLocked { id, locked: prev })
+            }
+            Command::SetStyleLink { id, style } => {
+                let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
+                let prev = std::mem::replace(&mut node.style, style);
+                Ok(Command::SetStyleLink { id, style: prev })
             }
             Command::SetClipped { id, clipped } => {
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
@@ -1678,6 +1684,14 @@ pub enum Command {
     SetLocked {
         id: NodeId,
         locked: bool,
+    },
+    /// Say which kept style a layer follows, or that it follows none
+    /// (`Node::style`). Changes nothing drawn: the look itself comes with
+    /// the commands beside it.
+    SetStyleLink {
+        id: NodeId,
+        #[serde(default)]
+        style: Option<String>,
     },
     /// Confine a layer to the one below it, or let it out again.
     SetClipped {

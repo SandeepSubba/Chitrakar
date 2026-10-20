@@ -567,6 +567,8 @@ export type Command =
   | { SetTransform: { id: NodeId; transform: Transform } }
   | { SetKind: { id: NodeId; kind: NodeKind } }
   | { SetName: { id: NodeId; name: string } }
+  /** Which kept style a layer follows, or none (`Node::style`). */
+  | { SetStyleLink: { id: NodeId; style: string | null } }
   | { SetMask: { id: NodeId; mask: Mask | null } }
   | { SetEffects: { id: NodeId; effects: Effect[] } }
   | { SetGuides: { guides: ({ Vertical: number } | { Horizontal: number })[] } }
@@ -606,6 +608,9 @@ export interface LayerInfo {
   clipped: boolean;
   /** What it does when the frame around it is resized. */
   pinned: Pinning;
+  /** The kept style it follows: kept again, the style's new look comes
+   * to this layer too. */
+  style: string | null;
   /** The layer this one is a live copy of, or 0 when it is not a copy. */
   copies: NodeId;
   depth: number;

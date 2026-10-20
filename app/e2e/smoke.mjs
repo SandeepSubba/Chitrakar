@@ -3785,6 +3785,67 @@ assert(
   );
 }
 
+// 8x2i. Styles followed: a style kept off a layer and given to another
+// is followed by both. Repaint the first and keep the style again
+// (shift-click its chip) and the other takes the new look; detached, a
+// layer stays as it is.
+{
+  await newDocument(400, 200, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 200) * b.height];
+  const rows = page.locator(".panel ul li");
+  const rect = async (hex, x0, x1) => {
+    await page.keyboard.press("Escape");
+    await setColor("Fill colour", hex);
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, 50));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, 150), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect("#cc2222", 40, 140);
+  await rect("#2266cc", 240, 340);
+  await pickTool("Move");
+  const pick = async (which) => {
+    await (which === "first" ? rows.last() : rows.first()).click();
+    await page.waitForTimeout(200);
+  };
+  const follows = page.locator(".layer-props .copy-of", { hasText: "Follows the style" });
+  await pick("first");
+  await page.click('button[aria-label="Keep as a style"]');
+  await page.waitForTimeout(250);
+  const chip = page.locator('button[aria-label="Style Style 1"]');
+  assert((await follows.count()) === 1, "the layer kept from follows its style");
+  await pick("second");
+  await chip.click();
+  await page.waitForTimeout(250);
+  let second = await canvasPixel(290, 100);
+  assert(second[0] > 180 && second[2] < 60, `given the style, red (${second})`);
+  assert((await follows.count()) === 1, "and follows it");
+  assert(await chip.evaluate((el) => el.classList.contains("followed")), "its chip says so");
+  // The first repainted green and kept again: the second follows.
+  await pick("first");
+  await setColor("Fill color", "#22aa44");
+  await chip.click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(300);
+  second = await canvasPixel(290, 100);
+  assert(second[1] > 140 && second[0] < 80, `kept again, the follower is green too (${second})`);
+  // Detached, it stays green when the style moves on.
+  await pick("second");
+  await page.click('button[aria-label="Detach from the style"]');
+  await page.waitForTimeout(250);
+  assert((await follows.count()) === 0, "detached, it follows nothing");
+  await pick("first");
+  await setColor("Fill color", "#8822cc");
+  await chip.click({ modifiers: ["Shift"] });
+  await page.waitForTimeout(300);
+  const first = await canvasPixel(90, 100);
+  second = await canvasPixel(290, 100);
+  assert(first[2] > 150 && first[1] < 80, `the style moved on (${first})`);
+  assert(second[1] > 140 && second[2] < 120, `and the detached layer stayed (${second})`);
+}
+
 // 8x3a. Typed geometry: the position and size fields place a layer
 // exactly, and each edit is one history entry.
 {

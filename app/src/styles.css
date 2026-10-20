@@ -1523,6 +1523,12 @@ body {
   border-width: 2px;
 }
 
+/* The style the picked layer follows, ringed in the accent. */
+.palette.styles .style-chip.followed {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* The rail's own width is the tools', and what sits under them wraps
    to it: a row of chips wider than the rail widened the rail, which
    narrowed the canvas, which moved the page — so picking the paint

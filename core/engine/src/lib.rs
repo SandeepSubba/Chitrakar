@@ -146,6 +146,7 @@ fn slots_of(cmd: &Command) -> Option<Vec<Slot>> {
         Command::SetOpacity { id, .. } => field(id, "opacity"),
         Command::SetVisible { id, .. } => field(id, "visible"),
         Command::SetLocked { id, .. } => field(id, "locked"),
+        Command::SetStyleLink { id, .. } => field(id, "style"),
         Command::SetClipped { id, .. } => field(id, "clipped"),
         Command::SetPinning { id, .. } => field(id, "pinned"),
         Command::SetBlendMode { id, .. } => field(id, "blend"),
@@ -509,6 +510,9 @@ impl Session {
             // put in it — a selection is a region to hand to a layer,
             // and nothing about the picture changes when it moves.
             | Command::SetSelection { .. }
+            // Nor which style a layer follows: the look it takes comes
+            // with commands of its own.
+            | Command::SetStyleLink { .. }
             | Command::SetLocked { .. } => None,
             Command::RemoveNode { id }
             | Command::SetOpacity { id, .. }
@@ -859,6 +863,10 @@ impl Session {
             Command::SetLocked { id, locked } => {
                 format!("{} {}", if *locked { "Lock" } else { "Unlock" }, name(id))
             }
+            Command::SetStyleLink { id, style } => match style {
+                Some(style) => format!("{} follows {style}", name(id)),
+                None => format!("Detach {} from its style", name(id)),
+            },
             Command::SetClipped { id, clipped } => {
                 format!("{} {}", if *clipped { "Clip" } else { "Unclip" }, name(id))
             }
@@ -7182,6 +7190,14 @@ impl Session {
             }
         }
         let mut styles = self.doc.styles().to_vec();
+        // Every other layer following the style takes the new look: a
+        // style kept again is a style changed, everywhere it is used.
+        let others: Vec<NodeId> = self
+            .followers_of(name)
+            .into_iter()
+            .filter(|f| *f != id)
+            .collect();
+        let mut cmds = self.look_commands(&look, &others)?;
         let kept = chitrakar_doc::KeptStyle {
             name: name.to_string(),
             look,
@@ -7190,10 +7206,22 @@ impl Session {
             Some(had) => *had = kept,
             None => styles.push(kept),
         }
-        self.apply_labeled(
-            Command::SetStyles { styles },
-            Some(format!("Keep the style {name}")),
-        )
+        cmds.insert(0, Command::SetStyles { styles });
+        // And the layer it was taken from follows it, as one given it does.
+        cmds.push(Command::SetStyleLink {
+            id,
+            style: Some(name.to_string()),
+        });
+        let label = if others.is_empty() {
+            format!("Keep the style {name}")
+        } else {
+            format!(
+                "Keep the style {name}, and {} {} following it",
+                others.len(),
+                if others.len() == 1 { "layer" } else { "layers" }
+            )
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))
     }
 
     /// Give the look kept under `name` to every layer named, in one
@@ -7211,11 +7239,20 @@ impl Session {
         } else {
             format!("Style {name} on {} layers", ids.len())
         };
-        self.apply_look(&look, ids, label)
+        // The look, and the style followed from here on: kept again with
+        // a new look, it is given to these too.
+        let mut cmds = self.look_commands(&look, ids)?;
+        for &id in ids {
+            cmds.push(Command::SetStyleLink {
+                id,
+                style: Some(name.to_string()),
+            });
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(label))
     }
 
-    /// Take a kept style out of the document. Layers that were given it
-    /// keep the look: a style is copied onto a layer, not followed.
+    /// Take a kept style out of the document. Layers that followed it
+    /// keep the look and follow nothing from here on.
     pub fn forget_style(&mut self, name: &str) -> Result<(), EngineError> {
         let styles: Vec<_> = self
             .doc
@@ -7227,8 +7264,13 @@ impl Session {
         if styles.len() == self.doc.styles().len() {
             return Err(EngineError::BadCommand(format!("no style called {name}")));
         }
+        // Its followers keep the look and follow nothing.
+        let mut cmds = vec![Command::SetStyles { styles }];
+        for id in self.followers_of(name) {
+            cmds.push(Command::SetStyleLink { id, style: None });
+        }
         self.apply_labeled(
-            Command::SetStyles { styles },
+            Command::Batch(cmds),
             Some(format!("Forget the style {name}")),
         )
     }
@@ -7459,6 +7501,19 @@ impl Session {
         ids: &[NodeId],
         label: String,
     ) -> Result<(), EngineError> {
+        let cmds = self.look_commands(style, ids)?;
+        if cmds.is_empty() {
+            return Ok(());
+        }
+        self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// The commands that give a look to every layer named.
+    fn look_commands(
+        &self,
+        style: &chitrakar_doc::Look,
+        ids: &[NodeId],
+    ) -> Result<Vec<Command>, EngineError> {
         // A look taken from a layer that has nothing to paint with — an
         // adjustment, a group, a placed photo — says nothing about how
         // to paint, so it leaves the target's own paint alone rather
@@ -7515,10 +7570,21 @@ impl Session {
                 blend: style.blend,
             });
         }
-        if cmds.is_empty() {
-            return Ok(());
-        }
-        self.apply_labeled(Command::Batch(cmds), Some(label))
+        Ok(cmds)
+    }
+
+    /// The layers following the kept style `name`.
+    fn followers_of(&self, name: &str) -> Vec<NodeId> {
+        let mut ids: Vec<NodeId> = self
+            .doc
+            .nodes()
+            .filter(|(_, n)| n.style.as_deref() == Some(name))
+            .map(|(id, _)| *id)
+            .collect();
+        // In the order they were made, so the history says the same thing
+        // every time.
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     /// Set the blend mode of several layers as one undo step.
@@ -8326,6 +8392,7 @@ impl Session {
                 locked: node.locked,
                 clipped: node.clipped && index > 0,
                 pinned: node.pinned,
+                style: node.style.clone(),
                 depth,
                 parent: group.0,
                 index,
@@ -9062,6 +9129,8 @@ pub struct LayerInfo {
     pub clipped: bool,
     /// What it does when the frame around it is given a new size.
     pub pinned: chitrakar_doc::Pinning,
+    /// The kept style it follows, if any.
+    pub style: Option<String>,
     pub depth: u32,
     pub parent: u64,
     pub index: usize,
@@ -11853,7 +11922,8 @@ mod tests {
         );
 
         // Kept again under the same name, it is replaced rather than
-        // doubled; forgotten, it is gone and the layer keeps its look.
+        // doubled, and the layer given it follows it to the newer look;
+        // forgotten, it is gone and the layer keeps the look it had.
         s.apply(Command::SetOpacity {
             id: a,
             opacity: 0.9,
@@ -11862,11 +11932,16 @@ mod tests {
         s.keep_style("warm", a).unwrap();
         assert_eq!(s.document().styles().len(), 1, "one style of that name");
         assert_eq!(s.document().styles()[0].look.opacity, 0.9, "the newer look");
+        assert_eq!(
+            s.document().node(b).unwrap().opacity,
+            0.9,
+            "a layer given the style follows it"
+        );
         s.forget_style("warm").unwrap();
         assert!(s.document().styles().is_empty(), "forgotten");
         assert_eq!(
             s.document().node(b).unwrap().opacity,
-            0.5,
+            0.9,
             "a layer given the style keeps its look"
         );
         assert!(s.undo().unwrap());
@@ -17489,6 +17564,115 @@ mod tests {
         assert_eq!(once.len(), 1, "the group, and only the group");
         assert_eq!(c.document().node(once[0]).unwrap().name, "pair");
         assert_eq!(c.document().children_of(once[0]).unwrap().len(), 2);
+    }
+
+    /// Layers given a style follow it: kept again with a new look, the
+    /// style gives it to every layer following it, in one step that one
+    /// undo takes back. A layer detached is left alone, forgetting the
+    /// style lets the rest go with their look kept, and which style a
+    /// layer follows is in the file.
+    #[test]
+    fn layers_given_a_style_follow_it_when_it_is_kept_again() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let a = add_rect(&mut s, "a", 20.0, 20.0);
+        let b = add_rect(&mut s, "b", 20.0, 20.0);
+        let c = add_rect(&mut s, "c", 20.0, 20.0);
+        let paint = |s: &mut Session, id, r: f32| {
+            let mut kind = s.document().node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { fill, .. } = &mut kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r,
+                    g: 0.2,
+                    b: 0.2,
+                    a: 1.0,
+                });
+            }
+            s.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        };
+        let red_of = |s: &Session, id| match &s.document().node(id).unwrap().kind {
+            NodeKind::Vector {
+                fill: Some(AuthoredColor::Srgb { r, .. }),
+                ..
+            } => *r,
+            other => panic!("no flat fill: {other:?}"),
+        };
+        let follows = |s: &Session, id| s.document().node(id).unwrap().style.clone();
+
+        paint(&mut s, a, 0.9);
+        s.keep_style("button", a).unwrap();
+        assert_eq!(
+            follows(&s, a).as_deref(),
+            Some("button"),
+            "the layer kept from follows it"
+        );
+        s.apply_style("button", &[b, c]).unwrap();
+        for id in [b, c] {
+            assert_eq!(
+                follows(&s, id).as_deref(),
+                Some("button"),
+                "given it, follows it"
+            );
+            assert!((red_of(&s, id) - 0.9).abs() < 1e-6);
+        }
+
+        // The style changed: kept again off a repainted layer.
+        paint(&mut s, a, 0.3);
+        let steps = s.history_labels().0.len();
+        s.keep_style("button", a).unwrap();
+        assert_eq!(s.history_labels().0.len(), steps + 1, "one step");
+        assert!(
+            s.history_labels()
+                .0
+                .last()
+                .unwrap()
+                .contains("2 layers following it"),
+            "{:?}",
+            s.history_labels().0.last()
+        );
+        for id in [b, c] {
+            assert!(
+                (red_of(&s, id) - 0.3).abs() < 1e-6,
+                "every follower takes the new look"
+            );
+        }
+        s.undo().unwrap();
+        for id in [b, c] {
+            assert!(
+                (red_of(&s, id) - 0.9).abs() < 1e-6,
+                "one undo takes it back"
+            );
+        }
+        s.redo().unwrap();
+
+        // Detached, a layer is its own.
+        s.apply(Command::SetStyleLink { id: c, style: None })
+            .unwrap();
+        paint(&mut s, a, 0.6);
+        s.keep_style("button", a).unwrap();
+        assert!((red_of(&s, b) - 0.6).abs() < 1e-6, "a follower follows");
+        assert!(
+            (red_of(&s, c) - 0.3).abs() < 1e-6,
+            "a detached layer does not"
+        );
+
+        // Which style a layer follows survives the file.
+        let back = Session::load(&s.save().unwrap()).unwrap();
+        assert_eq!(
+            back.document().node(b).unwrap().style.as_deref(),
+            Some("button")
+        );
+        assert_eq!(back.document().node(c).unwrap().style, None);
+
+        // Forgotten, the style lets its followers go with their look.
+        s.forget_style("button").unwrap();
+        for id in [a, b] {
+            assert_eq!(follows(&s, id), None, "follows nothing");
+        }
+        assert!((red_of(&s, b) - 0.6).abs() < 1e-6, "and keeps the look");
     }
 
     /// A style kept off a block of text keeps how it is set, and given to

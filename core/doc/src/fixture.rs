@@ -353,6 +353,13 @@ pub fn everything() -> Fixture {
         }],
     })
     .unwrap();
+    // And a layer following it, so a file written from this says which
+    // style a layer follows and every audit is asked of one that does.
+    doc.apply(Command::SetStyleLink {
+        id: under,
+        style: Some("warm".into()),
+    })
+    .unwrap();
     {
         let mut kind = doc.node(under).unwrap().kind.clone();
         if let NodeKind::Vector { fill, .. } = &mut kind {
@@ -3494,6 +3501,17 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             id: over,
             locked: true,
         },
+        // Following a kept style, and letting go of it.
+        Command::SetStyleLink {
+            id: over,
+            style: Some("warm".into()),
+        },
+        // `under` is the layer following "warm" in the shared document,
+        // so letting it go is a change on its own as well as in a run.
+        Command::SetStyleLink {
+            id: under,
+            style: None,
+        },
         Command::SetClipped {
             id: over,
             clipped: true,
@@ -4013,6 +4031,7 @@ pub fn variant_name(cmd: &Command) -> &'static str {
         Command::SetOpacity { .. } => "SetOpacity",
         Command::SetVisible { .. } => "SetVisible",
         Command::SetLocked { .. } => "SetLocked",
+        Command::SetStyleLink { .. } => "SetStyleLink",
         Command::SetClipped { .. } => "SetClipped",
         Command::SetPinning { .. } => "SetPinning",
         Command::SetBlendMode { .. } => "SetBlendMode",
@@ -4054,6 +4073,7 @@ pub const EVERY_VARIANT: &[&str] = &[
     "SetOpacity",
     "SetVisible",
     "SetLocked",
+    "SetStyleLink",
     "SetClipped",
     "SetPinning",
     "SetBlendMode",

@@ -144,8 +144,12 @@ holds a colour.
 
 Styles (`Document::styles`, `Command::SetStyles`, a `KeptStyle` holding
 a `Look`) are the palette's shape for a whole look — fill, stroke,
-gradient, effects, opacity, blend — kept by name and given to layers by
-name through `Session::apply_style`. A style keeps its colours *flat*
+gradient, effects, opacity, blend, and how text is set when taken off
+text — kept by name and given to layers by name through
+`Session::apply_style`. A layer given one follows it (`Node::style`,
+`Command::SetStyleLink`): keeping the style again under the same name
+gives its new look to every follower in the same step, forgetting it
+lets them go with their look, and the panel's Detach lets one go. A style keeps its colours *flat*
 (`keep_style` reads past every name), so it is outside the settling
 above by design: it names a look, not the entries the look was made
 from.
