@@ -4,8 +4,15 @@
     <meta charset="UTF-8" />
     <!-- viewport-fit=cover: the page runs under a phone's notch and
          rounded corners, and the stylesheet keeps clear of them with
-         env(safe-area-inset-*), which reads zero without it. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+         env(safe-area-inset-*), which reads zero without it.
+         interactive-widget=resizes-content: when the on-screen keyboard
+         comes up the page gets shorter, rather than the keyboard
+         covering its lower half — and with it the text being typed on
+         the canvas. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <!-- The browser's own bar takes the colour of the app's; the app
          sets it again when the theme is chosen. -->
     <meta name="theme-color" content="#2a2a30" />

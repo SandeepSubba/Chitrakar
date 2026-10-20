@@ -3040,6 +3040,13 @@ without reading anything else.*
     the page with the picture placed by name, the address plain again,
     the worker's store emptied, and a reload placing nothing; a picture
     handed over through the launch queue is placed.
+- **The phone rail's options, and the keyboard** (Phase 4): the palette
+  and a paint tool's controls lie in a row on a phone, and picking the
+  tool scrolls them into sight; `interactive-widget=resizes-content`.
+  - **Tests:** smoke 11h at 390×844: with Paint picked the rail is under
+    72 tall, the width and softness are on screen inside it, and the
+    palette's swatches are one row. 11e: the viewport asks the keyboard
+    to resize the page.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -9967,7 +9974,9 @@ chitrakar/
   into the iOS link. It reads `CARGO_CFG_TARGET_OS` now. An installable
   Android build ✅: CI's `android-apk` job runs `tauri android init`
   where the runner has the SDK and builds a debug APK for arm64, kept as
-  an artifact — the Android project is generated from tauri.conf.json
+  an artifact (it took starting the CLI through `npm run tauri`, from
+  `shells/tauri/package.json`, since the Gradle build calls the CLI
+  back the way it was started) — the Android project is generated from tauri.conf.json
   each time rather than committed, so it has nothing in it to keep in
   step by hand. Still to do: a signed release build, which wants a key;
   and iOS past compiling, which wants a Mac with Xcode and a team to
@@ -9989,7 +9998,12 @@ chitrakar/
   been saved; it is not any more. The viewport runs under the notch
   (`viewport-fit=cover`), which is what makes the safe-area padding the
   stylesheet already had mean anything, and the editor keeps clear of
-  the notch on a phone held either way. And it can be added to a home
+  the notch on a phone held either way. The on-screen keyboard makes the
+  page shorter (`interactive-widget=resizes-content`) rather than
+  covering its lower half, where text being typed on the canvas often
+  is — Android's Chrome had only been shrinking the visual viewport.
+  Safari ignores the setting; it scrolls the focused field into view
+  on its own. And it can be added to a home
   screen and opens as an app: a manifest, the shell's own icons, and the
   browser's bar taking the app's colour, following the theme. Smoke 11e.
 - Offline ✅: put on a home screen it is an app, and an app opens with
@@ -10017,6 +10031,13 @@ chitrakar/
   stripped the query after deciding whether the path was the root — and
   the worker now falls back to the kept page for any navigation a host
   has no page for. Smoke 11g.
+- The rail's options lie down with it ✅. Along a phone's bottom edge
+  the rail carried what it carries in a column — the palette two
+  swatches wide and as tall as it had swatches, and the paint tool's
+  width and edge stretched to match — which made it 133 pixels tall on a
+  390 screen, and put the width and the edge at the far end of its
+  scroll, out of sight. In a row it is as tall as a tool (60), and
+  picking a paint tool brings its width and edge into sight. Smoke 11h.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

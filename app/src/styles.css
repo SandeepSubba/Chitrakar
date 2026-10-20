@@ -2048,6 +2048,30 @@ body {
     flex: 0 0 auto;
   }
 
+  /* What the rail carries under its tools — the palette, the kept
+     brushes, a paint tool's width and edge — was laid out for a column:
+     the palette two swatches wide and as tall as it had swatches, and
+     everything else stretched to match. Lying down, that made the rail
+     133 pixels tall on a 390 screen. In a row, the rail is as tall as a
+     tool. */
+  .toolbar > * {
+    align-self: center;
+  }
+
+  .toolbar .palette {
+    max-width: none;
+    flex-wrap: nowrap;
+  }
+
+  .toolbar .brush-size {
+    margin: 0 0.15rem;
+  }
+
+  .toolbar .paint-softness {
+    width: 5rem;
+    margin: 0 0.3rem;
+  }
+
   /* The shape tools' flyout opens upward: below the rail is off the
      screen. */
   .tool-flyout {

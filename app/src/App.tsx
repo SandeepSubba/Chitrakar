@@ -1155,6 +1155,8 @@ export function App() {
     say();
     return () => mq.removeEventListener("change", say);
   }, []);
+  /** The tool rail, which on a phone lies along the bottom and scrolls. */
+  const railRef = useRef<HTMLElement>(null);
   /** The drawer the menus fold into on a phone, open. */
   const [menuSheet, setMenuSheet] = useState(false);
   /** A screen that is touched rather than pointed at — a phone, a
@@ -1288,6 +1290,15 @@ export function App() {
   const erasing = tool === "Eraser";
   const painting = tool === "Paint" || tool === "Eraser";
   const cloning = tool === "Clone" || tool === "Heal";
+  // On a phone the rail is a row that scrolls, and what a tool brings
+  // with it — a paint tool's width and edge — comes at its far end, past
+  // the edge of the screen. Picking such a tool brings them into sight.
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || !window.matchMedia("(max-width: 640px)").matches) return;
+    const last = rail.querySelector(".paint-softness, .brush-size:last-of-type");
+    if (last) last.scrollIntoView({ inline: "end", block: "nearest" });
+  }, [tool]);
   /** Whether the clone brush heals: laying the source's texture down in
    * the colour of the place it lands, rather than as it found it. */
   const healing = tool === "Heal";
@@ -9219,6 +9230,7 @@ export function App() {
       )}
       <div className="workspace">
         <nav
+          ref={railRef}
           className={floating ? "toolbar floating" : "toolbar"}
           aria-label="Tools"
           style={floating ? { left: floating[0], top: floating[1] } : undefined}

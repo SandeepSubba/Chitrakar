@@ -13850,6 +13850,7 @@ assert(
       : [];
     const panel = getComputedStyle(document.documentElement).getPropertyValue("--panel").trim();
     return {
+      viewport,
       cover: viewport.includes("viewport-fit=cover"),
       manifest,
       icons,
@@ -13862,6 +13863,10 @@ assert(
     };
   });
   assert(got.cover, "the page runs under the notch, to keep clear of it itself");
+  assert(
+    got.viewport.includes("interactive-widget=resizes-content"),
+    "and the on-screen keyboard makes the page shorter rather than covering it",
+  );
   assert(got.overscroll === "none", `a drag down from the top is not a reload (${got.overscroll})`);
   assert(
     Math.abs(got.editor - got.inner) < 1 && got.rail <= got.inner + 0.5,
@@ -14008,6 +14013,40 @@ assert(
   const opened = await lp.locator(".panel ul li .layer-name").allTextContents();
   assert(opened.length === 1 && /shore/.test(opened[0]), `a picture opened with the app is placed (${opened})`);
   await ctx2.close();
+}
+
+// 11h. On a phone the rail lies along the bottom, and what it carries
+// beside its tools — the palette, a paint tool's width and edge — lies
+// down with it: in a row, so the rail is as tall as a tool rather than
+// as tall as a column of swatches. Picking a paint tool brings its
+// width and edge into sight at the rail's far end.
+{
+  const phone = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const pp = await phone.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForTimeout(600);
+  const rail = pp.locator('nav[aria-label="Tools"]');
+  const paint = pp.locator('.toolbar button[aria-label="Paint"]');
+  await paint.scrollIntoViewIfNeeded();
+  await paint.tap();
+  await pp.waitForTimeout(400);
+  const r = await rail.boundingBox();
+  assert(r.height < 72, `the rail is as tall as a tool, palette and all (${r.height.toFixed(0)})`);
+  for (const label of ["Paint width", "Brush softness"]) {
+    const b = await pp.locator(`.toolbar [aria-label="${label}"]`).boundingBox();
+    assert(
+      b && b.x >= 0 && b.x + b.width <= 390 && b.y >= r.y && b.y + b.height <= r.y + r.height,
+      `picking the paint tool brings its ${label.toLowerCase()} into sight (${b && [b.x, b.width].map(Math.round)})`,
+    );
+  }
+  const swatches = await pp.locator(".toolbar .palette .swatch").evaluateAll((all) => new Set(all.map((s) => Math.round(s.getBoundingClientRect().y))).size);
+  assert(swatches <= 1, `the palette lies in a row (${swatches} rows)`);
+  await phone.close();
 }
 
 // 9aw. Dissolving a group answers for what the group itself was
