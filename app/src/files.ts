@@ -42,6 +42,17 @@ export const DOCUMENTS: Filter[] = [KINDS.chitra];
  * — carries its path encoded in its last segment, after the volume's
  * name and a colon, so that is where the parts are read from. */
 const partsOf = (path: string): string[] => {
+  // A file: address — what an iPhone's picker gives, kept as one so the
+  // shell can open it under the picker's grant — is a path, encoded.
+  if (/^file:\/\//i.test(path)) {
+    let inner = path.replace(/^file:\/\/[^/]*/i, "");
+    try {
+      inner = decodeURIComponent(inner);
+    } catch {
+      // Not encoded after all: read as it is.
+    }
+    return inner.split("/").filter(Boolean);
+  }
   if (/^[a-z][a-z0-9+.-]+:\/\//i.test(path) && !/^file:/i.test(path)) {
     const last = path.split("/").filter(Boolean).pop() ?? path;
     let inner = last;

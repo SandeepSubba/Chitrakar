@@ -101,7 +101,9 @@ async fn choose_to_save(
     match panel.blocking_save_file() {
         // An address has the name the person gave it in the system's
         // own panel, and no extension to put right.
-        Some(tauri_plugin_dialog::FilePath::Url(u)) if u.scheme() != "file" => {
+        Some(tauri_plugin_dialog::FilePath::Url(u))
+            if u.scheme() != "file" || cfg!(target_os = "ios") =>
+        {
             Ok(Some(u.to_string()))
         }
         Some(chosen) => {

@@ -87,11 +87,25 @@ pub fn path_to_string(path: PathBuf) -> Result<String, String> {
 /// in another app's keeping — which are not paths and never become
 /// one; only the system can open them, so they are kept as they came
 /// and opened through it ([`is_address`]).
+///
+/// On an iPhone or an iPad a `file://` address is kept too. A file
+/// picked there is the app's to read only while it holds the grant the
+/// picker gave with it, and the fs plugin takes that grant when it opens
+/// a `file://` address — read as a bare path, the same file is refused.
 pub fn chosen(file: tauri_plugin_fs::FilePath) -> Result<String, String> {
+    chosen_on(file, KEEP_FILE_ADDRESSES)
+}
+
+/// Whether `file://` addresses are kept as addresses here: on iOS.
+const KEEP_FILE_ADDRESSES: bool = cfg!(target_os = "ios");
+
+/// [`chosen`], with whether this platform keeps `file://` addresses
+/// said outright, so both answers are tested on any machine.
+pub fn chosen_on(file: tauri_plugin_fs::FilePath, keep_file: bool) -> Result<String, String> {
     use tauri_plugin_fs::FilePath;
     match file {
         FilePath::Path(p) => path_to_string(p),
-        FilePath::Url(u) if u.scheme() == "file" => u
+        FilePath::Url(u) if u.scheme() == "file" && !keep_file => u
             .to_file_path()
             .map_err(|()| format!("{u} is not a file on this device"))
             .and_then(path_to_string),
@@ -101,12 +115,18 @@ pub fn chosen(file: tauri_plugin_fs::FilePath) -> Result<String, String> {
 
 /// Whether what the page calls a file is an address only the system can
 /// open (see [`chosen`]) rather than a path. A Windows drive letter reads
-/// as a one-letter scheme and is a path; so is a `file:` address.
+/// as a one-letter scheme and is a path; so is a `file:` address, except
+/// on iOS.
 pub fn is_address(name: &str) -> bool {
+    is_address_on(name, KEEP_FILE_ADDRESSES)
+}
+
+/// [`is_address`], with the platform's answer about `file:` said outright.
+pub fn is_address_on(name: &str, keep_file: bool) -> bool {
     use std::str::FromStr;
     matches!(
         tauri_plugin_fs::FilePath::from_str(name),
-        Ok(tauri_plugin_fs::FilePath::Url(u)) if u.scheme() != "file"
+        Ok(tauri_plugin_fs::FilePath::Url(u)) if u.scheme() != "file" || keep_file
     )
 }
 
@@ -178,6 +198,17 @@ mod tests {
         let file = chosen(FilePath::from_str("file:///tmp/a%20b.png").unwrap()).unwrap();
         assert_eq!(file, "/tmp/a b.png");
         assert!(!is_address(&file));
+
+        // On iOS a file: address is kept, to be opened under its grant.
+        let kept = chosen_on(
+            FilePath::from_str("file:///var/mobile/a%20b.png").unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(kept, "file:///var/mobile/a%20b.png");
+        assert!(is_address_on(&kept, true));
+        assert!(!is_address_on(&kept, false));
+        assert!(!is_address_on("/var/mobile/a.png", true));
 
         // A drive letter is not a scheme.
         assert!(!is_address("C:\\Users\\me\\a.chitra"));

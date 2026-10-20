@@ -10057,7 +10057,9 @@ chitrakar/
   always draw or always move the page instead. Two fingers move it
   whatever it says. A finger that moves the page is a pan like the
   hand tool's, so taps still undo and a long press, which belongs to a
-  finger that draws, does not open the menu. Smoke 11i; 11b's palm
+  finger that draws, does not open the menu. A long press that opens the
+  menu ticks under the finger (`navigator.vibrate`), as a phone's own
+  does. Smoke 11i; 11b's palm
   rejection now runs with fingers set to draw, which is where it
   matters.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
@@ -10081,7 +10083,13 @@ chitrakar/
   to write first. The page names them from the path encoded in their
   last segment, so a document opened from Downloads is called by its
   name. `e2e/files.test.mjs` holds the naming, the shell's own test the
-  address against the path; smoke 11c the share.
+  address against the path; smoke 11c the share. On an iPhone or an iPad a
+  file picked in the system's panel is the app's to read only while it
+  holds the grant the picker gave with it, which the fs plugin takes
+  when it opens a `file://` address; the shell had been turning those
+  into bare paths, which iOS refuses. It keeps them as addresses there
+  (`files::chosen_on`, tested on any machine with the platform's answer
+  said outright), and the page names them decoded.
 
 ### Phase 5 — Depth (ongoing)
 - Pen tool + full path editing; boolean operations on shapes ✅. The pen

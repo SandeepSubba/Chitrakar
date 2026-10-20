@@ -46,8 +46,9 @@ names("content://com.android.providers.downloads.documents/document/msf%3A1000",
 // Not encoded after all, or badly: read as it is, never thrown.
 names("content://some.provider/files/pic.png", "pic.png", "");
 names("content://some.provider/files/100%25%ZZ", "100%25%ZZ", "");
-// A file: address is not one of these.
+// A file: address — an iPhone's, kept for its grant — is a path, encoded.
 check(baseName("file:///tmp/a.png") === "a.png", "a file: address is a path");
+names("file:///private/var/mobile/Holiday%20snaps/sea%20view.png", "sea view.png", "Holiday snaps");
 // The question before writing over files names them the same way.
 check(
   replacing(["content://p/document/primary%3ADownload%2Fa.png"]) === "a.png is already in Download. Replace it?",

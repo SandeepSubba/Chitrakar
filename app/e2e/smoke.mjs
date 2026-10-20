@@ -13545,9 +13545,14 @@ assert(
   const at2 = (fx, fy) => [box2.x + fx * box2.width, box2.y + fy * box2.height];
   const [lx, ly] = at2(0.2, 0.2);
   const before = await rows();
+  await tp.evaluate(() => {
+    window.__ticks = [];
+    navigator.vibrate = (ms) => (window.__ticks.push(ms), true);
+  });
   await finger("pointerdown", 21, lx, ly);
   await tp.waitForTimeout(700);
   assert(await tp.locator(".context-menu").isVisible(), "a finger held still opens the canvas's menu");
+  assert((await tp.evaluate(() => window.__ticks.length)) === 1, "with a tick under the finger");
   await finger("pointermove", 21, lx + 80, ly + 80);
   await finger("pointerup", 21, lx + 80, ly + 80);
   await tp.waitForTimeout(200);

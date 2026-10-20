@@ -2821,6 +2821,10 @@ export function App() {
     tapsRef.current.spoil(at.id);
     touchesRef.current.delete(at.id);
     ignoredRef.current.add(at.id);
+    // A tick under the finger, as a phone's own long press gives: the
+    // press has turned into a question. Where there is no vibration
+    // (Safari) there is no tick.
+    navigator.vibrate?.(12);
     openContextAt(at.x, at.y);
   };
 
