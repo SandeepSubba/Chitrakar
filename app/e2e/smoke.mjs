@@ -13444,6 +13444,10 @@ assert(
     hasTouch: true,
     isMobile: true,
   });
+  // Fingers set to draw: by default, once a pen has been used a finger
+  // moves the page (11i), and the palm is moot. Rejecting it matters
+  // where fingers draw.
+  await tablet.addInitScript(() => localStorage.setItem("chitrakar:prefs", JSON.stringify({ finger: "draw" })));
   const tp = await tablet.newPage();
   await tp.goto("http://localhost:8123/");
   await tp.waitForSelector("#engine-canvas");
@@ -14047,6 +14051,87 @@ assert(
   const swatches = await pp.locator(".toolbar .palette .swatch").evaluateAll((all) => new Set(all.map((s) => Math.round(s.getBoundingClientRect().y))).size);
   assert(swatches <= 1, `the palette lies in a row (${swatches} rows)`);
   await phone.close();
+}
+
+// 11i. One finger on a tablet: it draws, as a mouse does, until a pen
+// has touched the screen — then the pen draws and the finger moves the
+// page, so a hand resting on the glass never makes a mark. A preference
+// says always draw, or always move the page.
+{
+  const open = async (prefs) => {
+    const ctx = await browser.newContext({ viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });
+    if (prefs) {
+      await ctx.addInitScript((p) => localStorage.setItem("chitrakar:prefs", JSON.stringify(p)), prefs);
+    }
+    const tp = await ctx.newPage();
+    await tp.goto("http://localhost:8123/");
+    await tp.waitForSelector("#engine-canvas");
+    await tp.waitForTimeout(700);
+    await tp.evaluate(() => {
+      Element.prototype.setPointerCapture = () => {};
+      Element.prototype.releasePointerCapture = () => {};
+    });
+    await tp.locator('.toolbar button[aria-label="Rect"]').first().click();
+    return [ctx, tp];
+  };
+  const drag = (tp, kind, id, [x0, y0], [x1, y1]) =>
+    tp.evaluate(
+      ([kind, id, x0, y0, x1, y1]) => {
+        const c = document.getElementById("engine-canvas");
+        const send = (type, x, y) =>
+          c.dispatchEvent(
+            new PointerEvent(type, {
+              bubbles: true, cancelable: true, composed: true, pointerId: id, pointerType: kind,
+              isPrimary: true, pressure: type === "pointerup" ? 0 : 0.5, buttons: type === "pointerup" ? 0 : 1,
+              clientX: x, clientY: y,
+            }),
+          );
+        send("pointerdown", x0, y0);
+        for (let i = 1; i <= 4; i++) send("pointermove", x0 + ((x1 - x0) * i) / 4, y0 + ((y1 - y0) * i) / 4);
+        send("pointerup", x1, y1);
+      },
+      [kind, id, x0, y0, x1, y1],
+    );
+  const rows = (tp) => tp.locator(".panel ul li .layer-name").count();
+  const page = (tp) => tp.locator("#engine-page").boundingBox();
+
+  let [ctx, tp] = await open(null);
+  let b = await page(tp);
+  await drag(tp, "touch", 61, [b.x + 20, b.y + 20], [b.x + 80, b.y + 70]);
+  await tp.waitForTimeout(300);
+  assert((await rows(tp)) === 1, "before any pen, one finger draws");
+  await drag(tp, "pen", 2, [b.x + 120, b.y + 20], [b.x + 180, b.y + 70]);
+  await tp.waitForTimeout(300);
+  assert((await rows(tp)) === 2, "the pen draws");
+  const before = await page(tp);
+  await drag(tp, "touch", 62, [b.x + 100, b.y + 150], [b.x + 160, b.y + 190]);
+  await tp.waitForTimeout(300);
+  const after = await page(tp);
+  assert((await rows(tp)) === 2, "once a pen has been used, a finger draws nothing");
+  assert(
+    Math.abs(after.x - before.x - 60) < 3 && Math.abs(after.y - before.y - 40) < 3,
+    `it moves the page instead (${(after.x - before.x).toFixed(0)}, ${(after.y - before.y).toFixed(0)})`,
+  );
+  // Asked to draw, it draws, pen or no pen.
+  await tp.keyboard.press("Control+Comma");
+  await tp.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await tp.selectOption('select[aria-label="One finger"]', "draw");
+  await tp.click('.modal-actions .primary:text-is("Done")');
+  await tp.waitForTimeout(200);
+  b = await page(tp);
+  await drag(tp, "touch", 63, [b.x + 20, b.y + 150], [b.x + 80, b.y + 200]);
+  await tp.waitForTimeout(300);
+  assert((await rows(tp)) === 3, "asked to, a finger draws even after a pen");
+  await ctx.close();
+
+  // Asked to move the page, it does from the start.
+  [ctx, tp] = await open({ finger: "pan" });
+  const p0 = await page(tp);
+  await drag(tp, "touch", 64, [p0.x + 40, p0.y + 40], [p0.x + 90, p0.y + 40]);
+  await tp.waitForTimeout(300);
+  const p1 = await page(tp);
+  assert((await rows(tp)) === 0 && Math.abs(p1.x - p0.x - 50) < 3, "asked to move the page, a finger never draws");
+  await ctx.close();
 }
 
 // 9aw. Dissolving a group answers for what the group itself was

@@ -2847,7 +2847,19 @@ export function App() {
     e.button === 1 ||
     // The hand is the space bar made into a tool: for a finger, which
     // has no space bar, and for a hand that would rather not hold one.
-    (e.button === 0 && (spaceRef.current || tool === "Hand"));
+    (e.button === 0 && (spaceRef.current || tool === "Hand")) ||
+    fingerPans(e);
+
+  /** Whether a pen has touched this screen, this visit. */
+  const penSeenRef = useRef(false);
+  /** One finger moving the page rather than drawing on it: always, if
+   * asked; and by default once a pen has touched the screen — the pen
+   * draws and the hand moves the page, as in every drawing app on a
+   * tablet, so a finger resting on the glass never makes a mark. */
+  const fingerPans = (e: React.PointerEvent) =>
+    e.pointerType === "touch" &&
+    e.button === 0 &&
+    (prefs.finger === "pan" || (prefs.finger === "auto" && penSeenRef.current));
 
   /** Where a pointer is in the canvas's own coordinates — the space the
    * view's own offset is written in, which is what a pinch has to work
@@ -2921,6 +2933,7 @@ export function App() {
   const rejectPalm = (e: React.PointerEvent): boolean => {
     if (ignoredRef.current.has(e.pointerId)) return true;
     if (e.pointerType === "pen") {
+      penSeenRef.current = true;
       pensRef.current.add(e.pointerId);
       if (touchesRef.current.size > 0) {
         for (const id of touchesRef.current.keys()) {

@@ -35,7 +35,7 @@ import {
   type CommandId,
   type CommandKeys,
 } from "./commands";
-import { DEFAULTS, type ExportFormat, type Prefs, type Theme, type Units } from "./prefs";
+import { DEFAULTS, type ExportFormat, type FingerDoes, type Prefs, type Theme, type Units } from "./prefs";
 import {
   ALWAYS_SHOWN,
   KEYED_TOOLS,
@@ -332,6 +332,19 @@ export function PreferencesDialog({
                     <option value="light">Light</option>
                   </select>
                   <span className="hint">the windows and panels; the page is the page</span>
+                </label>
+                <label className="row">
+                  One finger
+                  <select
+                    value={prefs.finger}
+                    onChange={(e) => setPrefs({ finger: e.target.value as FingerDoes })}
+                    aria-label="One finger"
+                  >
+                    <option value="auto">Draws, until a pen is used</option>
+                    <option value="draw">Draws</option>
+                    <option value="pan">Moves the page</option>
+                  </select>
+                  <span className="hint">on a touch screen; two fingers always move it</span>
                 </label>
                 {num("Arrow key moves", prefs.nudge, (v) => setPrefs({ nudge: v }), {
                   min: 0.1,

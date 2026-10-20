@@ -27,6 +27,11 @@ export type Units = "px" | "mm" | "in";
 /** How the chrome is coloured: as the system says, or dark or light
  * whatever it says. */
 export type Theme = "system" | "dark" | "light";
+/** What one finger on the page does on a touch screen: draw, as a mouse
+ * does; move the page, as in a drawing app where the pen draws; or the
+ * second once a pen has touched the screen, which is how a tablet with
+ * a pen is used without being asked. */
+export type FingerDoes = "auto" | "draw" | "pan";
 /** What the align buttons line layers up with: each other, the frame or
  * page each sits in, or the key layer — the picked one wearing the
  * handles, which stays put. */
@@ -70,6 +75,9 @@ export type Prefs = {
   /** The chrome's colours: the system's choice, or one of the two
    * outright. The page is the page under either. */
   theme: Theme;
+  /** What one finger on the page does on a touch screen. About the
+   * hand and the device, so here. */
+  finger: FingerDoes;
   /** What the align buttons line layers up with. A way of working, so
    * it is remembered rather than asked each time. */
   alignTo: AlignTo;
@@ -162,6 +170,7 @@ export const withRecent = (recent: string[], path: string): string[] =>
 export const DEFAULTS: Prefs = {
   units: "px",
   theme: "system",
+  finger: "auto",
   alignTo: "selection",
   gpuFrames: false,
   grid: 0,
@@ -254,6 +263,7 @@ export function clamp(p: Prefs): Prefs {
         : "page",
     exportFormat: EXPORT_FORMATS.includes(p.exportFormat) ? p.exportFormat : "png",
     theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
+    finger: p.finger === "draw" || p.finger === "pan" ? p.finger : "auto",
     alignTo: p.alignTo === "page" || p.alignTo === "key" ? p.alignTo : "selection",
     grid: n(Math.round(p.grid), 0, 512, 0),
     snap: n(Math.round(p.snap), 0, 64, 6),

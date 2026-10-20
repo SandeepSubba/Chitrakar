@@ -3047,6 +3047,12 @@ without reading anything else.*
     72 tall, the width and softness are on screen inside it, and the
     palette's swatches are one row. 11e: the viewport asks the keyboard
     to resize the page.
+- **One finger, with a pen** (Phase 4): `prefs.finger` — auto (draws
+  until a pen is used, then moves the page), draw, or pan.
+  - **Tests:** smoke 11i on a 1024×768 touch page: a finger draws
+    before any pen; the pen draws; after it a finger draws nothing and
+    moves the page by exactly its drag; set to draw in Preferences it
+    draws again; a page opened with `finger: "pan"` never draws.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -10042,6 +10048,18 @@ chitrakar/
   390 screen, and put the width and the edge at the far end of its
   scroll, out of sight. In a row it is as tall as a tool (60), and
   picking a paint tool brings its width and edge into sight. Smoke 11h.
+- A finger that moves the page once a pen is in hand ✅. On a tablet
+  with a pen the pen draws and the hand moves the page — every drawing
+  app has taught it, and it is what makes a finger resting on the glass
+  harmless rather than a mark. By default one finger draws, as a mouse
+  does, until a pen has touched the screen, and moves the page from
+  then on; `prefs.finger` (Preferences › General › One finger) says
+  always draw or always move the page instead. Two fingers move it
+  whatever it says. A finger that moves the page is a pan like the
+  hand tool's, so taps still undo and a long press, which belongs to a
+  finger that draws, does not open the menu. Smoke 11i; 11b's palm
+  rejection now runs with fingers set to draw, which is where it
+  matters.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
