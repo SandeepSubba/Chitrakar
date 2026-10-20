@@ -3,8 +3,14 @@ fn main() {
     // the compiler knows the name is meant.
     println!("cargo::rustc-check-cfg=cfg(has_subject_matte)");
     tauri_build::build();
+    // A build script's own `cfg` is the machine it runs on, not the one
+    // the app is for: a Mac building for an iPhone would otherwise compile
+    // the Swift for macOS and hand it to the iOS link. What the app is
+    // for is in the environment cargo sets.
     #[cfg(target_os = "macos")]
-    build_subject_matte();
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_subject_matte();
+    }
 }
 
 /// Compile the Swift that asks the system for a subject's matte.

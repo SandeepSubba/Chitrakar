@@ -92,9 +92,18 @@ export type IconName =
   | "heal"
   | "selectNone"
   | "selectInverse"
-  | "feather";
+  | "feather"
+  | "menu";
 
 const PATHS: Record<IconName, JSX.Element> = {
+  // Three bars: the menus, folded into one drawer on a phone.
+  menu: (
+    <>
+      <path d="M4 7h16" />
+      <path d="M4 12h16" />
+      <path d="M4 17h16" />
+    </>
+  ),
   // A pipette: the barrel down to a tip, with the bulb at the top.
   eyedropper: (
     <>

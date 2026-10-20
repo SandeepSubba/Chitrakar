@@ -1746,6 +1746,9 @@ body {
      move. Text typed onto the canvas is still text. */
   user-select: none;
   -webkit-user-select: none;
+  /* A finger held still is the editor's long press, not Safari's
+     callout over an image. */
+  -webkit-touch-callout: none;
   flex: 1;
   position: relative;
   overflow: hidden;
@@ -1778,6 +1781,12 @@ body {
   padding: 0.6rem;
   background: var(--panel);
   border-left: 1px solid var(--border);
+  /* A layer's properties above the list are taller than a short window:
+     a tablet on its side, 768 high, put the list itself past the bottom
+     with nothing to scroll. The overlay below already scrolled; the
+     column beside the canvas does too now. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* A narrow window — a phone, a tablet held upright, a window dragged
@@ -1840,6 +1849,135 @@ body {
     overflow-y: auto;
     box-shadow: -12px 0 32px var(--shadow);
   }
+}
+
+/* A phone, upright or on its side: the menus are one button and a
+   drawer (MenuSheet), and the bar is one row — on a phone held on its
+   side two rows of bar were half the screen. What only informs goes;
+   the rulers go too, over a canvas a few hundred pixels across, where
+   every pixel they hold is picture that cannot be seen. */
+@media (max-width: 640px), (max-height: 500px) {
+  .topbar {
+    flex-wrap: nowrap;
+    height: auto;
+    min-height: 2.6rem;
+    gap: 0.15rem;
+  }
+
+  .topbar .doc-chip,
+  .topbar .brand,
+  .topbar .wide-only {
+    display: none;
+  }
+
+  /* The name gives way first: it is the window's title as well. */
+  .topbar .doc-name {
+    min-width: 0;
+    flex: 1 1 4rem;
+  }
+
+  .topbar .zoom-field input {
+    width: 3.2rem;
+  }
+
+  .ruler,
+  .ruler-corner {
+    display: none;
+  }
+}
+
+/* A phone on its side: the rail stays down the left, where a thumb
+   holding that edge is, and scrolls rather than running off the bottom
+   of a screen four hundred pixels tall. */
+@media (max-height: 500px) and (min-width: 641px) {
+  .toolbar,
+  .toolbar.floating {
+    position: static;
+    overflow-y: auto;
+    overflow-x: hidden;
+    max-height: 100%;
+  }
+
+  .toolbar > *,
+  .toolbar .tool-group {
+    flex: 0 0 auto;
+  }
+
+  /* Nothing to carry it off by: here it has one place to be. */
+  .toolbar .tool.grip {
+    display: none;
+  }
+}
+
+/* A key's chord beside a row is a promise a phone cannot keep: under a
+   finger the drawer says what each row does and nothing else. */
+@media (pointer: coarse) {
+  .menu-sheet .menu-item-hint {
+    display: none;
+  }
+}
+
+/* The menus' drawer: from the left, the height of the window, a section
+   a menu, each opening in place. */
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--scrim);
+}
+
+.menu-sheet {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(20rem, 86vw);
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  box-shadow: 12px 0 32px var(--shadow);
+  padding: max(0.5rem, env(safe-area-inset-top)) 0.4rem max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.sheet-menu-label {
+  display: block;
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: left;
+  padding: 0 0.75rem;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.sheet-menu.open .sheet-menu-label {
+  color: var(--accent);
+}
+
+.sheet-rows {
+  padding: 0 0 0.4rem 0.4rem;
+}
+
+.sheet-rows .menu-item {
+  width: 100%;
+  min-height: 2.6rem;
+}
+
+.sheet-sub > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.sheet-sub > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sheet-sub[open] > summary {
+  color: var(--accent);
 }
 
 /* A phone. The rail goes along the bottom, where the hand already is.
@@ -2951,4 +3089,109 @@ button.fold:hover {
   font-size: 0.74rem;
   line-height: 1.4;
   color: var(--muted);
+}
+
+/* The modifier keys a touch screen holds for you, at the canvas's
+   lower left, past the ruler. Small, since they sit over the picture,
+   but a finger's size to press. */
+.held-keys {
+  position: absolute;
+  left: 28px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+  touch-action: none;
+}
+
+.held-key {
+  min-width: 3.2rem;
+  height: 2.6rem;
+  padding: 0 0.6rem;
+  border-radius: 1.3rem;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.3);
+}
+
+.held-key.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text, #fff);
+}
+
+@media (max-width: 640px), (max-height: 500px) {
+  .held-keys {
+    left: 10px;
+    bottom: 10px;
+  }
+}
+
+/* A phone held upright: the layers come up from the bottom edge as a
+   sheet rather than across from the side, where they covered six tenths
+   of a 390-wide screen and the picture with it. Half the height, so the
+   page stays in sight above; pulled up by its grip, nearly all of it.
+   Held sideways the side overlay stays — there the width is what there
+   is to spare. */
+.sheet-grip {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .panel.overlay {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto !important;
+    max-width: none;
+    height: 56vh;
+    height: 56dvh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -12px 32px var(--shadow);
+    padding-top: 0;
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom));
+    transition: height 160ms ease;
+  }
+
+  .panel.overlay.tall {
+    height: 92vh;
+    height: 92dvh;
+  }
+
+  .panel.overlay .panel-edge {
+    display: none;
+  }
+
+  /* The grip: a bar to pull, a finger's height, kept at the top while
+     what is under it scrolls. */
+  .panel.overlay .sheet-grip {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 28px;
+    margin: 0 -0.6rem 4px;
+    background: var(--panel);
+    touch-action: none;
+    cursor: grab;
+  }
+
+  .panel.overlay .sheet-grip::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 11px;
+    width: 40px;
+    height: 5px;
+    margin-left: -20px;
+    border-radius: 3px;
+    background: var(--muted);
+    opacity: 0.6;
+  }
 }

@@ -92,7 +92,22 @@ a property over random strings and random edits, with emoji and accents
 in the alphabet on purpose. `app/e2e/measure.test.mjs` runs beside it the same way, over
 `src/measure.ts`: the distances the Move tool shows with alt held; and
 `app/e2e/findReplace.test.mjs` over `src/findReplace.ts` (Edit › Find
-and replace), bundled with the `runs.ts` it carries styling through.
+and replace), bundled with the `runs.ts` it carries styling through; and
+`app/e2e/touch.test.mjs` over `src/touch.ts`: two- and three-finger taps
+(undo, redo) and the Shift/Alt/Ctrl a touch screen holds on the canvas,
+which are worn onto every pointer event in the window's capture phase so
+no handler has to know they exist; and `app/e2e/files.test.mjs` over
+the naming in `src/files.ts`, which reads a file's name out of an
+Android `content://` address as well as a path — the shell opens and
+writes those through the fs plugin (`files::is_address`).
+
+On a phone (under 640 wide or 500 tall) the menus are a drawer behind
+one Menus button and the bar is one row (smoke 11a); the suite's
+`menuItem` goes through the drawer whenever there is no menubar. On a
+touch screen a long press opens the canvas's menu and a pen rejects the
+palm (smoke 11b). The shell compiles for Android and iOS (CI jobs
+`shell-android`, `shell-ios`); there is no `gen/android` or `gen/apple`
+yet.
 
 The Playwright smoke suite lives at `app/e2e/smoke.mjs` (~1400 pixel-level
 assertions driving the built app in headless Chromium; it has caught real

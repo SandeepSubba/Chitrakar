@@ -120,3 +120,93 @@ jobs:
         working-directory: app
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: shells/tauri/src-tauri
+
+  shell-android:
+    # The shell compiled for a phone: what a desktop build never asks of
+    # it — the dialog plugin's mobile half, the files handed over by
+    # RunEvent::Opened, the GPU mirror against Android's Vulkan. The
+    # runner's Android NDK supplies the C compiler the build scripts call.
+    name: Tauri shell (clippy, Android)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shells/tauri/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: app
+      - name: cargo clippy --target aarch64-linux-android
+        working-directory: shells/tauri/src-tauri
+        run: |
+          N="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$N/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$N/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$N/aarch64-linux-android24-clang"
+          cargo clippy --target aarch64-linux-android -- -D warnings
+
+  shell-ios:
+    # The same for an iPhone or an iPad, on the only machine that has
+    # the SDK: and a Mac building for iOS is where the build script's
+    # own platform and the app's differ, which the Swift subject matte
+    # has to tell apart.
+    name: Tauri shell (clippy, iOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install && rustup target add aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shells/tauri/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: app
+      - run: cargo clippy --target aarch64-apple-ios -- -D warnings
+        working-directory: shells/tauri/src-tauri
+
+  android-apk:
+    # An installable build for a phone, every time: the Android project
+    # is generated here, where the runner has the SDK and the NDK, rather
+    # than committed — `tauri android init` writes it from tauri.conf.json,
+    # so there is nothing in it to keep in step by hand. The APK is a
+    # debug one, signed with the throwaway debug key, kept as an
+    # artifact to download and install.
+    name: Android debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - run: rustup toolchain install && rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shells/tauri/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - name: Generate the Android project and build the APK
+        working-directory: shells/tauri/src-tauri
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          ../../../app/node_modules/.bin/tauri android init --ci --skip-targets-install
+          ../../../app/node_modules/.bin/tauri android build --ci --debug --apk --target aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chitrakar-android-debug
+          path: shells/tauri/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

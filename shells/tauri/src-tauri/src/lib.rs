@@ -65,9 +65,7 @@ async fn choose_to_open(
         panel = panel.add_filter(&f.name, &exts);
     }
     match panel.blocking_pick_file() {
-        Some(chosen) => {
-            files::path_to_string(chosen.into_path().map_err(|e| e.to_string())?).map(Some)
-        }
+        Some(chosen) => files::chosen(chosen).map(Some),
         None => Ok(None),
     }
 }
@@ -101,6 +99,11 @@ async fn choose_to_save(
         panel = panel.add_filter(&f.name, &exts);
     }
     match panel.blocking_save_file() {
+        // An address has the name the person gave it in the system's
+        // own panel, and no extension to put right.
+        Some(tauri_plugin_dialog::FilePath::Url(u)) if u.scheme() != "file" => {
+            Ok(Some(u.to_string()))
+        }
         Some(chosen) => {
             let path = chosen.into_path().map_err(|e| e.to_string())?;
             files::path_to_string(files::with_extension(path, &filters)).map(Some)
@@ -111,6 +114,7 @@ async fn choose_to_save(
 
 /// Ask for a folder, for an export that is more than one file: a panel
 /// per file is not a thing anybody wants to answer twelve times.
+#[cfg(desktop)]
 #[tauri::command]
 async fn choose_folder(app: tauri::AppHandle, title: String) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
@@ -122,11 +126,37 @@ async fn choose_folder(app: tauri::AppHandle, title: String) -> Result<Option<St
     }
 }
 
+/// A phone has no folder to pick, only files a picker hands over one at
+/// a time: a many-file export says so, rather than asking a question the
+/// system has no panel for.
+#[cfg(mobile)]
+#[tauri::command]
+async fn choose_folder(_app: tauri::AppHandle, _title: String) -> Result<Option<String>, String> {
+    Err("this device has no folders to choose: export one file at a time".into())
+}
+
 /// A file's bytes, as bytes: a document is megabytes, and a JSON array
 /// of numbers is several times that.
 #[tauri::command]
-async fn read_path(path: String) -> Result<tauri::ipc::Response, String> {
-    std::fs::read(&path)
+async fn read_path(app: tauri::AppHandle, path: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = if files::is_address(&path) {
+        use std::io::Read;
+        use tauri_plugin_fs::FsExt;
+        let mut how = tauri_plugin_fs::OpenOptions::new();
+        how.read(true);
+        let mut bytes = Vec::new();
+        app.fs()
+            .open(
+                path.parse::<tauri_plugin_fs::FilePath>()
+                    .map_err(|e| e.to_string())?,
+                how,
+            )
+            .and_then(|mut f| f.read_to_end(&mut bytes))
+            .map(|_| bytes)
+    } else {
+        std::fs::read(&path)
+    };
+    bytes
         .map(tauri::ipc::Response::new)
         .map_err(|e| format!("{path}: {e}"))
 }
@@ -134,7 +164,7 @@ async fn read_path(path: String) -> Result<tauri::ipc::Response, String> {
 /// Write the bytes in the body to the path in the `path` header, whole
 /// or not at all.
 #[tauri::command]
-async fn write_path(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+async fn write_path(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
         return Err("the file must be sent as bytes".into());
     };
@@ -144,6 +174,22 @@ async fn write_path(request: tauri::ipc::Request<'_>) -> Result<(), String> {
         .and_then(|h| h.to_str().ok())
         .ok_or("no path was given")?;
     let path = files::path_from_header(header)?;
+    // An address is written through the system, which has no file
+    // beside it to write first: it is written in place.
+    if let Some(address) = path.to_str().filter(|p| files::is_address(p)) {
+        use std::io::Write;
+        use tauri_plugin_fs::FsExt;
+        let mut how = tauri_plugin_fs::OpenOptions::new();
+        how.write(true).truncate(true).create(true);
+        let file: tauri_plugin_fs::FilePath = address
+            .parse()
+            .map_err(|e: std::convert::Infallible| e.to_string())?;
+        return app
+            .fs()
+            .open(file, how)
+            .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+            .map_err(|e| format!("{address}: {e}"));
+    }
     files::write_whole(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 

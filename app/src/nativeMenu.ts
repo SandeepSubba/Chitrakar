@@ -76,11 +76,22 @@ export function findEntry(
 /** Build the menu bar and hand it to the OS. `dispatch` is called with
  * the id of whatever was picked; the caller routes it to a handler that
  * is current, since this menu outlives the render that built it. */
+/** Whether the shell is on a phone or a tablet, where there is no
+ * system menu bar to hand the menus to: they stay in the window. An
+ * iPad asks for desktop pages and calls itself a Mac, so it is told
+ * apart by having a touch screen, which no Mac has. */
+export const onMobile = () => {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /android|iphone|ipad|ipod/i.test(ua) || (/macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+};
+
 export async function setNativeMenu(
   menus: MenuSpec[],
   dispatch: (id: string) => void,
   appName: string,
 ): Promise<void> {
+  if (onMobile()) throw new Error("no system menu bar on a phone or a tablet");
   const { Menu, MenuItem, PredefinedMenuItem, Submenu } = await import(
     "@tauri-apps/api/menu"
   );

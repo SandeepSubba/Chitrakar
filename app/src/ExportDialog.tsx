@@ -144,6 +144,7 @@ export function ExportDialog({
   keptRegions,
   keptComps,
   write,
+  share,
   onClose,
 }: {
   session: WasmSession;
@@ -168,6 +169,9 @@ export function ExportDialog({
   /** Write the files out, the way the platform writes them; false is a
    * panel cancelled, a failure throws. */
   write: (files: Outgoing[]) => Promise<boolean>;
+  /** Hand the files to the system's share sheet instead, where the
+   * device has one; absent where it does not. */
+  share?: (files: Outgoing[]) => Promise<boolean>;
   onClose: () => void;
 }) {
   const format = prefs.exportFormat;
@@ -441,7 +445,7 @@ export function ExportDialog({
       ? `${nameAt(scale, many[0])}${many.length > 1 ? `, and ${many.length - 1} more` : ""}`
       : nameAt(scale);
 
-  const run = useCallback(async () => {
+  const run = useCallback(async (via: "write" | "share" = "write") => {
     if (refusal) return;
     // Every scale asked for, and within each, every slice: the set
     // and the slices multiply rather than choosing between each
@@ -457,13 +461,13 @@ export function ExportDialog({
     try {
       // A panel put away leaves the window up, with what was in it:
       // nobody who cancels a save panel meant to start again.
-      if (await write(files)) onClose();
+      if (await (via === "share" && share ? share : write)(files)) onClose();
     } catch (err) {
       setFailed(String(err));
     }
     // `scales` and `nameAt` are made afresh each render from what the
     // dependencies below say.
-  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, write, onClose]);
+  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, write, share, onClose]);
 
   const runRef = useRef(run);
   runRef.current = run;
@@ -739,10 +743,21 @@ export function ExportDialog({
           <button className="mask-button" onClick={onClose}>
             Cancel
           </button>
+          {share && (
+            // The same bytes as Export, to the share sheet: on a phone
+            // that is where a picture goes next, and Save to Files is
+            // one of its answers.
+            <button className="mask-button" disabled={!!refusal} onClick={() => run("share")}>
+              Share…
+            </button>
+          )}
           <button
             className="mask-button primary"
             disabled={!!refusal}
-            onClick={run}
+            onClick={() => run()}
+            // Beside Share rather than pushed away from it: the two are
+            // the same question with two answers.
+            style={share ? { marginLeft: 0 } : undefined}
           >
             Export
           </button>

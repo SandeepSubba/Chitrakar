@@ -2978,6 +2978,50 @@ without reading anything else.*
       fixture's unlink first named a layer following nothing, which the
       audit that applies each command alone rightly called a command
       that proves nothing; it unlinks the layer following "warm" now.
+- **A phone's own bar** (Phase 4, the first of the mobile work): below
+  640 wide or 500 tall the menus are a drawer behind one Menus button,
+  the bar one row, the rulers gone, and the rail held sideways scrolls.
+  - **Tests:** smoke 11a at 390×844 and 844×390 with touch: no
+    menubar, a bar under 60 tall, no rulers; the drawer opens, Edit ›
+    Find and replace closes it and opens the dialog, the scrim closes
+    it; sideways, the rail scrolls and Zoom is reachable. 9s and 9u go
+    through the drawer below the menubar's sizes, and 9u finds the menu
+    that overflows rather than naming one.
+- **A hand on glass** (Phase 4): two- and three-finger taps undo and
+  redo, a long press opens the canvas's menu, a pen rejects the palm,
+  and a touch screen holds Shift, Alt and Ctrl on screen.
+  - **Tests:** `e2e/touch.test.mjs` (in `npm run test:unit`): taps
+    counted when the last finger lifts, staggered or not; spoiled by
+    travel, by slowness, by a cancelled finger; held keys worn on an
+    event (control off a Mac, command on one), latched by a tap and let
+    go by a hold. Smoke 11b on a 1024×768 touch page: no keys on the
+    mouse's page; two fingers undo a rect and three bring it back, while
+    a pinch and a hold change nothing; a long press opens the menu and
+    lifting draws nothing, a finger that moved on opens nothing; palm
+    then pen draws one rect and the pen's, a finger with the pen down
+    draws nothing, and with it lifted a finger draws again; Shift tapped
+    adds to the layers picked, tapped again picks one, held lets go
+    with the finger. Shift held on the screen with two layers picked
+    asks that the panel scrolls, which it did not.
+  - The shell: `cargo clippy --target aarch64-linux-android -- -D
+    warnings` clean against NDK r27c; CI jobs `shell-android` and
+    `shell-ios` keep it so.
+- **Share, and Android's addresses** (Phase 4): Share… in the export
+  window where the device can; the shell opens and writes `content://`.
+  - **Tests:** smoke 11c with the sheet stood in for: no Share without
+    one; one PNG shared and the window closed; put away, the window
+    stays; the set is three files in one sheet, @1x @2x @3x; a PDF the
+    sheet will not take is refused, saying so. `e2e/files.test.mjs`:
+    names and folders of paths, Windows paths and content addresses,
+    encoded, numbered and not encoded at all. Shell:
+    `a_content_address_is_kept_as_it_came_and_a_path_is_a_path`.
+- **The layers as a sheet** (Phase 4): below 640 wide the panel is a
+  bottom sheet, half or nearly all of the screen, moved by its grip.
+  - **Tests:** smoke 11d at 390×844 with touch: the sheet's bottom is
+    the screen's and its width the screen's, its top near the middle;
+    pulled up it is tall, down it is half, a short pull leaves it, a tap
+    toggles, pulled down from half it goes and the bar's button says so;
+    at 844×390 the side overlay, no grip.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -9852,12 +9896,95 @@ chitrakar/
   its own scrollbar, with the row that answers it kept against its
   bottom so what closes it is where it always is rather than down the end
   of a list of fields.
+- A phone's own bar ✅: on a phone — under 640 wide, or under 500 tall,
+  which is a phone held sideways and not a window anyone drags that
+  small — the menubar's eight labels became one Menus button that opens
+  the menus as a drawer from the left edge: each menu a row a thumb can
+  hit, opened in place, its sub-menus folding open under it, and the
+  shortcut hints left off under a coarse pointer since there is no
+  keyboard to press them on. The bar is one row again, keeping the
+  document's name, the zoom, undo and the layers; the rulers go, since
+  forty pixels of width and of height is a lot of a phone to give to
+  numbers nobody aims by with a thumb. Held sideways, the rail down the
+  left had sixteen tools in 339 pixels and no way to the last six —
+  Zoom among them; it scrolls now. Smoke 11a holds it upright and
+  sideways on a touch page; 9s and 9u, which opened New document and the
+  long menus through the menubar on a small window, open them through
+  the drawer where there is no menubar.
+- A hand on glass ✅ — what a mouse has words for and a finger did not.
+  Two fingers tapped is undo and three is redo, the gesture every
+  drawing app on a tablet has taught; a tap is every finger down and up
+  within 350ms with none travelling more than twelve pixels, so a pinch
+  and a hold stay what they were. A finger held still on the page for
+  450ms opens the canvas's menu, the one a right-click opens, and picks
+  what it is held on first; whatever the finger had begun is let go of,
+  and it is ignored until it lifts, so lifting it draws nothing — not
+  while painting or placing a path's anchors, where holding still is the
+  work. Android calls the same press a context menu a little later, and
+  the two are one. A pen landing takes the page from the palm that
+  usually gets there first, and lets go of what the palm began; a finger
+  landing while a pen is down is not heard at all. And a touch screen
+  has Shift, Alt and Ctrl of its own at the canvas's corner: tapped, a
+  key stays down until tapped again; held while the other hand works, it
+  lets go with the finger. It is one listener in the window's capture
+  phase that makes every pointer event *say* the key is down, ahead of
+  every handler, so the canvas, the handles and the layer list's
+  shift-click all answer to it without one of them knowing it is there.
+  `src/touch.ts` holds the bookkeeping, unit-tested without a browser;
+  smoke 11b drives all of it on a tablet's page. Inside the shell on a
+  phone or a tablet the menus stay in the window rather than being
+  handed to a system menu bar there is none of. Writing the test for the
+  on-screen Shift turned up a defect on any short window: the layers
+  panel did not scroll, so with a layer's properties open above it the
+  list itself was past the bottom of a 768-high screen — a tablet on its
+  side — and could not be reached. It scrolls now.
+- The shell compiles for a phone ✅ (`cargo clippy --target
+  aarch64-linux-android`, run here against the NDK, and the iOS one on
+  the Mac runner; both are CI jobs now). It found two things a desktop
+  build never asks: the dialog plugin has no folder picker on mobile, so
+  a many-file export says the device has no folders rather than failing
+  to build; and the build script read `cfg(target_os)` — which in a build
+  script is the machine building, not the one built for — so a Mac
+  building for an iPhone would have compiled the Vision Swift for macOS
+  into the iOS link. It reads `CARGO_CFG_TARGET_OS` now. An installable
+  Android build ✅: CI's `android-apk` job runs `tauri android init`
+  where the runner has the SDK and builds a debug APK for arm64, kept as
+  an artifact — the Android project is generated from tauri.conf.json
+  each time rather than committed, so it has nothing in it to keep in
+  step by hand. Still to do: a signed release build, which wants a key;
+  and iOS past compiling, which wants a Mac with Xcode and a team to
+  sign for.
+- The layers as a sheet ✅: on a phone held upright the panel came
+  across from the side and covered six tenths of a 390-wide screen, the
+  picture with it. It comes up from the bottom edge now, half the
+  height, so the page stays in sight above what is being changed about
+  it; its grip, pulled up, takes it to nearly all of the screen, and
+  pulled down lowers it a step at a time — tall to half, half to away —
+  while a tap toggles between the two heights and a pull too short to
+  mean it does nothing. Held sideways it is the side overlay still,
+  since there the width is what is spare. Smoke 11d.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
   (two fingers pinch to zoom and carry the page, and take the gesture
   over from the one that began it).
 - Platform file integration (Files app, Android SAF, share sheets).
+  Share sheets ✅: where the device has one, the export window has a
+  Share… beside Export — the same bytes, handed to the system, which on a
+  phone is where a picture goes next and Save to Files is one of its
+  answers. The set goes as three files in one sheet; a sheet put away
+  leaves the window up, as a cancelled save panel does; a format the
+  sheet will not take (a PDF, on a sheet that takes pictures) is said
+  rather than swallowed. And the phone shell, asked for several files
+  with no folders to choose, shares them. Android's own storage ✅ in
+  the shell: its picker hands over `content://` addresses, not paths,
+  which the shell had been refusing ("not a file path"). They are kept
+  as they came and opened, read and written through the fs plugin, which
+  asks the system; written in place, since there is no file beside one
+  to write first. The page names them from the path encoded in their
+  last segment, so a document opened from Downloads is called by its
+  name. `e2e/files.test.mjs` holds the naming, the shell's own test the
+  address against the path; smoke 11c the share.
 
 ### Phase 5 — Depth (ongoing)
 - Pen tool + full path editing; boolean operations on shapes ✅. The pen

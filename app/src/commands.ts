@@ -106,7 +106,7 @@ export function chordLabel(chord: string, mac = onAMac()): string {
   return [...parts.map((p) => named[p] ?? p), key.toUpperCase()].join("+");
 }
 
-function onAMac(): boolean {
+export function onAMac(): boolean {
   if (typeof navigator === "undefined") return false;
   return /mac|iphone|ipad/i.test(navigator.platform || navigator.userAgent || "");
 }

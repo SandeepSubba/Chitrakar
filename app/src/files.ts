@@ -8,7 +8,7 @@
  * are in `shells/tauri/src-tauri/src/lib.rs`.
  */
 
-import { isTauri } from "./nativeMenu";
+import { isTauri, onMobile } from "./nativeMenu";
 
 /** One line of a panel's "files of type" list. */
 export type Filter = { name: string; extensions: string[] };
@@ -37,13 +37,31 @@ export function filtersFor(name: string): Filter[] {
 
 export const DOCUMENTS: Filter[] = [KINDS.chitra];
 
+/** A path's parts, folders first. An address the system gave rather
+ * than a path — Android's `content://…/document/primary%3ADownload%2Fa.png`
+ * — carries its path encoded in its last segment, after the volume's
+ * name and a colon, so that is where the parts are read from. */
+const partsOf = (path: string): string[] => {
+  if (/^[a-z][a-z0-9+.-]+:\/\//i.test(path) && !/^file:/i.test(path)) {
+    const last = path.split("/").filter(Boolean).pop() ?? path;
+    let inner = last;
+    try {
+      inner = decodeURIComponent(last);
+    } catch {
+      // Not encoded after all: read as it is.
+    }
+    return inner.replace(/^[^:/]*:/, "").split("/").filter(Boolean);
+  }
+  return path.split(/[\\/]/).filter(Boolean);
+};
+
 /** A path's last part: what a person calls the file. */
-export const baseName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+export const baseName = (path: string) => partsOf(path).pop() ?? path;
 
 /** The folder a path is in, by its own last part — enough to tell two
  * files of the same name apart on a menu. */
 export const folderName = (path: string) => {
-  const parts = path.split(/[\\/]/).filter(Boolean);
+  const parts = partsOf(path);
   return parts.length > 1 ? parts[parts.length - 2] : "";
 };
 
@@ -106,6 +124,10 @@ export async function writeFiles(
     await writePath(path, f.make());
     return true;
   }
+  // A phone has no folders to choose. Where it can share, the files go
+  // to its share sheet together — Save to Files is one of the answers
+  // there — rather than to a question it has no panel for.
+  if (onMobile() && canShareFiles()) return shareFiles(title, files);
   const folder = await call<string | null>("choose_folder", { title });
   if (!folder) return false;
   const paths = await Promise.all(
@@ -161,4 +183,38 @@ export function imageType(name: string): string | null {
     bmp: "image/bmp",
   };
   return types[ext] ?? null;
+}
+
+/** Whether this device can hand files to its share sheet — a phone, a
+ * tablet, Safari, Chrome on Windows. Asked of a one-pixel PNG, since a
+ * device that shares any file shares a picture. */
+export function canShareFiles(): boolean {
+  try {
+    return (
+      typeof navigator !== "undefined" &&
+      typeof navigator.canShare === "function" &&
+      navigator.canShare({ files: [new File([new Uint8Array(1)], "probe.png", { type: "image/png" })] })
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Hand files to the system's share sheet: where they go then is the
+ * person's to say — Files, a message, another app, AirDrop. Answers
+ * whether they went; false is the sheet put away. A format the sheet
+ * will not take is said, naming it. */
+export async function shareFiles(title: string, files: Outgoing[]): Promise<boolean> {
+  const made = files.map((f) => new File([f.make() as BlobPart], f.name, { type: f.type }));
+  if (!navigator.canShare?.({ files: made })) {
+    const kinds = [...new Set(made.map((f) => f.type || "unknown"))].join(", ");
+    throw new Error(`this device cannot share ${made.length === 1 ? "this kind of file" : "these files"} (${kinds})`);
+  }
+  try {
+    await navigator.share({ files: made, title });
+    return true;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "AbortError") return false;
+    throw err;
+  }
 }

@@ -81,6 +81,35 @@ pub fn path_to_string(path: PathBuf) -> Result<String, String> {
         .map_err(|p| format!("{} cannot be named here", p.to_string_lossy()))
 }
 
+/// What the page calls a file a panel chose: its path where it has one,
+/// and otherwise the address the system gave for it. Android's picker
+/// hands over `content://` addresses — a file in Drive, in Downloads,
+/// in another app's keeping — which are not paths and never become
+/// one; only the system can open them, so they are kept as they came
+/// and opened through it ([`is_address`]).
+pub fn chosen(file: tauri_plugin_fs::FilePath) -> Result<String, String> {
+    use tauri_plugin_fs::FilePath;
+    match file {
+        FilePath::Path(p) => path_to_string(p),
+        FilePath::Url(u) if u.scheme() == "file" => u
+            .to_file_path()
+            .map_err(|()| format!("{u} is not a file on this device"))
+            .and_then(path_to_string),
+        FilePath::Url(u) => Ok(u.to_string()),
+    }
+}
+
+/// Whether what the page calls a file is an address only the system can
+/// open (see [`chosen`]) rather than a path. A Windows drive letter reads
+/// as a one-letter scheme and is a path; so is a `file:` address.
+pub fn is_address(name: &str) -> bool {
+    use std::str::FromStr;
+    matches!(
+        tauri_plugin_fs::FilePath::from_str(name),
+        Ok(tauri_plugin_fs::FilePath::Url(u)) if u.scheme() != "file"
+    )
+}
+
 /// The file name a save panel should offer, with the extension the
 /// first filter wants if the name has none of its own. Some panels add
 /// it and some do not; this way they all start from the same name.
@@ -131,6 +160,30 @@ fn has_extension(name: &str, ext: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_content_address_is_kept_as_it_came_and_a_path_is_a_path() {
+        use std::str::FromStr;
+        use tauri_plugin_fs::FilePath;
+        let content = "content://com.android.providers.downloads.documents/document/msf%3A1000";
+        let chosen_content = chosen(FilePath::from_str(content).unwrap()).unwrap();
+        assert_eq!(chosen_content, content);
+        assert!(is_address(&chosen_content));
+
+        let path = chosen(FilePath::Path(PathBuf::from("/tmp/a b.png"))).unwrap();
+        assert_eq!(path, "/tmp/a b.png");
+        assert!(!is_address(&path));
+
+        // A file: address is a path by another name.
+        let file = chosen(FilePath::from_str("file:///tmp/a%20b.png").unwrap()).unwrap();
+        assert_eq!(file, "/tmp/a b.png");
+        assert!(!is_address(&file));
+
+        // A drive letter is not a scheme.
+        assert!(!is_address("C:\\Users\\me\\a.chitra"));
+        assert!(!is_address("relative/a.png"));
+    }
+
     use super::*;
 
     fn png() -> Vec<Filter> {

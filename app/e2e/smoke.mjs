@@ -249,6 +249,20 @@ process.on("unhandledRejection", bail);
  * menu first. Returns the item's locator without clicking, since some steps
  * need to race the click against a download. */
 const menuItem = async (menu, item) => {
+  // On a phone-sized window there is no row of labels: the menus are a
+  // drawer behind one button, each menu a section opened in place.
+  if ((await page.locator("nav.menubar").count()) === 0) {
+    await page.click('button[aria-label="Menus"]');
+    await page.waitForTimeout(120);
+    await page.click(`.menu-sheet .sheet-menu-label:text-is("${menu}")`);
+    await page.waitForTimeout(120);
+    await page.evaluate(() => {
+      for (const d of document.querySelectorAll(".menu-sheet .sheet-sub")) d.open = true;
+    });
+    const row = page.locator(".menu-sheet .sheet-menu.open button.menu-item", { hasText: item }).first();
+    await row.scrollIntoViewIfNeeded();
+    return row;
+  }
   await page.click(`.menu-label:text-is("${menu}")`);
   await page.waitForTimeout(120);
   const direct = page.locator(".menu-pop:not(.sub) > .menu-item", { hasText: item });
@@ -9951,9 +9965,12 @@ assert(
 {
   await page.setViewportSize({ width: 740, height: 320 });
   await page.waitForTimeout(400);
-  await page.locator('.menubar button:has-text("File")').first().click();
+  // A phone on its side: the menus are a drawer here (11a).
+  await page.click('button[aria-label="Menus"]');
   await page.waitForTimeout(200);
-  await page.locator('.menu-pop button:has-text("New document")').first().click();
+  await page.click('.sheet-menu-label:has-text("File")');
+  await page.waitForTimeout(150);
+  await page.locator('.menu-sheet .menu-item:has-text("New document")').first().click();
   await page.waitForTimeout(350);
   const modal = page.locator(".modal");
   const modalBox = await modal.boundingBox();
@@ -9997,8 +10014,13 @@ assert(
 // to scroll. And a popup is fifteen rem wide, which a narrow window has
 // no room for under a label near the right of the bar — View hung three
 // pixels off the edge at a phone's width.
+//
+// A phone is a drawer now (11a), so the short window this asks of is one
+// that is not a phone: a laptop's window dragged short and narrow, still
+// too short for Edit and narrower than the line where menus open from
+// the bar's left edge. And the drawer is asked the same question below.
 {
-  await page.setViewportSize({ width: 740, height: 320 });
+  await page.setViewportSize({ width: 760, height: 520 });
   await page.waitForTimeout(400);
   const labels = await page.locator(".menubar button").allTextContents();
   assert(labels.length >= 4, `there are menus to open (${labels.join(",")})`);
@@ -10020,14 +10042,22 @@ assert(
     await page.waitForTimeout(120);
   }
   // And the reading that says a menu which had to scroll is still usable:
-  // the last item of the longest one, scrolled to and pressable.
-  await page.locator('.menubar button:has-text("Edit")').first().click();
-  await page.waitForTimeout(200);
+  // the last item of one that had to, scrolled to and pressable. Which
+  // menu is longest changes as menus are trimmed and filled, so it is
+  // found rather than named.
+  let tall = null;
+  for (const label of labels) {
+    await page.locator(`.menubar button:has-text("${label}")`).first().click();
+    await page.waitForTimeout(150);
+    if (await page.locator(".menu-pop").evaluate((m) => m.scrollHeight > m.clientHeight + 1)) {
+      tall = label;
+      break;
+    }
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(100);
+  }
+  assert(tall !== null, "a menu has more in it than fits, and knows it");
   const pop = page.locator(".menu-pop");
-  assert(
-    await pop.evaluate((m) => m.scrollHeight > m.clientHeight + 1),
-    "Edit has more in it than fits, and knows it",
-  );
   const lastItem = pop.locator("button").last();
   await lastItem.scrollIntoViewIfNeeded();
   await page.waitForTimeout(200);
@@ -10039,6 +10069,34 @@ assert(
       return b.contains(at);
     }),
     "and its last item can be scrolled to and pressed",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  // On a phone on its side the drawer is what has to scroll: Edit's last
+  // row, scrolled to and pressable.
+  await page.setViewportSize({ width: 740, height: 320 });
+  await page.waitForTimeout(400);
+  await page.click('button[aria-label="Menus"]');
+  await page.waitForTimeout(200);
+  await page.click('.sheet-menu-label:has-text("Edit")');
+  await page.waitForTimeout(150);
+  const drawer = page.locator(".menu-sheet");
+  assert(
+    await drawer.evaluate((m) => m.scrollHeight > m.clientHeight + 1),
+    "the drawer has more in it than fits, and knows it",
+  );
+  const lastRow = drawer.locator(".sheet-menu.open .menu-item").last();
+  await lastRow.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(150);
+  assert(
+    await lastRow.evaluate((b) => {
+      const r = b.getBoundingClientRect();
+      if (r.top < 0 || r.bottom > window.innerHeight) return false;
+      const at = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return b.contains(at);
+    }),
+    "and Edit's last row can be scrolled to and pressed",
   );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
@@ -13307,6 +13365,457 @@ assert(
     "and it sits on the corner it moves, not beside it",
   );
   await touch.close();
+}
+
+// 11a. A phone: the menus are one button and a drawer, the bar is one
+// row, and the rulers are put away — upright and on its side. A row in
+// the drawer does its work and puts the drawer away; on its side the
+// rail scrolls rather than running off the screen.
+{
+  for (const [w, h] of [
+    [390, 844],
+    [844, 390],
+  ]) {
+    const phone = await browser.newContext({
+      viewport: { width: w, height: h },
+      hasTouch: true,
+      isMobile: true,
+    });
+    const pp = await phone.newPage();
+    await pp.goto("http://localhost:8123/");
+    await pp.waitForSelector("#engine-canvas");
+    await pp.waitForTimeout(800);
+    const at = `${w}×${h}`;
+    assert((await pp.locator("nav.menubar").count()) === 0, `${at}: no row of menu labels`);
+    const bar = await pp.locator("header.topbar").boundingBox();
+    assert(bar.height <= 60, `${at}: the bar is one row (${bar.height.toFixed(0)}px)`);
+    assert(!(await pp.locator(".ruler-top").isVisible()), `${at}: the rulers are put away`);
+    await pp.tap('button[aria-label="Menus"]');
+    await pp.waitForTimeout(200);
+    const sheet = pp.locator('[role="dialog"][aria-label="Menus"]');
+    assert(await sheet.isVisible(), `${at}: the drawer opens`);
+    await pp.tap('.sheet-menu-label:has-text("Edit")');
+    await pp.waitForTimeout(150);
+    const row = sheet.locator('.menu-item:has-text("Find and replace")');
+    await row.scrollIntoViewIfNeeded();
+    await row.tap();
+    await pp.waitForTimeout(250);
+    assert(!(await sheet.isVisible()), `${at}: a row pressed puts the drawer away`);
+    assert(
+      await pp.locator('[role="dialog"][aria-label="Find and replace"]').isVisible(),
+      `${at}: and does its work`,
+    );
+    await pp.keyboard.press("Escape");
+    // The scrim puts it away too.
+    await pp.tap('button[aria-label="Menus"]');
+    await pp.waitForTimeout(150);
+    await pp.mouse.click(w - 8, h / 2);
+    await pp.waitForTimeout(150);
+    assert(!(await sheet.isVisible()), `${at}: so does the scrim`);
+    if (h < w) {
+      const rail = await pp.locator(".toolbar").evaluate((t) => ({
+        scrolls: t.scrollHeight > t.clientHeight && getComputedStyle(t).overflowY === "auto",
+      }));
+      assert(rail.scrolls, `${at}: the rail scrolls rather than running off the screen`);
+      const zoom = pp.locator('.toolbar button[aria-label="Zoom"]');
+      await zoom.scrollIntoViewIfNeeded();
+      const box = await zoom.boundingBox();
+      assert(box && box.y + box.height <= h, `${at}: and its last tool can be reached`);
+    }
+    await phone.close();
+  }
+}
+
+// 11b. A hand on glass: two fingers tapped undo and three redo, a
+// finger held still asks for the canvas's menu, a pen landing takes the
+// page from the palm that got there first, and the screen holds shift
+// for a hand that has no keyboard. On a tablet's own page, since whether
+// a pointer is coarse is decided when the context is made.
+{
+  assert(
+    (await page.locator(".held-keys").count()) === 0,
+    "a mouse's page offers no keys of its own: it has a keyboard",
+  );
+  const tablet = await browser.newContext({
+    viewport: { width: 1024, height: 768 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const tp = await tablet.newPage();
+  await tp.goto("http://localhost:8123/");
+  await tp.waitForSelector("#engine-canvas");
+  await tp.waitForTimeout(800);
+  // Synthetic pointers have no capture to take; the real ones do.
+  await tp.evaluate(() => {
+    Element.prototype.setPointerCapture = () => {};
+    Element.prototype.releasePointerCapture = () => {};
+  });
+  const point = (type, id, kind, x, y) =>
+    tp.evaluate(
+      ([type, id, kind, x, y]) => {
+        document.getElementById("engine-canvas").dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            pointerId: id,
+            pointerType: kind,
+            isPrimary: true,
+            pressure: type === "pointerup" ? 0 : 0.5,
+            buttons: type === "pointerup" ? 0 : 1,
+            clientX: x,
+            clientY: y,
+          }),
+        );
+      },
+      [type, id, kind, x, y],
+    );
+  const finger = (type, id, x, y) => point(type, id, "touch", x, y);
+  const rows = () => tp.locator(".panel ul li .layer-name").count();
+  const pickRect = async () => {
+    const direct = tp.locator('.toolbar button[aria-label="Rect"]');
+    await direct.first().click();
+    await tp.waitForTimeout(80);
+  };
+  const box = await tp.locator("#engine-page").boundingBox();
+  const at = (fx, fy) => [box.x + fx * box.width, box.y + fy * box.height];
+
+  assert(await tp.locator(".held-keys").isVisible(), "a touch screen offers shift, alt and control");
+
+  // Two rects drawn the ordinary way.
+  await pickRect();
+  for (const [a, b] of [
+    [at(0.1, 0.1), at(0.3, 0.3)],
+    [at(0.5, 0.5), at(0.7, 0.7)],
+  ]) {
+    await tp.mouse.move(...a);
+    await tp.mouse.down();
+    await tp.mouse.move(...b, { steps: 4 });
+    await tp.mouse.up();
+    await tp.waitForTimeout(200);
+  }
+  const drawn = await rows();
+  assert(drawn >= 2, `two rects to undo (${drawn} rows)`);
+
+  // Two fingers tapped: one step back.
+  const [mx, my] = at(0.85, 0.2);
+  await finger("pointerdown", 11, mx, my);
+  await finger("pointerdown", 12, mx + 60, my);
+  await finger("pointerup", 11, mx, my);
+  await finger("pointerup", 12, mx + 60, my);
+  await tp.waitForTimeout(250);
+  assert((await rows()) === drawn - 1, `two fingers tapped undid the last rect (${await rows()})`);
+  // Three: the step comes back.
+  await finger("pointerdown", 13, mx, my);
+  await finger("pointerdown", 14, mx + 40, my);
+  await finger("pointerdown", 15, mx + 80, my);
+  await finger("pointerup", 14, mx + 40, my);
+  await finger("pointerup", 13, mx, my);
+  await finger("pointerup", 15, mx + 80, my);
+  await tp.waitForTimeout(250);
+  assert((await rows()) === drawn, `three fingers tapped redid it (${await rows()})`);
+  // Two fingers that travel are a pinch, and held are a hold: neither
+  // undoes anything.
+  await finger("pointerdown", 16, mx, my);
+  await finger("pointerdown", 17, mx + 60, my);
+  await finger("pointermove", 17, mx + 120, my);
+  await finger("pointerup", 16, mx, my);
+  await finger("pointerup", 17, mx + 120, my);
+  await tp.waitForTimeout(150);
+  await finger("pointerdown", 18, mx, my);
+  await finger("pointerdown", 19, mx + 60, my);
+  await tp.waitForTimeout(500);
+  await finger("pointerup", 18, mx, my);
+  await finger("pointerup", 19, mx + 60, my);
+  await tp.waitForTimeout(250);
+  assert((await rows()) === drawn, `a pinch and a hold undo nothing (${await rows()})`);
+  await tp.keyboard.press("Control+0");
+  await tp.waitForTimeout(200);
+
+  // A finger held still on the page asks for its menu, and picks what it
+  // is held on, as a right-click does; lifting it draws nothing.
+  const box2 = await tp.locator("#engine-page").boundingBox();
+  const at2 = (fx, fy) => [box2.x + fx * box2.width, box2.y + fy * box2.height];
+  const [lx, ly] = at2(0.2, 0.2);
+  const before = await rows();
+  await finger("pointerdown", 21, lx, ly);
+  await tp.waitForTimeout(700);
+  assert(await tp.locator(".context-menu").isVisible(), "a finger held still opens the canvas's menu");
+  await finger("pointermove", 21, lx + 80, ly + 80);
+  await finger("pointerup", 21, lx + 80, ly + 80);
+  await tp.waitForTimeout(200);
+  assert((await rows()) === before, `and lifting it drew nothing (${await rows()})`);
+  assert(await tp.locator(".context-menu").isVisible(), "and the menu stays to be chosen from");
+  await tp.keyboard.press("Escape");
+  await tp.waitForTimeout(100);
+  // A finger that moves on is drawing, not asking.
+  await finger("pointerdown", 22, lx, ly);
+  await finger("pointermove", 22, lx + 40, ly + 40);
+  await tp.waitForTimeout(700);
+  assert(!(await tp.locator(".context-menu").isVisible()), "a finger that moved on opens nothing");
+  await finger("pointerup", 22, lx + 40, ly + 40);
+  await tp.waitForTimeout(200);
+  if ((await rows()) > before) {
+    await tp.keyboard.press("Control+z");
+    await tp.waitForTimeout(150);
+  }
+
+  // The palm lands first, then the pen: the pen draws, the palm does
+  // not, and a finger landing while the pen is down is not heard.
+  const start = await rows();
+  const [px, py] = at2(0.6, 0.15);
+  await finger("pointerdown", 31, px, py);
+  await finger("pointermove", 31, px + 30, py + 30);
+  await point("pointerdown", 2, "pen", px + 100, py);
+  await finger("pointerdown", 32, px + 10, py + 100);
+  await finger("pointermove", 32, px + 60, py + 160);
+  await finger("pointermove", 31, px + 50, py + 60);
+  await point("pointermove", 2, "pen", px + 160, py + 60);
+  await finger("pointerup", 32, px + 60, py + 160);
+  await finger("pointerup", 31, px + 50, py + 60);
+  await point("pointerup", 2, "pen", px + 160, py + 60);
+  await tp.waitForTimeout(300);
+  assert((await rows()) === start + 1, `the pen drew one rect and the palm none (${(await rows()) - start})`);
+  // Where on the screen paint is: the pen's rect is drawn, and where
+  // the palm dragged is the bare page still.
+  const screenPixel = (x, y) =>
+    tp.evaluate(
+      ([x, y]) => {
+        const c = document.getElementById("engine-canvas");
+        const r = c.getBoundingClientRect();
+        const k = c.width / r.width;
+        return Array.from(
+          c.getContext("2d").getImageData(Math.round((x - r.left) * k), Math.round((y - r.top) * k), 1, 1).data,
+        );
+      },
+      [x, y],
+    );
+  const bare = await screenPixel(px + 25, py + 120 + 200);
+  const same = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 4);
+  assert(!same(await screenPixel(px + 130, py + 30), bare), "the rect is where the pen drew it");
+  assert(same(await screenPixel(px + 25, py + 30), bare), "and none where the palm dragged");
+  // With the pen lifted, a finger draws again.
+  await finger("pointerdown", 33, px, py + 200);
+  await finger("pointermove", 33, px + 60, py + 260);
+  await finger("pointerup", 33, px + 60, py + 260);
+  await tp.waitForTimeout(300);
+  assert((await rows()) === start + 2, "with the pen lifted, a finger draws again");
+
+  // Shift held on the screen: a tap keeps it down, a second lets it go,
+  // and while it is down the layer list adds to what is picked.
+  const shift = tp.locator('button[aria-label="Hold Shift"]');
+  const names = tp.locator(".panel ul li .layer-name");
+  await names.nth(2).click();
+  await shift.tap();
+  await tp.waitForTimeout(100);
+  assert((await shift.getAttribute("aria-pressed")) === "true", "a tap keeps shift down");
+  await names.nth(0).click();
+  await tp.waitForTimeout(150);
+  const picked = await tp.locator(".panel ul li.selected, .panel ul li.multi").count();
+  assert(picked === 2, `shift held on the screen adds to what is picked (${picked})`);
+  await shift.tap();
+  await tp.waitForTimeout(100);
+  assert((await shift.getAttribute("aria-pressed")) === "false", "a second tap lets it go");
+  // With two layers picked their shared properties stand above the
+  // list, and on a screen 768 high the list was past the bottom with no
+  // way to it: the panel scrolls now, and the row can be got to.
+  const panelScrolls = await tp
+    .locator(".panel")
+    .evaluate((p) => p.scrollHeight <= p.clientHeight || getComputedStyle(p).overflowY === "auto");
+  assert(panelScrolls, "a panel taller than the screen scrolls");
+  await names.nth(1).click();
+  await tp.waitForTimeout(150);
+  const one = await tp.locator(".panel ul li.selected, .panel ul li.multi").count();
+  assert(one === 1, `and let go, a click picks one again (${one})`);
+  // Held through a press rather than tapped, it lets go with the finger.
+  const key = await shift.boundingBox();
+  const press = (type) =>
+    tp.evaluate(
+      ([type, x, y]) => {
+        document.querySelector('button[aria-label="Hold Shift"]').dispatchEvent(
+          new PointerEvent(type, { bubbles: true, pointerId: 41, pointerType: "touch", clientX: x, clientY: y }),
+        );
+      },
+      [type, key.x + key.width / 2, key.y + key.height / 2],
+    );
+  await press("pointerdown");
+  await tp.waitForTimeout(100);
+  assert((await shift.getAttribute("aria-pressed")) === "true", "held, shift is down");
+  await tp.waitForTimeout(500);
+  await press("pointerup");
+  await tp.waitForTimeout(100);
+  assert((await shift.getAttribute("aria-pressed")) === "false", "and let go with the finger");
+  // A press on a key is not a finger on the page: it begins no pinch.
+  assert(!(await tp.locator(".context-menu").isVisible()), "a key held opens no menu");
+  await tablet.close();
+}
+
+// 11c. Where the device has a share sheet, the export window offers it:
+// the same bytes Export writes, handed to the system — which on a phone
+// is where a picture goes next, Save to Files among its answers. The
+// sheet is stood in for, since this browser has none; one put away
+// leaves the window up, as a save panel cancelled does.
+{
+  await newDocument(200, 100, "rgb");
+  const exportWindow = '[role=dialog][aria-label="Export"]';
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector(exportWindow);
+  assert(
+    (await page.locator(`${exportWindow} button:text-is("Share…")`).count()) === 0,
+    "with no share sheet there is no Share",
+  );
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    window.__shared = [];
+    window.__shareAnswer = "ok";
+    navigator.canShare = (d) => Array.isArray(d?.files) && d.files.every((f) => f.type.startsWith("image/"));
+    navigator.share = async (d) => {
+      if (window.__shareAnswer === "abort") throw new DOMException("put away", "AbortError");
+      const files = await Promise.all(
+        d.files.map(async (f) => {
+          const b = new Uint8Array(await f.arrayBuffer());
+          return { name: f.name, type: f.type, size: f.size, png: b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 };
+        }),
+      );
+      window.__shared.push(files);
+    };
+  });
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector(exportWindow);
+  await page.click('.export-formats .preset:text-is("PNG")');
+  // The window remembers what it was last used for; the whole page, at
+  // its own size, whatever an earlier block left it at.
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.click(`${exportWindow} [role=group][aria-label="Scale"] button:text-is("1×")`);
+  const share = page.locator(`${exportWindow} button:text-is("Share…")`);
+  assert(await share.isVisible(), "a device with a share sheet is offered Share");
+  await share.click();
+  await page.waitForTimeout(600);
+  let shared = await page.evaluate(() => window.__shared);
+  assert(
+    shared.length === 1 && shared[0].length === 1 && shared[0][0].png && /\.png$/.test(shared[0][0].name),
+    `one PNG went to the sheet (${JSON.stringify(shared)})`,
+  );
+  assert(!(await page.isVisible(exportWindow)), "and the window closed behind it");
+  // Put away: the window stays, with what was in it.
+  await page.evaluate(() => (window.__shareAnswer = "abort"));
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector(exportWindow);
+  await share.click();
+  await page.waitForTimeout(400);
+  assert(await page.isVisible(exportWindow), "a sheet put away leaves the window up");
+  // The set: three sizes, together, in one sheet.
+  await page.evaluate(() => (window.__shareAnswer = "ok"));
+  await page.click(`${exportWindow} [role=group][aria-label="Scale"] button:text-is("Set")`);
+  await share.click();
+  await page.waitForTimeout(800);
+  shared = await page.evaluate(() => window.__shared);
+  const set = shared[shared.length - 1] ?? [];
+  assert(
+    set.length === 3 && set.map((f) => f.name.match(/@(\d)x/)?.[1]).join() === "1,2,3",
+    `the set went as three files in one sheet (${set.map((f) => f.name).join(", ")})`,
+  );
+  // A format the sheet will not take is said, not swallowed.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector(exportWindow);
+  await page.click('.export-formats .preset:text-is("PDF")');
+  // After the window has made its picture of the PDF, which clears what
+  // it last had to say.
+  await page.waitForTimeout(900);
+  await share.click();
+  await page.waitForTimeout(300);
+  assert(
+    await page.locator(`${exportWindow}`).getByText("cannot share").isVisible(),
+    "a file the sheet will not take is refused, saying so",
+  );
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click(`${exportWindow} [role=group][aria-label="Scale"] button:text-is("1×")`);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => {
+    delete navigator.canShare;
+    delete navigator.share;
+  });
+}
+
+// 11d. On a phone held upright the layers come up from the bottom edge
+// as a sheet, half the screen, so the page stays in sight above them —
+// from the side they covered six tenths of it. Its grip raises it to
+// nearly all of the screen and lowers it a step at a time, to away;
+// tapped, it toggles. Held sideways the side overlay stays.
+{
+  const phone = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  const pp = await phone.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForTimeout(800);
+  await pp.evaluate(() => {
+    Element.prototype.setPointerCapture = () => {};
+    Element.prototype.releasePointerCapture = () => {};
+  });
+  const panel = pp.locator(".panel");
+  const grip = pp.locator(".sheet-grip");
+  await pp.tap('button[aria-label="Layers panel"]');
+  await pp.waitForTimeout(400);
+  let box = await panel.boundingBox();
+  assert(
+    Math.abs(box.y + box.height - 844) < 2 && Math.abs(box.width - 390) < 2,
+    `the layers are a sheet along the bottom, the screen's width (${box.x},${box.y} ${box.width}×${box.height})`,
+  );
+  assert(box.y > 844 * 0.35 && box.y < 844 * 0.55, `half the screen, the page in sight above (top at ${box.y})`);
+  assert(await grip.isVisible(), "with a grip to pull");
+  const pull = async (dy) => {
+    const g = await grip.boundingBox();
+    const [x, y] = [g.x + g.width / 2, g.y + g.height / 2];
+    const send = (type, yy) =>
+      grip.evaluate(
+        (el, [type, x, yy]) =>
+          el.dispatchEvent(
+            new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 51, pointerType: "touch", clientX: x, clientY: yy }),
+          ),
+        [type, x, yy],
+      );
+    await send("pointerdown", y);
+    await send("pointermove", y + dy / 2);
+    await send("pointermove", y + dy);
+    await send("pointerup", y + dy);
+    await pp.waitForTimeout(350);
+  };
+  await pull(-120);
+  box = await panel.boundingBox();
+  assert(box.y < 844 * 0.15, `pulled up, nearly the whole screen (top at ${box.y})`);
+  await pull(120);
+  box = await panel.boundingBox();
+  assert(box.y > 844 * 0.35, `pulled down, half again (top at ${box.y})`);
+  // A pull too short to mean it moves nothing.
+  await pull(30);
+  box = await panel.boundingBox();
+  assert(await panel.isVisible() && box.y > 844 * 0.35 && box.y < 844 * 0.55, "a short pull leaves it where it was");
+  // Tapped, it toggles.
+  await pull(0);
+  box = await panel.boundingBox();
+  assert(box.y < 844 * 0.15, `a tap on the grip raises it (top at ${box.y})`);
+  await pull(0);
+  await pull(120);
+  assert(!(await panel.isVisible()), "and pulled down from half, it goes");
+  assert(
+    (await pp.locator('button[aria-label="Layers panel"]').getAttribute("aria-expanded")) === "false",
+    "and the bar's button knows it went",
+  );
+  // On its side, the side overlay: there the width is what is spare.
+  await pp.setViewportSize({ width: 844, height: 390 });
+  await pp.waitForTimeout(400);
+  await pp.tap('button[aria-label="Layers panel"]');
+  await pp.waitForTimeout(400);
+  box = await panel.boundingBox();
+  assert(
+    Math.abs(box.x + box.width - 844) < 2 && box.width < 844 * 0.8 && !(await grip.isVisible()),
+    `held sideways, the layers come from the side, with no grip (${box.x} ${box.width}×${box.height})`,
+  );
+  await phone.close();
 }
 
 // 9aw. Dissolving a group answers for what the group itself was
