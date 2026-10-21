@@ -174,7 +174,7 @@ pub fn build(res: &Resource) -> Pyramid {
     for (v, out) in lut.iter_mut().enumerate() {
         *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
     }
-    let (w0, h0) = (res.width, res.height);
+    let w0 = res.width;
     let own = |x: u32, y: u32| -> [f32; 4] {
         let s = ((y * w0 + x) * 4) as usize;
         let a = res.rgba8[s + 3] as f32 / 255.0;
@@ -186,7 +186,7 @@ pub fn build(res: &Resource) -> Pyramid {
         ]
     };
     let mut levels: Vec<Level> = Vec::new();
-    let first = halve(w0, h0, own);
+    let first = first_level(res, &lut, own);
     levels.push(first);
     while let Some(last) = levels.last() {
         if last.width <= 1 && last.height <= 1 {
@@ -229,27 +229,106 @@ fn fingerprint(res: &Resource) -> u64 {
     hash
 }
 
+/// The half, from the picture's own bytes: [`halve`] over them, with the
+/// whole two by twos — every texel but an odd edge's — read two rows at a
+/// time as slices rather than a texel at a time by its coordinates. The
+/// same arithmetic in the same order (`the_quick_two_by_two_is_the_loops_
+/// two_by_two`); without an index worked out and checked for every byte,
+/// which in a browser was most of making a photograph's levels.
+fn first_level(res: &Resource, lut: &[f32; 256], own: impl Fn(u32, u32) -> [f32; 4]) -> Level {
+    let (w, h) = (res.width, res.height);
+    let (hw, hh) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
+    let q = |v: f32| chitrakar_color::round_unsigned(v.clamp(0.0, 1.0) * 65535.0) as u16;
+    // The alpha a byte stands for, entry for entry what the division
+    // gives; and an opaque texel — nearly every one of a photograph — is
+    // its curve's values, since multiplying by one changes nothing.
+    let alpha_of: [f32; 256] = std::array::from_fn(|v| v as f32 / 255.0);
+    let lit = |b: &[u8]| {
+        if b[3] == 255 {
+            return [
+                lut[b[0] as usize],
+                lut[b[1] as usize],
+                lut[b[2] as usize],
+                1.0,
+            ];
+        }
+        let a = alpha_of[b[3] as usize];
+        [
+            lut[b[0] as usize] * a,
+            lut[b[1] as usize] * a,
+            lut[b[2] as usize] * a,
+            a,
+        ]
+    };
+    let row = (w * 4) as usize;
+    let whole = (w / 2) as usize;
+    let mut texels = Vec::with_capacity((hw * hh) as usize);
+    for y in 0..hh {
+        if 2 * y + 1 < h {
+            let top = &res.rgba8[(2 * y) as usize * row..][..row];
+            let bottom = &res.rgba8[(2 * y + 1) as usize * row..][..row];
+            for (t, b) in top.chunks_exact(8).zip(bottom.chunks_exact(8)).take(whole) {
+                let (a, bb) = (lit(&t[..4]), lit(&t[4..]));
+                let (c, d) = (lit(&b[..4]), lit(&b[4..]));
+                let avg = |k: usize| (((0.0 + a[k]) + bb[k]) + c[k] + d[k]) * 0.25;
+                texels.push([q(avg(0)), q(avg(1)), q(avg(2)), q(avg(3))]);
+            }
+            for x in whole as u32..hw {
+                texels.push(partial(w, h, x, y, &own));
+            }
+        } else {
+            for x in 0..hw {
+                texels.push(partial(w, h, x, y, &own));
+            }
+        }
+    }
+    Level {
+        width: hw,
+        height: hh,
+        texels,
+    }
+}
+
+/// A texel of the level below one `w` by `h` at an odd edge, where fewer
+/// than four are over it: the plain average of those there are.
+fn partial(w: u32, h: u32, x: u32, y: u32, read: &impl Fn(u32, u32) -> [f32; 4]) -> [u16; 4] {
+    let mut sum = [0f32; 4];
+    let mut n = 0.0f32;
+    for sy in (2 * y)..(2 * y + 2).min(h) {
+        for sx in (2 * x)..(2 * x + 2).min(w) {
+            let p = read(sx, sy);
+            for c in 0..4 {
+                sum[c] += p[c];
+            }
+            n += 1.0;
+        }
+    }
+    let q = |v: f32| chitrakar_color::round_unsigned(v.clamp(0.0, 1.0) * 65535.0) as u16;
+    [q(sum[0] / n), q(sum[1] / n), q(sum[2] / n), q(sum[3] / n)]
+}
+
 /// The level below one `w` by `h`: each texel the plain average of the
 /// two by two above it — or of as many of them as there are, at an odd
 /// edge.
 fn halve(w: u32, h: u32, read: impl Fn(u32, u32) -> [f32; 4]) -> Level {
     let (hw, hh) = (w.div_ceil(2).max(1), h.div_ceil(2).max(1));
     let mut texels = Vec::with_capacity((hw * hh) as usize);
+    // `round` to the bit, without the call it is in WebAssembly, where
+    // it was most of making a photograph's levels.
+    let q = |v: f32| chitrakar_color::round_unsigned(v.clamp(0.0, 1.0) * 65535.0) as u16;
     for y in 0..hh {
         for x in 0..hw {
-            let mut sum = [0f32; 4];
-            let mut n = 0.0f32;
-            for sy in (2 * y)..(2 * y + 2).min(h) {
-                for sx in (2 * x)..(2 * x + 2).min(w) {
-                    let p = read(sx, sy);
-                    for c in 0..4 {
-                        sum[c] += p[c];
-                    }
-                    n += 1.0;
-                }
+            // A whole two by two, which is every texel but an odd edge's:
+            // the four added in the order the loop below adds them, and a
+            // quarter taken, which is a division by four to the bit.
+            if 2 * x + 1 < w && 2 * y + 1 < h {
+                let (a, b) = (read(2 * x, 2 * y), read(2 * x + 1, 2 * y));
+                let (c, d) = (read(2 * x, 2 * y + 1), read(2 * x + 1, 2 * y + 1));
+                let avg = |k: usize| (((0.0 + a[k]) + b[k]) + c[k] + d[k]) * 0.25;
+                texels.push([q(avg(0)), q(avg(1)), q(avg(2)), q(avg(3))]);
+                continue;
             }
-            let q = |v: f32| ((v / n).clamp(0.0, 1.0) * 65535.0).round() as u16;
-            texels.push([q(sum[0]), q(sum[1]), q(sum[2]), q(sum[3])]);
+            texels.push(partial(w, h, x, y, &read));
         }
     }
     Level {
@@ -303,6 +382,53 @@ mod tests {
         assert!((half.texel(0, 1)[3] - 0.5).abs() < 1e-4);
         // And the corner one texel alone: (4,2), white.
         assert!((half.texel(2, 1)[3] - 1.0).abs() < 1e-4);
+    }
+
+    /// The whole two-by-twos taken the quick way are the same texels, to
+    /// the bit, as the loop every texel used to go through.
+    #[test]
+    fn the_quick_two_by_two_is_the_loops_two_by_two() {
+        let res = picture(37, 23, |x, y| {
+            let v = (x * 53 + y * 29) as u8;
+            [v, v.wrapping_mul(3), 255 - v, (x * 11 + y * 7) as u8]
+        });
+        let quick = build(&res);
+        // The first level the slow way.
+        let lut: Vec<f32> = (0..256)
+            .map(|v| chitrakar_color::srgb_to_linear(v as f32 / 255.0))
+            .collect();
+        let own = |x: u32, y: u32| {
+            let s = ((y * 37 + x) * 4) as usize;
+            let a = res.rgba8[s + 3] as f32 / 255.0;
+            [
+                lut[res.rgba8[s] as usize] * a,
+                lut[res.rgba8[s + 1] as usize] * a,
+                lut[res.rgba8[s + 2] as usize] * a,
+                a,
+            ]
+        };
+        let first = &quick.levels[0];
+        for y in 0..first.height {
+            for x in 0..first.width {
+                let mut sum = [0f32; 4];
+                let mut n = 0.0f32;
+                for sy in (2 * y)..(2 * y + 2).min(23) {
+                    for sx in (2 * x)..(2 * x + 2).min(37) {
+                        let p = own(sx, sy);
+                        for c in 0..4 {
+                            sum[c] += p[c];
+                        }
+                        n += 1.0;
+                    }
+                }
+                let want = sum.map(|v| ((v / n).clamp(0.0, 1.0) * 65535.0).round() as u16);
+                assert_eq!(
+                    first.texels[(y * first.width + x) as usize],
+                    want,
+                    "({x}, {y})"
+                );
+            }
+        }
     }
 
     /// A level made once is the one handed out again, and a picture too

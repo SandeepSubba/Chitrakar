@@ -3287,7 +3287,8 @@ without reading anything else.*
     comparison. The same byte as the curve's own for every float from
     nothing to one (checked once over all 1.07 billion of them, and over
     every 331st in the suite). Alpha rounds through `round_unsigned`,
-    `round` to the bit without the call.
+    `round` to the bit without the call, and an opaque pixel skips its
+    three divisions by one (`a_pixel_encoded_is_the_formulas_bytes`).
   - **The curve's two powers by table in WebAssembly** (`power`,
     `PowerTable`): 4096 points an octave, within a part in ten million
     of `powf`; natively `powf` stays the reference. A curves layer's
@@ -3362,6 +3363,28 @@ without reading anything else.*
     call` (four rectangles, a grid round each, inside and out, bit for
     bit against the formula that always called `hypot`); the browser
     suite for the view effect.
+- **Opening a photograph in the browser** (Phase 4): a 12 MP JPEG, timed
+  in Chromium from its bytes to its first frame. The import's colour
+  normalization said it skipped a profile that was already sRGB and
+  never asked: every picture with sRGB written into it — a browser's own
+  encoder, many cameras — went through a transform and a copy of all
+  its pixels for an answer that was the same picture
+  (`is_srgb_already`: a matrix and three curves, the primaries and white
+  within a two-thousandth, each curve within a ten-thousandth at a
+  thousand points). A picture that does need it — a phone's Display P3,
+  most of them — is carried across a 64 KB piece at a time rather than
+  through a copy of the whole of it, 48 MB less at the moment a
+  12-megapixel one opens. And the first level of its pyramid is read two
+  rows at a time as slices, an opaque texel without its multiplications
+  by one, the levels rounded without `round`'s call. The JPEG's decode
+  went from 300–550 ms to 195–310; the pyramid is about 250 ms of the
+  first frame in the browser and a hundred natively, which is most of
+  what is left, once.
+  - **Tests:** `srgb_is_left_alone_and_p3_is_converted_in_pieces` (sRGB
+    bytes untouched; P3 over seventy thousand pixels in pieces is what
+    the whole at once gives); `the_quick_two_by_two_is_the_loops_two_by_
+    two` (an odd-sized picture's first level, bit for bit against the
+    loop every texel used to take).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -410,6 +410,17 @@ impl Srgb8 {
     /// One premultiplied pixel: [`LinearRgba::to_srgb8`].
     #[inline]
     pub fn encode(&self, px: LinearRgba) -> [u8; 4] {
+        // Opaque, which is nearly all of a page: a division by one is the
+        // number itself, to the bit, and three divisions a pixel are what
+        // is left of this encode's cost once the curve is a table.
+        if px.a == 1.0 {
+            return [
+                self.channel(px.r),
+                self.channel(px.g),
+                self.channel(px.b),
+                255,
+            ];
+        }
         let alpha = round_unsigned(px.a.clamp(0.0, 1.0) * 255.0) as u8;
         if alpha == 0 {
             return [0, 0, 0, 0];
@@ -524,6 +535,42 @@ pub fn to_working(color: &AuthoredColor) -> LinearRgba {
 
 #[cfg(test)]
 mod tests {
+    /// A whole pixel encoded is the formula's bytes: opaque (where the
+    /// divisions by one are skipped), see-through, and gone.
+    #[test]
+    fn a_pixel_encoded_is_the_formulas_bytes() {
+        let reference = |p: LinearRgba| -> [u8; 4] {
+            let alpha = (p.a.clamp(0.0, 1.0) * 255.0).round() as u8;
+            if alpha == 0 {
+                return [0, 0, 0, 0];
+            }
+            let enc = |v: f32| (linear_to_srgb((v / p.a).clamp(0.0, 1.0)) * 255.0).round() as u8;
+            [enc(p.r), enc(p.g), enc(p.b), alpha]
+        };
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 100_000) as f32 / 99_999.0
+        };
+        let encoder = Srgb8::new();
+        for _ in 0..200_000 {
+            let a = match (next() * 4.0) as u32 {
+                0 => 1.0,
+                1 => 0.0,
+                _ => next(),
+            };
+            let p = LinearRgba {
+                r: next() * 1.2 * a,
+                g: next() * a,
+                b: next() * a,
+                a,
+            };
+            assert_eq!(encoder.encode(p), reference(p), "{p:?}");
+        }
+    }
+
     /// Any power a levels gamma asks for, by table, is the power to a few
     /// parts in a million wherever the table answers, and the same table
     /// is handed back while the exponent stays.

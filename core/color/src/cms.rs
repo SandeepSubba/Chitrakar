@@ -24,6 +24,13 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
         return false;
     }
     let srgb = ColorProfile::new_srgb();
+    // A photograph saved in sRGB with the profile written into the file —
+    // which is what a browser's own encoder does, and many cameras — is
+    // sRGB already. Taken through the transform it came out the same and
+    // cost the time of a pass over every pixel and a copy of all of them.
+    if is_srgb_already(&profile, &srgb) {
+        return false;
+    }
     let Ok(transform) = profile.create_transform_8bit(
         Layout::Rgba,
         &srgb,
@@ -32,8 +39,60 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
     ) else {
         return false;
     };
-    let src = pixels.to_vec();
-    transform.transform(&src, pixels).is_ok()
+    // A piece at a time rather than through a copy of the whole picture:
+    // a phone's photograph is usually Display P3, so this is the road it
+    // takes, and a copy of a 12-megapixel one was 48 MB more at the
+    // moment of opening it, on the device that can least spare it.
+    const PIECE: usize = 64 * 1024;
+    let mut src = vec![0u8; PIECE.min(pixels.len())];
+    for piece in pixels.chunks_mut(PIECE) {
+        let src = &mut src[..piece.len()];
+        src.copy_from_slice(piece);
+        if transform.transform(src, piece).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Whether a profile says what sRGB says: a matrix and three curves, the
+/// matrix's primaries and white within a two-thousandth of sRGB's (a
+/// profile's numbers are fixed point, and every maker of an sRGB profile
+/// rounds them its own way), and each curve within a ten-thousandth of
+/// sRGB's at every one of a thousand points along it — which is closer
+/// than eight bits can show.
+fn is_srgb_already(profile: &ColorProfile, srgb: &ColorProfile) -> bool {
+    if !profile.is_matrix_shaper() {
+        return false;
+    }
+    let near = |a: &moxcms::Xyzd, b: &moxcms::Xyzd| {
+        (a.x - b.x).abs() < 2e-3 && (a.y - b.y).abs() < 2e-3 && (a.z - b.z).abs() < 2e-3
+    };
+    if !(near(&profile.red_colorant, &srgb.red_colorant)
+        && near(&profile.green_colorant, &srgb.green_colorant)
+        && near(&profile.blue_colorant, &srgb.blue_colorant)
+        && near(&profile.white_point, &srgb.white_point))
+    {
+        return false;
+    }
+    let curves = [
+        (&profile.red_trc, &srgb.red_trc),
+        (&profile.green_trc, &srgb.green_trc),
+        (&profile.blue_trc, &srgb.blue_trc),
+    ];
+    curves.iter().all(|(theirs, ours)| {
+        let (Some(theirs), Some(ours)) = (theirs, ours) else {
+            return false;
+        };
+        let (Ok(theirs), Ok(ours)) = (theirs.make_linear_evaluator(), ours.make_linear_evaluator())
+        else {
+            return false;
+        };
+        (0..=1000).all(|i| {
+            let x = i as f32 / 1000.0;
+            (theirs.evaluate_value(x) - ours.evaluate_value(x)).abs() < 1e-4
+        })
+    })
 }
 
 /// A monitor's own profile, as the transform the screen wants: sRGB in,
@@ -323,6 +382,52 @@ mod tests {
         for ch in &grey[0..3] {
             assert!((*ch as i32 - 128).abs() <= 2, "grey shifted: {grey:?}");
         }
+    }
+
+    /// A picture whose profile is sRGB's is left as it is — the same
+    /// bytes, and no pass over them — and one in Display P3 is carried
+    /// across a piece at a time to what the whole of it at once gives.
+    #[test]
+    fn srgb_is_left_alone_and_p3_is_converted_in_pieces() {
+        let srgb = ColorProfile::new_srgb().encode().unwrap();
+        let mut px: Vec<u8> = (0..4000u32)
+            .flat_map(|i| [(i * 7) as u8, (i * 13) as u8, (i * 29) as u8, 255])
+            .collect();
+        let before = px.clone();
+        assert!(
+            !normalize_rgba8_to_srgb(&srgb, &mut px),
+            "nothing to do for sRGB"
+        );
+        assert_eq!(px, before);
+
+        // Bigger than a piece, and not a whole number of them.
+        let n = 70_001usize;
+        let mut big: Vec<u8> = (0..n as u32)
+            .flat_map(|i| {
+                [
+                    (i * 7) as u8,
+                    (i * 13) as u8,
+                    (i * 29) as u8,
+                    (i % 256) as u8,
+                ]
+            })
+            .collect();
+        let original = big.clone();
+        let p3 = display_p3_profile_bytes();
+        assert!(normalize_rgba8_to_srgb(&p3, &mut big));
+        let whole = ColorProfile::new_from_slice(&p3)
+            .unwrap()
+            .create_transform_8bit(
+                Layout::Rgba,
+                &ColorProfile::new_srgb(),
+                Layout::Rgba,
+                TransformOptions::default(),
+            )
+            .unwrap();
+        let mut at_once = vec![0u8; original.len()];
+        whole.transform(&original, &mut at_once).unwrap();
+        assert_eq!(big, at_once, "in pieces is the same as all at once");
+        assert_ne!(big, original, "and P3 did move");
     }
 
     #[test]
