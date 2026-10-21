@@ -3347,19 +3347,56 @@ fn one(
             // CPU averages a grid of taps over what a pixel covers, and
             // the grid is worked out by the same function here and
             // carried on the quad, so the two average the same taps.
-            let Some((foot, taps)) = chitrakar_render::picture_taps(t) else {
+            //
+            // Shrunk to a quarter or less, both read the level of the
+            // picture's pyramid the CPU reads, and average it over that
+            // level's taps: the same function says which.
+            let Some((k, foot, taps)) = chitrakar_render::picture_level(t, res.width, res.height)
+            else {
                 return Some(());
             };
-            let at = match out.ids.iter().find(|(id, _)| *id == raster.resource_id) {
+            let level = if k > 0 {
+                chitrakar_render::pyramid::of(&raster.resource_id, res)
+            } else {
+                None
+            };
+            let level = level.as_deref().and_then(|p| p.level(k));
+            let (foot, taps) = match level {
+                Some(_) => (foot, taps),
+                None => chitrakar_render::picture_taps(t)?,
+            };
+            let key = match level {
+                Some(_) => format!("{}@{k}", raster.resource_id),
+                None => raster.resource_id.clone(),
+            };
+            let at = match out.ids.iter().find(|(id, _)| *id == key) {
                 Some((_, at)) => *at,
                 None => {
                     let at = out.textures.len();
-                    out.textures.push(premultiplied(res));
-                    out.ids.push((raster.resource_id.clone(), at));
+                    out.textures.push(match level {
+                        Some(l) => level_image(l),
+                        None => premultiplied(res),
+                    });
+                    out.ids.push((key, at));
                     at
                 }
             };
             let size = [res.width as f32, res.height as f32];
+            // A level's last texel may be only part covered by the
+            // picture — a picture 5 wide has a half 3 wide, the last of
+            // them one texel of it — so the box's 0..1 is not the
+            // level's: the shader scales it by how much of the level the
+            // picture spans. Nothing (read as one) for the picture itself.
+            let span = match level {
+                Some(l) => {
+                    let step = (1u32 << k) as f32;
+                    [
+                        size[0] / (step * l.width as f32),
+                        size[1] / (step * l.height as f32),
+                    ]
+                }
+                None => [0.0, 0.0],
+            };
             // The quad is the image's own box, grown a device pixel on
             // every side; its local coordinates are the texture's, so
             // the vertex shader passes them straight through as texture
@@ -3369,7 +3406,7 @@ fn one(
             let mut verts = quad(
                 t,
                 size,
-                [0.0; 4],
+                [0.0, 0.0, span[0], span[1]],
                 [0.0, 0.0, 0.0, alpha],
                 [foot[0], foot[1], taps[0] as f32, taps[1] as f32],
                 1.0,
@@ -5027,6 +5064,22 @@ fn premultiplied(res: &chitrakar_doc::Resource) -> Image {
     Image {
         width: res.width,
         height: res.height,
+        channels: 4,
+        texels,
+    }
+}
+
+/// A level of a picture's pyramid as the compositor wants it: already
+/// linear and premultiplied, so only narrowed to half precision.
+fn level_image(level: &chitrakar_render::pyramid::Level) -> Image {
+    let mut texels = Vec::with_capacity(level.texels.len() * 4);
+    for p in &level.texels {
+        let c = |v: u16| f32_to_f16(v as f32 / 65535.0);
+        texels.extend_from_slice(&[c(p[0]), c(p[1]), c(p[2]), c(p[3])]);
+    }
+    Image {
+        width: level.width,
+        height: level.height,
         channels: 4,
         texels,
     }
@@ -8210,14 +8263,25 @@ mod tests {
     /// same function both renderers call, so this holds the sampling to
     /// it at shrinks that need two, three and four taps a side, turned,
     /// shrunk along one axis only, and faded.
+    ///
+    /// Shrunk to a half or more, both read a level of the picture's
+    /// pyramid (`chitrakar_render::pyramid`): the second size is odd, so
+    /// that a level's last texel is only part the picture's and the
+    /// shrink has to be carried across to the level's own coordinates
+    /// exactly; a tenth reads the eighth.
     #[test]
     fn a_shrunk_picture_is_averaged_the_way_the_cpu_averages_it() {
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
+        for (w, h) in [(96u32, 80u32), (101, 87)] {
+            shrunk_alike(&gpu, w, h);
+        }
+    }
+
+    fn shrunk_alike(gpu: &GpuRenderer, w: u32, h: u32) {
         // Stripes a texel wide one way and two the other, in colours, with
         // a clear band: nothing a single tap could get right by chance.
-        let (w, h) = (96u32, 80u32);
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
@@ -8278,6 +8342,7 @@ mod tests {
             ("a half", scaled(0.5, 0.5), 1.0),
             ("three tenths", scaled(0.3, 0.3), 1.0),
             ("a sixth", scaled(0.17, 0.17), 1.0),
+            ("a tenth", scaled(0.1, 0.1), 1.0),
             ("one axis", scaled(0.6, 0.23), 1.0),
             ("turned", turned, 1.0),
             ("faded", scaled(0.4, 0.4), 0.6),
@@ -8293,7 +8358,7 @@ mod tests {
             // samples sixteen times and this works out exactly.
             assert!(
                 mean < 0.001 && worst < 0.1,
-                "{name}: mean channel difference {mean:.5} (worst {worst:.4})"
+                "{name}, {w} by {h}: mean channel difference {mean:.5} (worst {worst:.4})"
             );
         }
     }

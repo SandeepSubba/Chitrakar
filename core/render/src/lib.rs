@@ -20,6 +20,7 @@ pub mod boolean;
 pub mod fit;
 pub mod median;
 pub mod morph;
+pub mod pyramid;
 pub mod text;
 pub mod tiles;
 pub mod trace;
@@ -3314,7 +3315,16 @@ fn render_child(
                                 clip,
                                 mask,
                             ),
-                            None => draw_raster(dst, doc, res, t, node.opacity, blend, clip, mask),
+                            None => draw_raster(
+                                dst,
+                                doc,
+                                (&raster.resource_id, res),
+                                t,
+                                node.opacity,
+                                blend,
+                                clip,
+                                mask,
+                            ),
                         }
                     }
                 }
@@ -7185,7 +7195,7 @@ fn paint_shape(
 fn draw_raster(
     dst: &mut Surface,
     doc: &Document,
-    res: &chitrakar_doc::Resource,
+    (id, res): (&str, &chitrakar_doc::Resource),
     t: Transform,
     opacity: f32,
     mode: BlendMode,
@@ -7210,7 +7220,28 @@ fn draw_raster(
     };
     // One texel, premultiplied so interpolation never mixes colour across a
     // transparent neighbour.
+    // Shrunk to a quarter or less, the picture is read from the level of
+    // its pyramid whose texels a device pixel covers between one and two
+    // of (`pyramid`), and everything below — the texel, the footprint,
+    // the taps — is that level's: the same averaging over a picture a
+    // power of two smaller, which was averaged once rather than every
+    // frame. Its outline is still the picture's own (`rect_coverage`
+    // below reads `res`), so an edge falls where it always fell.
+    let Some((k, foot, taps)) = picture_level(t, res.width, res.height) else {
+        return;
+    };
+    let levels = if k > 0 { pyramid::of(id, res) } else { None };
+    let level = levels.as_deref().and_then(|p| p.level(k));
+    let (step, ([foot_x, foot_y], [taps_x, taps_y])) = match level {
+        Some(_) => ((1u32 << k) as f32, (foot, taps)),
+        None => (1.0, picture_footprint(inv)),
+    };
+    let (tex_w, tex_h) = level.map_or((res.width, res.height), |l| (l.width, l.height));
     let texel = |x: u32, y: u32| -> LinearRgba {
+        if let Some(l) = level {
+            let [r, g, b, a] = l.texel(x, y);
+            return LinearRgba { r, g, b, a };
+        }
         let s = ((y * res.width + x) * 4) as usize;
         let a = alpha_of[res.rgba8[s + 3] as usize];
         LinearRgba {
@@ -7220,7 +7251,7 @@ fn draw_raster(
             a,
         }
     };
-    let (last_x, last_y) = (res.width as f32 - 1.0, res.height as f32 - 1.0);
+    let (last_x, last_y) = (tex_w as f32 - 1.0, tex_h as f32 - 1.0);
     // One bilinear sample takes the four texels around a point and ignores
     // the rest, which is right when the image is being enlarged and wrong
     // when it is being shrunk: at a third of its size, two texels in three
@@ -7228,7 +7259,6 @@ fn draw_raster(
     // device pixel spans more than one texel, average a grid across the
     // texels it really covers. The footprint is the inverse's own column
     // sums — how far in the source a step of one device pixel goes.
-    let ([foot_x, foot_y], [taps_x, taps_y]) = picture_footprint(inv);
     // One sample every *two* texels, not every one: a bilinear tap is
     // already the average of the two texels either side of it on each
     // axis, weighted to sum to one, so taps two texels apart cover the
@@ -7260,7 +7290,8 @@ fn draw_raster(
     // three interpolations below come out at the first of the four, so
     // this takes it directly. Same value to the bit, since mixing `a` and
     // `b` by nothing is `a + (b - a) * 0`.
-    let straight = (t.b == 0.0
+    let straight = (level.is_none()
+        && t.b == 0.0
         && t.c == 0.0
         && t.a == 1.0
         && t.d == 1.0
@@ -7281,6 +7312,7 @@ fn draw_raster(
                 continue;
             }
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
+            let (lx, ly) = (lx / step, ly / step);
             let cx = |i: f32| i.clamp(0.0, last_x) as u32;
             let cy = |i: f32| i.clamp(0.0, last_y) as u32;
             // Texel centres sit at (i + 0.5), so a sample at (sx, sy) lands
@@ -7332,6 +7364,38 @@ fn draw_raster(
 /// renderers average a shrunk picture over the same grid.
 pub fn picture_taps(t: Transform) -> Option<([f32; 2], [u32; 2])> {
     Inverse::of(t).map(picture_footprint)
+}
+
+/// How a shrunk picture is drawn from its pyramid under `t`: the level,
+/// how many of the picture's texels a side one of that level's is, the
+/// footprint and taps in that level's texels — see [`draw_raster`]. The
+/// GPU backend asks this so it uploads the level the CPU reads and
+/// averages it over the same grid. A level of 0 is the picture itself.
+pub fn picture_level(t: Transform, width: u32, height: u32) -> Option<(u32, [f32; 2], [u32; 2])> {
+    let inv = Inverse::of(t)?;
+    let ([fx, fy], _) = picture_footprint(inv);
+    let wanted = pyramid::level_for(fx.min(fy));
+    // The deepest level there is: one texel, as `pyramid::build` stops.
+    let mut depth = 0;
+    let (mut w, mut h) = (width, height);
+    while (w > 1 || h > 1) && depth < wanted {
+        w = w.div_ceil(2);
+        h = h.div_ceil(2);
+        depth += 1;
+    }
+    let k = wanted.min(depth);
+    let (foot, taps) = level_footprint([fx, fy], (1u32 << k) as f32);
+    Some((k, foot, taps))
+}
+
+/// A footprint in the picture's own texels carried to a level whose
+/// texels are `step` of them a side, and the taps that average it.
+fn level_footprint([fx, fy]: [f32; 2], step: f32) -> ([f32; 2], [u32; 2]) {
+    let foot_x = (fx / step).max(1.0);
+    let foot_y = (fy / step).max(1.0);
+    let taps_x = ((foot_x * 0.5).ceil() as u32).clamp(1, 4);
+    let taps_y = ((foot_y * 0.5).ceil() as u32).clamp(1, 4);
+    ([foot_x, foot_y], [taps_x, taps_y])
 }
 
 fn picture_footprint(inv: Inverse) -> ([f32; 2], [u32; 2]) {
@@ -23523,6 +23587,72 @@ mod tests {
     /// `a_minified_raster_averages_the_texels_it_skips_over` — hold the
     /// taps at one and that one fails. Between them the count is bracketed
     /// on both sides.
+    /// A checker a texel square, shrunk to a fifth and to a ninth and
+    /// turned, is the flat grey it averages to everywhere inside it. Drawn
+    /// from a level of its pyramid, where the checker has already been
+    /// averaged away; drawn from the picture itself, a grid of three or
+    /// four taps a side over a footprint of five or nine texels lands on
+    /// light and dark unevenly, and the picture is a moiré that crawls as
+    /// it moves.
+    #[test]
+    fn a_fine_checker_shrunk_a_long_way_is_flat_grey() {
+        const N: u32 = 360;
+        let mut bytes = Vec::with_capacity((N * N * 4) as usize);
+        for y in 0..N {
+            for x in 0..N {
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        for (name, scale, turn) in [("a fifth", 0.2f32, 0.3f32), ("a ninth", 0.111, 0.7)] {
+            let mut doc = Document::new(80, 80, ColorMode::Rgb);
+            let rid = doc.add_resource(N, N, bytes.clone());
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::raster(
+                    "checker",
+                    chitrakar_doc::RasterRef {
+                        resource_id: rid,
+                        width: N,
+                        height: N,
+                        corners: None,
+                    },
+                )),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            let (sn, cs) = turn.sin_cos();
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform {
+                    a: scale * cs,
+                    b: scale * sn,
+                    c: -scale * sn,
+                    d: scale * cs,
+                    e: 40.0 - scale * N as f32 * (cs - sn) / 2.0,
+                    f: 40.0 - scale * N as f32 * (cs + sn) / 2.0,
+                },
+            })
+            .unwrap();
+            let s = render(&doc).unwrap();
+            // Well inside the turned square, wherever it lands.
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for y in 30..50 {
+                for x in 30..50 {
+                    let p = s.get(x, y);
+                    lo = lo.min(p.r);
+                    hi = hi.max(p.r);
+                }
+            }
+            assert!(
+                (lo - 0.5).abs() < 0.01 && (hi - 0.5).abs() < 0.01,
+                "{name}: the grey runs from {lo:.4} to {hi:.4}, where it should be 0.5"
+            );
+        }
+    }
+
     #[test]
     fn a_picture_at_half_its_size_is_each_two_texels_averaged() {
         const N: u32 = 32;

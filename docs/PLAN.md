@@ -3174,6 +3174,19 @@ without reading anything else.*
     `an_eight_bit_picture_is_widened_in_place_to_what_the_general_road_
     gives` (grey, grey and alpha, RGB, RGBA as PNG; grey and RGB as JPEG;
     fails with grey-and-alpha's alpha dropped); `tests/peak.rs`.
+- **A shrunk picture is drawn from a pyramid** (Phase 4): levels made
+  once and kept, read where a device pixel covers two texels or more —
+  a fitted 12 MP photograph's frame from 80 ms to 21, both renderers.
+  - **Tests:** `each_level_is_the_last_averaged_two_by_two` (odd edges
+    average only what is there); `a_pyramid_is_made_once_and_kept`
+    (and another picture under the same id gets its own);
+    `a_fine_checker_shrunk_a_long_way_is_flat_grey` (fails drawn from
+    the picture itself, a ninth spread 0.485–0.515); the GPU's
+    `a_shrunk_picture_is_averaged_the_way_the_cpu_averages_it` gained an
+    odd size and a tenth (fails with the span left out, or with the
+    picture itself uploaded instead of the level);
+    `a_picture_at_half_its_size_is_each_two_texels_averaged` holds,
+    now through the half level.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -10247,18 +10260,30 @@ chitrakar/
   `core/codecs/tests/peak.rs` counts allocations in its own process and
   holds reading and saving to one copy of the pixels (with either fix
   taken out it fails, at 13 MB and 8 MB for a 7 MB picture).
-  **Still to do: the frame.** Moving that photograph on a phone-sized
-  view repaints in about 95 ms natively, single-threaded — several
-  hundred in a phone's WebAssembly. Half the resolution while a finger
-  moves was measured and does not help (78 ms): halve the pixels and
-  each one's footprint in the photograph doubles, so it averages four
-  times the texels (`picture_footprint`), and every frame still reads
-  all twelve million. The cost is the source, not the screen, so the
-  answer is a pyramid — the picture kept again at a half, a quarter, …
-  of its size, sampled from the level whose texels are about a device
-  pixel — and it is a change to the sampling arithmetic of both
-  renderers and of the tests that pin it, to be designed rather than
-  slipped in.
+  **The frame ✅.** Moving that photograph on a phone-sized view
+  repainted in about 95 ms natively, single-threaded — several hundred
+  in a phone's WebAssembly. Half the resolution while a finger moves
+  was measured and did not help (78 ms): halve the pixels and each
+  one's footprint in the photograph doubles, so it averages four times
+  the texels (`picture_footprint`), and every frame still read all
+  twelve million. The cost was the source, not the screen, so the
+  answer is a pyramid (`core/render/src/pyramid.rs`): the picture kept
+  again at a half, a quarter, … of its size, each level the last
+  averaged two by two in premultiplied linear light, sixteen bits a
+  channel. Shrunk to a half or more a picture is read from the level
+  whose texels a device pixel covers between one and two of
+  (`picture_level`), and averaged over that level's footprint with the
+  same taps as before; its outline is still the picture's own. The 12
+  MP photograph fitted to a 1000 × 750 view went from 80 ms a frame to
+  21, and to 400 × 300 from 39 to 4; the first frame pays about 140 ms
+  once to make the levels. They are kept for the whole process (the
+  desktop shell's GPU commands run on a pool of workers), by the
+  picture's id, least recently used first past 96 MB — a 12 MP
+  photograph's levels are 32 MB — and checked against a fingerprint of
+  the picture before they are handed out, since an id read out of a
+  file is the file's word for it. The GPU backend uploads the level the
+  CPU reads and scales the box's coordinates by how much of the level
+  the picture spans, which an odd size makes less than all of it.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
