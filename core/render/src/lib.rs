@@ -25,6 +25,51 @@ pub mod text;
 pub mod tiles;
 pub mod trace;
 
+/// `max` and `min` for the loops that run a pixel at a time.
+///
+/// The same answer as `f32::max` and `f32::min` — the other argument when
+/// one is not a number — said as comparisons. In WebAssembly `f32::max`
+/// is a call: the machine's own maximum hands a NaN on where Rust's hands
+/// the other number back, so the compiler cannot use it, and a call a
+/// channel a pixel was more of an adjustment layer's cost there than the
+/// adjustment. (They may differ from `max` and `min` only in which zero
+/// they give for a zero of each sign, which nothing downstream can tell
+/// apart but a division, and nothing here divides by one.)
+///
+/// And `round`, which is a call there for the same kind of reason: the
+/// machine rounds half to even and Rust rounds half away from zero.
+/// `rounded` is `round` to the bit (`chitrakar_color::round_half_away`).
+pub(crate) trait HiLo {
+    fn hi(self, other: Self) -> Self;
+    fn lo(self, other: Self) -> Self;
+    fn rounded(self) -> Self;
+}
+
+impl HiLo for f32 {
+    #[inline(always)]
+    fn hi(self, other: f32) -> f32 {
+        if self > other || other.is_nan() {
+            self
+        } else {
+            other
+        }
+    }
+
+    #[inline(always)]
+    fn lo(self, other: f32) -> f32 {
+        if self < other || other.is_nan() {
+            self
+        } else {
+            other
+        }
+    }
+
+    #[inline(always)]
+    fn rounded(self) -> f32 {
+        chitrakar_color::round_half_away(self)
+    }
+}
+
 use chitrakar_color::{to_working, AuthoredColor, LinearRgba};
 use chitrakar_doc::{
     stroke_align, Adjustment, BlendMode, DocError, Document, Effect, Filter, Gradient, Marker,
@@ -4087,14 +4132,14 @@ fn transfer() -> &'static Transfer {
 /// the wheel — red at 0, yellow at 1, and so on round to magenta at 5,
 /// which is the order the bands of a colour panel are always in.
 fn to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
+    let max = r.hi(g).hi(b);
+    let min = r.lo(g).lo(b);
     let light = (max + min) / 2.0;
     let chroma = max - min;
     if chroma <= 1e-6 {
         return (0.0, 0.0, light);
     }
-    let sat = chroma / (1.0 - (2.0 * light - 1.0).abs()).max(1e-6);
+    let sat = chroma / (1.0 - (2.0 * light - 1.0).abs()).hi(1e-6);
     let hue = if max == r {
         ((g - b) / chroma).rem_euclid(6.0)
     } else if max == g {
@@ -8136,8 +8181,8 @@ fn smeared(
             let mut acc = LinearRgba::TRANSPARENT;
             for k in 0..n {
                 let step = k as f32 - half;
-                let px = (x as f32 + sx * step).round() as i64;
-                let py = (y as f32 + sy * step).round() as i64;
+                let px = (x as f32 + sx * step).rounded() as i64;
+                let py = (y as f32 + sy * step).rounded() as i64;
                 let (px, py) = (px.clamp(0, w - 1), py.clamp(0, h - 1));
                 let s = original[(py * w + px) as usize];
                 acc.r += s.r;
@@ -9732,8 +9777,8 @@ fn draw_clone(
         };
         let at_source = |px: u32, py: u32| {
             read(
-                (px as f32 + sx).round() as i64,
-                (py as f32 + sy).round() as i64,
+                (px as f32 + sx).rounded() as i64,
+                (py as f32 + sy).rounded() as i64,
             )
         };
         // Healing takes the texture from the source and the colour from
@@ -11286,7 +11331,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             brightness,
             contrast,
         } => {
-            let f = |v: f32| ((v + brightness - 0.5) * (1.0 + contrast) + 0.5).max(0.0);
+            let f = |v: f32| ((v + brightness - 0.5) * (1.0 + contrast) + 0.5).hi(0.0);
             (f(r), f(g), f(b))
         }
         Adjustment::Exposure { stops } => {
@@ -11309,7 +11354,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             let (hue, sat) = colorize_tint(*hue_degrees, *saturation);
             let (_, _, light) = to_hsl(shown_value(r), shown_value(g), shown_value(b));
             let (nr, ng, nb) = from_hsl(hue, sat, light);
-            let f = |v: f32| (chitrakar_color::srgb_to_linear(v) + lightness).max(0.0);
+            let f = |v: f32| (chitrakar_color::srgb_to_linear(v) + lightness).hi(0.0);
             (f(nr), f(ng), f(nb))
         }
         Adjustment::HueSaturation {
@@ -11345,7 +11390,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // Saturation: scale distance from luminance; then lightness add.
             let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             let s = 1.0 + saturation;
-            let f = |v: f32| (lum + (v - lum) * s + lightness).max(0.0);
+            let f = |v: f32| (lum + (v - lum) * s + lightness).hi(0.0);
             (f(r), f(g), f(b))
         }
         Adjustment::SelectiveHsl { bands } => {
@@ -11358,7 +11403,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             let (mut dh, mut ds, mut dl) = (0.0, 0.0, 0.0);
             for (i, band) in bands.iter().enumerate().take(6) {
                 let away = (hue - i as f32).abs();
-                let w = (1.0 - away.min(6.0 - away)).max(0.0);
+                let w = (1.0 - away.lo(6.0 - away)).hi(0.0);
                 dh += w * band[0];
                 ds += w * band[1];
                 dl += w * band[2];
@@ -11397,15 +11442,19 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
         } => {
             // An input range that has collapsed still has to map somewhere:
             // hold it a hair wide rather than divide by nothing.
-            let span = (in_white - in_black).max(1e-3);
-            let exponent = 1.0 / gamma.max(0.05);
+            let span = (in_white - in_black).hi(1e-3);
+            let exponent = 1.0 / gamma.hi(0.05);
             // A gamma of one — levels set for their black and white
             // points alone, which is most of them — is no power at all,
             // and `x^1` is `x` to the bit.
             let f = |v: f32| {
-                let v = ((v - in_black) / span).max(0.0);
-                let v = if exponent == 1.0 { v } else { v.powf(exponent) };
-                (out_black + v * (out_white - out_black)).max(0.0)
+                let v = ((v - in_black) / span).hi(0.0);
+                let v = if exponent == 1.0 {
+                    v
+                } else {
+                    chitrakar_color::pow(v, exponent)
+                };
+                (out_black + v * (out_white - out_black)).hi(0.0)
             };
             (f(r), f(g), f(b))
         }
@@ -11416,7 +11465,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // travel at each end, so the extremes still hold a picture.
             let warm = temperature.clamp(-1.0, 1.0) * 0.5;
             let mag = tint.clamp(-1.0, 1.0) * 0.5;
-            let f = |v: f32, gain: f32| (v * gain).max(0.0);
+            let f = |v: f32, gain: f32| (v * gain).hi(0.0);
             (f(r, 1.0 + warm), f(g, 1.0 - mag), f(b, 1.0 - warm))
         }
         Adjustment::Vibrance { amount } => {
@@ -11430,14 +11479,14 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // linear light, so a bright colour would otherwise read as
             // fully saturated and take none of the change merely for
             // being bright.
-            let top = r.max(g).max(b);
+            let top = r.hi(g).hi(b);
             let sat = if top > 1e-6 {
-                (top - r.min(g).min(b)) / top
+                (top - r.lo(g).lo(b)) / top
             } else {
                 0.0
             };
             let s = 1.0 + amount * (1.0 - sat.clamp(0.0, 1.0));
-            let f = |v: f32| (lum + (v - lum) * s).max(0.0);
+            let f = |v: f32| (lum + (v - lum) * s).hi(0.0);
             (f(r), f(g), f(b))
         }
         Adjustment::BlackAndWhite { red, green, blue } => {
@@ -11450,7 +11499,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             } else {
                 [red / total, green / total, blue / total]
             };
-            let grey = (r * wr + g * wg + b * wb).max(0.0);
+            let grey = (r * wr + g * wg + b * wb).hi(0.0);
             (grey, grey, grey)
         }
         Adjustment::GradientMap { stops } => {
@@ -11542,7 +11591,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 // linear light's own middle shows as a light grey and
                 // would count as a highlight.
                 let (sr, sg, sb) = (shown_value(r), shown_value(g), shown_value(b));
-                let light = (sr.max(sg).max(sb) + sr.min(sg).min(sb)) / 2.0;
+                let light = (sr.hi(sg).hi(sb) + sr.lo(sg).lo(sb)) / 2.0;
                 // Three masks — ‾\___ , _/‾\_ , ___/‾ — with ramps a
                 // quarter wide at a third and two thirds. They add to
                 // one, so a tone is only ever shared between two
@@ -11595,7 +11644,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 // it, and the layer is the identity it is asked to be
                 // rather than a highlight crusher.
                 let inside = v.clamp(0.0, 1.0);
-                let over = (v - inside).max(0.0);
+                let over = (v - inside).hi(0.0);
                 let s = chitrakar_color::linear_to_srgb(inside);
                 chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k) + over * (1.0 - k)
             };
@@ -11607,7 +11656,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             let steps = posterize_steps(*levels);
             let f = |v: f32| {
                 let s = chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0));
-                chitrakar_color::srgb_to_linear((s * steps).round() / steps)
+                chitrakar_color::srgb_to_linear((s * steps).rounded() / steps)
             };
             (f(r), f(g), f(b))
         }
@@ -11675,7 +11724,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // In light, where a channel is an amount that can be shared
             // out; nothing comes out below black.
             let (m, k) = channel_mix(*red, *green, *blue, *constant, *monochrome);
-            let f = |row: [f32; 3], c: f32| (row[0] * r + row[1] * g + row[2] * b + c).max(0.0);
+            let f = |row: [f32; 3], c: f32| (row[0] * r + row[1] * g + row[2] * b + c).hi(0.0);
             (f(m[0], k[0]), f(m[1], k[1]), f(m[2], k[2]))
         }
         Adjustment::Threshold { level } => {
@@ -11719,7 +11768,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // fitted photograph repainted at five frames a second.
             let f = |v: f32, c: usize| {
                 let inside = v.clamp(0.0, 1.0);
-                on_steps(&luts.through[c], inside) + (v - inside).max(0.0) * luts.white[c]
+                on_steps(&luts.through[c], inside) + (v - inside).hi(0.0) * luts.white[c]
             };
             (f(r, 0), f(g, 1), f(b, 2))
         }

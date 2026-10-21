@@ -239,10 +239,14 @@ const POWER_SHIFT: u32 = 11;
 #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
 impl PowerTable {
     fn new(lo: f32, which: Power) -> PowerTable {
+        PowerTable::of(lo, |x| power_exact(x, which))
+    }
+
+    fn of(lo: f32, f: impl Fn(f32) -> f32) -> PowerTable {
         let first = lo.to_bits() >> POWER_SHIFT << POWER_SHIFT;
         let last = 1.0f32.to_bits();
         let values = (0..=((last - first) >> POWER_SHIFT) + 1)
-            .map(|i| power_exact(f32::from_bits(first + (i << POWER_SHIFT)), which))
+            .map(|i| f(f32::from_bits(first + (i << POWER_SHIFT))))
             .collect();
         PowerTable { first, values }
     }
@@ -259,6 +263,41 @@ impl PowerTable {
         let (a, b) = (*self.values.get(i)?, *self.values.get(i + 1)?);
         Some(a + (b - a) * t)
     }
+}
+
+/// `x.powf(e)`, for a pass that raises every channel of a page to one
+/// power — levels with a gamma. Natively that is `powf`. In WebAssembly
+/// it is read from a table of `x^e` over `[2^-16, 1]`, made the first
+/// time `e` is asked for and kept until another is (a slider being
+/// dragged asks for one a frame, and a table is a few milliseconds):
+/// within a few parts in a million for any exponent a gamma gives, which
+/// is a thousandth of the eight bits a page is shown in
+/// (`a_power_by_table_is_the_power`). Off the table's ends — above one,
+/// or darker than it reaches — `powf` answers.
+#[inline]
+pub fn pow(x: f32, e: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(v) = exponent_table(e).at(x) {
+            return v;
+        }
+    }
+    x.powf(e)
+}
+
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+fn exponent_table(e: f32) -> std::sync::Arc<PowerTable> {
+    use std::sync::{Arc, Mutex};
+    static KEPT: Mutex<Option<(u32, Arc<PowerTable>)>> = Mutex::new(None);
+    let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((bits, table)) = kept.as_ref() {
+        if *bits == e.to_bits() {
+            return table.clone();
+        }
+    }
+    let table = Arc::new(PowerTable::of(1.0 / 65536.0, |x| x.powf(e)));
+    *kept = Some((e.to_bits(), table.clone()));
+    table
 }
 
 #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
@@ -286,6 +325,17 @@ pub fn round_unsigned(v: f32) -> f32 {
         whole + 1.0
     } else {
         whole
+    }
+}
+
+/// `v.round()` for any `f32`: half away from zero, to the bit, without
+/// the call `round` is in WebAssembly ([`round_unsigned`] for each side).
+#[inline]
+pub fn round_half_away(v: f32) -> f32 {
+    if v.is_sign_negative() {
+        -round_unsigned(-v)
+    } else {
+        round_unsigned(v)
     }
 }
 
@@ -474,6 +524,38 @@ pub fn to_working(color: &AuthoredColor) -> LinearRgba {
 
 #[cfg(test)]
 mod tests {
+    /// Any power a levels gamma asks for, by table, is the power to a few
+    /// parts in a million wherever the table answers, and the same table
+    /// is handed back while the exponent stays.
+    #[test]
+    fn a_power_by_table_is_the_power() {
+        for e in [1.0f32 / 20.0, 1.0 / 3.0, 0.77, 1.3, 2.2, 5.0, 10.0] {
+            let table = exponent_table(e);
+            let mut worst = 0.0f64;
+            let mut bits = (1.0f32 / 65536.0).to_bits();
+            while bits <= 1.0f32.to_bits() {
+                let x = f32::from_bits(bits);
+                let exact = x.powf(e);
+                let got = table.at(x).expect("on the table");
+                // Relatively, down to where the power has run out of
+                // float to say it in: x^10 near 2^-16 is denormal, and a
+                // denormal has no relative precision to keep.
+                if exact > 1e-30 {
+                    worst = worst.max(((got - exact) / exact).abs() as f64);
+                } else {
+                    assert!((got - exact).abs() < 1e-30, "x^{e} at {x:e}");
+                }
+                bits += 61;
+            }
+            assert!(
+                worst < 1e-6,
+                "x^{e} is {worst:e} from the power, relatively"
+            );
+            assert!(std::sync::Arc::ptr_eq(&table, &exponent_table(e)));
+            assert!(table.at(1.5).is_none() && table.at(1e-6).is_none());
+        }
+    }
+
     /// The curve as WebAssembly reads it, from a table, is the curve by
     /// powers to within the last bit or two of an `f32`: across every
     /// value the table covers, in both directions, and the table answers
@@ -551,6 +633,34 @@ mod tests {
         for v in [0.5f32, 1.5, 2.5, 254.5, 0.49999997, 0.5000001] {
             assert_eq!(round_unsigned(v).to_bits(), v.round().to_bits(), "at {v:e}");
         }
+        // Either side of nothing, through the whole range and its ends.
+        let mut bits = 0u32;
+        while bits < 0x7f80_0000 {
+            for v in [f32::from_bits(bits), -f32::from_bits(bits)] {
+                assert_eq!(
+                    round_half_away(v).to_bits(),
+                    v.round().to_bits(),
+                    "at {v:e}"
+                );
+            }
+            bits += 9973;
+        }
+        for v in [
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            -0.5,
+            -2.5,
+            -0.49999997,
+            8388609.0,
+        ] {
+            assert_eq!(
+                round_half_away(v).to_bits(),
+                v.round().to_bits(),
+                "at {v:e}"
+            );
+        }
+        assert!(round_half_away(f32::NAN).is_nan());
     }
 
     use super::*;

@@ -13,6 +13,7 @@
 //! The second renderer runs the same two passes with the same weights,
 //! so this is the reference it is held to.
 
+use crate::HiLo;
 use chitrakar_color::{linear_to_srgb, LinearRgba};
 
 /// What a pixel shows: its straight colour in the display encoding,
@@ -27,7 +28,7 @@ fn shown(px: LinearRgba) -> [f32; 4] {
 
 /// The weight of a neighbour `k` pixels off, by distance alone.
 pub fn nearness(k: i32, radius: usize) -> f32 {
-    let sigma = (radius as f32 / 2.0).max(0.5);
+    let sigma = (radius as f32 / 2.0).hi(0.5);
     (-((k * k) as f32) / (2.0 * sigma * sigma)).exp()
 }
 
@@ -35,7 +36,7 @@ pub fn nearness(k: i32, radius: usize) -> f32 {
 /// colour, nothing at `threshold` apart or more.
 pub fn likeness(a: [f32; 4], b: [f32; 4], threshold: f32) -> f32 {
     let d = (0..4).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
-    (1.0 - d / threshold).max(0.0)
+    (1.0 - d / threshold).hi(0.0)
 }
 
 /// One pass along rows (or columns): every pixel the weighted average of
@@ -73,7 +74,7 @@ fn pass(
             }
             // The pixel itself always counts, fully, so there is always
             // something to divide by.
-            let t = total.max(1e-6);
+            let t = total.hi(1e-6);
             out.push(LinearRgba {
                 r: sum.r / t,
                 g: sum.g / t,

@@ -3308,6 +3308,29 @@ without reading anything else.*
     error under 1.2e-7 everywhere the table answers — a thousandth of an
     octave was tried first and fails at 5e-7). The browser suite runs the
     WebAssembly engine, so it is what holds the tables at pixel level.
+- **Every layer, timed in the browser** (Phase 4): each adjustment and
+  filter laid over the fitted 12 MP photograph in Chromium, what it adds
+  to a full repaint. The slow ones were slow for WebAssembly's reasons,
+  not their own: besides the power, `f32::max` and `f32::min` are calls
+  there (the machine's own maximum hands a NaN on, Rust's hands the other
+  number back), and so is `round`. The adjustments and the surface blur
+  say `hi`, `lo` and `rounded` now (`HiLo`: the same answers, as
+  comparisons and a truncation), the motion blur and the clone round
+  the same way, and levels raise to a gamma through a table of that
+  power kept while the gamma stays (`chitrakar_color::pow`, within a part
+  in a million; natively `powf`). Added to a repaint, before → after:
+  levels at a gamma of 1.3, 150 → 21 ms; posterize 96 → 36; selective
+  HSL 98 → 47; white balance 39 → 1; motion blur 95 → 69; invert 50 →
+  30. **Still slow:** a radial blur, 3.7 s — up to 129 samples a pixel
+  at a zoom that reaches the page's corners, which is the algorithm and
+  not the platform; the surface blur (141 ms), the median (106), the
+  pinch and the twirl (~95, a sine and cosine a pixel).
+  - **Tests:** `round_half_away` is `round` to the bit either side of
+    nothing across the range and its ends (in
+    `eight_bits_by_table_are_the_curves_own_eight_bits`);
+    `a_power_by_table_is_the_power` (seven exponents from a gamma of 20
+    to a tenth, under 1e-6 relatively, a denormal answer within 1e-30,
+    and the table kept while the exponent stays).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
