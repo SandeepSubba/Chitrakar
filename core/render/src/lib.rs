@@ -70,15 +70,25 @@ impl Surface {
 
     /// Encode to 8-bit sRGB RGBA (display/export edge).
     pub fn to_srgb8(&self) -> Vec<u8> {
-        self.pixels.iter().flat_map(|p| p.to_srgb8()).collect()
+        let srgb8 = chitrakar_color::Srgb8::new();
+        let mut out = Vec::with_capacity(self.pixels.len() * 4);
+        for p in &self.pixels {
+            out.extend_from_slice(&srgb8.encode(*p));
+        }
+        out
     }
 
     /// Encode one clip region into an existing full-size RGBA8 buffer.
     pub fn encode_srgb8_region(&self, clip: ClipRect, out: &mut [u8]) {
+        let srgb8 = chitrakar_color::Srgb8::new();
         for y in clip.y0..clip.y1 {
-            for x in clip.x0..clip.x1 {
-                let i = (y * self.width + x) as usize;
-                out[i * 4..i * 4 + 4].copy_from_slice(&self.pixels[i].to_srgb8());
+            let row = (y * self.width) as usize;
+            let (a, b) = (row + clip.x0 as usize, row + clip.x1 as usize);
+            for (px, dst) in self.pixels[a..b]
+                .iter()
+                .zip(out[a * 4..b * 4].chunks_exact_mut(4))
+            {
+                dst.copy_from_slice(&srgb8.encode(*px));
             }
         }
     }
@@ -10947,6 +10957,9 @@ pub enum Prepared {
     /// A colour lookup's table, read out of its resource: the grid's
     /// size and its entries (`chitrakar_doc::lut`).
     Table(u32, Vec<[f32; 3]>),
+    /// An exposure's gain, `2^stops`: one power a pass rather than one a
+    /// pixel, which in a browser is a routine in software.
+    Gain(f32),
 }
 
 /// How finely a gradient map's ramp is read off before the pass.
@@ -11018,6 +11031,7 @@ pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
             .resource(table)
             .and_then(|r| chitrakar_doc::lut::decode(*size, r.width, r.height, &r.rgba8))
             .map(|t| Prepared::Table(*size, t)),
+        Adjustment::Exposure { stops } => Some(Prepared::Gain(2f32.powf(*stops))),
         _ => None,
     }
 }
@@ -11066,11 +11080,17 @@ fn curves_through(luts: &CurveLuts) -> ([Vec<f32>; 3], [f32; 3]) {
             }
         };
         white[c] = chitrakar_color::srgb_to_linear(through(1.0));
-        (0..=CURVE_STEPS)
-            .map(|i| {
-                let v = i as f32 / CURVE_STEPS as f32;
-                chitrakar_color::srgb_to_linear(through(chitrakar_color::linear_to_srgb(v)))
-            })
+        // Into the encoding at each step is the same for every curve, so
+        // it is worked out once (`transfer().to_shown` holds exactly
+        // that); back out is read from the decoding's own table, which is
+        // within a few hundred-millionths of the power law. Worked out
+        // with powers, the twelve thousand of them were a curves layer's
+        // whole cost in a browser, where a power is a routine in
+        // software: fifty milliseconds a frame.
+        let t = transfer();
+        t.to_shown
+            .iter()
+            .map(|&shown| on_curve(&t.to_linear, through(shown)))
             .collect()
     });
     (tables, white)
@@ -11270,7 +11290,10 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             (f(r), f(g), f(b))
         }
         Adjustment::Exposure { stops } => {
-            let m = 2f32.powf(*stops);
+            let m = match ready {
+                Some(Prepared::Gain(m)) => *m,
+                _ => 2f32.powf(*stops),
+            };
             (r * m, g * m, b * m)
         }
         Adjustment::HueSaturation {
@@ -11376,8 +11399,12 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // hold it a hair wide rather than divide by nothing.
             let span = (in_white - in_black).max(1e-3);
             let exponent = 1.0 / gamma.max(0.05);
+            // A gamma of one — levels set for their black and white
+            // points alone, which is most of them — is no power at all,
+            // and `x^1` is `x` to the bit.
             let f = |v: f32| {
-                let v = ((v - in_black) / span).max(0.0).powf(exponent);
+                let v = ((v - in_black) / span).max(0.0);
+                let v = if exponent == 1.0 { v } else { v.powf(exponent) };
                 (out_black + v * (out_white - out_black)).max(0.0)
             };
             (f(r), f(g), f(b))

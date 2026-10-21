@@ -166,13 +166,7 @@ impl LinearRgba {
     /// non-deterministic — the same invisible pixel could encode differently
     /// depending on rounding upstream.
     pub fn to_srgb8(self) -> [u8; 4] {
-        let alpha = (self.a.clamp(0.0, 1.0) * 255.0).round() as u8;
-        if alpha == 0 {
-            return [0, 0, 0, 0];
-        }
-        let unpremul = |v: f32| v / self.a;
-        let enc = |v: f32| (linear_to_srgb(unpremul(v).clamp(0.0, 1.0)) * 255.0).round() as u8;
-        [enc(self.r), enc(self.g), enc(self.b), alpha]
+        Srgb8::new().encode(self)
     }
 }
 
@@ -181,8 +175,256 @@ pub fn srgb_to_linear(v: f32) -> f32 {
     if v <= 0.04045 {
         v / 12.92
     } else {
-        ((v + 0.055) / 1.055).powf(2.4)
+        power((v + 0.055) / 1.055, Power::Decode)
     }
+}
+
+/// The two powers the sRGB curve is made of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Power {
+    /// `x^2.4`, out of the encoding into light.
+    Decode,
+    /// `x^(1/2.4)`, from light into the encoding.
+    Encode,
+}
+
+/// `x` raised to one of the curve's two powers.
+///
+/// Natively that is `powf`, which the machine does in a few dozen
+/// instructions, and this is the reference every other answer is held
+/// to. WebAssembly has no instruction for a power: there `powf` is a
+/// routine in software, a channel a pixel crosses the curve once or
+/// twice for nearly every adjustment, and in a phone's browser that was
+/// more of a frame than anything else in it. So there the power is read
+/// from a table (`PowerTable`) — within a few hundred-millionths of
+/// `powf`, which is the last bit or two of an `f32`
+/// (`the_curve_by_table_is_the_curve_by_powers`) — and `powf` answers
+/// only off the table's ends.
+#[inline]
+fn power(x: f32, which: Power) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(v) = power_table(which).at(x) {
+            return v;
+        }
+    }
+    power_exact(x, which)
+}
+
+#[inline]
+fn power_exact(x: f32, which: Power) -> f32 {
+    match which {
+        Power::Decode => x.powf(2.4),
+        Power::Encode => x.powf(1.0 / 2.4),
+    }
+}
+
+/// A power over `[lo, 1]`, at 4096 points an octave — the float's
+/// exponent and its leading twelve bits of fraction say which two points
+/// a value is between, and the rest of its fraction how far, which within
+/// an octave is a straight line in the value itself. A power law bends
+/// so little across a four-thousandth of an octave that the line between
+/// two points is off by a few parts in a hundred million. (A thousandth
+/// was tried first: four parts in ten million, which is several bits.)
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+struct PowerTable {
+    first: u32,
+    values: Vec<f32>,
+}
+
+/// Bits of fraction below the twelve that index the table.
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+const POWER_SHIFT: u32 = 11;
+
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+impl PowerTable {
+    fn new(lo: f32, which: Power) -> PowerTable {
+        let first = lo.to_bits() >> POWER_SHIFT << POWER_SHIFT;
+        let last = 1.0f32.to_bits();
+        let values = (0..=((last - first) >> POWER_SHIFT) + 1)
+            .map(|i| power_exact(f32::from_bits(first + (i << POWER_SHIFT)), which))
+            .collect();
+        PowerTable { first, values }
+    }
+
+    #[inline]
+    fn at(&self, x: f32) -> Option<f32> {
+        let bits = x.to_bits();
+        if x.is_nan() || x > 1.0 || bits < self.first {
+            return None;
+        }
+        let off = bits - self.first;
+        let i = (off >> POWER_SHIFT) as usize;
+        let t = (off & ((1 << POWER_SHIFT) - 1)) as f32 * (1.0 / (1 << POWER_SHIFT) as f32);
+        let (a, b) = (*self.values.get(i)?, *self.values.get(i + 1)?);
+        Some(a + (b - a) * t)
+    }
+}
+
+#[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+fn power_table(which: Power) -> &'static PowerTable {
+    static DECODE: std::sync::OnceLock<PowerTable> = std::sync::OnceLock::new();
+    static ENCODE: std::sync::OnceLock<PowerTable> = std::sync::OnceLock::new();
+    match which {
+        // Past the curve's straight foot: (0.04045 + 0.055) / 1.055.
+        Power::Decode => DECODE.get_or_init(|| PowerTable::new(0.09, Power::Decode)),
+        // And past the other end's: 0.003_130_8.
+        Power::Encode => ENCODE.get_or_init(|| PowerTable::new(0.003, Power::Encode)),
+    }
+}
+
+/// `v.round()` for a value that is not negative: half away from zero,
+/// which for these is half up. The same number, to the bit, as
+/// `f32::round` — a whole part and what is left over are both exact —
+/// without the call: WebAssembly has no instruction for rounding half
+/// away from zero, so `round` there is a routine in software, and the
+/// frame a page shows rounds four times a pixel.
+#[inline]
+pub fn round_unsigned(v: f32) -> f32 {
+    let whole = v.trunc();
+    if v - whole >= 0.5 {
+        whole + 1.0
+    } else {
+        whole
+    }
+}
+
+/// A linear channel as the eight-bit sRGB value a display is sent:
+/// `(linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8`, the same
+/// answer for every `f32`, without working out the curve.
+///
+/// The curve is a power law, and WebAssembly has no instruction for a
+/// power: there it is a routine in software, and the frame a page shows
+/// was three of them a pixel — in a phone's browser, more than the whole
+/// of drawing the photograph the frame was of. The answer is one of 256
+/// whole numbers, though, and the curve only climbs, so it is the count
+/// of the 255 points where it steps up that `v` has reached. Those are
+/// found once, by bisection over the floats themselves using the curve
+/// as it is, so each is exactly where the curve's own answer changes;
+/// an index by a value's leading bits says where to start counting, and
+/// from there it is a step or two
+/// (`eight_bits_by_table_are_the_curves_own_eight_bits`).
+#[inline]
+pub fn linear_to_srgb8(v: f32) -> u8 {
+    Srgb8::new().channel(v)
+}
+
+/// The eight-bit encoder with its steps in hand: [`linear_to_srgb8`] and
+/// [`LinearRgba::to_srgb8`] for a caller encoding a whole frame, which
+/// asks for the steps once rather than three times a pixel.
+#[derive(Clone, Copy)]
+pub struct Srgb8 {
+    steps: &'static Srgb8Steps,
+}
+
+impl Default for Srgb8 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Srgb8 {
+    pub fn new() -> Self {
+        Srgb8 {
+            steps: srgb8_steps(),
+        }
+    }
+
+    /// One linear channel: [`linear_to_srgb8`].
+    #[inline]
+    pub fn channel(&self, v: f32) -> u8 {
+        if v.is_nan() || v <= 0.0 {
+            return 0;
+        }
+        if v >= 1.0 {
+            return 255;
+        }
+        let bits = v.to_bits();
+        if bits < self.steps.first {
+            return 0;
+        }
+        let Some(&k) = self
+            .steps
+            .start
+            .get(((bits - self.steps.first) >> STEP_SHIFT) as usize)
+        else {
+            return 255;
+        };
+        let mut k = k as usize;
+        while k < 255 && v >= self.steps.at[k] {
+            k += 1;
+        }
+        k as u8
+    }
+
+    /// One premultiplied pixel: [`LinearRgba::to_srgb8`].
+    #[inline]
+    pub fn encode(&self, px: LinearRgba) -> [u8; 4] {
+        let alpha = round_unsigned(px.a.clamp(0.0, 1.0) * 255.0) as u8;
+        if alpha == 0 {
+            return [0, 0, 0, 0];
+        }
+        let enc = |v: f32| self.channel(v / px.a);
+        [enc(px.r), enc(px.g), enc(px.b), alpha]
+    }
+}
+
+/// The curve's own eight bits, worked out: what [`linear_to_srgb8`]
+/// stands for.
+fn srgb8_by_curve(v: f32) -> u8 {
+    (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8
+}
+
+/// How far a value's bits are shifted to index where to start counting:
+/// the exponent and eleven bits of the fraction, so 2048 starting points
+/// an octave — finer than the curve's steps anywhere, so no more than one
+/// of them falls between two starting points and a channel is one
+/// comparison.
+const STEP_SHIFT: u32 = 12;
+
+struct Srgb8Steps {
+    /// The least value giving each of 1 ..= 255.
+    at: [f32; 255],
+    /// The bits the first starting point stands at: the first step's,
+    /// rounded down to a starting point. Anything less is nought.
+    first: u32,
+    /// How many of those a value at or past each starting point has
+    /// certainly reached.
+    start: Vec<u8>,
+}
+
+fn srgb8_steps() -> &'static Srgb8Steps {
+    static STEPS: std::sync::OnceLock<Srgb8Steps> = std::sync::OnceLock::new();
+    STEPS.get_or_init(|| {
+        let one = 1.0f32.to_bits();
+        let mut at = [0.0f32; 255];
+        for (k, step) in at.iter_mut().enumerate() {
+            let want = k as u8 + 1;
+            // The least bits in (0, one] whose value gives `want` or more.
+            let (mut lo, mut hi) = (0u32, one);
+            while lo + 1 < hi {
+                let mid = lo + (hi - lo) / 2;
+                if srgb8_by_curve(f32::from_bits(mid)) >= want {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            *step = f32::from_bits(hi);
+        }
+        let first = at[0].to_bits() >> STEP_SHIFT << STEP_SHIFT;
+        let mut reached = 0usize;
+        let start = (0..=((one - first) >> STEP_SHIFT))
+            .map(|b| {
+                let lowest = f32::from_bits(first + (b << STEP_SHIFT));
+                while reached < 255 && at[reached] <= lowest {
+                    reached += 1;
+                }
+                reached as u8
+            })
+            .collect();
+        Srgb8Steps { at, first, start }
+    })
 }
 
 /// Linear 0..=1 → sRGB-encoded 0..=1.
@@ -201,7 +443,7 @@ pub fn linear_to_srgb(v: f32) -> f32 {
         // them would have to know.
         1.0
     } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+        1.055 * power(v, Power::Encode) - 0.055
     }
 }
 
@@ -232,6 +474,85 @@ pub fn to_working(color: &AuthoredColor) -> LinearRgba {
 
 #[cfg(test)]
 mod tests {
+    /// The curve as WebAssembly reads it, from a table, is the curve by
+    /// powers to within the last bit or two of an `f32`: across every
+    /// value the table covers, in both directions, and the table answers
+    /// for the whole of the curve past its straight foot.
+    #[test]
+    fn the_curve_by_table_is_the_curve_by_powers() {
+        for (which, lo) in [(Power::Decode, 0.0905f32), (Power::Encode, 0.003_130_9)] {
+            let table = power_table(which);
+            let mut worst = 0.0f64;
+            let mut bits = lo.to_bits();
+            while bits <= 1.0f32.to_bits() {
+                let x = f32::from_bits(bits);
+                let by_table = table
+                    .at(x)
+                    .expect("the table covers the curve past its foot");
+                let exact = power_exact(x, which);
+                worst = worst.max(((by_table - exact) / exact).abs() as f64);
+                bits += 7;
+            }
+            assert!(
+                worst < 1.2e-7,
+                "the table is {worst:e} from the power, relatively"
+            );
+            // Off its ends it says so, and `powf` answers.
+            assert!(table.at(1.5).is_none() && table.at(f32::NAN).is_none());
+            assert!(table.at(0.001).is_none());
+        }
+    }
+
+    /// Eight bits by the table are the curve's own eight bits for every
+    /// value tried: every one either side of each step, a spread of a
+    /// few million across nothing to one, and what is off the ends — less
+    /// than nothing, more than one, not a number.
+    #[test]
+    fn eight_bits_by_table_are_the_curves_own_eight_bits() {
+        let steps = srgb8_steps();
+        // No two steps between neighbouring starting points, which is
+        // what makes a channel one comparison.
+        for pair in steps.start.windows(2) {
+            assert!(pair[1] - pair[0] <= 1, "two steps in one slot: {pair:?}");
+        }
+        for t in steps.at {
+            for d in [-2i64, -1, 0, 1, 2] {
+                let v = f32::from_bits((t.to_bits() as i64 + d) as u32);
+                assert_eq!(linear_to_srgb8(v), srgb8_by_curve(v), "at {v:e}");
+            }
+        }
+        let one = 1.0f32.to_bits();
+        let mut bits = 0u32;
+        while bits <= one {
+            let v = f32::from_bits(bits);
+            assert_eq!(linear_to_srgb8(v), srgb8_by_curve(v), "at {v:e}");
+            bits += 331;
+        }
+        for v in [
+            -1.0,
+            -0.0,
+            0.0,
+            1.0,
+            1.5,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            1e-40,
+        ] {
+            assert_eq!(linear_to_srgb8(v), srgb8_by_curve(v), "at {v:e}");
+        }
+        // And the rounding beside it is `round`, to the bit.
+        let mut bits = 0u32;
+        while bits <= 255.0f32.to_bits() {
+            let v = f32::from_bits(bits);
+            assert_eq!(round_unsigned(v).to_bits(), v.round().to_bits(), "at {v:e}");
+            bits += 97;
+        }
+        for v in [0.5f32, 1.5, 2.5, 254.5, 0.49999997, 0.5000001] {
+            assert_eq!(round_unsigned(v).to_bits(), v.round().to_bits(), "at {v:e}");
+        }
+    }
+
     use super::*;
 
     #[test]

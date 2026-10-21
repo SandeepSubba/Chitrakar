@@ -3269,6 +3269,45 @@ without reading anything else.*
     `a_plane_blurred_a_row_at_a_time_is_the_same_plane`, bit for bit
     against the column-at-a-time walk over three regions, five radii and
     both edges; each fails with the ring one row short.
+- **The browser's frame** (Phase 4): every number above was measured
+  natively, and the browser is where the app runs. Measured there — the
+  engine's own WebAssembly in headless Chromium, warmed up, the fastest
+  of twelve frames — a full repaint of the fitted 12 MP photograph was
+  170 ms, against 13 natively. WebAssembly has no instruction for a
+  power or for rounding half away from zero, so `powf` and `round` are
+  routines in software there, and the frame crossed the sRGB curve with
+  three of each a pixel on its way to the screen, and an adjustment
+  crossed it again. Three changes, none of them changing a native
+  answer:
+  - **The frame's eight bits by table** (`linear_to_srgb8`, `Srgb8`): the
+    answer is one of 256, and the curve only climbs, so it is how many
+    of the 255 points where it steps up a value has reached — found once
+    by bisection over the floats with the curve as it is, and indexed by
+    a value's leading bits finely enough that a channel is one
+    comparison. The same byte as the curve's own for every float from
+    nothing to one (checked once over all 1.07 billion of them, and over
+    every 331st in the suite). Alpha rounds through `round_unsigned`,
+    `round` to the bit without the call.
+  - **The curve's two powers by table in WebAssembly** (`power`,
+    `PowerTable`): 4096 points an octave, within a part in ten million
+    of `powf`; natively `powf` stays the reference. A curves layer's
+    tables are built through the transfer tables rather than twelve
+    thousand powers a frame.
+  - **No power where none is needed**: an exposure's gain once a pass
+    (`Prepared::Gain`), and levels at a gamma of one take no power.
+
+  | In Chromium, best of 12 | Before | After |
+  |---|---|---|
+  | Repaint the fitted photograph | 170 ms | 37 ms |
+  | …under a curves layer | 184 ms | 56 ms |
+  | …under a curves and a blur layer | 226 ms | 98 ms |
+  - **Tests:** `eight_bits_by_table_are_the_curves_own_eight_bits` (every
+    step and its neighbours, three million values across nothing to one,
+    the ends; and no two steps between neighbouring starting points);
+    `the_curve_by_table_is_the_curve_by_powers` (both powers, relative
+    error under 1.2e-7 everywhere the table answers — a thousandth of an
+    octave was tried first and fails at 5e-7). The browser suite runs the
+    WebAssembly engine, so it is what holds the tables at pixel level.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
