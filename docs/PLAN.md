@@ -3237,7 +3237,7 @@ without reading anything else.*
   | Drag a curves layer's opacity | 204 ms | 39 ms |
   | Drag a shape under a curves layer | 27 ms | 6 ms |
   | Drag a blur layer's opacity (curves under it) | 269 ms | 77 ms |
-  | Pan the view | 316 ms | 99 ms |
+  | Pan the view | 316 ms | 99 ms → 71 ms |
 
   Two changes. A curves layer crossed each channel into the display
   encoding and back with nine powers a pixel, three of them the same
@@ -3256,6 +3256,19 @@ without reading anything else.*
     quarter, between pixels, flipped both ways, faded, masked, blended,
     bit for bit against the other road; fails on the first page with
     the row weight nudged by a thousandth).
+- **A blur down the columns, a row at a time** (Phase 4): the box
+  passes walked a column to its end and then the next, reading a pixel
+  a row away — eighteen kilobytes on a phone's view — at every step, and
+  that was most of what a blur cost. Every column's running sum now
+  moves down together and each row is read in order, once; the rows the
+  window still reads are kept in a ring of `radius + 1`. The same for a
+  feathered mask's plane. Panning the fitted 12 MP photograph under a
+  blur layer went from 69 ms a frame to 39, and under a blur and a
+  curves layer from 99 to 71.
+  - **Tests:** `down_the_columns_a_row_at_a_time_is_the_same_blur` and
+    `a_plane_blurred_a_row_at_a_time_is_the_same_plane`, bit for bit
+    against the column-at-a-time walk over three regions, five radii and
+    both edges; each fails with the ring one row short.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

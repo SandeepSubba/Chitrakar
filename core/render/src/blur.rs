@@ -36,7 +36,7 @@ pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32, beyond: 
     let radius = (d.max(1) / 2).max(1);
     for _ in 0..3 {
         box_blur_axis(surface, clip, radius, true, beyond);
-        box_blur_axis(surface, clip, radius, false, beyond);
+        box_blur_down(surface, clip, radius, beyond);
     }
 }
 
@@ -92,6 +92,10 @@ pub fn blur_plane(cover: &mut [f32], width: u32, height: u32, sigma: f32) {
                 continue;
             }
             let norm = 1.0 / (2 * radius + 1) as f32;
+            if !horizontal {
+                plane_down(cover, w, h, radius, norm);
+                continue;
+            }
             for lane in 0..lanes {
                 for (i, slot) in line[..len].iter_mut().enumerate() {
                     *slot = cover[if horizontal {
@@ -113,6 +117,43 @@ pub fn blur_plane(cover: &mut [f32], width: u32, height: u32, sigma: f32) {
                     sum += read(i as isize + r + 1) - read(i as isize - r);
                 }
             }
+        }
+    }
+}
+
+/// [`blur_plane`]'s pass down the columns, worked a row at a time, as
+/// [`box_blur_down`] works a picture's: every column's running sum moves
+/// down together, the same additions in the same order as walking each
+/// column to its end, with the rows the window still reads kept as they
+/// were in a ring and the first row on its own.
+fn plane_down(cover: &mut [f32], w: usize, h: usize, radius: usize, norm: f32) {
+    let r = radius as isize;
+    let len = h as isize;
+    let first: Vec<f32> = cover[..w].to_vec();
+    let ring_len = radius + 1;
+    let mut ring = vec![0.0f32; ring_len * w];
+    // Row `j`, clamped to the plane, as it was before this pass, once the
+    // rows up to `done` have been written.
+    let row = |cover: &[f32], ring: &[f32], j: isize, done: isize, x: usize| -> f32 {
+        let j = j.clamp(0, len - 1);
+        if j > done {
+            cover[j as usize * w + x]
+        } else if j == 0 {
+            first[x]
+        } else {
+            ring[(j as usize % ring_len) * w + x]
+        }
+    };
+    let mut sum: Vec<f32> = (0..w)
+        .map(|x| (-r..=r).map(|j| row(cover, &ring, j, -1, x)).sum())
+        .collect();
+    for i in 0..len {
+        let at = (i as usize % ring_len) * w;
+        let start = i as usize * w;
+        ring[at..at + w].copy_from_slice(&cover[start..start + w]);
+        for (x, s) in sum.iter_mut().enumerate() {
+            cover[start + x] = *s * norm;
+            *s += row(cover, &ring, i + r + 1, i, x) - row(cover, &ring, i - r, i, x);
         }
     }
 }
@@ -210,6 +251,88 @@ fn box_blur_axis(
     }
 }
 
+/// [`box_blur_axis`] down the columns, worked a row at a time.
+///
+/// Walking one column to its end and then the next reads a pixel a whole
+/// row away at every step, and a row of a phone's view is eighteen
+/// kilobytes: the pass down the columns was most of what a blur cost.
+/// Here every column keeps its own running sum and all of them move down
+/// together, so each row is read in order, once. Each column's sum is
+/// built with the same additions in the same order as the column-at-a-
+/// time pass, so the answer is the same to the bit
+/// (`down_the_columns_a_row_at_a_time_is_the_same_blur`).
+///
+/// A row is overwritten with its answer before the window has finished
+/// with it, so the rows the window still reads are kept as they were: a
+/// ring of the last `radius + 1` — the window reaches `radius` back from
+/// the row just written — and the first row on its own, for a window
+/// that repeats the top edge.
+fn box_blur_down(surface: &mut Surface, clip: ClipRect, radius: i32, beyond: Beyond) {
+    let (cols, len) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as i32);
+    if len == 0 || cols == 0 {
+        return;
+    }
+    let radius = radius.min(len);
+    let norm = 1.0 / (2 * radius + 1) as f32;
+    let width = surface.width as usize;
+    let row_at = |j: i32| (clip.y0 as usize + j as usize) * width + clip.x0 as usize;
+    let first: Vec<LinearRgba> = surface.pixels[row_at(0)..row_at(0) + cols].to_vec();
+    let ring_len = (radius + 1) as usize;
+    let mut ring: Vec<LinearRgba> = vec![LinearRgba::TRANSPARENT; ring_len * cols];
+    let mut sum = vec![LinearRgba::TRANSPARENT; cols];
+    let add_row = |sum: &mut [LinearRgba],
+                   surface: &Surface,
+                   ring: &[LinearRgba],
+                   j: i32,
+                   done: i32,
+                   sign: f32| {
+        if beyond == Beyond::Nothing && (j < 0 || j >= len) {
+            // Nothing: adding or taking away transparent leaves the sum
+            // as it was, bit for bit.
+            for s in sum.iter_mut() {
+                *s = if sign > 0.0 {
+                    add(*s, LinearRgba::TRANSPARENT)
+                } else {
+                    sub(*s, LinearRgba::TRANSPARENT)
+                };
+            }
+            return;
+        }
+        // Row `j` as it was before this pass, with the rows up to `done`
+        // already written: still on the surface if it is past them, in
+        // the ring if it is one of the last few — the window never
+        // reaches further back — or the first row, which a window
+        // repeating the top edge reads to the end.
+        let j = j.clamp(0, len - 1);
+        let row: &[LinearRgba] = if j > done {
+            &surface.pixels[row_at(j)..row_at(j) + cols]
+        } else if j == 0 {
+            &first
+        } else {
+            let at = (j as usize % ring_len) * cols;
+            &ring[at..at + cols]
+        };
+        for (s, p) in sum.iter_mut().zip(row) {
+            *s = if sign > 0.0 { add(*s, *p) } else { sub(*s, *p) };
+        }
+    };
+    // Prime every column's window centred on the first row.
+    for j in -radius..=radius {
+        add_row(&mut sum, surface, &ring, j, -1, 1.0);
+    }
+    for i in 0..len {
+        // Keep the row as it was before its answer goes over it.
+        let at = (i as usize % ring_len) * cols;
+        let start = row_at(i);
+        ring[at..at + cols].copy_from_slice(&surface.pixels[start..start + cols]);
+        for (out, s) in surface.pixels[start..start + cols].iter_mut().zip(&sum) {
+            *out = scale(*s, norm);
+        }
+        add_row(&mut sum, surface, &ring, i + radius + 1, i, 1.0);
+        add_row(&mut sum, surface, &ring, i - radius, i, -1.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// A softness wider than what it is being drawn on.
@@ -246,6 +369,109 @@ mod tests {
     }
 
     use super::*;
+
+    /// The pass down the columns, worked a row at a time, is the same
+    /// blur as the one that walks each column to its end — the same
+    /// additions in the same order for every column — on regions that
+    /// start inside the surface, are shorter than the window and taller,
+    /// repeating the edge and reading nothing past it.
+    #[test]
+    fn down_the_columns_a_row_at_a_time_is_the_same_blur() {
+        let (w, h) = (37u32, 53u32);
+        let mut seed = 0x2545_f491u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 1000) as f32 / 999.0
+        };
+        let mut original = Surface::new(w, h);
+        for p in &mut original.pixels {
+            let a = next();
+            *p = LinearRgba {
+                r: next() * a,
+                g: next() * a,
+                b: next() * a,
+                a,
+            };
+        }
+        let clips = [
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            },
+            ClipRect {
+                x0: 3,
+                y0: 7,
+                x1: 30,
+                y1: 41,
+            },
+            ClipRect {
+                x0: 5,
+                y0: 10,
+                x1: 9,
+                y1: 13,
+            },
+        ];
+        for clip in clips {
+            for radius in [1, 2, 5, 17, 80] {
+                for beyond in [Beyond::Edge, Beyond::Nothing] {
+                    let mut by_columns = original.clone();
+                    box_blur_axis(&mut by_columns, clip, radius, false, beyond);
+                    let mut by_rows = original.clone();
+                    box_blur_down(&mut by_rows, clip, radius, beyond);
+                    for (i, (p, q)) in by_columns.pixels.iter().zip(&by_rows.pixels).enumerate() {
+                        assert!(
+                            [p.r, p.g, p.b, p.a]
+                                .iter()
+                                .zip([q.r, q.g, q.b, q.a])
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "radius {radius} over {clip:?}: pixel {i} is {q:?} a row at a time \
+                             and {p:?} a column at a time"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The same for a plane of coverage: [`blur_plane`]'s pass down the
+    /// columns, a row at a time, against walking each column to its end.
+    #[test]
+    fn a_plane_blurred_a_row_at_a_time_is_the_same_plane() {
+        let (w, h) = (29usize, 41usize);
+        let mut seed = 0x9e37_79b9u32;
+        let original: Vec<f32> = (0..w * h)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                (seed % 1000) as f32 / 999.0
+            })
+            .collect();
+        for radius in [1usize, 3, 8, 40] {
+            let norm = 1.0 / (2 * radius + 1) as f32;
+            let mut by_rows = original.clone();
+            plane_down(&mut by_rows, w, h, radius, norm);
+            // A column at a time, as `blur_plane` walked it.
+            let mut by_columns = original.clone();
+            let r = radius as isize;
+            for x in 0..w {
+                let line: Vec<f32> = (0..h).map(|y| by_columns[y * w + x]).collect();
+                let read = |i: isize| line[i.clamp(0, h as isize - 1) as usize];
+                let mut sum: f32 = (-r..=r).map(read).sum();
+                for y in 0..h {
+                    by_columns[y * w + x] = sum * norm;
+                    sum += read(y as isize + r + 1) - read(y as isize - r);
+                }
+            }
+            for (i, (p, q)) in by_columns.iter().zip(&by_rows).enumerate() {
+                assert_eq!(p.to_bits(), q.to_bits(), "radius {radius}: element {i}");
+            }
+        }
+    }
 
     fn full(surface: &Surface) -> ClipRect {
         ClipRect {
