@@ -69,9 +69,14 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let icc = image::ImageDecoder::icc_profile(&mut decoder)
         .ok()
         .flatten();
-    let img = image::DynamicImage::from_decoder(decoder)?.to_rgba8();
-    let (width, height) = (img.width(), img.height());
-    let mut rgba8 = img.into_raw();
+    let (width, height, mut rgba8) = match eight_bit(decoder)? {
+        Ok(done) => done,
+        Err(decoder) => {
+            let img = image::DynamicImage::from_decoder(decoder)?.to_rgba8();
+            let (width, height) = (img.width(), img.height());
+            (width, height, img.into_raw())
+        }
+    };
     if let Some(icc) = icc {
         // Best effort: an unparseable or non-RGB profile leaves pixels as-is.
         chitrakar_color::cms::normalize_rgba8_to_srgb(&icc, &mut rgba8);
@@ -81,6 +86,47 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         height,
         rgba8,
     })
+}
+
+/// An 8-bit picture — what a photograph almost always is — read straight
+/// into the four-channel buffer it is kept in and widened there, back to
+/// front so nothing is overwritten before it is read. Decoded and then
+/// converted, a 12-megapixel photograph was a 36 MB RGB picture and a
+/// 48 MB RGBA one alive at once; this is the 48 alone. Anything else (16
+/// bits, floats) is handed back for the general road.
+#[allow(clippy::type_complexity)]
+fn eight_bit<D: image::ImageDecoder>(
+    decoder: D,
+) -> Result<Result<(u32, u32, Vec<u8>), D>, CodecError> {
+    use image::ColorType;
+    let channels = match decoder.color_type() {
+        ColorType::L8 => 1,
+        ColorType::La8 => 2,
+        ColorType::Rgb8 => 3,
+        ColorType::Rgba8 => 4,
+        _ => return Ok(Err(decoder)),
+    };
+    let (width, height) = decoder.dimensions();
+    let pixels = width as usize * height as usize;
+    let read = decoder.total_bytes() as usize;
+    if read != pixels * channels {
+        return Ok(Err(decoder));
+    }
+    let mut out = vec![0u8; pixels * 4];
+    decoder.read_image(&mut out[..read])?;
+    // Widened from the last pixel back, each one written at or past where
+    // it was read from, so a pixel is only ever overwritten once read.
+    for i in (0..pixels).rev() {
+        let s = i * channels;
+        let px = match channels {
+            1 => [out[s], out[s], out[s], 255],
+            2 => [out[s], out[s], out[s], out[s + 1]],
+            3 => [out[s], out[s + 1], out[s + 2], 255],
+            _ => [out[s], out[s + 1], out[s + 2], out[s + 3]],
+        };
+        out[i * 4..i * 4 + 4].copy_from_slice(&px);
+    }
+    Ok(Ok((width, height, out)))
 }
 
 /// Encode 8-bit sRGB RGBA pixels as PNG.
@@ -228,6 +274,50 @@ pub(crate) fn blended_page(
 
 #[cfg(test)]
 mod tests {
+
+    /// An 8-bit picture of every kind is read as the general road reads
+    /// it — grey, grey with alpha, colour, colour with alpha — through the
+    /// widening in place (`eight_bit`), pixel for pixel, and as a PNG and
+    /// a JPEG both. Uneven sizes, so a row is not a multiple of anything.
+    #[test]
+    fn an_eight_bit_picture_is_widened_in_place_to_what_the_general_road_gives() {
+        use image::{ColorType, ImageEncoder};
+        let (w, h) = (13u32, 7u32);
+        let pattern = |c: usize| -> Vec<u8> {
+            (0..(w * h) as usize * c)
+                .map(|i| ((i * 37 + i / 5 * 11) % 256) as u8)
+                .collect()
+        };
+        for (kind, channels) in [
+            (ColorType::L8, 1),
+            (ColorType::La8, 2),
+            (ColorType::Rgb8, 3),
+            (ColorType::Rgba8, 4),
+        ] {
+            let raw = pattern(channels);
+            let mut png = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(&raw, w, h, kind.into())
+                .unwrap();
+            let general = image::load_from_memory(&png).unwrap().to_rgba8().into_raw();
+            let mine = decode(&png).unwrap();
+            assert_eq!((mine.width, mine.height), (w, h), "{kind:?}");
+            assert_eq!(mine.rgba8, general, "{kind:?} as a PNG");
+        }
+        for (kind, channels) in [(ColorType::L8, 1), (ColorType::Rgb8, 3)] {
+            let raw = pattern(channels);
+            let mut jpeg = Vec::new();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 90)
+                .write_image(&raw, w, h, kind.into())
+                .unwrap();
+            let general = image::load_from_memory(&jpeg)
+                .unwrap()
+                .to_rgba8()
+                .into_raw();
+            assert_eq!(decode(&jpeg).unwrap().rgba8, general, "{kind:?} as a JPEG");
+        }
+    }
+
     use super::*;
 
     #[test]

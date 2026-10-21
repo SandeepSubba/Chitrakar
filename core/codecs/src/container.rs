@@ -49,6 +49,21 @@ struct Manifest {
     fonts: Vec<EmbeddedFont>,
 }
 
+/// The manifest as it is written: the same fields, the document borrowed.
+/// Owned, it was a clone of the whole document — every picture's pixels
+/// with it, which the manifest never writes (`Resource::rgba8` is skipped)
+/// — so saving a document holding a 12-megapixel photograph held a second
+/// 48 MB copy of it for nothing, and the recover draft does that on its
+/// own every little while. An engine's memory, once grown, is not handed
+/// back.
+#[derive(Serialize)]
+struct ManifestOut<'a> {
+    format_version: u32,
+    document: &'a Document,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fonts: Vec<EmbeddedFont>,
+}
+
 /// One face inside the container: the name text blocks set themselves in,
 /// and the entry holding its file. The entry is numbered rather than named
 /// after the face so any name, however it is spelled, makes a valid path.
@@ -79,9 +94,9 @@ pub fn save_chitra_with_fonts(
     doc: &Document,
     fonts: &[FontFile],
 ) -> Result<Vec<u8>, ContainerError> {
-    let manifest = Manifest {
+    let manifest = ManifestOut {
         format_version: FORMAT_VERSION,
-        document: doc.clone(),
+        document: doc,
         fonts: fonts
             .iter()
             .enumerate()

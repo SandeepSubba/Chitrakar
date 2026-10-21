@@ -14274,6 +14274,35 @@ assert(
   await ctx.close();
 }
 
+// 11k. A page the size of a phone's photograph costs what the screen
+// shows of it, not what it would take to draw the whole of it. The first
+// frame of a new document was drawn before the document had been given
+// its view, which made it the whole page at full size — for 4032 × 3024
+// a 195 MB float surface and a 48 MB frame — and an engine's memory,
+// once grown, is never handed back. On a phone that was a quarter of a
+// gigabyte gone for the rest of the visit, for an empty page.
+{
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const pp = await phone.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForTimeout(800);
+  const heap = () => pp.evaluate(() => performance.memory.usedJSHeapSize / 1048576);
+  const before = await heap();
+  await pp.tap('button[aria-label="Menus"]');
+  await pp.tap('.sheet-menu-label:text-is("File")');
+  await pp.locator(".menu-sheet button.menu-item", { hasText: "New document" }).first().tap();
+  await pp.locator('input[aria-label="Width"]').fill("4032");
+  await pp.locator('input[aria-label="Height"]').fill("3024");
+  await pp.click("text=Create");
+  await pp.waitForTimeout(1500);
+  const grew = (await heap()) - before;
+  assert(grew < 60, `a 12-megapixel page costs what the screen shows (${grew.toFixed(0)} MB more)`);
+  const page = await pp.locator("#engine-page").boundingBox();
+  assert(page && page.width > 300 && page.width < 390, `and it is fitted to the screen (${page && page.width.toFixed(0)})`);
+  await phone.close();
+}
+
 // 9aw. Dissolving a group answers for what the group itself was
 // carrying. A group is somewhere to put layers and also a layer in its
 // own right: it can be hidden, or made half-transparent, and those two

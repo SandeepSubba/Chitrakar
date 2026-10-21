@@ -1820,6 +1820,28 @@ export function App() {
     [setDocumentSize],
   );
 
+  /** Give a session that has not drawn anything yet the view a fitted
+   * page will have, before its first frame. Without one the engine draws
+   * the whole page at full size — a 12-megapixel photograph's page is a
+   * 195 MB float surface and a 48 MB frame — and an engine's memory, once
+   * grown, is never handed back: one frame drawn before the view arrived
+   * left a phone's tab a quarter of a gigabyte heavier for the rest of
+   * the visit. Read off the host directly rather than out of state, so
+   * this is no dependency of the callbacks that make a session. */
+  const fitSession = useCallback((s: WasmSession, w: number, h: number) => {
+    const host = hostRef.current;
+    if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
+    const d = window.devicePixelRatio || 1;
+    const zoom = Math.min(host.clientWidth / w, host.clientHeight / h) * 0.9;
+    s.set_viewport(
+      zoom * d,
+      ((host.clientWidth - w * zoom) / 2) * d,
+      ((host.clientHeight - h * zoom) / 2) * d,
+      Math.round(host.clientWidth * d),
+      Math.round(host.clientHeight * d),
+    );
+  }, []);
+
   const fitView = useCallback(() => {
     const host = hostRef.current;
     if (!host) return;
@@ -1876,6 +1898,7 @@ export function App() {
   const newDocument = useCallback(
     (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72) => {
       const s = new WasmSession(width, height, useCmyk);
+      fitSession(s, width, height);
       s.set_dpi(dpi);
       setDocDpi(dpi);
       setSession(s);
@@ -1894,7 +1917,7 @@ export function App() {
       refresh(s);
       fitView();
     },
-    [refresh, fitView, setDocumentSize],
+    [refresh, fitView, fitSession, setDocumentSize],
   );
 
   useEffect(() => {
@@ -7757,6 +7780,7 @@ export function App() {
   const openDocumentBytes = (bytes: Uint8Array, name?: string): boolean => {
     try {
       const s = WasmSession.open(bytes);
+      fitSession(s, s.width, s.height);
       // Faces the file carried are registered by the open; offer them.
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
       if (name) setDocName(name.replace(/\.chitra$/i, ""));

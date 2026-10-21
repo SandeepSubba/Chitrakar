@@ -3166,6 +3166,14 @@ without reading anything else.*
     photograph up), besides `a_colour_overlay_is_the_cpus` and the pages
     nobody wrote;
   - the SVG export dropping it: caught by the importer's round trips.
+- **A photograph's page in a phone's memory** (Phase 4): the first frame
+  waits for the view; 8-bit pictures are widened in place; saving
+  borrows the document.
+  - **Tests:** smoke 11k (a 4032 × 3024 page on a phone page costs
+    under 60 MB of the engine's memory, and is fitted to the screen);
+    `an_eight_bit_picture_is_widened_in_place_to_what_the_general_road_
+    gives` (grey, grey and alpha, RGB, RGBA as PNG; grey and RGB as JPEG;
+    fails with grey-and-alpha's alpha dropped); `tests/peak.rs`.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -10214,6 +10222,31 @@ chitrakar/
   as before. Smoke 11j sends real touches through the browser's own
   input, since a synthetic event never meets its scrolling, which is
   the whole question.
+- A photograph's page, held in what a phone can spare ✅. In the browser
+  an engine's memory, once grown, is never handed back, so a peak is not
+  a moment — it is what the tab weighs for the rest of the visit. A
+  12-megapixel page (4032 × 3024) was measured three ways and found
+  three peaks far above what was kept:
+  - **The first frame of a new document** was drawn before the document
+    had been given its view, so it was the whole page at full size: a
+    195 MB float surface and a 48 MB frame, for an *empty* page. The
+    session is given its fitted view before its first frame now
+    (`fitSession`, in New and in Open). An empty 12-megapixel page went
+    from about 270 MB to 7 (smoke 11k holds it under 60).
+  - **Reading a photograph** decoded it as RGB and copied it into RGBA,
+    36 MB and 48 MB alive at once. An 8-bit picture is read straight
+    into the RGBA buffer and widened in place, back to front
+    (`eight_bit`): the decode peaks at what it keeps.
+  - **Saving** cloned the whole document — every picture's pixels — to
+    write a manifest that never writes pixels; and the recover draft
+    saves on its own every little while. The manifest borrows the
+    document now (`ManifestOut`).
+  Natively, opening the photograph on a phone-sized view went from a
+  129 MB peak to 95, and saving from 149 to 102: the photograph's 48 MB
+  and a screen's float cache, and the file being written.
+  `core/codecs/tests/peak.rs` counts allocations in its own process and
+  holds reading and saving to one copy of the pixels (with either fix
+  taken out it fails, at 13 MB and 8 MB for a 7 MB picture).
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
