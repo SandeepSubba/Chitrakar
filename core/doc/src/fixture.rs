@@ -754,6 +754,20 @@ pub fn everything() -> Fixture {
                 },
                 opacity: 0.85,
             },
+            // And recoloured, in the palette's ink, by name: the one
+            // effect that changes the layer's own pixels rather than
+            // drawing beside them, and until now asked only of pages
+            // nobody wrote — never of this one, where every audit looks.
+            Effect::ColorOverlay {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.45,
+                    b: 0.8,
+                    a: 1.0,
+                }
+                .standing_for("ink"),
+                opacity: 0.6,
+            },
         ],
     })
     .unwrap();
