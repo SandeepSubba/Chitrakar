@@ -10247,6 +10247,18 @@ chitrakar/
   `core/codecs/tests/peak.rs` counts allocations in its own process and
   holds reading and saving to one copy of the pixels (with either fix
   taken out it fails, at 13 MB and 8 MB for a 7 MB picture).
+  **Still to do: the frame.** Moving that photograph on a phone-sized
+  view repaints in about 95 ms natively, single-threaded — several
+  hundred in a phone's WebAssembly. Half the resolution while a finger
+  moves was measured and does not help (78 ms): halve the pixels and
+  each one's footprint in the photograph doubles, so it averages four
+  times the texels (`picture_footprint`), and every frame still reads
+  all twelve million. The cost is the source, not the screen, so the
+  answer is a pyramid — the picture kept again at a half, a quarter, …
+  of its size, sampled from the level whose texels are about a device
+  pixel — and it is a change to the sampling arithmetic of both
+  renderers and of the tests that pin it, to be designed rather than
+  slipped in.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
