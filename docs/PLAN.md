@@ -3147,21 +3147,24 @@ without reading anything else.*
     swipe left the list where it was.
 - **The shared fixture, an eighth time: a colour overlay, by name.** The
   one effect that changes a layer's own pixels rather than drawing
-  beside them had only ever been asked of pages nobody wrote. It goes on
-  the text layer now, over its inner shadow and bevel, in the palette's
-  ink by name. One audit stopped holding and it was the right one: the
-  file format's inventory of fields a `.chitra` cannot be missing grew
-  by the overlay's eight. Everything else held, so the code it was meant
-  to exercise was broken to see who would notice:
+  beside them had only ever been asked of pages nobody wrote. It stands
+  on the photograph now, in the palette's ink by name. One audit stopped
+  holding, and it was the right one: the file format's inventory of
+  fields a `.chitra` cannot be missing grew by the overlay's eight.
+  Everything else held, so the code it was meant to exercise was broken
+  to see who would notice — and where it first went says why that step
+  is not optional. It went on the lettering first, and there nothing
+  noticed the GPU backend ignoring overlays: the text wears a bevel at
+  0.85, which re-lights nearly every pixel of its thin strokes, so the
+  overlay under it hardly shows — to the audit or to the eye. On the
+  photograph:
   - the palette walk skipping the overlay's colour: caught by
     `a_palette_change_leaves_nothing_meaning_the_old_colour`, and only
     because the overlay now stands in the document;
-  - the GPU backend ignoring overlays: caught by its own
-    `a_colour_overlay_is_the_cpus` and the pages nobody wrote — *not* by
-    the shared document's audit, since the overlay is on small text,
-    which a whole-page mean cannot see and which has no interior pixels
-    for the interiors check. A gap in that audit worth knowing: text is
-    compared there in name only;
+  - the GPU backend ignoring overlays: caught by the shared document's
+    own cross-renderer audit (after `MoveNode`, which brings the
+    photograph up), besides `a_colour_overlay_is_the_cpus` and the pages
+    nobody wrote;
   - the SVG export dropping it: caught by the importer's round trips.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,

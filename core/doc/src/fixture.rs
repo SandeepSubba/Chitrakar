@@ -589,6 +589,26 @@ pub fn everything() -> Fixture {
         },
     })
     .unwrap();
+    // Recoloured, in the palette's ink, by name: the one effect that
+    // changes a layer's own pixels rather than drawing beside them, and
+    // until now asked only of pages nobody wrote — never of this one,
+    // where every audit looks. On the photograph, which is all its own
+    // pixels: on the lettering it went first, and a bevel lit over it
+    // hid nearly all of it from every audit (and from the eye).
+    doc.apply(Command::SetEffects {
+        id: picture,
+        effects: vec![Effect::ColorOverlay {
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.45,
+                b: 0.8,
+                a: 1.0,
+            }
+            .standing_for("ink"),
+            opacity: 0.6,
+        }],
+    })
+    .unwrap();
     doc.apply(Command::AddNode {
         parent: root,
         index: 3,
@@ -753,20 +773,6 @@ pub fn everything() -> Fixture {
                     a: 1.0,
                 },
                 opacity: 0.85,
-            },
-            // And recoloured, in the palette's ink, by name: the one
-            // effect that changes the layer's own pixels rather than
-            // drawing beside them, and until now asked only of pages
-            // nobody wrote — never of this one, where every audit looks.
-            Effect::ColorOverlay {
-                color: chitrakar_color::AuthoredColor::Srgb {
-                    r: 0.2,
-                    g: 0.45,
-                    b: 0.8,
-                    a: 1.0,
-                }
-                .standing_for("ink"),
-                opacity: 0.6,
             },
         ],
     })
