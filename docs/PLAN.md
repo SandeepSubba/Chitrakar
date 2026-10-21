@@ -3227,6 +3227,35 @@ without reading anything else.*
     its silhouette, 0.04 apart); `a_frame_between_pixels_is_drawn_and_
     what_it_cannot_hold_goes_back` draws the pixelate at a zoom now and
     asks the in-place frame with an inner shadow to go back.
+- **The frames a phone draws most** (Phase 4): a 12-megapixel
+  photograph fitted to a 1170 × 878 view, timed natively through
+  `Session::render_cached`, before → after:
+
+  | Gesture | Before | After |
+  |---|---|---|
+  | Drag the photograph | 44 ms | 11 ms |
+  | Drag a curves layer's opacity | 204 ms | 39 ms |
+  | Drag a shape under a curves layer | 27 ms | 6 ms |
+  | Drag a blur layer's opacity (curves under it) | 269 ms | 77 ms |
+  | Pan the view | 316 ms | 99 ms |
+
+  Two changes. A curves layer crossed each channel into the display
+  encoding and back with nine powers a pixel, three of them the same
+  number every time; the whole crossing is one table a channel now,
+  worked out exactly at 4096 steps once a pass (`curves_through`). And
+  an upright picture read one tap a pixel — a photograph at any zoom —
+  is drawn by rows and columns: where a column reads, between which two
+  texels and how far, and how much of it the outline covers, are worked
+  out once a column, and the same for a row, so a pixel is four fetches
+  and its blend. The same arithmetic in the same order, to the bit.
+  - **Tests:** `a_curves_layer_crosses_by_table_where_the_power_law_
+    would` (within 2e-5 from the deepest shadow to five times white;
+    fails at 0.014 with the table sixteen times coarser, and above white
+    with the gain left off); `an_upright_picture_is_the_same_picture_by_
+    rows_and_columns` (nine pages, enlarged, shrunk onto the half and the
+    quarter, between pixels, flipped both ways, faded, masked, blended,
+    bit for bit against the other road; fails on the first page with
+    the row weight nudged by a thousandth).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

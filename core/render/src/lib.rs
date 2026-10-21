@@ -4190,6 +4190,16 @@ fn on_curve(table: &Curve, v: f32) -> f32 {
     a + (b - a) * f
 }
 
+/// `on_curve` over a table held as a slice: `CURVE_STEPS` steps from
+/// nothing to one. A table of any other length is not one of these, and
+/// reads as the identity rather than out of its end.
+fn on_steps(table: &[f32], v: f32) -> f32 {
+    let Ok(table) = <&Curve>::try_from(table) else {
+        return v;
+    };
+    on_curve(table, v)
+}
+
 /// The channels a blend function sees: unpremultiplied and in the
 /// display encoding, which is the space the spec is written in.
 fn shown(t: &Transfer, v: f32, a: f32) -> f32 {
@@ -7299,6 +7309,62 @@ fn draw_raster(
         && t.f.fract() == 0.0)
         .then_some((t.e as i64, t.f as i64));
 
+    // Square to the page and read one tap a pixel — a photograph fitted
+    // to a view, at any zoom, which is what most frames of an editor
+    // are. There the column a pixel reads from depends only on its x and
+    // the row only on its y, and so does how much of it the picture's
+    // outline covers: each is worked out once a column and once a row,
+    // and a pixel is four fetches and its blend. The same arithmetic in
+    // the same order as below, to the bit
+    // (`an_upright_picture_is_the_same_picture_by_rows_and_columns`).
+    // A 12-megapixel photograph fitted to a phone's 1170 × 878 view
+    // was 44 ms a frame to drag and is 11.
+    if straight.is_none() && !averaging && t.b == 0.0 && t.c == 0.0 && by_rows() {
+        let cx = |i: f32| i.clamp(0.0, last_x) as u32;
+        let cy = |i: f32| i.clamp(0.0, last_y) as u32;
+        let span = |lo: f32, hi: f32, at: u32| {
+            let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+            (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+        };
+        let (w, h) = (res.width as f32, res.height as f32);
+        let any_y = bbox.y0 as f32 + 0.5;
+        let any_x = bbox.x0 as f32 + 0.5;
+        // Where a column reads, between which two texels and how far, and
+        // how much of it the outline covers; the same for a row.
+        let cols: Vec<(u32, u32, f32, f32)> = (bbox.x0..bbox.x1)
+            .map(|px| {
+                let u = inv.at(px as f32 + 0.5, any_y).0 / step - 0.5;
+                let u0 = u.floor();
+                (cx(u0), cx(u0 + 1.0), u - u0, span(t.e, t.e + w * t.a, px))
+            })
+            .collect();
+        for py in bbox.y0..bbox.y1 {
+            let v = inv.at(any_x, py as f32 + 0.5).1 / step - 0.5;
+            let v0 = v.floor();
+            let (y0, y1, fy) = (cy(v0), cy(v0 + 1.0), v - v0);
+            let edge_y = span(t.f, t.f + h * t.d, py);
+            if edge_y <= 0.0 {
+                continue;
+            }
+            for (px, &(x0, x1, fx, edge_x)) in (bbox.x0..bbox.x1).zip(&cols) {
+                let edge = edge_x * edge_y;
+                if edge <= 0.0 {
+                    continue;
+                }
+                let cov = coverage_at(doc, mask, px, py) * edge * opacity;
+                if cov <= 0.0 {
+                    continue;
+                }
+                let top = lerp(texel(x0, y0), texel(x1, y0), fx);
+                let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
+                let src = scale_alpha(lerp(top, bottom, fy), cov);
+                let i = (py * dst.width + px) as usize;
+                dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+            }
+        }
+        return;
+    }
+
     for py in bbox.y0..bbox.y1 {
         for px in bbox.x0..bbox.x1 {
             // The image is a rect in local space, so its outline gets the
@@ -7364,6 +7430,24 @@ fn draw_raster(
 /// renderers average a shrunk picture over the same grid.
 pub fn picture_taps(t: Transform) -> Option<([f32; 2], [u32; 2])> {
     Inverse::of(t).map(picture_footprint)
+}
+
+/// Whether an upright picture is drawn by rows and columns
+/// (`draw_raster`). Always, outside the test that holds the two roads to
+/// the same picture.
+#[cfg(not(test))]
+fn by_rows() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static BY_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn by_rows() -> bool {
+    BY_ROWS.with(|b| b.get())
 }
 
 /// How a shrunk picture is drawn from its pyramid under `t`: the level,
@@ -10838,6 +10922,13 @@ pub struct CurveLuts {
     pub red: Option<Vec<f32>>,
     pub green: Option<Vec<f32>>,
     pub blue: Option<Vec<f32>>,
+    /// Each channel's whole crossing — linear light into the display
+    /// encoding, through the master and the channel's own curve, and
+    /// back — from nothing to white in `CURVE_STEPS` steps, and what
+    /// white becomes (`curves_through`). One table a channel a pixel,
+    /// where the crossing was nine powers.
+    pub through: [Vec<f32>; 3],
+    pub white: [f32; 3],
 }
 
 /// What an adjustment works out once for a whole pass rather than once
@@ -10944,12 +11035,45 @@ fn curve_lut_of(adj: &Adjustment) -> CurveLuts {
         return CurveLuts::default();
     };
     let channel = |pts: &Vec<[f32; 2]>| (pts.len() >= 2).then(|| curve_lut(pts));
-    CurveLuts {
+    let mut luts = CurveLuts {
         master: curve_lut(points),
         red: channel(red),
         green: channel(green),
         blue: channel(blue),
-    }
+        ..CurveLuts::default()
+    };
+    let (through, white) = curves_through(&luts);
+    luts.through = through;
+    luts.white = white;
+    luts
+}
+
+/// The crossing a curves layer makes of each channel, tabulated from
+/// linear light to linear light: into the display encoding the graph is
+/// drawn over, through the master and then the channel's own curve, and
+/// back into light — worked out exactly at each of `CURVE_STEPS` steps,
+/// and read between them. And what white becomes, which is the gain a
+/// channel above white is carried on by.
+fn curves_through(luts: &CurveLuts) -> ([Vec<f32>; 3], [f32; 3]) {
+    let own = [luts.red.as_ref(), luts.green.as_ref(), luts.blue.as_ref()];
+    let mut white = [0.0f32; 3];
+    let tables = std::array::from_fn(|c| {
+        let through = |x: f32| {
+            let m = curve_at(&luts.master, x);
+            match own[c] {
+                Some(lut) => curve_at(lut, m),
+                None => m,
+            }
+        };
+        white[c] = chitrakar_color::srgb_to_linear(through(1.0));
+        (0..=CURVE_STEPS)
+            .map(|i| {
+                let v = i as f32 / CURVE_STEPS as f32;
+                chitrakar_color::srgb_to_linear(through(chitrakar_color::linear_to_srgb(v)))
+            })
+            .collect()
+    });
+    (tables, white)
 }
 
 /// A gradient map's stops as the ramp walker wants them: resolved to the
@@ -11561,26 +11685,16 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // identity, a curve that pulls white down pulls the
             // highlights down with it in proportion, and the two meet
             // exactly at one.
-            let f = |v: f32, own: Option<&Vec<f32>>| {
-                let through = |x: f32| {
-                    let m = curve_at(&luts.master, x);
-                    match own {
-                        Some(lut) => curve_at(lut, m),
-                        None => m,
-                    }
-                };
+            //
+            // The whole crossing is one table a channel, worked out once
+            // a pass (`curves_through`): nine powers a pixel were most of
+            // what a curves layer cost, and dragging one's opacity over a
+            // fitted photograph repainted at five frames a second.
+            let f = |v: f32, c: usize| {
                 let inside = v.clamp(0.0, 1.0);
-                let white = chitrakar_color::srgb_to_linear(through(1.0));
-                let at = chitrakar_color::srgb_to_linear(through(chitrakar_color::linear_to_srgb(
-                    inside,
-                )));
-                at + (v - inside).max(0.0) * white
+                on_steps(&luts.through[c], inside) + (v - inside).max(0.0) * luts.white[c]
             };
-            (
-                f(r, luts.red.as_ref()),
-                f(g, luts.green.as_ref()),
-                f(b, luts.blue.as_ref()),
-            )
+            (f(r, 0), f(g, 1), f(b, 2))
         }
     };
     LinearRgba {
@@ -23983,6 +24097,209 @@ mod tests {
                 (lo - 0.5).abs() < 0.01 && (hi - 0.5).abs() < 0.01,
                 "{name}: the grey runs from {lo:.4} to {hi:.4}, where it should be 0.5"
             );
+        }
+    }
+
+    /// A curves layer's crossing — into the display encoding, through
+    /// the curves, back into light — is read from one table a channel
+    /// now rather than worked out with nine powers a pixel. The table
+    /// is the exact crossing at each step and read between them, so it
+    /// has to stay the exact crossing everywhere: in the deepest shadow,
+    /// where the encoding is steepest, across the middle, at white, and
+    /// above white, where a channel is carried on by the curve's gain.
+    #[test]
+    fn a_curves_layer_crosses_by_table_where_the_power_law_would() {
+        let adj = Adjustment::Curves {
+            points: vec![[0.0, 0.05], [0.3, 0.42], [0.7, 0.66], [1.0, 0.93]],
+            red: vec![[0.0, 0.0], [0.5, 0.6], [1.0, 1.0]],
+            green: Vec::new(),
+            blue: vec![[0.0, 0.1], [0.4, 0.3], [1.0, 0.9]],
+        };
+        let ready = prepare(&Document::new(1, 1, ColorMode::Rgb), &adj);
+        let Some(Prepared::Curves(luts)) = ready.as_ref() else {
+            panic!("a curves layer prepares its tables");
+        };
+        let exact = |v: f32, own: Option<&Vec<f32>>| {
+            let through = |x: f32| {
+                let m = curve_at(&luts.master, x);
+                own.map_or(m, |lut| curve_at(lut, m))
+            };
+            let inside = v.clamp(0.0, 1.0);
+            let white = chitrakar_color::srgb_to_linear(through(1.0));
+            chitrakar_color::srgb_to_linear(through(chitrakar_color::linear_to_srgb(inside)))
+                + (v - inside).max(0.0) * white
+        };
+        let mut worst = (0.0f32, 0.0f32);
+        for i in 0..=3000 {
+            // Dense in the shadows, where the encoding bends hardest.
+            let v = (i as f32 / 2000.0).powi(3) * 1.5;
+            let got = apply_adjustment(
+                &adj,
+                ready.as_ref(),
+                LinearRgba {
+                    r: v,
+                    g: v,
+                    b: v,
+                    a: 1.0,
+                },
+            );
+            for (c, own) in [
+                (got.r, luts.red.as_ref()),
+                (got.g, None),
+                (got.b, luts.blue.as_ref()),
+            ] {
+                let off = (c - exact(v, own)).abs();
+                if off > worst.0 {
+                    worst = (off, v);
+                }
+            }
+        }
+        assert!(
+            worst.0 < 2e-5,
+            "the table is {} from the power law at {}",
+            worst.0,
+            worst.1
+        );
+    }
+
+    /// An upright picture read one tap a pixel is drawn by rows and
+    /// columns — where each reads from worked out once — and that has to
+    /// be the same picture, to the bit, as the road every other picture
+    /// takes: enlarged, shrunk a little and onto a level of its pyramid,
+    /// between pixels, flipped either way, faded, masked, and blended.
+    #[test]
+    fn an_upright_picture_is_the_same_picture_by_rows_and_columns() {
+        const N: u32 = 97;
+        let bytes: Vec<u8> = (0..N * 61 * 4)
+            .map(|i| ((i as u64 * 53 + 7) % 251) as u8)
+            .collect();
+        let place = |t: Transform, opacity: f32, masked: bool, blend: BlendMode| {
+            let mut doc = Document::new(140, 90, ColorMode::Rgb);
+            let rid = doc.add_resource(N, 61, bytes.clone());
+            let root = doc.root();
+            let mut node = Node::raster(
+                "img",
+                chitrakar_doc::RasterRef {
+                    resource_id: rid,
+                    width: N,
+                    height: 61,
+                    corners: None,
+                },
+            );
+            node.opacity = opacity;
+            node.blend = blend;
+            if masked {
+                node.mask = Some(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 40.0, ry: 25.0 },
+                        transform: Transform::translation(60.0, 40.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform { id, transform: t })
+                .unwrap();
+            doc
+        };
+        let at = |a: f32, d: f32, e: f32, f: f32| Transform {
+            a,
+            d,
+            e,
+            f,
+            ..Default::default()
+        };
+        let pages = [
+            (
+                "enlarged",
+                at(1.37, 1.37, 3.3, 2.6),
+                1.0,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "shrunk a little",
+                at(0.71, 0.83, 5.5, 4.25),
+                1.0,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "onto the half",
+                at(0.4, 0.4, 7.2, 1.9),
+                1.0,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "onto the quarter",
+                at(0.23, 0.26, 1.1, 0.6),
+                1.0,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "flipped across",
+                at(-1.2, 1.1, 130.4, 3.0),
+                1.0,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "flipped down",
+                at(0.9, -0.95, 4.0, 70.7),
+                1.0,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "faded",
+                at(1.1, 1.1, 2.5, 2.5),
+                0.45,
+                false,
+                BlendMode::Normal,
+            ),
+            (
+                "masked",
+                at(1.3, 1.2, 0.5, 0.5),
+                1.0,
+                true,
+                BlendMode::Normal,
+            ),
+            (
+                "blended",
+                at(1.05, 1.15, 6.6, 3.3),
+                1.0,
+                false,
+                BlendMode::Multiply,
+            ),
+        ];
+        for (name, t, opacity, masked, blend) in pages {
+            let doc = place(t, opacity, masked, blend);
+            BY_ROWS.with(|b| b.set(false));
+            let general = render(&doc).unwrap();
+            BY_ROWS.with(|b| b.set(true));
+            let rows = render(&doc).unwrap();
+            assert!(
+                rows.pixels.iter().any(|p| p.a > 0.0),
+                "{name}: drawn at all"
+            );
+            for (i, (p, q)) in general.pixels.iter().zip(&rows.pixels).enumerate() {
+                assert!(
+                    p.r.to_bits() == q.r.to_bits()
+                        && p.g.to_bits() == q.g.to_bits()
+                        && p.b.to_bits() == q.b.to_bits()
+                        && p.a.to_bits() == q.a.to_bits(),
+                    "{name}: pixel {i} is {q:?} by rows and {p:?} the other way"
+                );
+            }
         }
     }
 
