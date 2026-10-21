@@ -3331,6 +3331,19 @@ without reading anything else.*
     `a_power_by_table_is_the_power` (seven exponents from a gamma of 20
     to a tenth, under 1e-6 relatively, a denormal answer within 1e-30,
     and the table kept while the exponent stays).
+- **A view moved keeps its surfaces; the pinch and the surface blur in
+  the browser** (Phase 4). `set_viewport` let go of the frame's surface
+  and its scratch, so every frame of a pan asked for sixteen megabytes
+  of zeroed memory and zeroed it — the browser's profile had it at a few
+  milliseconds a frame; a whole repaint clears what it draws over, so
+  they are kept now and only a view of another size gets new ones. The
+  pinch raises to its power through `chitrakar_color::pow`, and the
+  surface blur's likeness folds with `hi` rather than `f32::max` (a call
+  in WebAssembly).
+  - **Tests:** `a_view_moved_shows_what_a_fresh_view_there_shows`
+    (panned, zoomed in, zoomed out past the page, panned again, with a
+    shadow and a blur filter on the page: bit for bit what a session
+    that only looked there shows).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

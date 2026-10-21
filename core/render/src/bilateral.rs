@@ -35,7 +35,7 @@ pub fn nearness(k: i32, radius: usize) -> f32 {
 /// The weight of a neighbour by likeness alone: one for the same shown
 /// colour, nothing at `threshold` apart or more.
 pub fn likeness(a: [f32; 4], b: [f32; 4], threshold: f32) -> f32 {
-    let d = (0..4).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, f32::max);
+    let d = (0..4).map(|i| (a[i] - b[i]).abs()).fold(0.0f32, HiLo::hi);
     (1.0 - d / threshold).hi(0.0)
 }
 

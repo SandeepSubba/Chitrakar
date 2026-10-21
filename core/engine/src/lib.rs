@@ -8112,9 +8112,12 @@ impl Session {
         self.viewport = Some(size);
         // Everything the surface shows has moved; none of it can be reused,
         // and that includes the part beside the page, which a document-space
-        // dirty region has no way to name.
-        self.cache = None;
-        self.scratch = None;
+        // dirty region has no way to name. The surfaces themselves can be:
+        // a whole repaint clears all it draws over, and a pan is a whole
+        // repaint every frame, so letting them go meant asking for sixteen
+        // megabytes of zeroed memory a frame and zeroing it — a few
+        // milliseconds a frame in a browser, for nothing. A view of
+        // another size gets new ones (`render_cached`).
         self.stale = None;
         self.stale_all = true;
     }
@@ -11268,6 +11271,79 @@ mod tests {
             (c.x1 - c.x0) < 200 || (c.y1 - c.y0) < 200,
             "an edit is not a whole-surface repaint: {c:?}"
         );
+    }
+
+    /// A view moved keeps its surfaces — a pan is a whole repaint every
+    /// frame, and a fresh pair a frame was sixteen megabytes of zeroed
+    /// memory — so what it shows after being panned, zoomed in, zoomed
+    /// out past the page's edge and panned again has to be exactly what a
+    /// session that only ever looked there shows: nothing of an earlier
+    /// frame left beside the page, under a shadow's reach or a filter's.
+    #[test]
+    fn a_view_moved_shows_what_a_fresh_view_there_shows() {
+        let build = || {
+            let mut session = Session::new(160, 120, ColorMode::Rgb);
+            let id = add_rect(&mut session, "r", 70.0, 50.0);
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(30.0, 25.0),
+                })
+                .unwrap();
+            session
+                .apply(Command::SetEffects {
+                    id,
+                    effects: vec![chitrakar_doc::Effect::DropShadow {
+                        dx: 6.0,
+                        dy: 5.0,
+                        blur: 3.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity: 0.7,
+                        spread: 0.0,
+                    }],
+                })
+                .unwrap();
+            let root = session.document().root();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::filter(
+                        "blur",
+                        chitrakar_doc::Filter::GaussianBlur { sigma: 2.0 },
+                    )),
+                })
+                .unwrap();
+            session
+        };
+        let mut moved = build();
+        for (scale, x, y) in [
+            (1.0, 0.0, 0.0),
+            (2.0, 40.0, 30.0),
+            (0.5, -60.0, -40.0),
+            (1.5, 25.0, -10.0),
+        ] {
+            moved.set_viewport(scale, x, y, 180, 140);
+            moved.render_cached().unwrap();
+        }
+        let mut fresh = build();
+        fresh.set_viewport(1.5, 25.0, -10.0, 180, 140);
+        let a = moved.render_cached().unwrap().0.pixels.clone();
+        let b = fresh.render_cached().unwrap().0.pixels.clone();
+        for (i, (p, q)) in a.iter().zip(&b).enumerate() {
+            assert!(
+                [p.r, p.g, p.b, p.a]
+                    .iter()
+                    .zip([q.r, q.g, q.b, q.a])
+                    .all(|(u, v)| u.to_bits() == v.to_bits()),
+                "pixel {i}: {p:?} after moving, {q:?} looked at fresh"
+            );
+        }
     }
 
     #[test]

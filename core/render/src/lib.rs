@@ -8869,7 +8869,9 @@ pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f
     if r.is_nan() || r >= reach || r <= 0.0 {
         return here;
     }
-    let k = (r / reach).powf(power) * reach / r;
+    // `powf` natively; read from a table of this power in a browser,
+    // where a power a pixel was most of what a pinch cost.
+    let k = chitrakar_color::pow(r / reach, power) * reach / r;
     [mid[0] + dx * k, mid[1] + dy * k]
 }
 
