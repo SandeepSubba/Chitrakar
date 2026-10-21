@@ -2852,6 +2852,15 @@ fn one(
         None
     };
     let t = parent.compose(node.transform);
+    // A frame that has been turned: its cut is not whole pixels but how
+    // much of each one it covers, so it goes on a surface of its own and
+    // the cut is taken on the way down, by the page's own numbers.
+    let turned_frame = match &node.kind {
+        NodeKind::Artboard { width, height, .. } if t.b.abs() >= 1e-6 || t.c.abs() >= 1e-6 => {
+            Some((*width, *height, t))
+        }
+        _ => None,
+    };
     // What composites as a unit before it meets what is under it: a
     // layer with a blend mode, which has to see the whole of what it
     // is coming down onto; a group that is less than opaque, whose
@@ -2990,7 +2999,8 @@ fn one(
             }
         }
     }
-    let alone = !shadings.is_empty()
+    let alone = turned_frame.is_some()
+        || !shadings.is_empty()
         // A layer in a colour overlay, which is recoloured where its
         // surface comes back down.
         || overlay.is_some()
@@ -3119,6 +3129,7 @@ fn one(
             to: None,
             bound: None,
             parent,
+            turned: None,
         }
     } else {
         Held {
@@ -3126,6 +3137,7 @@ fn one(
             to: held_to,
             bound,
             parent,
+            turned: None,
         }
     };
     // The strokes that did exactly that. They already carry everything
@@ -3559,12 +3571,57 @@ fn one(
             background,
             ..
         } => {
-            let upright = t.b.abs() < 1e-6 && t.c.abs() < 1e-6;
+            let upright = turned_frame.is_none();
             // Faded or masked, it is on a surface of its own (above) unless
             // what it holds reads the page, which the CPU draws in place
             // and mixes back by the fade and the mask: that goes back.
-            if !upright || ((node.opacity < 1.0 || node.mask.is_some()) && !alone) {
+            if upright && (node.opacity < 1.0 || node.mask.is_some()) && !alone {
                 return None;
+            }
+            // Turned: on a surface of its own (`turned_frame`), as the CPU
+            // draws it — the ground over the frame's whole box and what
+            // it holds drawn whole, then the surface cut by how much of
+            // each pixel the frame covers on the way down. Not wearing an
+            // effect, though: then the cut belongs inside the surface, on
+            // the frame's own drawing where its silhouette is made, and
+            // that drawing is everything it holds, each with a mask of its
+            // own the cut would have to share a slot with.
+            if !upright {
+                if !node.effects.is_empty() || held_to.is_some() {
+                    return None;
+                }
+                if node.blend != BlendMode::Normal
+                    && chitrakar_render::works_on_what_is_under(doc, child).ok()?
+                {
+                    return None;
+                }
+                let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) =
+                    chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height])
+                else {
+                    return None;
+                };
+                if let Some(ground) = background {
+                    // Past the frame's edge by a pixel all round: the cut
+                    // gives the ground its edge, and a second edge drawn
+                    // here would be antialiased twice.
+                    let (gx0, gy0) = (fx0.floor() - 1.0, fy0.floor() - 1.0);
+                    vector(
+                        doc,
+                        child,
+                        &VectorShape::Rect {
+                            width: fx1.ceil() + 1.0 - gx0,
+                            height: fy1.ceil() + 1.0 - gy0,
+                            radius: 0.0,
+                        },
+                        Some(ground.clone()),
+                        None,
+                        None,
+                        Transform::translation(gx0, gy0),
+                        1.0,
+                        out,
+                    )?;
+                }
+                collect(doc, child, t, 1.0, bound, out)?;
             }
             // Masked and wearing an effect, a frame goes back — for want of
             // knowing, rather than for a reason in this arm. One random page
@@ -3606,75 +3663,90 @@ fn one(
             let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) = box_ else {
                 return None;
             };
-            let (pw, ph) = out.surface;
-            let board = chitrakar_render::ClipRect {
-                x0: (fx0.round().max(0.0) as u32).min(pw),
-                y0: (fy0.round().max(0.0) as u32).min(ph),
-                x1: (fx1.round().max(0.0) as u32).min(pw),
-                y1: (fy1.round().max(0.0) as u32).min(ph),
-            };
-            let inside = match bound {
-                Some(outer) => outer.intersect(board),
-                None => board,
-            };
-            if inside.is_empty() {
-                return Some(());
-            }
-            // The ground is the frame's rectangle, filled — the one
-            // rounded to whole pixels, as the CPU renderer fills it, laid
-            // down as a rectangle on the surface. On whole pixels an
-            // antialiased edge is a crisp one, so a frame between pixels
-            // (which is any frame at most zooms) is the same picture
-            // both ways rather than one handed back.
-            if let Some(ground) = background {
-                let (rx0, ry0) = (fx0.round(), fy0.round());
-                vector(
-                    doc,
-                    child,
-                    &VectorShape::Rect {
-                        width: fx1.round() - rx0,
-                        height: fy1.round() - ry0,
-                        radius: 0.0,
-                    },
-                    Some(ground.clone()),
-                    None,
-                    None,
-                    Transform::translation(rx0, ry0),
-                    alpha,
-                    out,
-                )?;
-                // The ground is inside the frame like everything
-                // else: a frame hanging off the page shows only the
-                // part of it that is on the page.
-                let (at, quad) = mask_texture(doc, child, None, None, Some(inside), parent, out)?;
-                for v in &mut out.vertices[mark.0..] {
-                    v.mask = quad;
+            if !upright {
+                // Drawn above; what is left is the surface's way down.
+            } else {
+                let (pw, ph) = out.surface;
+                let board = chitrakar_render::ClipRect {
+                    x0: (fx0.round().max(0.0) as u32).min(pw),
+                    y0: (fy0.round().max(0.0) as u32).min(ph),
+                    x1: (fx1.round().max(0.0) as u32).min(pw),
+                    y1: (fy1.round().max(0.0) as u32).min(ph),
+                };
+                let inside = match bound {
+                    Some(outer) => outer.intersect(board),
+                    None => board,
+                };
+                if inside.is_empty() {
+                    return Some(());
                 }
-                for item in &mut out.draws[mark.1..] {
-                    item.mask = at;
+                // The ground is the frame's rectangle, filled — the one
+                // rounded to whole pixels, as the CPU renderer fills it, laid
+                // down as a rectangle on the surface. On whole pixels an
+                // antialiased edge is a crisp one, so a frame between pixels
+                // (which is any frame at most zooms) is the same picture
+                // both ways rather than one handed back.
+                if let Some(ground) = background {
+                    let (rx0, ry0) = (fx0.round(), fy0.round());
+                    vector(
+                        doc,
+                        child,
+                        &VectorShape::Rect {
+                            width: fx1.round() - rx0,
+                            height: fy1.round() - ry0,
+                            radius: 0.0,
+                        },
+                        Some(ground.clone()),
+                        None,
+                        None,
+                        Transform::translation(rx0, ry0),
+                        alpha,
+                        out,
+                    )?;
+                    // The ground is inside the frame like everything
+                    // else: a frame hanging off the page shows only the
+                    // part of it that is on the page.
+                    let (at, quad) = mask_texture(
+                        doc,
+                        child,
+                        Held {
+                            mask: None,
+                            to: None,
+                            bound: Some(inside),
+                            parent,
+                            turned: None,
+                        },
+                        out,
+                    )?;
+                    for v in &mut out.vertices[mark.0..] {
+                        v.mask = quad;
+                    }
+                    for item in &mut out.draws[mark.1..] {
+                        item.mask = at;
+                    }
                 }
-            }
-            // On a surface of its own, what is inside is drawn whole, as a
-            // group's is. (Whatever holds a frame and fades it is on a
-            // surface of its own already, so what arrives here is whole
-            // either way; this says so rather than leaning on it.)
-            let inner = if alone { 1.0 } else { opacity };
-            collect(doc, child, t, inner, Some(inside), out)?;
-            // Everything inside took the bound as it was collected,
-            // and the frame itself has no mask — it was declined
-            // above if it had one — so there is nothing left to put
-            // over what was drawn.
-            //
-            // Unless the frame wears an effect, and then there is: the
-            // surface it was drawn into has to be brought down again,
-            // and that is below, past the end of this match. Returning
-            // here used to skip it, so a frame with a shadow opened a
-            // surface nothing ever closed — no shadow anywhere, and the
-            // frame's own pixels wrong besides. It was declined rather
-            // than drawn, so nothing was ever wrong on a page; but the
-            // reason written down for declining it was not this one.
-            if !alone {
-                return Some(());
+                // On a surface of its own, what is inside is drawn whole, as a
+                // group's is. (Whatever holds a frame and fades it is on a
+                // surface of its own already, so what arrives here is whole
+                // either way; this says so rather than leaning on it.)
+                let inner = if alone { 1.0 } else { opacity };
+                collect(doc, child, t, inner, Some(inside), out)?;
+                // Everything inside took the bound as it was collected,
+                // and the frame itself has no mask — it was declined
+                // above if it had one — so there is nothing left to put
+                // over what was drawn.
+                //
+                // Unless the frame wears an effect, and then there is: the
+                // surface it was drawn into has to be brought down again,
+                // and that is below, past the end of this match. Returning
+                // here used to skip it, so a frame with a shadow opened a
+                // surface nothing ever closed — no shadow anywhere, and the
+                // frame's own pixels wrong besides. It was declined rather
+                // than drawn, so nothing was ever wrong on a page; but the
+                // reason written down for declining it was not this one.
+                if !alone {
+                    return Some(());
+                }
             }
         }
         // A copy draws what the original draws, where the copy is: the
@@ -3893,14 +3965,17 @@ fn one(
     // coverages a layer is held back by are one coverage, and a
     // fragment reads it once.
     let coverage = if framed.is_some() { None } else { bound };
-    if node.mask.is_some() || held_to.is_some() || coverage.is_some() {
+    if node.mask.is_some() || held_to.is_some() || coverage.is_some() || turned_frame.is_some() {
         let (at, box_) = mask_texture(
             doc,
             child,
-            node.mask.as_ref(),
-            held_to,
-            coverage,
-            parent,
+            Held {
+                mask: node.mask.as_ref(),
+                to: held_to,
+                bound: coverage,
+                parent,
+                turned: turned_frame,
+            },
             out,
         )?;
         for v in &mut out.vertices[mark.0..] {
@@ -3938,7 +4013,18 @@ fn one(
         // holds it back and not from its mask.
         if let Some((from, draws)) = laid {
             let (over, box_over) = if held_to.is_some() || coverage.is_some() {
-                mask_texture(doc, child, None, held_to, coverage, parent, out)?
+                mask_texture(
+                    doc,
+                    child,
+                    Held {
+                        mask: None,
+                        to: held_to,
+                        bound: coverage,
+                        parent,
+                        turned: None,
+                    },
+                    out,
+                )?
             } else {
                 (None, NO_MASK)
             };
@@ -4175,6 +4261,10 @@ struct Held<'a> {
     bound: Option<chitrakar_render::ClipRect>,
     /// The space the mask is authored in, which is the layer's parent's.
     parent: Transform,
+    /// A turned frame's own cut: its width and height, and how it is
+    /// placed on the surface. Worked out per pixel by the renderer being
+    /// matched (`frame_cover`).
+    turned: Option<(f32, f32, Transform)>,
 }
 
 /// Multiply a coverage plane, laid over the device pixels `(x0, y0)` to
@@ -4218,6 +4308,23 @@ fn held_back(
             }
         }
     }
+    // A frame that has been turned: by how much of each pixel it covers,
+    // the same numbers the page cuts it by.
+    if let Some((fw, fh, at)) = layer.turned {
+        let h = cover.len() as u32 / w.max(1);
+        let region = chitrakar_render::ClipRect {
+            x0,
+            y0,
+            x1: x0 + w,
+            y1: y0 + h,
+        };
+        for (c, f) in cover
+            .iter_mut()
+            .zip(chitrakar_render::frame_cover(fw, fh, at, region))
+        {
+            *c *= f;
+        }
+    }
     Some(())
 }
 
@@ -4232,12 +4339,10 @@ fn held_back(
 fn mask_texture(
     doc: &Document,
     id: NodeId,
-    mask: Option<&chitrakar_doc::Mask>,
-    held_to: Option<NodeId>,
-    bound: Option<chitrakar_render::ClipRect>,
-    parent: Transform,
+    held: Held<'_>,
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
+    let parent = held.parent;
     // The surface, not the page: what a coverage plane is indexed by is
     // the thing being drawn on.
     let page = out.surface;
@@ -4295,19 +4400,7 @@ fn mask_texture(
     // any of this.
     let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
     let mut cover = vec![1.0; (w * h) as usize];
-    held_back(
-        doc,
-        &mut cover,
-        (x0, y0, w),
-        Held {
-            mask,
-            to: held_to,
-            bound,
-            parent,
-        },
-        clip,
-        page,
-    )?;
+    held_back(doc, &mut cover, (x0, y0, w), held, clip, page)?;
     let at = out.textures.len();
     out.textures.push(Image {
         width: w,
@@ -7758,10 +7851,15 @@ mod tests {
         );
         assert!(mean < 0.004, "faded: mean {mean:.5}, worst {worst:.3}");
         // Turned, the CPU works its edge out per pixel on a surface of its
-        // own, which goes back.
+        // own, and so does this, by the same numbers (`frame_cover`).
         let mut turned = doc.clone();
         turned.apply(Command::TurnCanvas { quarters: 1 }).unwrap();
-        assert!(!GpuRenderer::can_render(&turned), "a turned frame");
+        assert!(GpuRenderer::can_render(&turned), "a turned frame");
+        let (mean, worst) = difference(
+            &gpu.render(&turned).unwrap(),
+            &chitrakar_render::render(&turned).unwrap(),
+        );
+        assert!(mean < 0.004, "turned: mean {mean:.5}, worst {worst:.3}");
     }
 
     #[test]
@@ -16412,6 +16510,112 @@ mod tests {
         // nothing, in either.
         let p = reference.pixels[(22 * reference.width + 28) as usize];
         assert!(p.a < 0.01, "past the base, nothing of the shadow: {p:?}");
+    }
+
+    /// A frame that has been turned: the ground and what it holds, cut by
+    /// how much of each pixel the frame covers — the page's own numbers
+    /// (`frame_cover`), taken on the way down from a surface of its own.
+    /// It used to go back whatever it held, so straightening a canvas
+    /// with a frame on it handed the whole page back.
+    #[test]
+    fn a_turned_frame_is_cut_the_way_the_cpu_cuts_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let page = |dress: &dyn Fn(&mut Document, NodeId)| {
+            let mut doc = Document::new(64, 64, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 64.0,
+                        height: 64.0,
+                        radius: 0.0,
+                    },
+                    BLUE,
+                ),
+            })
+            .unwrap();
+            let mut frame = Node::artboard(
+                "frame",
+                30.0,
+                22.0,
+                Some(AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.9,
+                    b: 0.6,
+                    a: 1.0,
+                }),
+            );
+            let (sin, cos) = 0.4f32.sin_cos();
+            frame.transform = Transform {
+                a: cos,
+                b: sin,
+                c: -sin,
+                d: cos,
+                e: 24.0,
+                f: 12.0,
+            };
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(frame),
+            })
+            .unwrap();
+            let frame = doc.children_of(root).unwrap()[1];
+            // A shape hanging past the frame's edge, which the cut trims.
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: filled("inside", VectorShape::Ellipse { rx: 10.0, ry: 7.0 }, RED),
+            })
+            .unwrap();
+            let inside = doc.children_of(frame).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: inside,
+                transform: Transform::translation(26.0, 18.0),
+            })
+            .unwrap();
+            dress(&mut doc, frame);
+            doc
+        };
+        for (name, doc) in [
+            ("plain", page(&|_, _| {})),
+            (
+                "faded",
+                page(&|d, id| {
+                    d.apply(Command::SetOpacity { id, opacity: 0.5 })
+                        .map(|_| ())
+                        .unwrap()
+                }),
+            ),
+            (
+                "blended",
+                page(&|d, id| {
+                    d.apply(Command::SetBlendMode {
+                        id,
+                        blend: BlendMode::Multiply,
+                    })
+                    .map(|_| ())
+                    .unwrap()
+                }),
+            ),
+        ] {
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{name}: a turned frame is drawn"
+            );
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            assert!(
+                mean < 0.002 && worst < 0.05,
+                "{name}: mean {mean:.5}, worst {worst:.3}"
+            );
+        }
     }
 
     #[test]

@@ -3110,6 +3110,28 @@ without reading anything else.*
     effects that reach out are cut twice. The backend's audit now draws
     58 of the fixture's commands and declines 3: turning and straightening
     the canvas, and a mask on a frame.
+- **A turned frame, drawn by the GPU backend.** Turned a quarter or
+  straightened, a canvas with a frame on it went back whole: the frame's
+  arm refused anything not upright, since everything inside a frame is
+  bounded by a rectangle of whole pixels and a turned frame's edge is
+  not one. It goes on a surface of its own now, as the CPU draws it —
+  the ground over the frame's whole box, what it holds drawn whole —
+  and the surface is cut on the way down by how much of each pixel the
+  frame covers, read from the reference renderer itself
+  (`chitrakar_render::frame_cover`, its `rect_coverage` over a region),
+  riding the same coverage texture as a mask (`Held::turned`;
+  `mask_texture` takes a `Held` now rather than its four parts). Faded
+  and blended it agrees; wearing an effect, or held to the layer under
+  it, it still goes back — then the cut belongs inside the surface on
+  draws that each carry a mask of their own.
+  - **Tests:** `a_turned_frame_is_cut_the_way_the_cpu_cuts_it` (plain,
+    faded, Multiply; with the cut left off the way down, the plain page
+    is a tenth apart on average and the block fails);
+    `a_frame_paints_its_ground_and_keeps_its_contents_inside` asks the
+    quarter-turned frame to be drawn and to agree, where it pinned the
+    refusal. The fixture's own turned frame wears a shadow, so its audit
+    still declines turning and straightening; the next thing to take
+    apart there is the half-turn, which no single layer explains.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

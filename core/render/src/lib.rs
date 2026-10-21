@@ -10033,6 +10033,28 @@ pub fn layer_coverage_at(
     Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect())
 }
 
+/// How much of each pixel of `region` a frame of `width` by `height`
+/// covers, placed on the surface by `t` — the cut the page gives a frame
+/// that has been turned, worked out per pixel (`rect_coverage`), so a
+/// second renderer can cut by the same numbers rather than its own. Row
+/// by row over the region.
+pub fn frame_cover(width: f32, height: f32, t: Transform, region: ClipRect) -> Vec<f32> {
+    let (w, h) = (
+        region.x1.saturating_sub(region.x0),
+        region.y1.saturating_sub(region.y0),
+    );
+    let Some(inv) = Inverse::of(t) else {
+        return vec![0.0; (w * h) as usize];
+    };
+    let mut out = Vec::with_capacity((w * h) as usize);
+    for y in region.y0..region.y0 + h {
+        for x in region.x0..region.x0 + w {
+            out.push(rect_coverage(width, height, t, inv, x, y));
+        }
+    }
+    out
+}
+
 /// What the layers clipped to `id` are held to, as coverage per pixel
 /// over a surface of `size`: the alpha the page itself confines them by.
 ///
