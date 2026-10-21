@@ -1401,6 +1401,17 @@ body {
   fill: #f24e1e;
 }
 
+/* Equal spacing while a layer is dragged: the same marks as the
+   distances alt shows, in a colour of their own, since they say
+   something else — these gaps are the same. */
+.measures.spacing line {
+  stroke: #e0389b;
+}
+
+.measures.spacing .measure rect {
+  fill: #e0389b;
+}
+
 .measures text {
   fill: #fff;
   font: 11px/1 system-ui, sans-serif;

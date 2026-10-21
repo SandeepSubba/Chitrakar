@@ -14139,6 +14139,73 @@ assert(
   await ctx.close();
 }
 
+// 9cb. Equal spacing, as Figma's guides: a layer carried past a
+// neighbour catches the gap that neighbour leaves to the one before it,
+// and both gaps are marked while it is held there; let go, the marks go.
+// Ctrl drags free of it, as it does of every other line.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [box.x + (x / 600) * box.width, box.y + (y / 300) * box.height];
+  const field = (label) => page.locator(`input[aria-label="${label}"]`);
+  const place = async (x, y, w, h) => {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x, y));
+    await page.mouse.down();
+    await page.mouse.move(...at(x + w, y + h), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    await pickTool("Move");
+    await page.locator(".panel ul li").first().click();
+    await page.waitForTimeout(150);
+    const keep = page.locator('button[aria-label="Keep the proportions"]');
+    if ((await keep.getAttribute("aria-pressed")) === "true") await keep.click();
+    for (const [label, v] of [["X position", x], ["Y position", y], ["W size", w], ["H size", h]]) {
+      await field(label).fill(String(v));
+      await field(label).press("Enter");
+      await page.waitForTimeout(80);
+    }
+  };
+  await place(20, 100, 40, 40);
+  await place(100, 100, 40, 40);
+  await place(200, 100, 40, 40);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  // Carried 18 to the left, the third is 42 past the second — near
+  // enough to the 40 the first two leave to catch it.
+  const marks = page.locator('svg[aria-label="Equal spacing"]');
+  await page.mouse.move(...at(220, 120));
+  await page.mouse.down();
+  await page.mouse.move(...at(210, 121), { steps: 3 });
+  await page.mouse.move(...at(202, 120), { steps: 3 });
+  await page.waitForTimeout(200);
+  assert(await marks.isVisible(), "held where the gaps are equal, they are marked");
+  const labels = await marks.locator("text").allTextContents();
+  assert(labels.length === 2 && labels.every((t) => t === "40"), `both gaps, 40 each (${labels})`);
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert(!(await marks.isVisible()), "let go, the marks go");
+  assert(
+    Math.abs(Number(await field("X position").inputValue()) - 180) < 0.01,
+    `and it is left 40 past the second, at 180 (${await field("X position").inputValue()})`,
+  );
+  // Ctrl drags free: carried the same way from where it now is, it goes
+  // where the hand put it.
+  await page.keyboard.down("Control");
+  await page.mouse.move(...at(200, 120));
+  await page.mouse.down();
+  await page.mouse.move(...at(195, 121), { steps: 3 });
+  await page.mouse.move(...at(203, 120), { steps: 3 });
+  await page.waitForTimeout(150);
+  assert(!(await marks.isVisible()), "with ctrl held, nothing is marked");
+  await page.mouse.up();
+  await page.keyboard.up("Control");
+  await page.waitForTimeout(250);
+  const free = Number(await field("X position").inputValue());
+  assert(Math.abs(free - 183) < 1.5, `and nothing is caught (${free})`);
+}
+
 // 9aw. Dissolving a group answers for what the group itself was
 // carrying. A group is somewhere to put layers and also a layer in its
 // own right: it can be hidden, or made half-transparent, and those two

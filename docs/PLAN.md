@@ -3053,6 +3053,27 @@ without reading anything else.*
     before any pen; the pen draws; after it a finger draws nothing and
     moves the page by exactly its drag; set to draw in Preferences it
     draws again; a page opened with `finger: "pan"` never draws.
+- **Equal spacing ✅** (`app/src/spacing.ts`: `equalSpacing`; the Move
+  tool's drag). Figma's spacing guides: a layer carried past a
+  neighbour catches the gap that neighbour leaves to the one before it,
+  carried between two it catches the middle, and the equal gaps are
+  marked while it is held there — the alt distances' marks, in pink,
+  since they say something else: these gaps are the same. Only what is
+  beside it counts, a row for spacing along x and a column along y. It
+  comes after the edges and middles: an axis that has caught a line is
+  not moved off it, though its gaps are still marked when they happen to
+  be equal there. Ctrl drags free of it, as of every other line.
+  - **Tests:**
+    - `e2e/spacing.test.mjs` (in `npm run test:unit`): past the second
+      of two, before the first, between two (the middle: 35 a side,
+      which the draft of this test had wrong at 30), down a column; not
+      another row, not one neighbour alone; already in place, it stays
+      and says so.
+    - Smoke 9cb: squares at 20, 100 and 200; the third dragged 18 left
+      shows two 40s while held, lands at 180, and the marks go on
+      release; with ctrl it lands where the hand put it. With the
+      correction left out of the drag, it lands at 182 and the block
+      fails.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

@@ -27,6 +27,7 @@ import {
 } from "./files";
 import { SHAPE_PRESETS, presetPath } from "./shapes";
 import { boxOf, gapsBetween, union, type Box, type Gap } from "./measure";
+import { equalSpacing } from "./spacing";
 import { matchesIn, replaceIn, type FindOptions } from "./findReplace";
 import { FingerTaps, NONE_HELD, afterPress, wear, type Held } from "./touch";
 import { onLaunch, takeShared } from "./offline";
@@ -620,6 +621,9 @@ interface ToolDrag {
   b0?: [number, number, number, number];
   snapX?: number[];
   snapY?: number[];
+  /** Move: the other layers' boxes, which the dragged one can be spaced
+   * evenly among. */
+  spacers?: Box[];
 }
 
 /** Effect names as the panel shows them, in the order the picker offers. */
@@ -1485,6 +1489,9 @@ export function App() {
    * picked to what the pointer is over, or to the frame or page round
    * it — and the box they are measured to, outlined. */
   const [measures, setMeasures] = useState<{ gaps: Gap[]; to: Box } | null>(null);
+  /** The gaps a dragged layer has just made equal, marked while it is
+   * held there. */
+  const [spacing, setSpacing] = useState<Gap[]>([]);
   /** Where the pointer last was over the canvas, in document units, so
    * pressing alt without moving shows the distances there. */
   const lastPointer = useRef<[number, number] | null>(null);
@@ -2697,6 +2704,20 @@ export function App() {
     return [xs, ys];
   };
 
+  /** The boxes a dragged layer can be spaced evenly among: every layer
+   * not travelling with it, as snapTargets reads them. */
+  const spacerBoxes = (moving: NodeId[]): Box[] => {
+    if (!session) return [];
+    const out: Box[] = [];
+    for (const layer of layers) {
+      const id = layer.id as NodeId;
+      if (moving.some((m) => relatedTo(id, m))) continue;
+      const b = session.bounds_of(id);
+      if (b.length === 4) out.push([b[0], b[1], b[0] + b[2], b[1] + b[3]]);
+    }
+    return out;
+  };
+
   /** Nudge a point being drawn onto the nearest of the lines it can
    * catch, and show the ones it landed on. A shape has no box yet, so
    * what snaps is the corner under the cursor rather than three lines an
@@ -3792,6 +3813,7 @@ export function App() {
       if (moved) {
         drag.b0 = moved;
         [drag.snapX, drag.snapY] = snapTargets(together);
+        drag.spacers = spacerBoxes(together);
       }
       setSelected(target);
     }
@@ -4143,6 +4165,7 @@ export function App() {
       const snapping =
         drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey);
       const next: Guides = { x: [], y: [] };
+      const marks: Gap[] = [];
       if (snapping) {
         const tol = prefs.snap / view.zoom;
         const b = drag.b0!;
@@ -4152,7 +4175,28 @@ export function App() {
         my += sy.delta;
         if (sx.guide !== null) next.x.push(sx.guide);
         if (sy.guide !== null) next.y.push(sy.guide);
+        // Then equal spacing, along each axis an edge or a middle has not
+        // already caught: carried past a neighbour the layer leaves the
+        // gap that neighbour leaves to the next, and carried between two
+        // it sits in the middle. An axis that did catch a line still
+        // shows equal gaps when they are equal there — it just is not
+        // moved off the line to make them so.
+        for (const axis of ["x", "y"] as const) {
+          const caught = axis === "x" ? sx.guide !== null : sy.guide !== null;
+          const box: Box = [b[0] + mx, b[1] + my, b[2] + mx, b[3] + my];
+          const even = equalSpacing(box, drag.spacers ?? [], axis, caught ? 1e-6 : tol);
+          if (!even) continue;
+          if (axis === "x") mx += even.delta;
+          else my += even.delta;
+          marks.push(...even.marks);
+        }
       }
+      setSpacing((was) =>
+        was.length === marks.length &&
+        was.every((g, i) => g.from[0] === marks[i].from[0] && g.from[1] === marks[i].from[1] && g.length === marks[i].length)
+          ? was
+          : marks,
+      );
       // Only re-render when the guides actually change: this runs on every
       // pointer sample.
       setGuides((g) =>
@@ -4317,6 +4361,7 @@ export function App() {
     const drag = toolDragRef.current;
     toolDragRef.current = null;
     setGuides({ x: [], y: [] });
+    setSpacing([]);
     setCropRect(null);
     if (!drag || !session) return;
 
@@ -4916,6 +4961,7 @@ export function App() {
     }
     handleDragRef.current = null;
     setGuides({ x: [], y: [] });
+    setSpacing([]);
     if (session?.commit_preview()) refresh(session);
   };
 
@@ -10475,6 +10521,26 @@ export function App() {
                     .join(" ")}
                 />
               ))}
+            </svg>
+          )}
+          {spacing.length > 0 && (
+            <svg className="measures spacing" aria-label="Equal spacing">
+              {spacing.map((g, i) => {
+                const [x1, y1] = [view.x + g.from[0] * view.zoom, view.y + g.from[1] * view.zoom];
+                const [x2, y2] = [view.x + g.to[0] * view.zoom, view.y + g.to[1] * view.zoom];
+                const label = String(inUnits(g.length, units, docDpi));
+                const [mx, my] = [(x1 + x2) / 2, (y1 + y2) / 2];
+                const w = label.length * 7 + 8;
+                return (
+                  <g key={i} className="measure">
+                    <line x1={x1} y1={y1} x2={x2} y2={y2} />
+                    <rect x={mx - w / 2} y={my - 8} width={w} height={16} rx={3} />
+                    <text x={mx} y={my + 4}>
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
             </svg>
           )}
           {measures && (

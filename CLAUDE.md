@@ -99,7 +99,9 @@ which are worn onto every pointer event in the window's capture phase so
 no handler has to know they exist; and `app/e2e/files.test.mjs` over
 the naming in `src/files.ts`, which reads a file's name out of an
 Android `content://` address as well as a path — the shell opens and
-writes those through the fs plugin (`files::is_address`).
+writes those through the fs plugin (`files::is_address`); and
+`app/e2e/spacing.test.mjs` over `src/spacing.ts`: the equal-spacing
+guides the Move tool catches after the edges and middles (smoke 9cb).
 
 On a phone (under 640 wide or 500 tall) the menus are a drawer behind
 one Menus button and the bar is one row (smoke 11a); the suite's
