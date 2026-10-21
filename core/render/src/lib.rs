@@ -5211,7 +5211,35 @@ fn rounded_rect_distance(width: f32, height: f32, radius: f32, x: f32, y: f32) -
     let r = corner_radius(width, height, radius);
     let qx = (x - hw).abs() - (hw - r);
     let qy = (y - hh).abs() - (hh - r);
-    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+    // Along a side one of the two is nothing, and the distance is the
+    // other — which is what `hypot` gives, to the bit, without the call
+    // it is in WebAssembly. Only the corners have two to put together.
+    let (ax, ay) = (qx.hi(0.0), qy.hi(0.0));
+    let out = if ax == 0.0 {
+        ay
+    } else if ay == 0.0 {
+        ax
+    } else {
+        length(ax, ay)
+    };
+    out + qx.hi(qy).lo(0.0) - r
+}
+
+/// How far `(x, y)` is from nothing: `hypot` natively. In WebAssembly,
+/// where `hypot` is a routine in software and a shape's edge asks it at
+/// every pixel near a corner, the root of the sum of the squares, which
+/// for the distances a page holds is the same to the last bit or so — it
+/// is `hypot`'s care over values near the float's own limits that costs.
+#[inline]
+pub(crate) fn length(x: f32, y: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        (x * x + y * y).sqrt()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        x.hypot(y)
+    }
 }
 
 /// Where the closest point on a segment lies along it, 0 at `a` and 1 at
@@ -9237,7 +9265,7 @@ fn halftone_ink(
     } else {
         cell * (0.5 + (dark - quarter) / (1.0 - quarter) * (std::f32::consts::FRAC_1_SQRT_2 - 0.5))
     };
-    let d = (here[0] - c[0]).hypot(here[1] - c[1]);
+    let d = length(here[0] - c[0], here[1] - c[1]);
     // A dot under a pixel across fades with its size, or white would
     // wear a half-grey speck in the middle of every cell.
     let small = (2.0 * radius * sharp).clamp(0.0, 1.0);
@@ -24377,6 +24405,39 @@ mod tests {
                         && p.a.to_bits() == q.a.to_bits(),
                     "{name}: pixel {i} is {q:?} by rows and {p:?} the other way"
                 );
+            }
+        }
+    }
+
+    /// A rounded rectangle's distance skips `hypot` along its sides,
+    /// where one of the two lengths is nothing — and is the same number,
+    /// to the bit, as the formula that always called it, everywhere
+    /// round the shape, inside, outside, and at its corners.
+    #[test]
+    fn a_rounded_rectangles_distance_is_the_same_without_the_call() {
+        let reference = |width: f32, height: f32, radius: f32, x: f32, y: f32| {
+            let (hw, hh) = (width / 2.0, height / 2.0);
+            let r = corner_radius(width, height, radius);
+            let qx = (x - hw).abs() - (hw - r);
+            let qy = (y - hh).abs() - (hh - r);
+            qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+        };
+        for (w, h, r) in [
+            (120.0f32, 80.0f32, 6.0f32),
+            (40.0, 40.0, 20.0),
+            (30.0, 12.0, 0.0),
+            (9.5, 70.25, 3.3),
+        ] {
+            let mut y = -12.0f32;
+            while y < h + 12.0 {
+                let mut x = -12.0f32;
+                while x < w + 12.0 {
+                    let got = rounded_rect_distance(w, h, r, x, y);
+                    let want = reference(w, h, r, x, y);
+                    assert_eq!(got.to_bits(), want.to_bits(), "{w}x{h} r{r} at ({x}, {y})");
+                    x += 0.37;
+                }
+                y += 0.41;
             }
         }
     }

@@ -1737,6 +1737,31 @@ export function App() {
   const viewArgsRef = useRef({ scale: 1, x: 0, y: 0 });
   gpuOnRef.current = isTauri() && prefs.gpuFrames;
 
+  /** The frame and nothing else: from the desktop shell's graphics
+   * card when that is asked for and the card can draw it exactly, and
+   * otherwise from the engine here, as it always was. A view moving —
+   * every frame of a pan or a pinch — needs only this: the layers, the
+   * guides, the palette, the region and the rest are the document's,
+   * and a view changes none of them. Reading them all back as JSON and
+   * handing them to the panels was a frame's worth of work a frame. */
+  const present = useCallback((s: WasmSession) => {
+    const canvas = canvasRef.current;
+    if (canvas && gpuOnRef.current) {
+      gpuRef.current.request(
+        s,
+        () => ({
+          ...viewArgsRef.current,
+          width: s.frame_width(),
+          height: s.frame_height(),
+        }),
+        () => cpuFrame(s, true),
+      );
+    } else if (canvas) {
+      cpuFrame(s, cpuStaleRef.current);
+      cpuStaleRef.current = false;
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const refresh = useCallback(
     (s: WasmSession) => {
       setSaveTick((n) => n + 1);
@@ -1785,24 +1810,7 @@ export function App() {
           return null;
         }
       });
-      const canvas = canvasRef.current;
-      // The frame, from the desktop shell's graphics card when that is
-      // asked for and the card can draw it exactly, and otherwise from
-      // the engine here, as it always was.
-      if (canvas && gpuOnRef.current) {
-        gpuRef.current.request(
-          s,
-          () => ({
-            ...viewArgsRef.current,
-            width: s.frame_width(),
-            height: s.frame_height(),
-          }),
-          () => cpuFrame(s, true),
-        );
-      } else if (canvas) {
-        cpuFrame(s, cpuStaleRef.current);
-        cpuStaleRef.current = false;
-      }
+      present(s);
       setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
       setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
       setSwatches(JSON.parse(s.swatches_json()) as Swatch[]);
@@ -2563,8 +2571,8 @@ export function App() {
     // Resizing the element clears its backing store, and the engine tracks
     // what it has already presented, so it has to be told.
     session.invalidate();
-    refresh(session);
-  }, [session, view, viewport, dpr, docSize, refresh]);
+    present(session);
+  }, [session, view, viewport, dpr, docSize, present]);
 
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.

@@ -3344,6 +3344,24 @@ without reading anything else.*
     (panned, zoomed in, zoomed out past the page, panned again, with a
     shadow and a blur filter on the page: bit for bit what a session
     that only looked there shows).
+- **A pan in the app** (Phase 4): measured in the built app in Chromium
+  — a page of 200 rounded rectangles, thirty wheel steps, each timed to
+  the second animation frame after it (about 33 ms of that is the two
+  frames) — a step went from 99 ms to 76. Two things. A view moving
+  called the app's whole `refresh`, which read the layers, guides,
+  palette, styles, region, kept regions and comps back as JSON and handed
+  them all to React, and bumped the save counter, every frame of a pan:
+  the view effect calls `present` now, the frame alone, since a view
+  changes none of those. And a rounded rectangle's edge asked `hypot` —
+  a routine in software in WebAssembly — at every sample, sixteen by
+  sixteen a corner pixel: along a side one of the two lengths is nothing
+  and `hypot` of a length and nothing is the length, to the bit, so only
+  the corners ask now, and in WebAssembly they take the root of the sum
+  of the squares (`length`; natively `hypot` still).
+  - **Tests:** `a_rounded_rectangles_distance_is_the_same_without_the_
+    call` (four rectangles, a grid round each, inside and out, bit for
+    bit against the formula that always called `hypot`); the browser
+    suite for the view effect.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
