@@ -231,8 +231,11 @@ fn write_node(
         // A layer's effects travel as a filter on a wrapper outside all
         // of its own: outside its transform, since an offset is written in
         // the space the layer sits in; outside its mask and what it is
-        // held to, since a shadow grows from what shows of the layer and
-        // is not itself cut by either. The wrapper takes the layer's
+        // held to, since a shadow grows from what shows of the layer. Its
+        // own mask does not cut the shadow; what it is held to does,
+        // again, on a wrapper outside the filter (`held_again`): a
+        // clipping group shows nothing outside its base, shadow included,
+        // and the engine cuts both before and after. The wrapper takes the layer's
         // blend with it — a filter isolates what is inside it, so a blend
         // left on the layer would meet nothing — which brings the effects
         // down by the blend too, as the engine does.
@@ -275,6 +278,25 @@ fn write_node(
         if !cut.is_empty() {
             let blend = std::mem::take(&mut blend);
             let _ = writeln!(out, "{pad}<g{cut}{blend}>");
+        }
+        // Held, with effects: what the effects lay is cut by the base as
+        // well as what the layer lays — the same mask twice, once inside
+        // the filter so the shadow grows from what shows and once outside
+        // it so the shadow shows only where the base does.
+        // Only where an effect reaches out past the layer: an inner
+        // shadow and a bevel stay inside what shows, which is cut already.
+        let held_again = effects.is_some()
+            && !confined.is_empty()
+            && node.effects.iter().any(|e| {
+                matches!(
+                    e,
+                    chitrakar_doc::Effect::DropShadow { .. }
+                        | chitrakar_doc::Effect::Outline { .. }
+                )
+            });
+        if held_again {
+            let blend = std::mem::take(&mut blend);
+            let _ = writeln!(out, "{pad}<g{confined}{blend}>");
         }
         if let Some(filter) = &effects {
             let blend = std::mem::take(&mut blend);
@@ -1062,6 +1084,9 @@ fn write_node(
             let _ = writeln!(out, "{pad}</g>");
         }
         if effects.is_some() {
+            let _ = writeln!(out, "{pad}</g>");
+        }
+        if held_again {
             let _ = writeln!(out, "{pad}</g>");
         }
         if !cut.is_empty() {

@@ -2828,11 +2828,21 @@ fn one(
                 // faded, masked or blended lands within a thousandth of
                 // the reference, which is where a plain one lands.
                 //
-                // An *effect* is: the coverage then includes the shadow
-                // the base casts, and what the CPU renderer holds the
-                // layer above to does not. That one is off by a fiftieth
-                // and goes back.
-                if !draws || !b.effects.is_empty() {
+                // An *effect* on the base used to be: the base drawn
+                // aside took its shadow with it, and what the page holds
+                // the layer above to does not, so the two came apart by
+                // a fiftieth and the page went back. The reading is the
+                // page's own cut now (`clip_coverage_at`), effects left
+                // out exactly where the page leaves them out, so a base
+                // wearing one is a base like any other —
+                //
+                // — except a frame. A frame wearing effects is drawn by a
+                // road of its own on both sides (in place, when what it
+                // holds works on the page), and a layer held to one came
+                // out a sixtieth apart on a page nobody wrote. Those stay
+                // the CPU's.
+                if !draws || (!b.effects.is_empty() && matches!(b.kind, NodeKind::Artboard { .. }))
+                {
                     return None;
                 }
                 Some(base)
@@ -2959,12 +2969,22 @@ fn one(
     // the cut is soft all the way round. A held rectangle with a shadow
     // over a brushed shape drifted by twice the level the pages nobody
     // wrote are held to, the first time those pages brushed a base.
+    //
+    // "Both then cut what the effect laid" was only nearly true until the
+    // reference renderer was made to: it cut the effect to the rectangle
+    // the base was drawn in rather than to the base, which on an upright
+    // square is a pixel's band of rounding along two edges — three
+    // quarters of full scale apart, there — and on a disc was the whole
+    // of the disc's corners. It cuts by the base's alpha now, as this does.
+    //
+    // Which also settled the soft cut above: with both cutting by alpha,
+    // an outline along a diagonal cut is the cut's own antialiased edge
+    // on both sides, and a page held to a turned base agrees to a
+    // two-thousandth on average, its interiors exactly. Held to something
+    // turned, it is drawn. Held to a brush layer — soft all the way round —
+    // it still goes back.
     if !node.effects.is_empty() {
         if let Some(base) = held_to {
-            let t = chitrakar_render::world_transform(doc, base).ok()?;
-            if t.b.abs() > 1e-6 || t.c.abs() > 1e-6 {
-                return None;
-            }
             if matches!(doc.node(base).ok()?.kind, NodeKind::Paint { .. }) {
                 return None;
             }
@@ -4179,7 +4199,9 @@ fn held_back(
         }
     }
     if let Some(base) = layer.to {
-        let held = chitrakar_render::layer_coverage_at(doc, base, layer.parent, page).ok()?;
+        // What the page itself holds it to — the base before its effects
+        // (`clip_coverage_at`), not the base drawn whole.
+        let held = chitrakar_render::clip_coverage_at(doc, base, layer.parent, page).ok()?;
         for (i, c) in cover.iter_mut().enumerate() {
             let (x, y) = (x0 + i as u32 % w, y0 + i as u32 / w);
             *c *= held[(y * page.0 + x) as usize];
@@ -15576,26 +15598,22 @@ mod tests {
         );
     }
 
-    /// A layer held to the one below it, wearing an effect, goes back to
-    /// the reference renderer — and the reason is a disagreement about
-    /// what a clip *means*, not about arithmetic.
+    /// A layer held to one that stands at an angle, wearing an effect,
+    /// is drawn the way the reference renderer draws it.
     ///
-    /// The renderer being matched cuts such a layer to what holds it
-    /// **before** anything is made of it, so the effect grows from the
-    /// shape that will really be seen: an outline on a held layer traces
-    /// the cut, and where the cut runs diagonally the outline runs with
-    /// it. This backend builds the effect from the layer's own silhouette
-    /// and cuts afterwards — which is what Photoshop and Affinity both do
-    /// with a clipping group, and a different picture. Until it is
-    /// settled which is right (see the roadmap) this backend declines
-    /// rather than drawing a second answer.
-    ///
-    /// Found on a page nobody wrote once those pages began turning
-    /// layers: against an upright base the two answers differ only along
-    /// an edge the cut removes anyway, and it took a base whose edge runs
-    /// diagonally to separate them.
+    /// It used to go back, over what looked like a disagreement about
+    /// what a clip means: the reference renderer's outline traced the
+    /// diagonal cut two pixels wide where this backend's faded out in one.
+    /// It was not a meaning. The reference renderer cut the effect to the
+    /// *rectangle* the base was drawn in, and a turned base's rectangle is
+    /// bigger than the base — so the outline grown from the cut showed
+    /// along it. Cut by the base's alpha on both sides, the outline along
+    /// the cut is the cut's own antialiased edge, and the two agree.
     #[test]
-    fn a_held_layer_wearing_an_effect_goes_back() {
+    fn a_held_layer_wearing_an_effect_on_a_turned_base_is_drawn() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
         use chitrakar_doc::{Command, Effect, Node, Transform, VectorShape};
         let rect = |name: &str, w: f32, h: f32, c: [f32; 3]| {
             let mut n = Node::vector(
@@ -15683,31 +15701,37 @@ mod tests {
             doc
         };
         assert!(
-            !GpuRenderer::can_render(&page(true)),
-            "a held layer wearing an effect goes back"
-        );
-        // And one without an effect is still drawn, so this is not
-        // declining held layers wholesale.
-        assert!(
             GpuRenderer::can_render(&page(false)),
-            "a held layer with no effect is still drawn"
+            "held, with no effect"
         );
-        // What the reference renderer does, written down where whoever
-        // weighs the two answers next will find it: the outline traces
-        // the diagonal cut, which is only true of a renderer that cuts
-        // before it grows.
-        let reference = chitrakar_render::render(&page(true)).unwrap();
+        let doc = page(true);
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "held to a turned base, wearing an outline"
+        );
+        let mine = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, _) = difference(&mine, &reference);
+        assert!(mean < 0.002, "mean {mean:.5}");
+        let (in_mean, in_worst, over, at) = interiors(&mine, &reference);
+        assert!(
+            over == 0 && in_mean < 0.001,
+            "interiors {in_mean:.5}, worst {in_worst:.4} at {at:?}"
+        );
+        // And the outline is not laid outside the base, past the cut,
+        // where the base's rectangle used to let it: green there was the
+        // rectangle, not the clip.
         let green = |x: u32, y: u32| {
             let p = reference.pixels[(y * reference.width + x) as usize];
             p.g > 0.4 && p.r < 0.35
         };
         assert!(
-            (26..31).any(|x| green(x, 17)),
-            "the reference renderer traces the cut with the outline"
+            !(27..31).any(|x| green(x, 17)),
+            "nothing of the outline outside the base"
         );
         assert!(
             (14..20).any(|y| green(17, y)),
-            "and traces the layer's own edge as well"
+            "and the layer's own edge, inside the base, is outlined"
         );
     }
 
@@ -16257,6 +16281,139 @@ mod tests {
         );
     }
 
+    /// A layer held to one that casts a shadow is held to the layer, not
+    /// to its shadow: the page reads what a run of clipped layers is cut
+    /// by before the base's effects are drawn, so the shadow is under
+    /// the base and nothing above shows through it. The backend read the
+    /// base drawn whole, shadow and all, and handed such a page back; it
+    /// reads the page's own cut now (`clip_coverage_at`).
+    #[test]
+    fn a_layer_held_to_a_base_with_a_shadow_is_held_to_the_base() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = VectorShape::Rect {
+            width: 20.0,
+            height: 20.0,
+            radius: 0.0,
+        };
+        for blend in [BlendMode::Normal, BlendMode::Multiply] {
+            let mut doc = Document::new(48, 48, ColorMode::Rgb);
+            let base = add(
+                &mut doc,
+                filled("base", rect.clone(), RED),
+                Transform::translation(8.0, 8.0),
+            );
+            doc.apply(Command::SetEffects {
+                id: base,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 6.0,
+                    dy: 6.0,
+                    blur: 1.0,
+                    color: BLUE,
+                    opacity: 0.9,
+                    spread: 0.0,
+                }],
+            })
+            .unwrap();
+            let over = add(
+                &mut doc,
+                filled("over", rect.clone(), BLUE),
+                Transform::translation(16.0, 16.0),
+            );
+            doc.apply(Command::SetClipped {
+                id: over,
+                clipped: true,
+            })
+            .unwrap();
+            doc.apply(Command::SetBlendMode { id: over, blend })
+                .unwrap();
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "{blend:?}: held to a base that casts a shadow"
+            );
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            assert!(
+                mean < 0.004 && worst < 0.2,
+                "{blend:?}: mean {mean:.5}, worst {worst:.3}"
+            );
+            // Where only the shadow is — past the base, inside the layer
+            // above — nothing of the layer above shows.
+            let at = |s: &Surface, x: u32, y: u32| s.pixels[(y * s.width + x) as usize];
+            let r = at(&reference, 32, 32);
+            let g = at(&mine, 32, 32);
+            assert!(
+                (r.b - g.b).abs() < 0.05 && (r.r - g.r).abs() < 0.05,
+                "{blend:?}: in the shadow {g:?} against {r:?}"
+            );
+        }
+    }
+
+    /// A layer held to the one under it and casting a shadow, past the
+    /// edge of what holds it: the shadow is cut by the base, on both
+    /// sides. The reference renderer cut it to the rectangle the base was
+    /// drawn in instead, which on a square left a pixel's band of shadow
+    /// along two of its edges — three quarters of full scale apart from
+    /// this backend, which cut it to the square — and on a disc filled
+    /// the corners of its box (`a_shadow_held_to_a_disc_stays_inside_the_
+    /// disc`, in the reference renderer's own tests).
+    #[test]
+    fn a_held_layer_casting_a_shadow_past_its_base_is_cut_by_the_base() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = VectorShape::Rect {
+            width: 20.0,
+            height: 20.0,
+            radius: 0.0,
+        };
+        let mut doc = Document::new(48, 48, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled("base", rect.clone(), RED),
+            Transform::translation(8.0, 8.0),
+        );
+        let over = add(
+            &mut doc,
+            filled("over", rect.clone(), BLUE),
+            Transform::translation(16.0, 16.0),
+        );
+        doc.apply(Command::SetClipped {
+            id: over,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: over,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 5.0,
+                dy: 4.0,
+                blur: 1.0,
+                color: BLUE,
+                opacity: 0.75,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "held and casting a shadow, it is drawn"
+        );
+        let mine = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&mine, &reference);
+        assert!(
+            mean < 0.004 && worst < 0.05,
+            "mean {mean:.5}, worst {worst:.3}"
+        );
+        // Just past the base's right edge, level with the held layer:
+        // nothing, in either.
+        let p = reference.pixels[(22 * reference.width + 28) as usize];
+        assert!(p.a < 0.01, "past the base, nothing of the shadow: {p:?}");
+    }
+
     #[test]
     fn what_it_cannot_draw_it_declines() {
         let mut doc = Document::new(40, 40, ColorMode::Rgb);
@@ -16352,9 +16509,9 @@ mod tests {
                 "held to a base wearing {what}"
             );
         }
-        // An *effect* on the base is the one that still goes back: the
-        // coverage then carries the shadow the base casts, and what the
-        // CPU renderer holds the layer above to does not.
+        // An effect on the base used to go back: the coverage carried the
+        // shadow the base casts, and what the page holds the layer above
+        // to does not. It reads the page's own cut now.
         let mut lit = held.clone();
         lit.apply(Command::SetEffects {
             id,
@@ -16369,8 +16526,8 @@ mod tests {
         })
         .unwrap();
         assert!(
-            !GpuRenderer::can_render(&lit),
-            "held to a base that casts a shadow"
+            GpuRenderer::can_render(&lit),
+            "held to a base that casts a shadow, it is drawn: held to the base, not the shadow"
         );
 
         // Ink authored for a press is drawn now rather than handed back

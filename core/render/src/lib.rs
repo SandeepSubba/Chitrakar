@@ -1225,6 +1225,15 @@ impl Cover {
         }
     }
 
+    /// The cut at one pixel of the surface: nothing outside the window.
+    fn alpha_at(&self, x: u32, y: u32) -> f32 {
+        let (x0, y0) = self.origin;
+        if x < x0 || y < y0 || x >= x0 + self.width || y >= y0 + self.height {
+            return 0.0;
+        }
+        self.alpha[at_in(self.origin, self.width, x, y)]
+    }
+
     fn rect(&self) -> ClipRect {
         ClipRect {
             x0: self.origin.0,
@@ -1792,6 +1801,7 @@ fn lay_clone(
             clip,
             blend,
             node.opacity,
+            cover,
         );
     }
     composite_from(dst, &laid, (0, 0), 1.0, blend, clip.intersect(region));
@@ -1807,6 +1817,7 @@ fn lay_clone(
             clip,
             blend,
             node.opacity,
+            cover,
         );
     }
     laid
@@ -1871,6 +1882,7 @@ fn lay_levels(
                         region,
                         BlendMode::Normal,
                         node.opacity,
+                        None,
                     );
                 }
                 composite_from(&mut next, &pic, (0, 0), 1.0, BlendMode::Normal, region);
@@ -1886,6 +1898,7 @@ fn lay_levels(
                         region,
                         BlendMode::Normal,
                         node.opacity,
+                        None,
                     );
                 }
                 pic = next;
@@ -2443,6 +2456,7 @@ fn draw_layer(
                 clip,
                 node.blend,
                 node.opacity,
+                cover,
             );
         }
         // An upright frame holding something that works on the page is
@@ -2474,6 +2488,7 @@ fn draw_layer(
                 clip,
                 node.blend,
                 node.opacity,
+                cover,
             );
         }
         Ok(taken)
@@ -3368,6 +3383,7 @@ fn draw_effect(
     clip: ClipRect,
     blend: BlendMode,
     layer_opacity: f32,
+    held: Option<&Cover>,
 ) {
     let scale = parent.max_scale();
     let along = |dx: f32, dy: f32| (parent.a * dx + parent.c * dy, parent.b * dx + parent.d * dy);
@@ -3405,6 +3421,7 @@ fn draw_effect(
                 blend,
                 None,
                 Gain::of(*spread, tint),
+                held,
             );
         }
         Effect::InnerShadow {
@@ -3433,6 +3450,7 @@ fn draw_effect(
                 blend,
                 Some(layer),
                 Gain::of(*spread, tint),
+                held,
             );
         }
         Effect::Bevel { .. } => {
@@ -3479,6 +3497,7 @@ fn draw_effect(
                 blend,
                 Some(layer),
                 None,
+                held,
             );
         }
         Effect::Outline {
@@ -3502,6 +3521,7 @@ fn draw_effect(
                 blend,
                 None,
                 None,
+                held,
             );
         }
     }
@@ -3754,6 +3774,7 @@ fn stamp(
     blend: BlendMode,
     keep_inside: Option<&Surface>,
     gain: Option<Gain>,
+    held: Option<&Cover>,
 ) {
     let (ox, oy) = offset;
     let (lo_x, hi_x) = (field_clip.x0 as f32, field_clip.x1 as f32 - 1.0);
@@ -3793,6 +3814,14 @@ fn stamp(
             let i = (y * dst.width + x) as usize;
             if let Some(inside) = keep_inside {
                 src = scale_alpha(src, inside.pixels[at_in(origin, inside.width, x, y)].a);
+            }
+            // Held to the layer under it: an effect is cut by that
+            // layer's alpha as the layer itself is. A clipping group
+            // shows nothing outside its base; cut to the rectangle the
+            // base was drawn in instead, a shadow held to a disc filled
+            // the corners of the disc's box.
+            if let Some(c) = held {
+                src = scale_alpha(src, c.alpha_at(x, y));
             }
             if src.a <= 0.0 {
                 continue;
@@ -9828,12 +9857,18 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     // A clone layer is drawn with what it lifts from under it, as it is
     // on the page: drawn onto nothing it laid nothing, and a layer held to
     // it was confined to nothing in an SVG.
-    if !clone_alone(doc, base, &mut surface, clip, space)? {
-        render_layer(doc, base, &mut surface, clip, space, false)?;
-    }
+    // Anything else is read the way the page holds a layer to it
+    // (`clip_coverage_at`): before its effects, so a shadow cast by the
+    // base does not let the layer above it show through in the file
+    // where it does not on the page.
+    let alpha = if clone_alone(doc, base, &mut surface, clip, space)? {
+        surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect()
+    } else {
+        clip_coverage_at(doc, base, space, (w, h))?
+    };
     let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
-    for p in &surface.pixels {
-        rgba8.extend_from_slice(&[255, 255, 255, (p.a.clamp(0.0, 1.0) * 255.0).round() as u8]);
+    for a in alpha {
+        rgba8.extend_from_slice(&[255, 255, 255, (a * 255.0).round() as u8]);
     }
     Ok(Some(PaintedPixels {
         width: w,
@@ -9996,6 +10031,42 @@ pub fn layer_coverage_at(
     let clip = surface.full_clip();
     render_layer(doc, id, &mut surface, clip, parent, false)?;
     Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect())
+}
+
+/// What the layers clipped to `id` are held to, as coverage per pixel
+/// over a surface of `size`: the alpha the page itself confines them by.
+///
+/// Not [`layer_coverage_at`]. That draws the layer whole, effects and
+/// all, which is the shape a layer *occupies*; what a clipped layer is
+/// held to is the layer as it is before its effects are drawn — a drop
+/// shadow under the base does not widen what the layer above shows
+/// through. So this draws the base the way the page does when a run of
+/// clipped layers sits on it (`draw_layer` asked to capture its cut) and
+/// reads back that same cut, which is what keeps every other drawing of
+/// clipping — the GPU backend, an exporter's clip — from coming to a
+/// different answer about what it means.
+pub fn clip_coverage_at(
+    doc: &Document,
+    id: NodeId,
+    parent: Transform,
+    size: (u32, u32),
+) -> Result<Vec<f32>, DocError> {
+    let mut surface = Surface::new(size.0, size.1);
+    let clip = surface.full_clip();
+    let cover = draw_layer(doc, id, &mut surface, clip, parent, None, Some(0), false)?;
+    let Some(c) = cover else {
+        // Nothing captured is a layer drawn the plain way: its own alpha
+        // on an empty surface is the same reading.
+        return Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect());
+    };
+    let mut out = vec![0.0f32; (size.0 * size.1) as usize];
+    for y in c.origin.1..(c.origin.1 + c.height).min(size.1) {
+        for x in c.origin.0..(c.origin.0 + c.width).min(size.0) {
+            out[(y * size.0 + x) as usize] =
+                c.alpha[at_in(c.origin, c.width, x, y)].clamp(0.0, 1.0);
+        }
+    }
+    Ok(out)
 }
 
 /// A layer's mask as an image: what it lets through over the layer's
@@ -10305,6 +10376,7 @@ pub fn effect_pixels(
             whole,
             BlendMode::Normal,
             node.opacity,
+            None,
         );
     }
     if out.pixels.iter().all(|p| p.a <= 0.0) {
@@ -13738,6 +13810,164 @@ mod tests {
     /// middle of the page — a shadow that is not a function of the layer
     /// alone, and one that changed when the layer was copied a few
     /// pixels across.
+    /// A layer held to a round one shows nothing outside the round one —
+    /// its shadow included. A clipping group shows nothing outside its
+    /// base: the held layer is cut to the base before its shadow is
+    /// grown, and the shadow it then casts was laid down inside the
+    /// *rectangle* the base was drawn in rather than inside the base. On
+    /// a square base the two are the same but for a pixel of rounding
+    /// along two edges; on a disc the shadow filled the corners of the
+    /// disc's box, where nothing of the clipping group should be.
+    /// What an exporter is handed as a clipped layer's clip is the base
+    /// as the page holds it: before its effects. Drawn whole, the base's
+    /// drop shadow was in the clip, and a layer held to it showed through
+    /// the shadow in an SVG where it does not on the page.
+    #[test]
+    fn a_clip_for_an_exporter_leaves_the_bases_shadow_out() {
+        let mut doc = Document::new(60, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled_rect("base", 20.0, 20.0, RED),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: filled_rect("held", 40.0, 40.0, BLUE),
+        })
+        .unwrap();
+        let ids = doc.children_of(root).unwrap();
+        let (base, held) = (ids[0], ids[1]);
+        doc.apply(Command::SetTransform {
+            id: base,
+            transform: Transform::translation(10.0, 10.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: base,
+            effects: vec![Effect::DropShadow {
+                dx: 8.0,
+                dy: 8.0,
+                blur: 0.5,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        let clip = clip_pixels(&doc, held).unwrap().expect("held, so a clip");
+        let alpha = |x: f32, y: f32| {
+            let (px, py) = ((x - clip.origin[0]) as i64, (y - clip.origin[1]) as i64);
+            if px < 0 || py < 0 || px >= clip.width as i64 || py >= clip.height as i64 {
+                return 0u8;
+            }
+            clip.rgba8[((py as u32 * clip.width + px as u32) * 4 + 3) as usize]
+        };
+        assert_eq!(
+            alpha(20.0, 20.0),
+            255,
+            "inside the base, the clip lets it through"
+        );
+        assert_eq!(
+            alpha(35.0, 35.0),
+            0,
+            "in the base's shadow only, it does not"
+        );
+        // And the page agrees: the held layer is not there either.
+        let page = render(&doc).unwrap();
+        let p = page.pixels[(35 * page.width + 35) as usize];
+        assert!(p.b < 0.05, "nor on the page: {p:?}");
+    }
+
+    #[test]
+    fn a_shadow_held_to_a_disc_stays_inside_the_disc() {
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let root = doc.root();
+        let mut disc = Node::vector("disc", VectorShape::Ellipse { rx: 15.0, ry: 15.0 });
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(RED);
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(disc),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: filled_rect("held", 60.0, 60.0, BLUE),
+        })
+        .unwrap();
+        let ids = doc.children_of(root).unwrap();
+        let (disc, held) = (ids[0], ids[1]);
+        doc.apply(Command::SetTransform {
+            id: disc,
+            transform: Transform::translation(40.0, 40.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetTransform {
+            id: held,
+            transform: Transform::translation(10.0, 10.0),
+        })
+        .unwrap();
+        doc.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        doc.apply(Command::SetEffects {
+            id: held,
+            effects: vec![Effect::DropShadow {
+                dx: 6.0,
+                dy: 6.0,
+                blur: 0.5,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        let at = |x: u32, y: u32| page.pixels[(y * page.width + x) as usize];
+        let b = bounds_in_parent_space(&doc, disc).unwrap();
+        // The disc's box, and a point in its lower right corner that is
+        // outside the disc but inside the disc's shadow-to-be.
+        let Bounds::Rect(x0, y0, x1, y1) = b else {
+            panic!("the disc has a box: {b:?}")
+        };
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let corner = ((cx + 13.0) as u32, (cy + 13.0) as u32);
+        assert!(
+            at(corner.0, corner.1).a < 0.01,
+            "outside the disc, inside its box: nothing ({:?})",
+            at(corner.0, corner.1)
+        );
+        // Inside the disc the held layer shows, as it should.
+        assert!(
+            at(cx as u32, cy as u32).b > 0.9,
+            "inside, the held layer ({:?})",
+            at(cx as u32, cy as u32)
+        );
+    }
+
     #[test]
     fn a_shadow_is_the_same_near_the_pages_edge_as_away_from_it() {
         let cast = |x: f32| {

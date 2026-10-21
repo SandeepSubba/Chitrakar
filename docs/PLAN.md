@@ -3074,6 +3074,42 @@ without reading anything else.*
       release; with ctrl it lands where the hand put it. With the
       correction left out of the drag, it lands at 182 and the block
       fails.
+- **Clipping and effects, asked what is really declined** (the GPU
+  backend). The fixture audit printed what the backend hands back —
+  `SetClipped`, `SetEffects`, `TurnCanvas`, `StraightenCanvas`, `SetMask`
+  — and a throwaway test took each page apart a layer at a time to find
+  why. Two came off, and the reasons were three defects:
+  - **What a clipped layer is held to read the base whole.** The page
+    holds a layer to its base *before* the base's effects are drawn; the
+    backend and the exporters' `clip_pixels` read the base drawn whole,
+    shadow and all, so a layer held to a base casting a shadow showed
+    through the shadow in an SVG, and the backend declined the page.
+    `clip_coverage_at` draws the base the way the page captures it and
+    reads back that same cut; both read it now. A base wearing effects
+    is drawn, except a frame (drawn by a road of its own).
+  - **A held layer's effects escaped its base, on the page.** Cut before
+    the effect was grown, and then written inside the base's *window* —
+    grown by the effect's reach — rather than its alpha: a shadow held to
+    a disc filled the disc's box's corners. Cut by the base's alpha now
+    (`stamp`'s `held`, on the two roads that draw a held layer's
+    effects). That settled the "soft clip" question the backend had been
+    declining over (see the September note): drawn by both now.
+  - **The SVG let them escape too**, on purpose — its comment had written
+    down what the renderer happened to do. A held layer with an effect
+    that reaches out (a drop shadow, an outline) wears its base's mask
+    twice now: inside the filter, so the shadow grows from what shows,
+    and outside it, so it shows only where the base does.
+  - **Tests:** `a_shadow_held_to_a_disc_stays_inside_the_disc` (failed
+    before: a solid shadow outside the disc), `a_clip_for_an_exporter_
+    leaves_the_bases_shadow_out` (fails with the base read whole);
+    backend `a_layer_held_to_a_base_with_a_shadow_is_held_to_the_base`,
+    `a_held_layer_casting_a_shadow_past_its_base_is_cut_by_the_base`,
+    `a_held_layer_wearing_an_effect_on_a_turned_base_is_drawn`. Random
+    SVG page 223 (a rect held to brush strokes, casting a shadow) is what
+    caught the exporter; page 160 (a frame's inner shadow) is why only
+    effects that reach out are cut twice. The backend's audit now draws
+    58 of the fixture's commands and declines 3: turning and straightening
+    the canvas, and a mask on a frame.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -4577,7 +4613,12 @@ without reading anything else.*
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
      cross-renderer audits can run: every one of its thirty-four is
-     compared now.
+     compared now. Asked command by command (October 2026), it draws 58
+     of the fixture's and declines 3 — turning and straightening the
+     canvas, and a mask on a frame — after clipping and effects came off
+     (§0 *Clipping and effects, asked what is really declined*). Those
+     three are the next to take apart the same way: none comes down to
+     one layer, so it is the page, not a layer, that is refused.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
      asking what is *really* refused rather than reading what is written
@@ -4784,8 +4825,11 @@ without reading anything else.*
      fixture audit
      (`whatever_the_gpu_agrees_to_draw_it_draws_the_way_the_cpu_does`) is
      what to run while doing any of it. See docs/spikes/gpu-rendering.md.
-  2. Mobile shells: `tauri android init` / `ios init` (needs SDKs, so it
-     wants a machine with Xcode/Android Studio).
+  2. Mobile shells ✅ as far as a machine without an account can take
+     them: CI runs `tauri android init` and keeps an optimised,
+     test-signed APK, and `tauri ios init` and keeps a Simulator build
+     (Phase 4). What is left wants the owner: a kept Android signing key
+     for a store build, and an Apple team for a device one.
   3. Depth. Nine methods have been paying, and all of them are cheap
      enough to keep reaching for. One: **put something in the shared fixture that
      nothing there has ever held** — an effect, a blend mode, a mask read
@@ -6195,6 +6239,18 @@ without reading anything else.*
      agree exactly. `a_held_layer_wearing_an_effect_goes_back` pins the
      decline and writes down what the reference renderer does, so
      whoever settles it finds the evidence rather than the conclusion.
+     **Settled (October 2026), and it was a defect after all.** The
+     reference renderer did *not* cut again afterwards: it wrote the
+     effect inside the window the base had been drawn in, and that window
+     is grown by how far the held layers' effects reach — so they can
+     *read* past the base — which let them *write* past it too. On a
+     turned base the window is bigger than the base, and the outline
+     "tracing the cut" was the rectangle showing; on a disc, a held
+     layer's shadow filled the corners of the disc's box on the page. It
+     cuts by the base's alpha now (`stamp`'s `held`), as the backend
+     does, and the turned case is drawn by both, agreeing to a
+     two-thousandth (`a_held_layer_wearing_an_effect_on_a_turned_base_is_
+     drawn`).
      Two false starts are recorded with it, both plausible and both
      wrong: that the coverage texture was too small for the effect to
      read (growing it changed nothing — the effects were not reading
