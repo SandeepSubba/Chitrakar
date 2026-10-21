@@ -1648,6 +1648,41 @@ impl GpuRenderer {
         // every `Close` — a pass has one set of attachments, and this is
         // where they change.
         let passes = plan(&scene.draws);
+        // A filter inside a frame reads its neighbourhood only as far as
+        // the frame goes: the same numbers as the page's, with the
+        // frame's rectangle where the page's would be. One for each
+        // frame that holds such a filter.
+        let mut framed: Vec<(chitrakar_render::ClipRect, wgpu::BindGroup)> = Vec::new();
+        for r in passes.iter().filter_map(|p| p.within) {
+            if framed.iter().any(|(at, _)| *at == r) {
+                continue;
+            }
+            let numbers = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("frame"),
+                    contents: bytemuck::cast_slice(&[
+                        width as f32,
+                        height as f32,
+                        r.x0 as f32,
+                        r.y0 as f32,
+                        r.x1 as f32,
+                        r.y1 as f32,
+                        scene.size[0],
+                        scene.size[1],
+                    ]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("frame"),
+                layout: &self.layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: numbers.as_entire_binding(),
+                }],
+            });
+            framed.push((r, group));
+        }
         let deep = passes.iter().map(|p| p.target).max().unwrap_or(0);
         // One surface per depth of isolation, reused by every group at
         // that depth: a group's surface is laid down the moment its
@@ -1814,6 +1849,11 @@ impl GpuRenderer {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         for (n, step) in passes.iter().enumerate() {
             let (colour, resolve) = attachment(step.target);
+            // What this pass's opening reads its neighbourhood within.
+            let edged = step
+                .within
+                .and_then(|r| framed.iter().find(|(at, _)| *at == r))
+                .map_or(&bind, |(_, group)| group);
             // The multisampled attachment is only worth keeping when
             // this surface is drawn on again — which is what happens to
             // the page while a group is taken off to its own surface and
@@ -1867,7 +1907,7 @@ impl GpuRenderer {
                         occlusion_query_set: None,
                     });
                     pass.set_pipeline(&self.box_blur);
-                    pass.set_bind_group(0, &bind, &[]);
+                    pass.set_bind_group(0, edged, &[]);
                     // The first round reads the copy; every one after it
                     // reads what the one before wrote.
                     pass.set_bind_group(
@@ -2075,7 +2115,7 @@ impl GpuRenderer {
                         occlusion_query_set: None,
                     });
                     pass.set_pipeline(&self.blocks);
-                    pass.set_bind_group(0, &bind, &[]);
+                    pass.set_bind_group(0, edged, &[]);
                     // The first reads the copy; the second reads what the
                     // first wrote.
                     pass.set_bind_group(1, if round == 0 { backdrop } else { &scratch[0].1 }, &[]);
@@ -2107,7 +2147,7 @@ impl GpuRenderer {
                     occlusion_query_set: None,
                 });
                 pass.set_pipeline(&self.smear);
-                pass.set_bind_group(0, &bind, &[]);
+                pass.set_bind_group(0, edged, &[]);
                 pass.set_bind_group(1, backdrop, &[]);
                 pass.set_bind_group(2, &self.open, &[]);
                 pass.set_bind_group(3, &self.open, &[]);
@@ -2268,7 +2308,9 @@ impl GpuRenderer {
                         }
                     };
                     pass.set_bind_group(2, mask.map_or(&self.open, |at| &textures[at]), &[]);
+                    pass.set_bind_group(0, edged, &[]);
                     pass.draw(quad.clone(), 0..1);
+                    pass.set_bind_group(0, &bind, &[]);
                 }
                 for item in &scene.draws[step.items.clone()] {
                     // A masked layer holds its fragments to the coverage
@@ -2445,6 +2487,13 @@ fn f16_to_f32(bits: u16) -> f32 {
 struct Item {
     draw: Draw,
     mask: Option<usize>,
+    /// For a filter inside a frame: the frame's rectangle on the
+    /// surface, which is where what it reads a neighbourhood of stops —
+    /// the CPU renderer draws a frame's contents into its rectangle and
+    /// nowhere else, so a blur there carries the frame's edge on past
+    /// it rather than reading what is beyond. `None` is the page's own
+    /// edge, which is every other draw's.
+    within: Option<chitrakar_render::ClipRect>,
 }
 
 impl Item {
@@ -2452,7 +2501,11 @@ impl Item {
     /// `collect` puts the mask on afterwards, once for everything the
     /// layer turned into.
     fn of(draw: Draw) -> Item {
-        Item { draw, mask: None }
+        Item {
+            draw,
+            mask: None,
+            within: None,
+        }
     }
 }
 
@@ -3246,6 +3299,7 @@ fn one(
                         erase: stroke.erase,
                     },
                     mask: at,
+                    within: None,
                 });
             }
         }
@@ -3321,6 +3375,7 @@ fn one(
                         aside: alone,
                     },
                     mask: at,
+                    within: None,
                 });
             }
         }
@@ -3450,48 +3505,26 @@ fn one(
             // A filter's radius is written in the space it lives
             // in, so a group that scales stretches it — which is the
             // reading the CPU renderer takes.
-            // Inside a frame, a filter that reads a neighbourhood stops
-            // at the frame's edge on the CPU, whose contents are drawn
-            // into the frame's rectangle and nowhere else: a blur carries
-            // the frame's edge on past it, a pixelate's blocks at the edge
-            // average only what is inside. The passes here read as far as
-            // the page goes, so a pixelate in a frame came out a different
-            // grid along every side of it. A filter of one pixel does not
-            // care, and the page's own edge is the same on both; anything
-            // else inside a frame goes back.
-            let framed = bound.is_some_and(|b| b != out.page);
-            if framed
-                && matches!(
-                    filter,
-                    chitrakar_doc::Filter::GaussianBlur { .. }
-                        | chitrakar_doc::Filter::Sharpen { .. }
-                        | chitrakar_doc::Filter::HighPass { .. }
-                        | chitrakar_doc::Filter::Halftone { .. }
-                        | chitrakar_doc::Filter::Emboss { .. }
-                        | chitrakar_doc::Filter::Twirl { .. }
-                        | chitrakar_doc::Filter::Pinch { .. }
-                        | chitrakar_doc::Filter::Ripple { .. }
-                        | chitrakar_doc::Filter::FindEdges { .. }
-                        | chitrakar_doc::Filter::OilPaint { .. }
-                        | chitrakar_doc::Filter::LensCorrection { .. }
-                        | chitrakar_doc::Filter::MotionBlur { .. }
-                        | chitrakar_doc::Filter::RadialBlur { .. }
-                        | chitrakar_doc::Filter::Pixelate { .. }
-                        | chitrakar_doc::Filter::Median { .. }
-                        | chitrakar_doc::Filter::SurfaceBlur { .. }
-                )
-            {
-                return None;
+            // Inside a frame, what a filter reads a neighbourhood of
+            // stops at the frame's edge on the CPU, whose contents are
+            // drawn into the frame's rectangle and nowhere else: a blur
+            // carries the frame's edge on past it, a pixelate's blocks at
+            // the edge average only what is inside. So its quads are the
+            // frame's rectangle rather than the page's, and its passes
+            // are told the frame's edges where they would be told the
+            // page's (`Item::within`) — every reading that stops at the
+            // page stops there instead.
+            let within = bound
+                .filter(|b| *b != out.page)
+                .map(|b| out.page.intersect(b));
+            if within.is_some_and(|w| w.is_empty()) {
+                return Some(());
             }
+            let area = within.unwrap_or(out.page);
+            let marked = out.draws.len();
             match filter_of(filter, parent, out.size)? {
                 Filtering::Pointwise(params, grad, extra) => {
-                    let quad = out.push(page_quad(
-                        (out.page, out.surface),
-                        alpha,
-                        params,
-                        grad,
-                        extra,
-                    ));
+                    let quad = out.push(page_quad((area, out.surface), alpha, params, grad, extra));
                     out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
                 }
                 Filtering::Blur {
@@ -3499,13 +3532,13 @@ fn one(
                     sharpen,
                     high_pass,
                 } => {
-                    let on = (out.page, out.surface);
+                    let on = (area, out.surface);
                     let axis =
                         |a: f32| page_quad(on, 1.0, [radius, a, 0.0, 0.0], [0.0; 4], [0.0; 3]);
                     let mut steps = out.push(axis(0.0));
                     steps.end = out.push(axis(1.0)).end;
                     let quad = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         alpha,
                         [sharpen, if high_pass { 1.0 } else { 0.0 }, 0.0, 0.0],
                         [0.0; 4],
@@ -3515,7 +3548,7 @@ fn one(
                 }
                 Filtering::Blocks { across, down } => {
                     let mut steps = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         1.0,
                         across,
                         [0.0; 4],
@@ -3523,7 +3556,7 @@ fn one(
                     ));
                     steps.end = out
                         .push(page_quad(
-                            (out.page, out.surface),
+                            (area, out.surface),
                             1.0,
                             down,
                             [0.0; 4],
@@ -3533,7 +3566,7 @@ fn one(
                     // Laid down the way a blur is: nothing is added back,
                     // so the amount that makes a sharpen is zero.
                     let quad = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         alpha,
                         [0.0; 4],
                         [0.0; 4],
@@ -3543,7 +3576,7 @@ fn one(
                 }
                 Filtering::Smear { taps, step } => {
                     let along = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         1.0,
                         [taps, step[0], step[1], 0.0],
                         [0.0; 4],
@@ -3554,7 +3587,7 @@ fn one(
                     // and its mask. Nothing is added back, so the amount
                     // that makes a sharpen out of a blur is zero here.
                     let quad = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         alpha,
                         [0.0; 4],
                         [0.0; 4],
@@ -3570,14 +3603,14 @@ fn one(
                     down,
                 } => {
                     let along = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         1.0,
                         params,
                         linear,
                         [down, 0.0, 0.0],
                     ));
                     let quad = out.push(page_quad(
-                        (out.page, out.surface),
+                        (area, out.surface),
                         alpha,
                         [0.0; 4],
                         [0.0; 4],
@@ -3588,6 +3621,9 @@ fn one(
                 // Nothing asked for is nothing drawn, and nothing
                 // drawn wants no mask over it either.
                 Filtering::Nothing => return Some(()),
+            }
+            for item in &mut out.draws[marked..] {
+                item.within = within;
             }
         }
         // A frame is a group with a size of its own: a ground
@@ -3609,6 +3645,20 @@ fn one(
             ..
         } => {
             let upright = turned_frame.is_none();
+            // Wearing an effect while holding something that reads the
+            // page, the CPU draws a frame where it stands
+            // (`frame_in_place`): on a surface of its own, an adjustment
+            // or a filter inside it would have nothing under it to work
+            // on. Here an effect puts the frame on one, so an invert in a
+            // frame with an inner shadow inverted nothing — a tenth of
+            // full scale apart, on a page whose halftone had kept it out
+            // of every audit until filters in frames were drawn. It goes
+            // back.
+            if !node.effects.is_empty()
+                && chitrakar_render::frame_in_place(doc, child, parent).ok()?
+            {
+                return None;
+            }
             // Faded or masked, it is on a surface of its own (above) unless
             // what it holds reads the page, which the CPU draws in place
             // and mixes back by the fade and the mask: that goes back.
@@ -3700,23 +3750,18 @@ fn one(
                             effects: Vec::new(),
                         },
                         mask: at,
+                        within: None,
                     });
                 }
             }
-            // Masked and wearing an effect, a frame goes back — for want of
-            // knowing, rather than for a reason in this arm. One random page
-            // (seed 1233) holds such a frame inside an outlined frame, in a
-            // copy that hangs off the page's edge, and comes out apart from
-            // the CPU along that edge; the same page with the mask taken off
-            // is drawn and comes out apart on the code before masked frames
-            // were drawn at all, and moved onto the page the difference
-            // falls to the one edge it still hangs over. It is the open
-            // question of what lies past the page casting effects onto it
-            // (see the roadmap), and this keeps masked frames from walking
-            // into more of it until that is settled.
-            if node.mask.is_some() && !node.effects.is_empty() {
-                return None;
-            }
+            // Masked and wearing an effect, a frame is drawn: its
+            // silhouette is the frame cut by its mask, on the surface the
+            // effect is grown from, as the CPU builds it
+            // (`a_masked_frame_wearing_an_effect_is_drawn_the_way_the_cpu_
+            // draws_it`, off the page's edges as well as on it). It was
+            // handed back for want of knowing after seed 1233 came apart
+            // along the page's edge; that page holds such a frame inside
+            // another frame wearing an effect, which still goes back.
             // Brought down by a blend of its own while holding something
             // that works on the page — an adjustment, a filter, a clone —
             // the CPU draws the frame where it stands as well as on a
@@ -6004,6 +6049,9 @@ struct Pass {
     target: usize,
     clear: bool,
     lay: Option<Opening>,
+    /// Where what the opening reads a neighbourhood of stops, when it
+    /// is a filter inside a frame (`Item::within`).
+    within: Option<chitrakar_render::ClipRect>,
     items: std::ops::Range<usize>,
 }
 
@@ -6127,6 +6175,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
     let mut passes = Vec::new();
     let mut stack = vec![0usize];
     let (mut start, mut clear, mut lay) = (0usize, true, None);
+    let mut within = None;
     for (i, item) in draws.iter().enumerate() {
         // Only the four that change what the pass is drawing on, or
         // want to read it, cut it.
@@ -6145,6 +6194,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             target: *stack.last().unwrap(),
             clear,
             lay: lay.take(),
+            within: within.take(),
             items: start..i,
         });
         match &item.draw {
@@ -6176,6 +6226,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     let painted = |at: &Painted| Pass {
                         target,
                         clear: false,
+                        within: None,
                         lay: Some(Opening::Effect {
                             from,
                             at: at.clone(),
@@ -6190,6 +6241,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     passes.push(Pass {
                         target,
                         clear: false,
+                        within: None,
                         lay: Some(Opening::Lay {
                             from,
                             quad: quad.clone(),
@@ -6206,6 +6258,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             }
             Draw::Adjust { quad, table } => {
                 clear = false;
+                within = item.within;
                 lay = Some(Opening::Adjust {
                     quad: quad.clone(),
                     mask: item.mask,
@@ -6214,6 +6267,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             }
             Draw::Blur { steps, quad } => {
                 clear = false;
+                within = item.within;
                 lay = Some(Opening::Blur {
                     steps: steps.clone(),
                     quad: quad.clone(),
@@ -6222,6 +6276,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             }
             Draw::Smear { along, quad } => {
                 clear = false;
+                within = item.within;
                 lay = Some(Opening::Smear {
                     along: along.clone(),
                     quad: quad.clone(),
@@ -6230,6 +6285,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             }
             Draw::Blocks { steps, quad } => {
                 clear = false;
+                within = item.within;
                 lay = Some(Opening::Blocks {
                     steps: steps.clone(),
                     quad: quad.clone(),
@@ -6272,6 +6328,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
         target: *stack.last().unwrap(),
         clear,
         lay,
+        within,
         items: start..draws.len(),
     });
     passes
@@ -6368,6 +6425,7 @@ fn quad(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use chitrakar_color::{AuthoredColor, ColorMode};
     use chitrakar_doc::{Command, Node, StrokeCap, StrokeJoin};
@@ -13708,9 +13766,13 @@ mod tests {
     /// rounded box, and held to the CPU at an awkward zoom with a picture
     /// of a frame half off the page. Letting those frames through found
     /// three things this backend drew wrongly in any frame and had never
-    /// been asked to draw, and each goes back: a frame with a blend
+    /// been asked to draw, and each went back: a frame with a blend
     /// holding what works on the page, a frame held to the layer under
-    /// it, and a filter reading a neighbourhood inside one.
+    /// it, and a filter reading a neighbourhood inside one. The third is
+    /// drawn now, its reading stopped at the frame's edge
+    /// (`a_filter_inside_a_frame_reads_only_the_frame`), and asked here
+    /// at the zoom too; drawing it found a fourth, a frame wearing an
+    /// effect while holding what works on the page, which goes back.
     #[test]
     fn a_frame_between_pixels_is_drawn_and_what_it_cannot_hold_goes_back() {
         use chitrakar_doc::Filter as F;
@@ -13776,6 +13838,14 @@ mod tests {
                 "a blended frame of paint",
                 page(None, BlendMode::Multiply, false),
             ),
+            (
+                "a pixelate inside a frame",
+                page(
+                    Some(Node::filter("p", F::Pixelate { size: 5.0 })),
+                    BlendMode::Normal,
+                    false,
+                ),
+            ),
         ] {
             for (name, view, size) in views {
                 assert!(
@@ -13794,7 +13864,26 @@ mod tests {
             }
         }
         let curves = Node::adjustment("curves", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
-        let pixelate = Node::filter("p", F::Pixelate { size: 5.0 });
+        // An effect puts the frame on a surface of its own here, where an
+        // invert inside it has nothing to invert; the CPU draws the frame
+        // where it stands.
+        let shadowed = {
+            let mut doc = page(Some(curves.clone()), BlendMode::Normal, false);
+            let frame = doc.children_of(doc.root()).unwrap()[1];
+            doc.apply(Command::SetEffects {
+                id: frame,
+                effects: vec![chitrakar_doc::Effect::InnerShadow {
+                    dx: 2.0,
+                    dy: 2.0,
+                    blur: 1.0,
+                    color: WHITE,
+                    opacity: 0.5,
+                    spread: 0.0,
+                }],
+            })
+            .unwrap();
+            doc
+        };
         for (what, doc) in [
             (
                 "a blended frame working on the page",
@@ -13804,12 +13893,165 @@ mod tests {
                 "a frame held to the layer under it",
                 page(None, BlendMode::Normal, true),
             ),
-            (
-                "a pixelate inside a frame",
-                page(Some(pixelate), BlendMode::Normal, false),
-            ),
+            ("a frame wearing an effect working on the page", shadowed),
         ] {
             assert!(!GpuRenderer::can_render(&doc), "{what} goes back");
+        }
+    }
+
+    /// A frame with a mask that also wears an effect is drawn. Its
+    /// silhouette is the frame cut by its mask, as the CPU renderer
+    /// builds it, and the effect is cast from that. It was handed back
+    /// for want of knowing, after one random page (seed 1233) came out
+    /// apart along the page's edge — a question about what lies past the
+    /// page casting onto it, which a later frame's own refusal now keeps
+    /// that page out of anyway. So it is asked here directly: a shadow,
+    /// an outline and an inner shadow, the frame in the middle of the
+    /// page and hanging off its left and top edges, faded and in a
+    /// faded group, at its own size and at an awkward zoom.
+    #[test]
+    fn a_masked_frame_wearing_an_effect_is_drawn_the_way_the_cpu_draws_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Effect as E;
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let page = |at: (f32, f32), opacity: f32, in_group: bool, effect: E| {
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.85, 0.87, 0.9),
+                ),
+                Transform::default(),
+            );
+            let root = doc.root();
+            let host = if in_group {
+                let mut g = Node::group("g");
+                g.opacity = 0.7;
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(g),
+                })
+                .unwrap();
+                doc.children_of(root).unwrap()[1]
+            } else {
+                root
+            };
+            let mut frame = Node::artboard("frame", 36.0, 26.0, Some(WHITE));
+            frame.opacity = opacity;
+            frame.mask = Some(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Ellipse { rx: 15.0, ry: 10.0 },
+                    transform: Transform::translation(18.0, 13.0),
+                },
+                invert: false,
+                feather: 0.0,
+            });
+            frame.effects = vec![effect];
+            let index = doc.children_of(host).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: host,
+                index,
+                node: Box::new(frame),
+            })
+            .unwrap();
+            let id = doc.children_of(host).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at.0, at.1),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: id,
+                index: 0,
+                node: filled("dot", VectorShape::Ellipse { rx: 9.0, ry: 7.0 }, RED),
+            })
+            .unwrap();
+            let dot = doc.children_of(id).unwrap()[0];
+            doc.apply(Command::SetTransform {
+                id: dot,
+                transform: Transform::translation(14.0, 12.0),
+            })
+            .unwrap();
+            doc
+        };
+        let shadow = E::DropShadow {
+            dx: 4.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: ink(0.0, 0.0, 0.1),
+            opacity: 0.8,
+            spread: 0.0,
+        };
+        let outline = E::Outline {
+            width: 2.5,
+            color: ink(0.1, 0.6, 0.2),
+            opacity: 1.0,
+        };
+        let inner = E::InnerShadow {
+            dx: 2.0,
+            dy: 2.0,
+            blur: 1.0,
+            color: ink(0.0, 0.0, 0.1),
+            opacity: 0.9,
+            spread: 0.0,
+        };
+        let views = [
+            ("its own size", Transform::default(), (80, 60)),
+            (
+                "an awkward zoom",
+                Transform {
+                    a: 1.37,
+                    d: 1.37,
+                    e: -3.3,
+                    f: 2.6,
+                    ..Default::default()
+                },
+                (100, 80),
+            ),
+        ];
+        for (effect_name, effect) in [
+            ("a shadow", shadow),
+            ("an outline", outline),
+            ("an inner shadow", inner),
+        ] {
+            for (where_, at) in [
+                ("in the middle", (20.4, 15.7)),
+                ("off the left edge", (-12.3, 15.7)),
+                ("off the top edge", (20.4, -9.6)),
+            ] {
+                for (how, opacity, grouped) in [
+                    ("plain", 1.0, false),
+                    ("faded", 0.6, false),
+                    ("in a faded group", 1.0, true),
+                ] {
+                    let doc = page(at, opacity, grouped, effect.clone());
+                    for (view_name, view, size) in views {
+                        let what = format!("{effect_name}, {where_}, {how}, at {view_name}");
+                        assert!(gpu.draws_view(&doc, view, size), "{what} is drawn");
+                        let mine = gpu.render_view(&doc, view, size).unwrap();
+                        let mut reference = Surface::new(size.0, size.1);
+                        let clip = reference.full_clip();
+                        chitrakar_render::render_region_at(&doc, &mut reference, clip, view)
+                            .unwrap();
+                        let (mean, worst) = difference(&mine, &reference);
+                        let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+                        assert!(
+                            mean < 0.004 && over == 0 && in_mean < 0.002,
+                            "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                             (worst {in_worst:.3} at {spot:?}, {over} over)"
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -14348,6 +14590,184 @@ mod tests {
             middle(&across),
             middle(&along)
         );
+    }
+
+    /// A filter inside a frame reads only what is inside the frame, as
+    /// the CPU renderer reads it: the frame's contents are drawn into its
+    /// rectangle and nowhere else, so a blur there carries the frame's
+    /// edge on past it, and a pixelate's blocks at the edge average only
+    /// what is inside. Stripes run across the frame's edges, so a filter
+    /// reading past them would bring the stripes outside in. Every filter
+    /// that reads a neighbourhood was handed back inside a frame; each is
+    /// drawn now, and agrees.
+    #[test]
+    fn a_filter_inside_a_frame_reads_only_the_frame() {
+        use chitrakar_doc::Filter as F;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let page = |filter: F| {
+            let mut doc = Document::new(90, 70, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 90.0,
+                        height: 70.0,
+                        radius: 0.0,
+                    },
+                    ink(0.15, 0.2, 0.3),
+                ),
+                Transform::default(),
+            );
+            for i in 0..9 {
+                add(
+                    &mut doc,
+                    filled(
+                        "stripe",
+                        VectorShape::Rect {
+                            width: 4.0,
+                            height: 70.0,
+                            radius: 0.0,
+                        },
+                        ink(0.95, 0.9, 0.3),
+                    ),
+                    Transform::translation(3.0 + i as f32 * 10.0, 0.0),
+                );
+            }
+            let frame = add(
+                &mut doc,
+                // A white ground inside it, against the stripes outside:
+                // what a filter reads past its edge comes in as stripes.
+                Box::new(Node::artboard("frame", 50.0, 36.0, Some(WHITE))),
+                Transform::translation(18.3, 15.6),
+            );
+            for (i, (node, at)) in [
+                (
+                    filled(
+                        "dot",
+                        VectorShape::Ellipse { rx: 8.0, ry: 6.0 },
+                        ink(0.9, 0.2, 0.2),
+                    ),
+                    (6.0, 7.0),
+                ),
+                (
+                    filled(
+                        "bar",
+                        VectorShape::Rect {
+                            width: 30.0,
+                            height: 5.0,
+                            radius: 0.0,
+                        },
+                        ink(0.2, 0.8, 0.4),
+                    ),
+                    (28.0, 28.0),
+                ),
+                (Box::new(Node::filter("f", filter)), (0.0, 0.0)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                doc.apply(Command::AddNode {
+                    parent: frame,
+                    index: i,
+                    node,
+                })
+                .unwrap();
+                let id = doc.children_of(frame).unwrap()[i];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(at.0, at.1),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let filters = [
+            F::GaussianBlur { sigma: 3.0 },
+            F::Sharpen {
+                sigma: 2.0,
+                amount: 0.8,
+            },
+            F::HighPass { sigma: 2.0 },
+            F::Halftone {
+                size: 4.0,
+                degrees: 30.0,
+            },
+            F::Emboss {
+                degrees: 120.0,
+                height: 2.0,
+                amount: 0.9,
+            },
+            F::MotionBlur {
+                distance: 9.0,
+                degrees: 20.0,
+            },
+            F::RadialBlur {
+                amount: 0.3,
+                spin: false,
+                center: [0.5, 0.5],
+            },
+            F::RadialBlur {
+                amount: 0.2,
+                spin: true,
+                center: [0.4, 0.6],
+            },
+            F::Twirl {
+                degrees: 90.0,
+                radius: 0.6,
+                center: [0.5, 0.5],
+            },
+            F::Pinch {
+                amount: 0.5,
+                radius: 0.6,
+                center: [0.5, 0.5],
+            },
+            F::Ripple {
+                amplitude: 3.0,
+                wavelength: 12.0,
+            },
+            F::FindEdges { amount: 1.0 },
+            F::OilPaint { radius: 2.0 },
+            F::LensCorrection { amount: 0.3 },
+            F::Pixelate { size: 6.0 },
+            F::Median { radius: 2.0 },
+            F::SurfaceBlur {
+                radius: 3.0,
+                threshold: 0.2,
+            },
+        ];
+        let mut apart = Vec::new();
+        for filter in filters {
+            let doc = page(filter.clone());
+            if !GpuRenderer::can_render(&doc) {
+                apart.push(format!("{filter:?}: handed back"));
+                continue;
+            }
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, at) = interiors(&mine, &reference);
+            // A median is a vote among the 256 steps a channel shows at,
+            // found by halving here and by a sliding histogram on the
+            // CPU, so a pixel can land a step apart: it is held to what
+            // its own test holds it to
+            // (`a_median_votes_the_way_the_cpu_votes`), not to a step.
+            let agrees = if matches!(filter, F::Median { .. }) {
+                mean < 0.0015 && worst < 0.03
+            } else {
+                mean < 0.004 && over == 0 && in_mean < 0.002
+            };
+            if !agrees {
+                apart.push(format!(
+                    "{filter:?}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                     (worst {in_worst:.3} at {at:?}, {over} over)"
+                ));
+            }
+        }
+        assert!(apart.is_empty(), "{}", apart.join("\n"));
     }
 
     /// Blur and sharpen: six box passes on a pair of scratch textures,

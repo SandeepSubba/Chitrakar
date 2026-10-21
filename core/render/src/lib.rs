@@ -1313,7 +1313,7 @@ pub fn copies_a_clone(doc: &Document, id: NodeId) -> bool {
 /// by: upright where it lands, and holding something that works on what
 /// is under it, which on a surface of its own would have nothing to work
 /// on. See the frame's arm in `render_child`.
-fn frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> Result<bool, DocError> {
+pub fn frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> Result<bool, DocError> {
     let node = doc.node(id)?;
     if !matches!(node.kind, NodeKind::Artboard { .. }) {
         return Ok(false);

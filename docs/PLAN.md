@@ -3198,6 +3198,35 @@ without reading anything else.*
     stripes' contrast row by row moves under 0.04, and 0.09 with the
     levels read one or the other). `a_picture_goes_where_its_corners_
     are_put` holds as it was.
+- **A filter inside a frame, on the GPU** (Phase 4): the sixteen
+  filters that read a neighbourhood were all handed back inside a frame,
+  since their passes read as far as the page goes and the CPU stops at
+  the frame. Each draw now carries the frame's rectangle
+  (`Item::within`), its quads are drawn over it, and its passes are
+  bound a copy of the page's numbers with the frame's edges in place of
+  the page's — so every reading that stopped at the page stops at the
+  frame. Three readings had never stopped at the page at all, clamping
+  to the texture instead: the warps (twirl, pinch, ripple, lens), the
+  halftone's cell and the emboss's offset now read through `texel_at`,
+  which clamps to those edges. A masked frame wearing an effect is drawn
+  too: it was handed back for want of knowing, and asked directly it
+  agrees on and off the page's edges. Drawing filters in frames turned
+  up an older defect: a frame wearing an effect while holding something
+  that works on the page — an invert, a noise — is drawn in place by the
+  CPU (`frame_in_place`) and was put on a surface of its own here, where
+  there was nothing under it to work on: a tenth of full scale apart,
+  on a page whose halftone had kept it out of every audit. It goes back.
+  The random pages drawn went from 1029 to 1036 of 2000.
+  - **Tests:** `a_filter_inside_a_frame_reads_only_the_frame` (seventeen
+    filters, stripes against the frame's white ground; with the frame's
+    edges left off the passes, thirteen of them come apart, and with
+    `texel_at` clamping to the texture, six);
+    `a_masked_frame_wearing_an_effect_is_drawn_the_way_the_cpu_draws_it`
+    (a shadow, an outline, an inner shadow, on and off two edges, faded
+    and in a faded group, at two views; with the frame's mask left off
+    its silhouette, 0.04 apart); `a_frame_between_pixels_is_drawn_and_
+    what_it_cannot_hold_goes_back` draws the pixelate at a zoom now and
+    asks the in-place frame with an inner shadow to go back.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -4701,13 +4730,15 @@ without reading anything else.*
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
      cross-renderer audits can run: every one of its thirty-four is
-     compared now. Asked command by command (October 2026), it draws 60
-     of the fixture's and declines 1 — a mask on a frame that wears an
-     effect — after clipping and effects, and turned frames, came off
-     (§0 *Clipping and effects, asked what is really declined*, and *A
-     turned frame*). What is left is that one open question, the
-     outline wider than a pass will walk, and a copy of a clone layer
-     wearing anything of its own.
+     compared now. Asked command by command (October 2026), it draws all
+     61 of the fixture's and declines none: the last, a mask on a frame
+     that wears an effect, came off once it was asked directly (§0 *A
+     filter inside a frame*), after clipping and effects, and turned
+     frames, had (§0 *Clipping and effects, asked what is really
+     declined*, and *A turned frame*). What is left is the outline wider
+     than a pass will walk, a copy of a clone layer wearing anything of
+     its own, and a frame wearing an effect while holding what works on
+     the page.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
      asking what is *really* refused rather than reading what is written

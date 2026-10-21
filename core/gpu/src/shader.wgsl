@@ -1077,9 +1077,14 @@ fn ripple_sine(at: f32, length: f32) -> f32 {
     return sin((t - floor(t)) * 6.28318530717958647);
 }
 
-// A pixel of what is under the layer, the edge read again past the edge.
+// A pixel of what is under the layer, the edge read again past the edge
+// — the page's edge, or a frame's for a filter inside one, which is where
+// the CPU renderer's own reading stops (it is handed that rectangle to
+// work in), rather than the surface's. Within the texture either way.
 fn texel_at(i: vec2i, size: vec2i) -> vec4f {
-    return textureLoad(backdrop, clamp(i, vec2i(0), size - vec2i(1)), 0);
+    let lo = max(vec2i(page.lo), vec2i(0));
+    let hi = min(vec2i(page.hi), size) - vec2i(1);
+    return textureLoad(backdrop, clamp(i, lo, hi), 0);
 }
 
 // The CPU renderer's lerp over a whole pixel, alpha and all.
@@ -1159,8 +1164,7 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let fwd = vec4f(g.w / det, -g.y / det, -g.z / det, g.x / det);
         let dev = vec2f(fwd.x * centre.x + fwd.z * centre.y + e.x, fwd.y * centre.x + fwd.w * centre.y + e.y);
         let size = vec2i(textureDimensions(backdrop));
-        let texel = clamp(vec2i(floor(dev + vec2f(0.25))), vec2i(0), size - vec2i(1));
-        let under = textureLoad(backdrop, texel, 0);
+        let under = texel_at(vec2i(floor(dev + vec2f(0.25))), size);
         var lum = 1.0;
         if under.a > 0.0 {
             lum = dot(vec3f(0.2126, 0.7152, 0.0722), under.rgb) / under.a;
@@ -1291,8 +1295,8 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let size = vec2i(textureDimensions(backdrop));
         let px = vec2i(floor(at));
         let step = vec2i(i32(p.y), i32(p.z));
-        let toward = textureLoad(backdrop, clamp(px + step, vec2i(0), size - vec2i(1)), 0);
-        let away = textureLoad(backdrop, clamp(px - step, vec2i(0), size - vec2i(1)), 0);
+        let toward = texel_at(px + step, size);
+        let away = texel_at(px - step, size);
         let luma = vec3f(0.2126, 0.7152, 0.0722);
         let rise = dot(luma, toward.rgb) - dot(luma, away.rgb);
         let g = clamp(0.5 * was.a - 0.5 * p.w * rise, 0.0, was.a);
