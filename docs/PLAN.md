@@ -3121,17 +3121,23 @@ without reading anything else.*
   (`chitrakar_render::frame_cover`, its `rect_coverage` over a region),
   riding the same coverage texture as a mask (`Held::turned`;
   `mask_texture` takes a `Held` now rather than its four parts). Faded
-  and blended it agrees; wearing an effect, or held to the layer under
-  it, it still goes back — then the cut belongs inside the surface on
-  draws that each carry a mask of their own.
+  and blended it agrees. Wearing an effect, the cut belongs inside the
+  surface the effect is grown from — the frame's silhouette is the cut
+  frame — on draws that each carry a mask of their own; so what the
+  frame draws goes on a surface inside that one, and the cut is taken
+  on that inner surface's one quad. Held to the layer under it, or
+  wearing an effect inside another frame, it still goes back.
   - **Tests:** `a_turned_frame_is_cut_the_way_the_cpu_cuts_it` (plain,
     faded, Multiply; with the cut left off the way down, the plain page
     is a tenth apart on average and the block fails);
     `a_frame_paints_its_ground_and_keeps_its_contents_inside` asks the
     quarter-turned frame to be drawn and to agree, where it pinned the
-    refusal. The fixture's own turned frame wears a shadow, so its audit
-    still declines turning and straightening; the next thing to take
-    apart there is the half-turn, which no single layer explains.
+    refusal; and the same page casting a shadow (with the inner
+    surface's cut left off, a tenth apart). The fixture audit draws 60
+    of its commands now and declines 1: a mask on a frame that wears an
+    effect, which is the open question recorded with seed 1233 (what
+    lies past the page casting effects onto it). The half-turn that no
+    single layer explained was this frame too — drawn now.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -4635,12 +4641,13 @@ without reading anything else.*
      slot — and both are below. With those two gone there is no whole
      layer left that the shared fixture has to have removed before the
      cross-renderer audits can run: every one of its thirty-four is
-     compared now. Asked command by command (October 2026), it draws 58
-     of the fixture's and declines 3 — turning and straightening the
-     canvas, and a mask on a frame — after clipping and effects came off
-     (§0 *Clipping and effects, asked what is really declined*). Those
-     three are the next to take apart the same way: none comes down to
-     one layer, so it is the page, not a layer, that is refused.
+     compared now. Asked command by command (October 2026), it draws 60
+     of the fixture's and declines 1 — a mask on a frame that wears an
+     effect — after clipping and effects, and turned frames, came off
+     (§0 *Clipping and effects, asked what is really declined*, and *A
+     turned frame*). What is left is that one open question, the
+     outline wider than a pass will walk, and a copy of a clone layer
+     wearing anything of its own.
      That list was three items longer an hour ago and every one of the
      three came off for a different reason, which is the argument for
      asking what is *really* refused rather than reading what is written

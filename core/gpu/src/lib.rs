@@ -3581,14 +3581,25 @@ fn one(
             // Turned: on a surface of its own (`turned_frame`), as the CPU
             // draws it — the ground over the frame's whole box and what
             // it holds drawn whole, then the surface cut by how much of
-            // each pixel the frame covers on the way down. Not wearing an
-            // effect, though: then the cut belongs inside the surface, on
-            // the frame's own drawing where its silhouette is made, and
-            // that drawing is everything it holds, each with a mask of its
-            // own the cut would have to share a slot with.
+            // each pixel the frame covers on the way down.
+            //
+            // Wearing an effect, the cut belongs inside the surface the
+            // effect is grown from — the frame's silhouette is the cut
+            // frame — and the drawing it would cut is everything the frame
+            // holds, each with a mask of its own in the one slot. So what
+            // the frame draws goes on a surface of its own inside that one,
+            // and the cut is taken where that inner surface comes down:
+            // one quad, one slot.
             if !upright {
-                if !node.effects.is_empty() || held_to.is_some() {
+                let wears = !node.effects.is_empty();
+                // Inside another frame as well, the outer bound would be
+                // laid over everything the layer drew, the inner quad
+                // with it, and the cut lost.
+                if held_to.is_some() || (wears && bound.is_some()) {
                     return None;
+                }
+                if wears {
+                    out.draws.push(Item::of(Draw::Open));
                 }
                 if node.blend != BlendMode::Normal
                     && chitrakar_render::works_on_what_is_under(doc, child).ok()?
@@ -3622,6 +3633,38 @@ fn one(
                     )?;
                 }
                 collect(doc, child, t, 1.0, bound, out)?;
+                if wears {
+                    let quad = out.push(page_quad(
+                        (out.page, out.surface),
+                        1.0,
+                        [blend_index(BlendMode::Normal) as f32, 0.0, 0.0, 0.0],
+                        [0.0; 4],
+                        [0.0; 3],
+                    ));
+                    let (at, box_) = mask_texture(
+                        doc,
+                        child,
+                        Held {
+                            mask: None,
+                            to: None,
+                            bound: None,
+                            parent,
+                            turned: turned_frame,
+                        },
+                        out,
+                    )?;
+                    for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
+                        v.mask = box_;
+                    }
+                    out.draws.push(Item {
+                        draw: Draw::Close {
+                            quad,
+                            blend: BlendMode::Normal,
+                            effects: Vec::new(),
+                        },
+                        mask: at,
+                    });
+                }
             }
             // Masked and wearing an effect, a frame goes back — for want of
             // knowing, rather than for a reason in this arm. One random page
@@ -3965,7 +4008,9 @@ fn one(
     // coverages a layer is held back by are one coverage, and a
     // fragment reads it once.
     let coverage = if framed.is_some() { None } else { bound };
-    if node.mask.is_some() || held_to.is_some() || coverage.is_some() || turned_frame.is_some() {
+    // A turned frame wearing an effect took its cut inside (above).
+    let turned_cut = if worn { None } else { turned_frame };
+    if node.mask.is_some() || held_to.is_some() || coverage.is_some() || turned_cut.is_some() {
         let (at, box_) = mask_texture(
             doc,
             child,
@@ -3974,7 +4019,7 @@ fn one(
                 to: held_to,
                 bound: coverage,
                 parent,
-                turned: turned_frame,
+                turned: turned_cut,
             },
             out,
         )?;
@@ -16598,6 +16643,31 @@ mod tests {
                     d.apply(Command::SetBlendMode {
                         id,
                         blend: BlendMode::Multiply,
+                    })
+                    .map(|_| ())
+                    .unwrap()
+                }),
+            ),
+            // Casting a shadow: grown from the cut frame, so the cut is
+            // taken inside the surface the shadow is grown from.
+            (
+                "casting a shadow",
+                page(&|d, id| {
+                    d.apply(Command::SetEffects {
+                        id,
+                        effects: vec![chitrakar_doc::Effect::DropShadow {
+                            dx: 4.0,
+                            dy: 5.0,
+                            blur: 2.0,
+                            color: AuthoredColor::Srgb {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.1,
+                                a: 1.0,
+                            },
+                            opacity: 0.8,
+                            spread: 0.0,
+                        }],
                     })
                     .map(|_| ())
                     .unwrap()
