@@ -3187,6 +3187,17 @@ without reading anything else.*
     picture itself uploaded instead of the level);
     `a_picture_at_half_its_size_is_each_two_texels_averaged` holds,
     now through the half level.
+- **A picture in perspective drawn from its pyramid** (Phase 4): a
+  level a pixel, mixed between two; the inside of the quad a row at a
+  time — 450 ms to 92 for a 12 MP photograph with its corners moved.
+  - **Tests:** `a_checker_in_deep_perspective_is_grey_from_end_to_end`
+    (shrunk by four to forty; fails drawn from the photograph itself,
+    0.066 off); `corners_moved_to_a_shrink_draw_the_shrink` (at a half,
+    a quarter, an eighth; fails with the level's coordinates left
+    unscaled); `a_picture_going_away_blurs_without_a_seam` (the
+    stripes' contrast row by row moves under 0.04, and 0.09 with the
+    levels read one or the other). `a_picture_goes_where_its_corners_
+    are_put` holds as it was.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -10284,6 +10295,18 @@ chitrakar/
   file is the file's word for it. The GPU backend uploads the level the
   CPU reads and scales the box's coordinates by how much of the level
   the picture spans, which an odd size makes less than all of it.
+  **A picture in perspective ✅** was worse: 450 ms a frame for the same
+  photograph with its corners moved, since there every pixel took up to
+  eight by eight taps of the photograph itself and asked whether all
+  four of its corners were inside the quad. It is 92 ms now. Each pixel
+  reads its own level, since perspective shrinks the far end more than
+  the near, and is mixed between the two levels its footprint falls
+  between — the photograph itself counting as the first — because a
+  level read one or the other is a seam across the road where one gives
+  way to the next. Which pixels are wholly inside the quad is worked out
+  once a row, as an interval, rather than four corners a pixel. The GPU
+  still hands a picture in perspective back, so there is no parity to
+  keep.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅

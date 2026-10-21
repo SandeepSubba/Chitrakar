@@ -3307,7 +3307,7 @@ fn render_child(
                             Some(warp) => draw_raster_warped(
                                 dst,
                                 doc,
-                                res,
+                                (&raster.resource_id, res),
                                 warp,
                                 t,
                                 node.opacity,
@@ -7421,7 +7421,7 @@ fn picture_footprint(inv: Inverse) -> ([f32; 2], [u32; 2]) {
 fn draw_raster_warped(
     dst: &mut Surface,
     doc: &Document,
-    res: &chitrakar_doc::Resource,
+    (id, res): (&str, &chitrakar_doc::Resource),
     warp: chitrakar_doc::Projective,
     t: Transform,
     opacity: f32,
@@ -7462,16 +7462,11 @@ fn draw_raster_warped(
     if bbox.is_empty() {
         return;
     }
-    // Inside every edge, the same way round as the quad turns.
+    // Which way round the quad turns, so that inside every edge is the
+    // same side of each.
     let turn = {
         let (a, b, c) = (quad[0], quad[1], quad[2]);
         ((b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0)).signum()
-    };
-    let inside = |x: f64, y: f64| {
-        (0..4).all(|i| {
-            let (a, b) = (quad[i], quad[(i + 1) % 4]);
-            ((b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0)) * turn >= 0.0
-        })
     };
     // The part of a pixel's square the quad covers: the square clipped
     // to each edge in turn, and its area.
@@ -7517,7 +7512,7 @@ fn draw_raster_warped(
         *out = chitrakar_color::srgb_to_linear(v as f32 / 255.0);
         alpha_of[v] = v as f32 / 255.0;
     }
-    let texel = |x: u32, y: u32| -> LinearRgba {
+    let own = |x: u32, y: u32| -> LinearRgba {
         let s = ((y * res.width + x) * 4) as usize;
         let a = alpha_of[res.rgba8[s + 3] as usize];
         LinearRgba {
@@ -7527,28 +7522,64 @@ fn draw_raster_warped(
             a,
         }
     };
-    let (last_x, last_y) = (res.width as f32 - 1.0, res.height as f32 - 1.0);
-    let cx = |i: f32| i.clamp(0.0, last_x) as u32;
-    let cy = |i: f32| i.clamp(0.0, last_y) as u32;
-    let bilinear = |sx: f32, sy: f32| {
-        let (u, v) = (sx - 0.5, sy - 0.5);
-        let (u0, v0) = (u.floor(), v.floor());
-        let (fx, fy) = (u - u0, v - v0);
-        let (x0, x1) = (cx(u0), cx(u0 + 1.0));
-        let (y0, y1) = (cy(v0), cy(v0 + 1.0));
-        let top = lerp(texel(x0, y0), texel(x1, y0), fx);
-        let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
-        lerp(top, bottom, fy)
+    // Shrunk by half or more, a pixel here is read from the picture's
+    // pyramid, as an upright one is (`draw_raster`) — but how far it is
+    // shrunk changes across the picture, so the level does too, pixel
+    // by pixel, and a pixel between two levels is read from both and
+    // mixed by how far between them it is. Without the mix the line
+    // where one level gives way to the next would be a seam across the
+    // road; with it the picture goes from one to the other as smoothly
+    // as the perspective does. Made only when some pixel wants it.
+    let mut levels: Option<Option<std::sync::Arc<pyramid::Pyramid>>> = None;
+    // Where along the line at height `y` the quad is: each edge keeps
+    // one side of a line, which along a row is one side of a point, so
+    // the four together are an interval — empty where `lo > hi`.
+    let along = |y: f64| -> (f64, f64) {
+        let (mut lo, mut hi) = (f64::MIN, f64::MAX);
+        for i in 0..4 {
+            let (a, b) = (quad[i], quad[(i + 1) % 4]);
+            // side(x) = ((b.0 - a.0)(y - a.1) - (b.1 - a.1)(x - a.0)) · turn
+            //         = k - m·x, kept where it is not below nothing.
+            let m = (b.1 - a.1) * turn;
+            let k = ((b.0 - a.0) * (y - a.1) + (b.1 - a.1) * a.0) * turn;
+            if m > 0.0 {
+                hi = hi.min(k / m);
+            } else if m < 0.0 {
+                lo = lo.max(k / m);
+            } else if k < 0.0 {
+                return (f64::MAX, f64::MIN);
+            }
+        }
+        (lo, hi)
     };
-
     for py in bbox.y0..bbox.y1 {
+        let fy = py as f64;
+        // Worked out once a row rather than four corners a pixel, which
+        // was most of what drawing a picture in perspective cost: the
+        // pixels whose squares lie wholly inside the quad (inside both
+        // the row's top and bottom lines, which for a convex quad is
+        // inside everywhere between), and the reach of the quad across
+        // the strip the row is — its two lines' intervals and any corner
+        // between them — outside which a pixel has none of it.
+        let (top, bottom) = (along(fy), along(fy + 1.0));
+        let whole = (top.0.max(bottom.0), top.1.min(bottom.1));
+        let mut reach = (f64::MAX, f64::MIN);
+        for (lo, hi) in [top, bottom] {
+            if lo <= hi {
+                reach = (reach.0.min(lo), reach.1.max(hi));
+            }
+        }
+        for &(x, y) in &quad {
+            if y > fy && y < fy + 1.0 {
+                reach = (reach.0.min(x), reach.1.max(x));
+            }
+        }
         for px in bbox.x0..bbox.x1 {
-            let (fx, fy) = (px as f64, py as f64);
-            let edge = if inside(fx, fy)
-                && inside(fx + 1.0, fy)
-                && inside(fx, fy + 1.0)
-                && inside(fx + 1.0, fy + 1.0)
-            {
+            let fx = px as f64;
+            if fx + 1.0 < reach.0 || fx > reach.1 {
+                continue;
+            }
+            let edge = if fx >= whole.0 && fx + 1.0 <= whole.1 {
                 1.0
             } else {
                 covered(fx, fy)
@@ -7573,40 +7604,122 @@ fn draw_raster_warped(
             let ((ax, ay), (bx, by)) = (step(1.0, 0.0), step(0.0, 1.0));
             let foot_x = (ax.abs() + bx.abs()).max(1.0) as f32;
             let foot_y = (ay.abs() + by.abs()).max(1.0) as f32;
-            // A tap a texel apart, not two as the upright path takes
-            // them: there the footprint is one figure for the whole
-            // picture and the taps are laid to suit it, but here it is
-            // whatever the perspective makes it at this pixel — 4.9
-            // texels, say — and three taps two apart over a fine
-            // pattern leave a third of it uncancelled. Taps a texel
-            // apart cancel it whatever the figure.
-            let taps_x = (foot_x.ceil() as u32).clamp(1, 8);
-            let taps_y = (foot_y.ceil() as u32).clamp(1, 8);
             let (lx, ly) = (lx as f32, ly as f32);
-            let sampled = if taps_x > 1 || taps_y > 1 {
-                let mut acc = LinearRgba::TRANSPARENT;
-                for j in 0..taps_y {
-                    for i in 0..taps_x {
-                        let ox = (i as f32 + 0.5) / taps_x as f32 - 0.5;
-                        let oy = (j as f32 + 0.5) / taps_y as f32 - 0.5;
-                        let s = bilinear(lx + ox * foot_x, ly + oy * foot_y);
-                        acc = LinearRgba {
-                            r: acc.r + s.r,
-                            g: acc.g + s.g,
-                            b: acc.b + s.b,
-                            a: acc.a + s.a,
-                        };
+            let least = foot_x.min(foot_y);
+            // Shrunk at all, the pixel is somewhere between two levels —
+            // the picture itself counting as the first — and is read from
+            // both. From the picture itself too, so that where the half
+            // takes over from it there is no step either.
+            let pyramid = if least > 1.0 {
+                levels
+                    .get_or_insert_with(|| pyramid::of(id, res))
+                    .as_deref()
+            } else {
+                None
+            };
+            let read = |k: u32| match pyramid.and_then(|p| p.level(k)) {
+                Some(l) => {
+                    let step = (1u32 << k) as f32;
+                    let texel = |x: u32, y: u32| {
+                        let [r, g, b, a] = l.texel(x, y);
+                        LinearRgba { r, g, b, a }
+                    };
+                    warped_sample(
+                        &texel,
+                        l.width,
+                        l.height,
+                        lx / step,
+                        ly / step,
+                        foot_x / step,
+                        foot_y / step,
+                        2.0,
+                    )
+                }
+                None => warped_sample(&own, res.width, res.height, lx, ly, foot_x, foot_y, 1.0),
+            };
+            let sampled = match pyramid {
+                None => read(0),
+                Some(p) => {
+                    // Where between two levels this pixel's footprint
+                    // falls: 2.0 is all of the half, 3.0 halfway from the
+                    // half to the quarter, 4.0 all of the quarter.
+                    let at = least.log2().min(p.depth() as f32);
+                    let k = at.floor() as u32;
+                    let between = (at - k as f32).clamp(0.0, 1.0);
+                    let near = read(k);
+                    if between > 0.0 && k < p.depth() {
+                        lerp(near, read(k + 1), between)
+                    } else {
+                        near
                     }
                 }
-                scale_alpha(acc, 1.0 / (taps_x * taps_y) as f32)
-            } else {
-                bilinear(lx, ly)
             };
             let src = scale_alpha(sampled, cov);
             let i = (py * dst.width + px) as usize;
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
         }
     }
+}
+
+/// A warped picture read at (`lx`, `ly`) by a pixel whose footprint
+/// there is `foot_x` by `foot_y` of its texels: one bilinear tap, or a
+/// grid of them a texel apart across the footprint. A tap a texel apart,
+/// not two as the upright path takes them: there the footprint is one
+/// figure for the whole picture and the taps are laid to suit it, but
+/// here it is whatever the perspective makes it at this pixel — 4.9
+/// texels, say — and three taps two apart over a fine pattern leave a
+/// third of it uncancelled. Taps a texel apart cancel it whatever the
+/// figure. `texel` reads the picture or one of its levels, `width` by
+/// `height`; `apart` is how many texels apart the taps are — one for
+/// the picture itself, for that reason, and two on a level of its
+/// pyramid, where a pattern finer than a texel of the level has already
+/// been averaged away and a bilinear tap covers the two texels either
+/// side of it, as on the upright path.
+#[allow(clippy::too_many_arguments)]
+fn warped_sample(
+    texel: &impl Fn(u32, u32) -> LinearRgba,
+    width: u32,
+    height: u32,
+    lx: f32,
+    ly: f32,
+    foot_x: f32,
+    foot_y: f32,
+    apart: f32,
+) -> LinearRgba {
+    let (last_x, last_y) = (width as f32 - 1.0, height as f32 - 1.0);
+    let cx = |i: f32| i.clamp(0.0, last_x) as u32;
+    let cy = |i: f32| i.clamp(0.0, last_y) as u32;
+    let bilinear = |sx: f32, sy: f32| {
+        let (u, v) = (sx - 0.5, sy - 0.5);
+        let (u0, v0) = (u.floor(), v.floor());
+        let (fx, fy) = (u - u0, v - v0);
+        let (x0, x1) = (cx(u0), cx(u0 + 1.0));
+        let (y0, y1) = (cy(v0), cy(v0 + 1.0));
+        let top = lerp(texel(x0, y0), texel(x1, y0), fx);
+        let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
+        lerp(top, bottom, fy)
+    };
+    let (foot_x, foot_y) = (foot_x.max(1.0), foot_y.max(1.0));
+    let taps_x = ((foot_x / apart).ceil() as u32).clamp(1, 8);
+    let taps_y = ((foot_y / apart).ceil() as u32).clamp(1, 8);
+    if taps_x == 1 && taps_y == 1 {
+        return bilinear(lx, ly);
+    }
+    let mut acc = LinearRgba::TRANSPARENT;
+    for j in 0..taps_y {
+        for i in 0..taps_x {
+            let ox = (i as f32 + 0.5) / taps_x as f32 - 0.5;
+            let oy = (j as f32 + 0.5) / taps_y as f32 - 0.5;
+            let s = bilinear(lx + ox * foot_x, ly + oy * foot_y);
+            acc = LinearRgba {
+                r: acc.r + s.r,
+                g: acc.g + s.g,
+                b: acc.b + s.b,
+                a: acc.a + s.a,
+            };
+        }
+    }
+    scale_alpha(acc, 1.0 / (taps_x * taps_y) as f32)
 }
 
 /// Mask coverage at a pixel center, in document space. 1.0 without a mask.
@@ -10567,7 +10680,7 @@ pub fn warped_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>
     draw_raster_warped(
         &mut surface,
         doc,
-        res,
+        (&raster.resource_id, res),
         warp,
         Transform::translation(-x0, -y0),
         1.0,
@@ -23416,6 +23529,226 @@ mod tests {
             inside.r,
             outside.r
         );
+    }
+
+    /// A fine checker laid into a deep perspective is the grey it
+    /// averages to from end to end — a near end shrunk to a quarter and
+    /// a far end to a fortieth, which is past the eight taps a side a
+    /// pixel can take of the picture itself: there it was a moiré.
+    /// Read from the pyramid's levels, a level for each pixel and mixed
+    /// between two, it is flat however deep the shrink, and with no step
+    /// where one level gives way to the next.
+    #[test]
+    fn a_checker_in_deep_perspective_is_grey_from_end_to_end() {
+        const N: u32 = 1024;
+        let mut bytes = Vec::with_capacity((N * N * 4) as usize);
+        for y in 0..N {
+            for x in 0..N {
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut doc = Document::new(270, 60, ColorMode::Rgb);
+        let rid = doc.add_resource(N, N, bytes);
+        let root = doc.root();
+        let n = N as f32;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "road",
+                chitrakar_doc::RasterRef {
+                    resource_id: rid,
+                    width: N,
+                    height: N,
+                    // A road going away: its near edge 250 wide along the
+                    // bottom, its far one 25 along the top — shrunk by four
+                    // across at the near end and by forty at the far, and
+                    // down it by more than two everywhere.
+                    corners: Some([[n * 0.45, 0.0], [n * 0.55, 0.0], [n, n], [0.0, n]]),
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                a: 250.0 / n,
+                d: 45.0 / n,
+                e: 10.0,
+                f: 5.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        // Down the middle of the road, from the near end to the far.
+        let mut worst = (0.0f32, 0);
+        for y in 6..49 {
+            for x in [130u32, 135, 140] {
+                let off = (s.get(x, y).r - 0.5).abs();
+                if off > worst.0 {
+                    worst = (off, y);
+                }
+            }
+        }
+        assert!(
+            worst.0 < 0.01,
+            "the grey is {} off at row {}",
+            worst.0,
+            worst.1
+        );
+    }
+
+    /// Down a road in perspective a picture blurs as it goes away, and it
+    /// blurs smoothly: where one level of its pyramid gives way to the
+    /// next, a pixel is read from both and mixed by how far between them
+    /// it is. Read from one or the other, the line where they meet is a
+    /// step in how sharp the picture is — a seam across the road.
+    /// Measured as the stripes' contrast, row by row, which should fall
+    /// away with the distance and never jump.
+    #[test]
+    fn a_picture_going_away_blurs_without_a_seam() {
+        const N: u32 = 512;
+        let mut bytes = Vec::with_capacity((N * N * 4) as usize);
+        for _ in 0..N {
+            for x in 0..N {
+                let wave = 0.5 + 0.5 * (x as f32 * std::f32::consts::TAU / 64.0).sin();
+                let v = (wave * 255.0).round() as u8;
+                bytes.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut doc = Document::new(140, 50, ColorMode::Rgb);
+        let rid = doc.add_resource(N, N, bytes);
+        let root = doc.root();
+        let n = N as f32;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "road",
+                chitrakar_doc::RasterRef {
+                    resource_id: rid,
+                    width: N,
+                    height: N,
+                    corners: Some([[n * 0.375, 0.0], [n * 0.625, 0.0], [n, n], [0.0, n]]),
+                },
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                a: 128.0 / n,
+                d: 40.0 / n,
+                e: 6.0,
+                f: 5.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let s = render(&doc).unwrap();
+        // The middle of each row, where every row is still road.
+        let contrast: Vec<f32> = (6..44)
+            .map(|y| {
+                let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+                for x in 58..82 {
+                    let v = s.get(x, y).r;
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+                hi - lo
+            })
+            .collect();
+        let jump = contrast
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        // Blended, the most it moves between two rows is under 0.04 — the
+        // stripes' period sliding against the window — and with the levels
+        // read one or the other, 0.09.
+        assert!(
+            jump < 0.06,
+            "the stripes' contrast jumps by {jump} from one row to the next: {contrast:?}"
+        );
+    }
+
+    /// A picture whose corners are moved to where a plain shrink would
+    /// put them is drawn as the plain shrink is: the two read the same
+    /// levels of the same pyramid with the same arithmetic, the moved
+    /// corners only finding their level pixel by pixel. At a power of two,
+    /// where a pixel is wholly on one level; between two, the moved
+    /// picture mixes the two levels (a seam across a road otherwise) and
+    /// the plain one, all of it on one, does not.
+    #[test]
+    fn corners_moved_to_a_shrink_draw_the_shrink() {
+        const N: u32 = 240;
+        let bytes: Vec<u8> = (0..N * N * 4)
+            .map(|i| {
+                if i % 4 == 3 {
+                    255
+                } else {
+                    ((i as u64 * 53 + 7) % 251) as u8
+                }
+            })
+            .collect();
+        for shrink in [2.0f32, 4.0, 8.0] {
+            let place = |corners: Option<[[f32; 2]; 4]>, t: Transform| {
+                let mut doc = Document::new(80, 80, ColorMode::Rgb);
+                let rid = doc.add_resource(N, N, bytes.clone());
+                let root = doc.root();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(Node::raster(
+                        "img",
+                        chitrakar_doc::RasterRef {
+                            resource_id: rid,
+                            width: N,
+                            height: N,
+                            corners,
+                        },
+                    )),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[0];
+                doc.apply(Command::SetTransform { id, transform: t })
+                    .unwrap();
+                render(&doc).unwrap()
+            };
+            let side = N as f32 / shrink;
+            let plain = place(
+                None,
+                Transform {
+                    a: 1.0 / shrink,
+                    d: 1.0 / shrink,
+                    e: 2.0,
+                    f: 2.0,
+                    ..Default::default()
+                },
+            );
+            let moved = place(
+                Some([[0.0, 0.0], [side, 0.0], [side, side], [0.0, side]]),
+                Transform::translation(2.0, 2.0),
+            );
+            let inside = (side.floor() as u32).min(78);
+            let mut worst = 0.0f32;
+            for y in 3..inside {
+                for x in 3..inside {
+                    let (p, q) = (plain.get(x, y), moved.get(x, y));
+                    worst = worst
+                        .max((p.r - q.r).abs())
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs());
+                }
+            }
+            assert!(
+                worst < 0.03,
+                "shrunk by {shrink}: the two differ by {worst}"
+            );
+        }
     }
 
     /// A picture with its corners moved is drawn through them: where
