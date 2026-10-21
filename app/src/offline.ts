@@ -13,15 +13,29 @@ export function keepForOffline() {
       .then(() => navigator.serviceWorker.ready)
       .then((reg) => {
         // What this visit loaded, said once the worker can keep it: the
-        // page itself, its script, style and engine, and its fonts.
-        const keep = [
-          new URL("./", location.href).href,
-          ...performance
-            .getEntriesByType("resource")
-            .map((e) => e.name)
-            .filter((u) => new URL(u).origin === location.origin),
-        ];
-        reg.active?.postMessage({ keep });
+        // page itself, its script, style and engine, and its fonts. And
+        // said again whenever more has finished loading: the engine is
+        // seven megabytes fetched by the script, and finishes after the
+        // page's load as often as not — said only once, it was missing
+        // from what was kept, and the editor opened offline without it.
+        const say = () => {
+          const keep = [
+            new URL("./", location.href).href,
+            ...performance
+              .getEntriesByType("resource")
+              .map((e) => e.name)
+              .filter((u) => new URL(u).origin === location.origin),
+          ];
+          reg.active?.postMessage({ keep });
+        };
+        say();
+        if (typeof PerformanceObserver !== "undefined") {
+          let soon: number | undefined;
+          new PerformanceObserver(() => {
+            clearTimeout(soon);
+            soon = window.setTimeout(say, 300);
+          }).observe({ type: "resource" });
+        }
       })
       .catch((err) => console.warn("offline:", err));
   });

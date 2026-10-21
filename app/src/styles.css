@@ -2275,7 +2275,9 @@ body {
    group it would go into, and the row being carried dimmed. */
 .panel ul li {
   position: relative;
-  touch-action: none;
+  /* A swipe scrolls the list; a row lifts to be carried after a long
+     press (`ROW_LIFT_MS`), which keeps the swipe from then on. */
+  touch-action: pan-y;
 }
 .panel ul li.drop-above::before,
 .panel ul li.drop-below::after {

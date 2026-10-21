@@ -863,6 +863,9 @@ const LONG_PRESS_MS = 450;
 const LONG_PRESS_SLOP = 10;
 /** How far the layers sheet's grip has to be pulled to move it a step. */
 const SHEET_STEP = 60;
+/** How long a finger is held on a layer's row before the row lifts to be
+ * reordered; before that, moving scrolls the list. */
+const ROW_LIFT_MS = 350;
 
 /** Roughly how much room the right-click menu takes, which is what keeps
  * it inside the window. Wide enough for its longest line and tall enough
@@ -5440,6 +5443,11 @@ export function App() {
     active: boolean;
     over: NodeId | null;
     where: "above" | "below" | "into";
+    /** A finger's drag: false until it has been held still long enough
+     * to lift the row (`ROW_LIFT_MS`); till then moving is scrolling. A
+     * mouse's or a pen's is lifted from the start. */
+    lifted: boolean;
+    timer?: number;
   } | null>(null);
   const layerListRef = useRef<HTMLUListElement>(null);
   /** When a drag last ended, so the click the release brings with it does
@@ -5450,16 +5458,46 @@ export function App() {
   const layerDragDone = useRef(0);
   const onRowPointerDown = (e: React.PointerEvent, id: NodeId) => {
     if (e.button !== 0 || renaming) return;
-    layerDragRef.current = {
+    // A finger on the list is first of all scrolling it: the rows are
+    // most of the list, and a swipe on one that reordered the layers
+    // left a phone with no way down to the rest. Held still a moment, the
+    // row lifts — with a tick under the finger — and from then on the
+    // finger carries it, as a phone's own lists are reordered.
+    const finger = e.pointerType === "touch";
+    const drag: NonNullable<typeof layerDragRef.current> = {
       id,
       startY: e.clientY,
       active: false,
       over: null,
       where: "above",
+      lifted: !finger,
+    };
+    if (finger) {
+      drag.timer = window.setTimeout(() => {
+        if (layerDragRef.current !== drag) return;
+        drag.lifted = true;
+        navigator.vibrate?.(10);
+        setLayerDrag({ id, over: null, where: "above" });
+      }, ROW_LIFT_MS);
+    }
+    layerDragRef.current = drag;
+    // Let go of, or taken by the browser for a scroll: either way over.
+    const onCancel = () => {
+      clearTimeout(drag.timer);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      if (layerDragRef.current === drag) layerDragRef.current = null;
+      setLayerDrag(null);
     };
     const onMove = (ev: PointerEvent) => {
       const drag = layerDragRef.current;
       if (!drag) return;
+      if (!drag.lifted) {
+        // Moved before it lifted: a scroll, which is the browser's.
+        if (Math.abs(ev.clientY - drag.startY) > 6) onCancel();
+        return;
+      }
       if (!drag.active) {
         if (Math.abs(ev.clientY - drag.startY) < 4) return;
         drag.active = true;
@@ -5487,21 +5525,38 @@ export function App() {
       setLayerDrag({ id: drag.id, over, where });
     };
     const onUp = () => {
+      clearTimeout(drag.timer);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      const drag = layerDragRef.current;
+      window.removeEventListener("pointercancel", onCancel);
+      const drag2 = layerDragRef.current;
+      if (drag2 !== drag) return;
       layerDragRef.current = null;
       setLayerDrag(null);
       // The drop is read from the ref, not a state updater: an updater is
       // meant to be pure, and React may run it twice.
-      if (drag?.active && drag.over !== null) {
+      if (drag.active && drag.over !== null) {
         layerDragDone.current = Date.now();
         dropLayer(drag.id, drag.over, drag.where);
       }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   };
+  // Once a row has lifted under a finger, the finger's movement is the
+  // row's and not a scroll: the rows let a vertical swipe scroll the list
+  // (`touch-action: pan-y`), and the one way to keep that swipe for the
+  // row is to decline the scroll as it begins.
+  useEffect(() => {
+    const list = layerListRef.current;
+    if (!list) return;
+    const hold = (e: TouchEvent) => {
+      if (layerDragRef.current?.lifted && e.cancelable) e.preventDefault();
+    };
+    list.addEventListener("touchmove", hold, { passive: false });
+    return () => list.removeEventListener("touchmove", hold);
+  });
   /** Move `id` to where a drop over `over` asked for, as one MoveNode. The
    * list runs top-first, so "above" a row is the slot past its index in
    * painter's order, and a move within one group accounts for the slot

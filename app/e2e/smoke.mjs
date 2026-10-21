@@ -13917,7 +13917,7 @@ assert(
   }
   assert(
     kept.includes("/") && kept.some((p) => p.endsWith(".wasm")) && kept.some((p) => /\/assets\/index-.*\.js$/.test(p)),
-    `the page, its script and its engine are kept (${kept.length} files)`,
+    `the page, its script and its engine are kept (${kept.length} files: ${kept.join(", ")})`,
   );
   assert(
     kept.some((p) => p.startsWith("/fonts/")),
@@ -14204,6 +14204,74 @@ assert(
   await page.waitForTimeout(250);
   const free = Number(await field("X position").inputValue());
   assert(Math.abs(free - 183) < 1.5, `and nothing is caught (${free})`);
+}
+
+// 11j. The layer list under a finger: a swipe scrolls it, and a row held
+// still a moment lifts to be carried, as a phone's own lists are
+// reordered. The rows had been set to give the browser nothing, so a
+// swipe on one reordered the layers and a phone with more layers than
+// the list could show had no way down to the rest. Real touches, sent
+// through the browser's own input (a synthetic event never meets the
+// browser's scrolling, which is the whole question).
+{
+  const ctx = await browser.newContext({ viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });
+  const tp = await ctx.newPage();
+  await tp.goto("http://localhost:8123/");
+  await tp.waitForSelector("#engine-canvas");
+  await tp.waitForTimeout(700);
+  const b = await tp.locator("#engine-page").boundingBox();
+  for (let i = 0; i < 3; i++) {
+    await tp.locator('.toolbar button[aria-label="Rect"]').first().click();
+    await tp.mouse.move(b.x + 20 + i * 60, b.y + 20);
+    await tp.mouse.down();
+    await tp.mouse.move(b.x + 60 + i * 60, b.y + 60, { steps: 3 });
+    await tp.mouse.up();
+    await tp.waitForTimeout(150);
+  }
+  // Enough layers that the list runs past the bottom of the panel.
+  for (let i = 0; i < 3; i++) {
+    await tp.keyboard.press("Control+a");
+    await tp.keyboard.press("Control+d");
+    await tp.waitForTimeout(250);
+  }
+  await tp.keyboard.press("Escape");
+  const panel = tp.locator(".panel");
+  const overflows = await panel.evaluate((e) => e.scrollHeight > e.clientHeight + 100);
+  assert(overflows, "more layers than the panel shows");
+  const names = () => tp.locator(".panel ul li .layer-name").allTextContents();
+  const cdp = await ctx.newCDPSession(tp);
+  const touch = (type, x, y) =>
+    cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
+  const row = await tp.locator(".panel ul li").nth(4).boundingBox();
+  const x = row.x + row.width / 2;
+  const before = await names();
+  await touch("touchStart", x, row.y + 5);
+  for (let i = 1; i <= 8; i++) {
+    await touch("touchMove", x, row.y + 5 - i * 30);
+    await tp.waitForTimeout(16);
+  }
+  await touch("touchEnd", 0, 0);
+  await tp.waitForTimeout(500);
+  const scrolled = await panel.evaluate((e) => e.scrollTop);
+  assert(scrolled > 50, `a swipe on the rows scrolls the list (${scrolled})`);
+  assert(JSON.stringify(await names()) === JSON.stringify(before), "and reorders nothing");
+  await panel.evaluate((e) => (e.scrollTop = 0));
+  await tp.waitForTimeout(200);
+  const r0 = await tp.locator(".panel ul li").nth(0).boundingBox();
+  const r2 = await tp.locator(".panel ul li").nth(2).boundingBox();
+  const first = before[0];
+  await touch("touchStart", x, r0.y + r0.height / 2);
+  await tp.waitForTimeout(500);
+  for (let i = 1; i <= 10; i++) {
+    await touch("touchMove", x, r0.y + r0.height / 2 + ((r2.y + r2.height * 0.8 - r0.y - r0.height / 2) * i) / 10);
+    await tp.waitForTimeout(16);
+  }
+  await touch("touchEnd", 0, 0);
+  await tp.waitForTimeout(500);
+  const after = await names();
+  assert(after[0] !== first && after.indexOf(first) === 2, `held a moment, the row lifts and is carried (${after.indexOf(first)})`);
+  assert((await panel.evaluate((e) => e.scrollTop)) === 0, "and carrying it scrolls nothing");
+  await ctx.close();
 }
 
 // 9aw. Dissolving a group answers for what the group itself was

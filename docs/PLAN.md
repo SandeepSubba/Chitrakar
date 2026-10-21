@@ -3138,6 +3138,13 @@ without reading anything else.*
     effect, which is the open question recorded with seed 1233 (what
     lies past the page casting effects onto it). The half-turn that no
     single layer explained was this frame too — drawn now.
+- **The layer list under a finger** (Phase 4): a swipe scrolls, a long
+  press lifts a row to be carried.
+  - **Tests:** smoke 11j on a 1024×768 touch page with 24 layers,
+    through `Input.dispatchTouchEvent`: a swipe on the rows scrolls the
+    list and reorders nothing; held half a second, the top row is
+    carried to third, and nothing scrolls. Before the change the same
+    swipe left the list where it was.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser
@@ -10133,7 +10140,13 @@ chitrakar/
   serve the visit that installed it, so the page tells it what that
   visit loaded once it is in charge; kept assets the page no longer
   loads go then, so the cache does not grow by a build on every update.
-  Smoke 11f reloads with the network off and draws a rect.
+  Smoke 11f reloads with the network off and draws a rect. It failed
+  once on a loaded machine, here and on CI alike, with seven files kept
+  and not the engine: the page said what it had loaded on its `load`
+  event, and the engine — seven megabytes the script fetches — finishes
+  after that as often as not. It says so again whenever more finishes
+  loading now (a `PerformanceObserver`), so the engine is kept however
+  late it arrives.
 - Pictures given to the app ✅. Installed, it is in the phone's own
   share sheet: "Share → Chitrakar" from the photos app posts the picture
   to `share-target` (`share_target` in the manifest), which no page can
@@ -10168,6 +10181,18 @@ chitrakar/
   does. Smoke 11i; 11b's palm
   rejection now runs with fingers set to draw, which is where it
   matters.
+- The layer list under a finger ✅. Its rows had been set to give the
+  browser nothing (`touch-action: none`) so that dragging one reordered
+  the layers — which meant a swipe on the list, which is mostly rows,
+  reordered the layers too and never scrolled it. On a phone with more
+  layers than the sheet could show, there was no way down to the rest.
+  A swipe scrolls now (`pan-y`), and a row held still for a third of a
+  second lifts — a tick under the finger, the row dimmed — and is
+  carried from then on, the scroll declined as it begins (a
+  non-passive `touchmove` on the list). A mouse or a pen drags at once,
+  as before. Smoke 11j sends real touches through the browser's own
+  input, since a synthetic event never meets its scrolling, which is
+  the whole question.
 - Touch + Apple Pencil/stylus input (pressure into the input pipeline early, ahead of
   brush tools). Pressure ✅ (a pen's own reading drives the brush's width,
   with a mouse's speed standing in for it); the view's own gestures ✅
