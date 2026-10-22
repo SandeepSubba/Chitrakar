@@ -2649,7 +2649,12 @@ export function App() {
     ];
     const threshold =
       (window as unknown as { __chitrakarDraftMs?: number }).__chitrakarDraftMs ?? DRAFT_MS;
-    const drafting = !gpuOnRef.current && frameMsRef.current > threshold;
+    // Never for a pan: the engine draws one from the frame before it,
+    // shifted, with only the strips the pan exposed drawn afresh — a
+    // small cost whatever the page weighs — and a draft would throw
+    // that frame away for a whole one at half size. On a slow machine
+    // every pan drafted, and a drag was slower than it had been.
+    const drafting = !gpuOnRef.current && frameMsRef.current > threshold && !panned;
     if (settleRef.current !== null) window.clearTimeout(settleRef.current);
     settleRef.current = null;
     if (drafting) {

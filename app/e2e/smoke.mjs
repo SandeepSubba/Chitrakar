@@ -14452,6 +14452,32 @@ assert(
     after[0] === before[0] && after[1] === before[1],
     `and shows the bytes it showed before (${after[0]} against ${before[0]}; first differing pixels ${after[2]})`,
   );
+  // A page too slow to draw sharp while the view moves (11l) is still
+  // never drafted for a pan: a pan is the frame before it moved over,
+  // cheap whatever the page weighs, and a draft would be a whole frame
+  // at half size instead.
+  const draft = () => page.evaluate(() => document.getElementById("engine-canvas").dataset.draft);
+  await page.evaluate(() => {
+    window.__chitrakarDraftMs = -1;
+  });
+  await page.mouse.move(...at(200, 150));
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(40);
+  assert((await draft()) === "1", "a slow page drafts while it zooms");
+  await page.waitForTimeout(450);
+  const [sx, sy] = at(300, 250);
+  await page.keyboard.down("Space");
+  await page.waitForTimeout(150);
+  await page.mouse.move(sx, sy);
+  await page.mouse.down();
+  await page.mouse.move(sx + 20, sy + 12, { steps: 4 });
+  assert((await draft()) === "0", "and never while it pans");
+  await page.mouse.up();
+  await page.keyboard.up("Space");
+  await page.waitForTimeout(300);
+  await page.evaluate(() => {
+    delete window.__chitrakarDraftMs;
+  });
 }
 
 // 9aw. Dissolving a group answers for what the group itself was
