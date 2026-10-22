@@ -9340,6 +9340,15 @@ fn mix_snapshot(
 /// it here takes it from this function, so that what it draws is what
 /// this renderer would have drawn.
 pub fn text_raster(spec: &chitrakar_doc::TextSpec, t: Transform) -> (text::TextRaster, f32) {
+    let scale = text_raster_scale(spec, t);
+    (
+        text::rasterize_on_grid(spec, scale, grid_phase(t, scale)),
+        scale,
+    )
+}
+
+/// The scale [`text_raster`] rasterizes a block at under `t`.
+fn text_raster_scale(spec: &chitrakar_doc::TextSpec, t: Transform) -> f32 {
     let [bx0, by0, bx1, by1] = text::bounds(spec);
     let natural = (bx1 - bx0, by1 - by0);
     let ceiling = (8192.0 / natural.0.max(natural.1).max(1.0)).min(64.0);
@@ -9354,11 +9363,49 @@ pub fn text_raster(spec: &chitrakar_doc::TextSpec, t: Transform) -> (text::TextR
     // than that on screen is still sharp at twice the size it is drawn.
     let ceiling = ceiling.min(2048.0 / spec.size.abs().max(1e-3));
     let ceiling = if ceiling.is_finite() { ceiling } else { 0.0 };
-    let scale = max_scale(t).max(0.02).min(ceiling);
-    (
-        text::rasterize_on_grid(spec, scale, grid_phase(t, scale)),
-        scale,
-    )
+    max_scale(t).max(0.02).min(ceiling)
+}
+
+/// [`text_raster`], kept: a block is rasterized again only when what it
+/// says, the scale it is seen at or where its origin falls between the
+/// pixels has changed. A region repainted under a block — a shape dragged
+/// across a paragraph, a brush stroke beside a caption — asked for the
+/// whole block's raster on every frame of it, to read a corner of it.
+/// The same raster either way; the last few dozen are kept, and no more
+/// than a bound's worth of them.
+fn text_raster_kept(
+    spec: &chitrakar_doc::TextSpec,
+    t: Transform,
+) -> (std::sync::Arc<text::TextRaster>, f32) {
+    use std::sync::{Arc, Mutex};
+    type Key = (chitrakar_doc::TextSpec, u32, [u32; 2]);
+    static KEPT: Mutex<Vec<(Key, Arc<text::TextRaster>, f32)>> = Mutex::new(Vec::new());
+    const MOST: usize = 48;
+    const BYTES: usize = 48 << 20;
+    let scale = text_raster_scale(spec, t);
+    let phase = grid_phase(t, scale);
+    let key: Key = (spec.clone(), scale.to_bits(), phase.map(f32::to_bits));
+    {
+        let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(i) = kept.iter().position(|(k, _, _)| *k == key) {
+            let hit = kept.remove(i);
+            let out = (hit.1.clone(), hit.2);
+            kept.push(hit);
+            return out;
+        }
+    }
+    let (raster, scale) = text_raster(spec, t);
+    let raster = Arc::new(raster);
+    let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+    kept.push((key, raster.clone(), scale));
+    let size = |r: &text::TextRaster| r.coverage.len() * 4 + r.tint.len();
+    while kept.len() > MOST || kept.iter().map(|(_, r, _)| size(r)).sum::<usize>() > BYTES {
+        if kept.len() <= 1 {
+            break;
+        }
+        kept.remove(0);
+    }
+    (raster, scale)
 }
 
 /// Where a block's origin falls between the pixels it is seen on, along
@@ -10948,7 +10995,7 @@ fn draw_text(
         return;
     };
     let [bx0, by0, bx1, by1] = text::bounds(spec);
-    let (raster, scale) = text_raster(spec, t);
+    let (raster, scale) = text_raster_kept(spec, t);
     let color = resolve_color(doc, &spec.fill);
     // A block whose style runs ask for more than one colour says per
     // pixel which is which; one that does not leaves this empty and is
@@ -24439,6 +24486,77 @@ mod tests {
                 }
                 y += 0.41;
             }
+        }
+    }
+
+    /// Text is shaped and rasterized once and kept — by the face and the
+    /// string, by what the block says, the scale and where its origin
+    /// falls between pixels — so nothing kept may ever stand in for what
+    /// a change asks for: a block drawn, then changed in its words, its
+    /// size, the scale it is seen at and its place between the pixels,
+    /// is at every step the page a fresh document draws.
+    #[test]
+    fn text_kept_from_one_frame_is_never_another_frames_text() {
+        let f = chitrakar_doc::fixture::everything();
+        let NodeKind::Text(base) = f.doc.node(f.words).unwrap().kind.clone() else {
+            panic!("the fixture's words are text");
+        };
+        let page = |spec: &chitrakar_doc::TextSpec, t: Transform| {
+            let mut doc = Document::new(220, 90, ColorMode::Rgb);
+            let root = doc.root();
+            let mut n = Node::text("t", spec.clone());
+            n.transform = t;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(n),
+            })
+            .unwrap();
+            doc
+        };
+        let mut spec = base.clone();
+        spec.text = "Kept, and drawn again".into();
+        spec.size = 18.0;
+        let mut steps = vec![(spec.clone(), Transform::translation(6.0, 8.0))];
+        let mut changed = spec.clone();
+        changed.text = "Kept, and drawn agaim".into();
+        steps.push((changed.clone(), Transform::translation(6.0, 8.0)));
+        changed.size = 19.5;
+        steps.push((changed.clone(), Transform::translation(6.0, 8.0)));
+        steps.push((
+            changed.clone(),
+            Transform {
+                a: 1.3,
+                d: 1.3,
+                e: 6.0,
+                f: 8.0,
+                ..Default::default()
+            },
+        ));
+        steps.push((changed.clone(), Transform::translation(6.37, 8.61)));
+        steps.push((spec.clone(), Transform::translation(6.0, 8.0)));
+        for (i, (spec, t)) in steps.iter().enumerate() {
+            // Drawn twice, the second from what the first kept, and
+            // against a raster made from nothing.
+            let doc = page(spec, *t);
+            let first = render(&doc).unwrap();
+            let again = render(&doc).unwrap();
+            let (raster, scale) = text_raster(spec, *t);
+            let (kept, kept_scale) = text_raster_kept(spec, *t);
+            assert_eq!(
+                scale.to_bits(),
+                kept_scale.to_bits(),
+                "step {i}: the same scale"
+            );
+            assert_eq!(
+                raster.coverage, kept.coverage,
+                "step {i}: the raster kept is the raster made"
+            );
+            assert_eq!(first.pixels.len(), again.pixels.len());
+            assert!(
+                first.pixels.iter().zip(&again.pixels).all(|(p, q)| p == q),
+                "step {i}: drawn again from what was kept, it is the same page"
+            );
         }
     }
 

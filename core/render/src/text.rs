@@ -475,22 +475,79 @@ fn shape_piece(
     // move that much further or a synthesized bold would set tighter
     // than the upright it is made from.
     let heavier = smear(spec, scale);
-    let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(piece);
-    let out = rustybuzz::shape(face, &[], buffer);
+    let out = shaped(fonts, face, piece);
     glyphs.reserve(out.len());
-    for (info, pos) in out.glyph_infos().iter().zip(out.glyph_positions()) {
+    for g in out.iter() {
         glyphs.push(Shaped {
-            id: ab_glyph::GlyphId(info.glyph_id as u16),
-            x: *pen + pos.x_offset as f32 * unit,
-            y: -(pos.y_offset as f32) * unit,
-            advance: pos.x_advance as f32 * unit + heavier,
-            cluster: from + info.cluster as usize,
+            id: ab_glyph::GlyphId(g.glyph as u16),
+            x: *pen + g.x_offset as f32 * unit,
+            y: -(g.y_offset as f32) * unit,
+            advance: g.x_advance as f32 * unit + heavier,
+            cluster: from + g.cluster as usize,
             run,
             marker: false,
         });
-        *pen += pos.x_advance as f32 * unit + heavier + track;
+        *pen += g.x_advance as f32 * unit + heavier + track;
     }
+}
+
+/// One glyph as the shaper places it, in the face's own units.
+#[derive(Clone, Copy)]
+struct Placed {
+    glyph: u32,
+    x_offset: i32,
+    y_offset: i32,
+    x_advance: i32,
+    cluster: u32,
+}
+
+/// The shaper's answer for `piece` in a face, kept: what a face makes of
+/// a string is the same at every size and every zoom — the size scales
+/// what comes back, after — and asking again on every frame was most of
+/// what drawing text cost, the shaper working out its plan for the face
+/// afresh each time. Kept by the face and the string, and let go of
+/// wholesale once there are more than a page of paragraphs could ask for.
+fn shaped(
+    fonts: &'static Fonts,
+    face: &rustybuzz::Face<'static>,
+    piece: &str,
+) -> std::sync::Arc<Vec<Placed>> {
+    use std::sync::{Arc, Mutex};
+    type Kept = HashMap<(usize, String), Arc<Vec<Placed>>>;
+    static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+    const MOST: usize = 4096;
+    let key = (fonts as *const Fonts as usize, piece.to_string());
+    if let Some(found) = KEPT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|k| k.get(&key).cloned())
+    {
+        return found;
+    }
+    let mut buffer = rustybuzz::UnicodeBuffer::new();
+    buffer.push_str(piece);
+    let out = rustybuzz::shape(face, &[], buffer);
+    let placed: Arc<Vec<Placed>> = Arc::new(
+        out.glyph_infos()
+            .iter()
+            .zip(out.glyph_positions())
+            .map(|(info, pos)| Placed {
+                glyph: info.glyph_id,
+                x_offset: pos.x_offset,
+                y_offset: pos.y_offset,
+                x_advance: pos.x_advance,
+                cluster: info.cluster,
+            })
+            .collect(),
+    );
+    let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+    let kept = kept.get_or_insert_with(HashMap::new);
+    if kept.len() >= MOST {
+        kept.clear();
+    }
+    kept.insert(key, placed.clone());
+    placed
 }
 
 /// Where a line's start sits, given the block's alignment and the room a

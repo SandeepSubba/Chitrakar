@@ -3385,6 +3385,25 @@ without reading anything else.*
     the whole at once gives); `the_quick_two_by_two_is_the_loops_two_by_
     two` (an odd-sized picture's first level, bit for bit against the
     loop every texel used to take).
+- **Text shaped and rasterized once** (Phase 4): a page of forty
+  paragraphs was shaped from nothing on every frame — the shaper working
+  out its plan for the face afresh each time, a billion of five billion
+  instructions — and every block rasterized whole even where only a
+  corner of it was being repainted. What a face makes of a string is
+  the same at every size and zoom, so the shaper's answer is kept by the
+  face and the string (`text::shaped`, let go of wholesale past 4096);
+  and a block's raster is kept by what the block says, the scale it is
+  seen at and where its origin falls between the pixels
+  (`text_raster_kept`, the last 48 and no more than 48 MB). The row pass
+  of the box blur reads its middle without asking where the line ends.
+  Natively, the page of paragraphs repaints in 26 ms rather than 37, and
+  dragging a shape across it in 1 ms a frame rather than 16.
+  - **Tests:** `text_kept_from_one_frame_is_never_another_frames_text`
+    (a block drawn, changed in its words, its size, its scale and its
+    place between pixels, and back: each time the raster kept is the
+    raster made; with the place between pixels left out of the key it
+    fails at that step); `a_blur_in_three_runs_is_the_same_blur` (bit
+    for bit against the pass that asks at every read).
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

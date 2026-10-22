@@ -243,10 +243,36 @@ fn box_blur_axis(
         for i in -radius..=radius {
             sum = add(sum, at(i));
         }
-        for i in 0..len {
-            surface.pixels[index(lane, i)] = scale(sum, norm);
-            sum = add(sum, at(i + radius + 1));
-            sum = sub(sum, at(i - radius));
+        // Only the first `radius` and the last `radius + 1` can read past
+        // the line's ends; between them every read is inside it and needs
+        // no asking. The same additions in the same order, in three runs
+        // (`a_blur_in_three_runs_is_the_same_blur`).
+        let head = radius.min(len);
+        let tail = (len - radius - 1).max(head);
+        let step = |i: i32, sum: &mut LinearRgba, inside: bool| {
+            *sum = if inside {
+                add(*sum, line[(i + radius + 1) as usize])
+            } else {
+                add(*sum, at(i + radius + 1))
+            };
+            *sum = if inside {
+                sub(*sum, line[(i - radius) as usize])
+            } else {
+                sub(*sum, at(i - radius))
+            };
+        };
+        if horizontal {
+            let row = ((clip.y0 + lane) * surface.width + clip.x0) as usize;
+            let out = &mut surface.pixels[row..row + len as usize];
+            for i in 0..len {
+                out[i as usize] = scale(sum, norm);
+                step(i, &mut sum, i >= head && i < tail);
+            }
+        } else {
+            for i in 0..len {
+                surface.pixels[index(lane, i)] = scale(sum, norm);
+                step(i, &mut sum, i >= head && i < tail);
+            }
         }
     }
 }
@@ -430,6 +456,94 @@ mod tests {
                                 .all(|(a, b)| a.to_bits() == b.to_bits()),
                             "radius {radius} over {clip:?}: pixel {i} is {q:?} a row at a time \
                              and {p:?} a column at a time"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A pass along the rows with its middle unchecked is the pass that
+    /// checks every read: the same picture to the bit, for windows wider
+    /// and narrower than the line, repeating the edge and reading nothing.
+    #[test]
+    fn a_blur_in_three_runs_is_the_same_blur() {
+        let (w, h) = (41u32, 9u32);
+        let mut seed = 0x51ed_270bu32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 1000) as f32 / 999.0
+        };
+        let mut original = Surface::new(w, h);
+        for p in &mut original.pixels {
+            let a = next();
+            *p = LinearRgba {
+                r: next() * a,
+                g: next() * a,
+                b: next() * a,
+                a,
+            };
+        }
+        let reference = |surface: &mut Surface, clip: ClipRect, radius: i32, beyond: Beyond| {
+            let len = (clip.x1 - clip.x0) as i32;
+            let radius = radius.min(len);
+            let norm = 1.0 / (2 * radius + 1) as f32;
+            for y in clip.y0..clip.y1 {
+                let line: Vec<LinearRgba> = (clip.x0..clip.x1)
+                    .map(|x| surface.pixels[(y * w + x) as usize])
+                    .collect();
+                let at = |i: i32| {
+                    if beyond == Beyond::Nothing && (i < 0 || i >= len) {
+                        return LinearRgba::TRANSPARENT;
+                    }
+                    line[i.clamp(0, len - 1) as usize]
+                };
+                let mut sum = LinearRgba::TRANSPARENT;
+                for i in -radius..=radius {
+                    sum = add(sum, at(i));
+                }
+                for i in 0..len {
+                    surface.pixels[(y * w + clip.x0 + i as u32) as usize] = scale(sum, norm);
+                    sum = add(sum, at(i + radius + 1));
+                    sum = sub(sum, at(i - radius));
+                }
+            }
+        };
+        for clip in [
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            },
+            ClipRect {
+                x0: 4,
+                y0: 1,
+                x1: 33,
+                y1: 8,
+            },
+            ClipRect {
+                x0: 10,
+                y0: 2,
+                x1: 13,
+                y1: 4,
+            },
+        ] {
+            for radius in [1, 3, 9, 20, 60] {
+                for beyond in [Beyond::Edge, Beyond::Nothing] {
+                    let mut ours = original.clone();
+                    box_blur_axis(&mut ours, clip, radius, true, beyond);
+                    let mut theirs = original.clone();
+                    reference(&mut theirs, clip, radius, beyond);
+                    for (i, (p, q)) in ours.pixels.iter().zip(&theirs.pixels).enumerate() {
+                        assert!(
+                            [p.r, p.g, p.b, p.a]
+                                .iter()
+                                .zip([q.r, q.g, q.b, q.a])
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "radius {radius} over {clip:?}: pixel {i}"
                         );
                     }
                 }
