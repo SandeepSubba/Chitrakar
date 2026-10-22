@@ -14303,6 +14303,53 @@ assert(
   await phone.close();
 }
 
+// 11l. A page whose full frame is slow is drawn as a draft while the view
+// moves — half the resolution, a quarter of the pixels, stretched over
+// the canvas — and sharp once the view keeps still; a page that is quick
+// to draw never drafts. How slow counts as slow is a threshold the test
+// sets below nothing, so every page drafts, rather than a page made slow.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [box.x + (x / 400) * box.width, box.y + (y / 300) * box.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 80));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 220), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const draft = () => page.evaluate(() => document.getElementById("engine-canvas").dataset.draft);
+  await page.mouse.move(...at(200, 150));
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(40);
+  assert((await draft()) !== "1", "a page quick to draw is drawn sharp as the view moves");
+  await page.waitForTimeout(300);
+  const inside = await canvasPixel(200, 150);
+  const outside = await canvasPixel(30, 30);
+  await page.evaluate(() => {
+    window.__chitrakarDraftMs = -1;
+  });
+  await page.mouse.wheel(0, 120);
+  await page.waitForTimeout(40);
+  assert((await draft()) === "1", "a slow page is drawn as a draft while the view moves");
+  const soft = await canvasPixel(200, 150);
+  assert(
+    soft.every((v, i) => Math.abs(v - inside[i]) <= 3),
+    `and the draft is the same page, softer (${soft} against ${inside})`,
+  );
+  await page.waitForTimeout(450);
+  assert((await draft()) === "0", "and it is drawn sharp once the view keeps still");
+  const [inAfter, outAfter] = [await canvasPixel(200, 150), await canvasPixel(30, 30)];
+  assert(
+    inAfter.every((v, i) => v === inside[i]) && outAfter.every((v, i) => v === outside[i]),
+    `sharp to the byte: ${inAfter}/${outAfter} against ${inside}/${outside}`,
+  );
+  await page.evaluate(() => {
+    delete window.__chitrakarDraftMs;
+  });
+}
+
 // 9aw. Dissolving a group answers for what the group itself was
 // carrying. A group is somewhere to put layers and also a layer in its
 // own right: it can be hidden, or made half-transparent, and those two

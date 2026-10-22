@@ -3404,6 +3404,7 @@ without reading anything else.*
     raster made; with the place between pixels left out of the key it
     fails at that step); `a_blur_in_three_runs_is_the_same_blur` (bit
     for bit against the pass that asks at every read).
+- ✅ **Draft frames while a slow view moves.** A page whose last full frame took longer than 70 ms — a radial blur, a dozen filters, a phone — is drawn at half the resolution while the view is moving, which is a quarter of the pixels, stretched over the canvas, and at its own 160 ms after the view keeps still. The GPU path never drafts; a quick page never drafts. Smoke 11l sets the threshold below nothing so every page drafts, and checks the draft is the same page and the settled frame is the same to the byte.
 - **Verify before committing:** `cargo test --workspace` (~620),
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all`,
   and in `app/`: `npm run build && npm run test:e2e` (~1400 browser

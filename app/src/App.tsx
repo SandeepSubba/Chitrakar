@@ -582,6 +582,13 @@ function inUnits(px: number, units: Units, dpi: number): number {
 }
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 8;
+
+/** A full frame slower than this draws the view as a draft while it
+ * moves (the view effect). Most pages are a few milliseconds and never
+ * do; a phone drawing a heavy one is several times this. */
+const DRAFT_MS = 70;
+/** How long the view keeps still before the draft is drawn sharp. */
+const SETTLE_MS = 160;
 const MIN_SIZE = 2; // doc pixels, resize clamp
 
 interface View {
@@ -1472,6 +1479,13 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const imgDataRef = useRef<ImageData | null>(null);
+  /** Where a draft frame is laid before it is stretched over the canvas. */
+  const draftCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  /** How long the last full-size frame took, which decides whether the
+   * next view change is drawn as a draft. */
+  const frameMsRef = useRef(0);
+  /** The sharp frame waiting for the view to keep still. */
+  const settleRef = useRef<number | null>(null);
   /** A gradient being dragged across a shape with the gradient tool:
    * which shape, what it held before, how a document point lands in its
    * unit box, and where the drag began. */
@@ -1698,7 +1712,32 @@ export function App() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
+    const started = performance.now();
     const dirty = s.render_frame();
+    // A frame smaller than the canvas is a draft (`DRAFT_MS`): laid whole
+    // onto a canvas of its own size and stretched over this one. Timed
+    // only at full size, since that is the cost a draft is standing in
+    // for.
+    if (s.frame_width() !== canvas.width || s.frame_height() !== canvas.height) {
+      const draft = (draftCanvasRef.current ??= document.createElement("canvas"));
+      draft.width = s.frame_width();
+      draft.height = s.frame_height();
+      const view = new Uint8ClampedArray(getWasmMemory().buffer, s.frame_ptr(), s.frame_len());
+      draft
+        .getContext("2d")!
+        .putImageData(new ImageData(new Uint8ClampedArray(view), draft.width, draft.height), 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(draft, 0, 0, canvas.width, canvas.height);
+      canvas.dataset.draft = "1";
+      return;
+    }
+    // Only a whole frame says what a view change costs: an edit repaints
+    // the little it touched.
+    if (dirty.length === 4 && dirty[2] === canvas.width && dirty[3] === canvas.height) {
+      frameMsRef.current = performance.now() - started;
+    }
+    canvas.dataset.draft = "0";
     if (
       !imgDataRef.current ||
       imgDataRef.current.width !== s.frame_width() ||
@@ -2554,15 +2593,41 @@ export function App() {
   // canvas is a window onto the page now, so its backing store follows the
   // viewport rather than the document, and every pan or zoom is a fresh
   // frame — which is cheap, because it is only ever a screenful.
+  //
+  // A page whose full frame is slow — a radial blur, a dozen filters, a
+  // phone — is drawn at half the resolution while the view is moving,
+  // which is a quarter of the pixels, stretched over the canvas; and at
+  // its own once the view has been still a moment. What the hand is
+  // doing is moving the page, and a sharp frame every third of a second
+  // is worse at that than a soft one every tenth. The page is drawn
+  // sharp again whatever the last frame cost, so a light page never
+  // drafts and a heavy one only while it moves.
   useEffect(() => {
     if (!session) return;
-    session.set_viewport(
+    const full = (): [number, number, number, number, number] => [
       view.zoom * dpr,
       view.x * dpr,
       view.y * dpr,
       Math.round(viewport[0] * dpr),
       Math.round(viewport[1] * dpr),
-    );
+    ];
+    const threshold =
+      (window as unknown as { __chitrakarDraftMs?: number }).__chitrakarDraftMs ?? DRAFT_MS;
+    const drafting = !gpuOnRef.current && frameMsRef.current > threshold;
+    if (settleRef.current !== null) window.clearTimeout(settleRef.current);
+    settleRef.current = null;
+    if (drafting) {
+      const [k, x, y, w, h] = full();
+      session.set_viewport(k / 2, x / 2, y / 2, Math.ceil(w / 2), Math.ceil(h / 2));
+      settleRef.current = window.setTimeout(() => {
+        settleRef.current = null;
+        session.set_viewport(...full());
+        session.invalidate();
+        present(session);
+      }, SETTLE_MS);
+    } else {
+      session.set_viewport(...full());
+    }
     viewArgsRef.current = {
       scale: Math.min(64, Math.max(0.01, view.zoom * dpr)),
       x: view.x * dpr,
