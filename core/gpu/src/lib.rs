@@ -2522,6 +2522,28 @@ struct Scene {
     /// several layers is uploaded once. Ramps are not shared: they are
     /// small, and two layers rarely carry the same one.
     ids: Vec<(String, usize)>,
+    /// The layers above the one being drawn that wear an effect and a
+    /// mask, outermost first, with the space each mask is authored in.
+    /// Such a layer's mask rides its own drawing (so the silhouette its
+    /// effect is grown from is the masked one), and it is put there by
+    /// writing it over every coverage slot the drawing left — which
+    /// wipes whatever those slots held: a frame's cut, a turned frame's
+    /// cover, what a layer inside is held to. So a coverage built while
+    /// one of these is above folds the mask in, and is put back after
+    /// (`placed`), and the two together are one coverage per slot. The
+    /// same goes for every layer not on a surface of its own that is
+    /// held to another or cut by a frame: that coverage rides its
+    /// drawing the same way, so it is on this list on the same terms.
+    ///
+    /// Empty while a layer on a surface of its own is drawn: what is on
+    /// that surface meets the masks above once, where the surface comes
+    /// down, and so it is that quad which folds them in.
+    worn: Vec<Above>,
+    /// Every coverage put on a run of quads so far, in the order they
+    /// were put on. A layer writing its own over everything it drew puts
+    /// these back afterwards, newest first, so a slot ends up holding the
+    /// coverage built for it — which already folds in the masks above.
+    placed: Vec<Settled>,
     /// The surface being drawn, in device pixels, and where the page
     /// lands on it once mapped through the view.
     ///
@@ -2562,6 +2584,8 @@ impl Default for Scene {
             draws: Vec::new(),
             textures: Vec::new(),
             ids: Vec::new(),
+            worn: Vec::new(),
+            placed: Vec::new(),
             surface: (0, 0),
             page: chitrakar_render::ClipRect {
                 x0: 0,
@@ -3130,6 +3154,46 @@ fn one(
     if alone {
         out.draws.push(Item::of(Draw::Open));
     }
+    // A frame above cuts what the layer *lays down*, and not the
+    // silhouette its effects grew from: the CPU renderer builds a field
+    // over a window grown past the frame's edge by the effect's own
+    // reach and then writes only inside the frame, so a shadow ends at
+    // the frame while the shape it is a shadow of does not. Whole
+    // pixels, so the cut can be the rectangle the quads are drawn over
+    // rather than a coverage they read — which leaves the mask texture
+    // for the mask, and leaves what was drawn into the surface uncut.
+    let framed = match bound {
+        Some(b) if !shadings.is_empty() => Some(out.page.intersect(b)),
+        _ => None,
+    };
+    // What the layer is held back by that rides the one coverage slot
+    // with its mask: a frame's cut, unless the effects took it as a
+    // rectangle above, and a turned frame's cover, unless the effect
+    // took that inside.
+    let coverage = if framed.is_some() { None } else { bound };
+    let turned_cut = if worn { None } else { turned_frame };
+    // The coverages above, set aside while this layer is drawn on a
+    // surface of its own (`Scene::worn`), and this layer's own put up
+    // for what it draws if it is to ride the drawing — which it does
+    // unless the layer is on a surface of its own with no effect, where
+    // it goes on the quad that lays the surface down.
+    let outer = if alone {
+        std::mem::take(&mut out.worn)
+    } else {
+        Vec::new()
+    };
+    let wearing = (!alone || worn)
+        && (node.mask.is_some() || held_to.is_some() || coverage.is_some() || turned_cut.is_some());
+    if wearing {
+        out.worn.push(Above {
+            id: child,
+            to: held_to,
+            bound: coverage,
+            parent,
+            turned: turned_cut,
+        });
+    }
+    let placed_from = out.placed.len();
     // What the layer itself is drawn at: its own opacity, unless it is
     // going on a surface of its own, where the opacity belongs to the
     // quad that brings the surface back — except when it has effects,
@@ -3199,10 +3263,10 @@ fn one(
             turned: None,
         }
     };
-    // The strokes that did exactly that. They already carry everything
-    // the pass at the end would apply, so that pass puts them back
-    // afterwards rather than writing over them.
-    let mut settled: Vec<Settled> = Vec::new();
+    // Where the layer's drawing began, before anything below moves
+    // `mark`: a run of quads the masks above are kept off because they
+    // are met once, where the surface comes down.
+    let drawn_from = mark;
     match &node.kind {
         NodeKind::Group => {
             collect(
@@ -3240,7 +3304,7 @@ fn one(
         // comes down in its colour, or takes off what is under it.
         NodeKind::Paint { strokes } => {
             let Some(inv) = chitrakar_render::invert(t) else {
-                return Some(());
+                return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
             };
             let _ = inv;
             // The softest fade is still one device pixel wide, which is
@@ -3258,7 +3322,7 @@ fn one(
                 // is the CPU's.
                 let confined = match stroke.clip.as_deref() {
                     Some(region) => match stroke.bounds() {
-                        Some(box_) => Some(clip_texture(doc, region, box_, t, held, out)?),
+                        Some(box_) => Some(clip_texture(doc, region, box_, t, held, true, out)?),
                         None => continue,
                     },
                     None => None,
@@ -3291,9 +3355,9 @@ fn one(
                     v.mask = box_;
                 }
                 if confined.is_some() {
-                    settled.push(Settled {
+                    out.placed.push(Settled {
                         vertices: quad.start as usize..quad.end as usize,
-                        draw: out.draws.len(),
+                        draws: out.draws.len()..out.draws.len() + 1,
                         texture: at,
                         quad: box_,
                     });
@@ -3319,7 +3383,7 @@ fn one(
             for stroke in strokes {
                 let confined = match stroke.clip.as_deref() {
                     Some(region) => match stroke.bounds() {
-                        Some(box_) => Some(clip_texture(doc, region, box_, t, held, out)?),
+                        Some(box_) => Some(clip_texture(doc, region, box_, t, held, true, out)?),
                         None => continue,
                     },
                     None => None,
@@ -3366,9 +3430,9 @@ fn one(
                     v.mask = box_;
                 }
                 if confined.is_some() {
-                    settled.push(Settled {
+                    out.placed.push(Settled {
                         vertices: quad.start as usize..quad.end as usize,
-                        draw: out.draws.len(),
+                        draws: out.draws.len()..out.draws.len() + 1,
                         texture: at,
                         quad: box_,
                     });
@@ -3389,10 +3453,10 @@ fn one(
             let Some(res) = doc.resource(&raster.resource_id) else {
                 // A resource whose pixels never came back is drawn by
                 // nobody; the CPU skips it too.
-                return Some(());
+                return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
             };
             if res.rgba8.is_empty() {
-                return Some(());
+                return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
             }
             if res.width > out.max_texture || res.height > out.max_texture {
                 return None;
@@ -3414,7 +3478,7 @@ fn one(
             // level's taps: the same function says which.
             let Some((k, foot, taps)) = chitrakar_render::picture_level(t, res.width, res.height)
             else {
-                return Some(());
+                return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
             };
             let level = if k > 0 {
                 chitrakar_render::pyramid::of(&raster.resource_id, res)
@@ -3524,7 +3588,7 @@ fn one(
                 .filter(|b| *b != out.page)
                 .map(|b| out.page.intersect(b));
             if within.is_some_and(|w| w.is_empty()) {
-                return Some(());
+                return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
             }
             let area = within.unwrap_or(out.page);
             let marked = out.draws.len();
@@ -3744,11 +3808,22 @@ fn one(
                             parent,
                             turned: turned_frame,
                         },
+                        false,
                         out,
                     )?;
                     for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
                         v.mask = box_;
                     }
+                    // Kept: the frame's own mask, written over everything
+                    // it drew below, would otherwise take this cut with it
+                    // — a turned frame in a turned copy, masked and wearing
+                    // a shadow, came out upright (page 3186).
+                    out.placed.push(Settled {
+                        vertices: quad.start as usize..quad.end as usize,
+                        draws: out.draws.len()..out.draws.len() + 1,
+                        texture: at,
+                        quad: box_,
+                    });
                     out.draws.push(Item {
                         draw: Draw::Close {
                             quad,
@@ -3809,7 +3884,7 @@ fn one(
                     None => board,
                 };
                 if inside.is_empty() {
-                    return Some(());
+                    return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
                 }
                 // The ground is the frame's rectangle, filled — the one
                 // rounded to whole pixels, as the CPU renderer fills it, laid
@@ -3847,6 +3922,7 @@ fn one(
                             parent,
                             turned: None,
                         },
+                        true,
                         out,
                     )?;
                     for v in &mut out.vertices[mark.0..] {
@@ -3855,6 +3931,12 @@ fn one(
                     for item in &mut out.draws[mark.1..] {
                         item.mask = at;
                     }
+                    out.placed.push(Settled {
+                        vertices: mark.0..out.vertices.len(),
+                        draws: mark.1..out.draws.len(),
+                        texture: at,
+                        quad,
+                    });
                 }
                 // On a surface of its own, what is inside is drawn whole, as a
                 // group's is. (Whatever holds a frame and fades it is on a
@@ -3876,6 +3958,12 @@ fn one(
                 // than drawn, so nothing was ever wrong on a page; but the
                 // reason written down for declining it was not this one.
                 if !alone {
+                    // Nothing below is this frame's, but the bookkeeping
+                    // there is: a frame's cut left on the list after the
+                    // frame cut everything drawn after it (page 1115).
+                    if wearing {
+                        out.worn.pop();
+                    }
                     return Some(());
                 }
             }
@@ -3931,6 +4019,11 @@ fn one(
           // whole stroke before any of it goes down; it has passes of
           // its own now — `Healing`.)
     }
+    if alone {
+        out.worn = outer;
+    } else if wearing {
+        out.worn.pop();
+    }
     // Where the quads that lay the surface down start, so the mask can
     // be kept off them: a layer with effects wears its mask on its own
     // drawing rather than on the way down, since a mask decides what the
@@ -3944,15 +4037,19 @@ fn one(
     // pixels, so the cut can be the rectangle the quads are drawn over
     // rather than a coverage they read — which leaves the mask texture
     // for the mask, and leaves what was drawn into the surface uncut.
-    let framed = match bound {
-        Some(b) if !shadings.is_empty() => Some(out.page.intersect(b)),
-        _ => None,
-    };
     let down = framed.unwrap_or(out.page);
     if alone {
         if !worn {
             // The mask and the opacity go on the quad that lays the
-            // surface down, not on what was drawn into it.
+            // surface down, not on what was drawn into it. Nor are the
+            // masks above: those the quad folds in, so what was drawn is
+            // recorded as carrying none of them.
+            out.placed.push(Settled {
+                vertices: drawn_from.0..out.vertices.len(),
+                draws: drawn_from.1..out.draws.len(),
+                texture: None,
+                quad: NO_MASK,
+            });
             mark = (out.vertices.len(), out.draws.len());
         } else {
             laid = Some((out.vertices.len(), out.draws.len()));
@@ -4095,10 +4192,25 @@ fn one(
     // What a layer is held to rides the same texture — two
     // coverages a layer is held back by are one coverage, and a
     // fragment reads it once.
-    let coverage = if framed.is_some() { None } else { bound };
-    // A turned frame wearing an effect took its cut inside (above).
-    let turned_cut = if worn { None } else { turned_frame };
-    if node.mask.is_some() || held_to.is_some() || coverage.is_some() || turned_cut.is_some() {
+    // Whether this goes on the layer's drawing (and so folds in the masks
+    // above it, which the drawing meets here) or on the quad that lays
+    // its surface down (which folds them in too) — as against the drawing
+    // of a layer wearing an effect, which its own surface's quad keeps
+    // the masks above off.
+    let fold = !(alone && worn);
+    // The run this covers: everything from `mark`, short of the quads
+    // that lay a surface wearing an effect down, which take a coverage
+    // of their own below.
+    let own = match laid {
+        Some((v, d)) => (mark.0..v, mark.1..d),
+        None => (mark.0..out.vertices.len(), mark.1..out.draws.len()),
+    };
+    if node.mask.is_some()
+        || held_to.is_some()
+        || coverage.is_some()
+        || turned_cut.is_some()
+        || (fold && !out.worn.is_empty())
+    {
         let (at, box_) = mask_texture(
             doc,
             child,
@@ -4109,6 +4221,7 @@ fn one(
                 parent,
                 turned: turned_cut,
             },
+            fold,
             out,
         )?;
         for v in &mut out.vertices[mark.0..] {
@@ -4117,57 +4230,121 @@ fn one(
         for item in &mut out.draws[mark.1..] {
             item.mask = at;
         }
-        // A stroke carrying a region of its own already holds all of
-        // this, folded into that region when it was built. Putting those
-        // back is what lets one slot answer two questions.
-        for own in &settled {
-            for v in &mut out.vertices[own.vertices.clone()] {
+        // Whatever inside already carries a coverage of its own — a
+        // stroke's region, a frame's cut, a turned frame's cover, a layer
+        // held to another — holds the whole of what it is held back by,
+        // this layer's mask folded in when it was built. Put back, newest
+        // first so a coverage over a run lands before the ones inside
+        // it, which is what lets one slot answer two questions. It used
+        // to put back strokes' regions only, so a frame masked and
+        // wearing a shadow lost its cut and showed what it held past its
+        // edge (page 4204).
+        for i in (placed_from..out.placed.len()).rev() {
+            let own = out.placed[i].clone();
+            for v in &mut out.vertices[own.vertices] {
                 v.mask = own.quad;
             }
-            out.draws[own.draw].mask = own.texture;
-        }
-        // The surface already holds the mask; laying it down is not the
-        // place to take the coverage a second time.
-        //
-        // Not *all* of the coverage, though, and that distinction is the
-        // whole of a defect. A layer's own mask belongs to its drawing:
-        // the effects are built from the silhouette the mask left, and a
-        // shadow of a masked shape falls outside the mask, as it should.
-        // What a layer is **held to** is the other thing: it cuts what
-        // the layer lays down, its effects with it — that is what a
-        // clipping group means, and it is what the reference renderer
-        // does. Riding the same slot, the two were folded into the one
-        // texture and then cleared together here, so a layer held to the
-        // one below it drew its outline outside that layer, where the
-        // reference renderer draws none. The same slot carries a frame's
-        // bound, which leaked the same way.
-        //
-        // So the lay-down keeps a coverage of its own, built from what
-        // holds it back and not from its mask.
-        if let Some((from, draws)) = laid {
-            let (over, box_over) = if held_to.is_some() || coverage.is_some() {
-                mask_texture(
-                    doc,
-                    child,
-                    Held {
-                        mask: None,
-                        to: held_to,
-                        bound: coverage,
-                        parent,
-                        turned: None,
-                    },
-                    out,
-                )?
-            } else {
-                (None, NO_MASK)
-            };
-            for v in &mut out.vertices[from..] {
-                v.mask = box_over;
-            }
-            for item in &mut out.draws[draws..] {
-                item.mask = over;
+            for item in &mut out.draws[own.draws] {
+                item.mask = own.texture;
             }
         }
+        out.placed.push(Settled {
+            vertices: own.0,
+            draws: own.1,
+            texture: at,
+            quad: box_,
+        });
+    } else if alone {
+        // Nothing of its own on its drawing, and the masks above are
+        // kept off it (they go on the surface's way down).
+        out.placed.push(Settled {
+            vertices: own.0,
+            draws: own.1,
+            texture: None,
+            quad: NO_MASK,
+        });
+    }
+    // The surface already holds the mask; laying it down is not the
+    // place to take the coverage a second time.
+    //
+    // Not *all* of the coverage, though, and that distinction is the
+    // whole of a defect. A layer's own mask belongs to its drawing:
+    // the effects are built from the silhouette the mask left, and a
+    // shadow of a masked shape falls outside the mask, as it should.
+    // What a layer is **held to** is the other thing: it cuts what
+    // the layer lays down, its effects with it — that is what a
+    // clipping group means, and it is what the reference renderer
+    // does. Riding the same slot, the two were folded into the one
+    // texture and then cleared together here, so a layer held to the
+    // one below it drew its outline outside that layer, where the
+    // reference renderer draws none. The same slot carries a frame's
+    // bound, which leaked the same way.
+    //
+    // So the lay-down keeps a coverage of its own, built from what
+    // holds it back and not from its mask.
+    //
+    // And from the masks above it, which what it drew was kept clear
+    // of for the same reason: a surface meets them once.
+    if let Some((from, draws)) = laid {
+        let (over, box_over) = if held_to.is_some() || coverage.is_some() || !out.worn.is_empty() {
+            mask_texture(
+                doc,
+                child,
+                Held {
+                    mask: None,
+                    to: held_to,
+                    bound: coverage,
+                    parent,
+                    turned: None,
+                },
+                true,
+                out,
+            )?
+        } else {
+            (None, NO_MASK)
+        };
+        for v in &mut out.vertices[from..] {
+            v.mask = box_over;
+        }
+        for item in &mut out.draws[draws..] {
+            item.mask = over;
+        }
+        out.placed.push(Settled {
+            vertices: from..out.vertices.len(),
+            draws: draws..out.draws.len(),
+            texture: over,
+            quad: box_over,
+        });
+    }
+    Some(())
+}
+
+/// A layer that turns out to draw nothing — a picture whose pixels never
+/// came back, a frame standing wholly outside the frame it is in — leaves
+/// as if it had never started: the surface opened for it is taken back,
+/// since a surface opened and never closed swallows everything drawn
+/// after it (a frame outside its frame, faded, ate the rest of page
+/// 2956), and the masks above are put back as they were.
+fn nothing_drawn(
+    alone: bool,
+    wearing: bool,
+    outer: Vec<Above>,
+    mark: (usize, usize),
+    placed_from: usize,
+    out: &mut Scene,
+) -> Option<()> {
+    out.vertices.truncate(mark.0);
+    out.draws.truncate(mark.1);
+    out.placed.truncate(placed_from);
+    if alone {
+        debug_assert!(matches!(
+            out.draws.last().map(|i| &i.draw),
+            Some(Draw::Open)
+        ));
+        out.draws.pop();
+        out.worn = outer;
+    } else if wearing {
+        out.worn.pop();
     }
     Some(())
 }
@@ -4335,6 +4512,7 @@ fn clip_texture(
     box_: [f32; 4],
     t: Transform,
     layer: Held<'_>,
+    fold: bool,
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
     let page = out.surface;
@@ -4363,7 +4541,8 @@ fn clip_texture(
     // Multiplied, which is what the CPU renderer does with them — it asks
     // the region as the stroke goes down and the layer's coverage as the
     // layer does, and a coverage taken twice is a coverage multiplied.
-    held_back(doc, &mut cover, (x0, y0, w), layer, clip, page)?;
+    let above: &[Above] = if fold { &out.worn } else { &[] };
+    held_back(doc, &mut cover, (x0, y0, w), layer, above, clip, page)?;
     let at = out.textures.len();
     out.textures.push(Image {
         width: w,
@@ -4374,12 +4553,27 @@ fn clip_texture(
     Some((Some(at), [x0 as f32, y0 as f32, w as f32, h as f32]))
 }
 
-/// A stroke that carries a region of its own, and so already holds the
-/// whole of what its layer is held back by: where its quad's vertices and
-/// its draw landed, and the coverage they were given.
+/// A layer above the one being drawn whose coverage rides its own
+/// drawing, and so has to be folded into every coverage built under it
+/// (`Scene::worn`): the layer, for its mask, and the rest of what it is
+/// held back by, as `Held` carries them.
+#[derive(Clone)]
+struct Above {
+    id: NodeId,
+    to: Option<NodeId>,
+    bound: Option<chitrakar_render::ClipRect>,
+    parent: Transform,
+    turned: Option<(f32, f32, Transform)>,
+}
+
+/// A coverage put on a run of quads: where their vertices and draws
+/// landed, and the texture and box they were given. First for a stroke
+/// carrying a region of its own, which already holds the whole of what
+/// its layer is held back by; now for every coverage (`Scene::placed`).
+#[derive(Clone)]
 struct Settled {
     vertices: std::ops::Range<usize>,
-    draw: usize,
+    draws: std::ops::Range<usize>,
     texture: Option<usize>,
     quad: [f32; 4],
 }
@@ -4411,10 +4605,32 @@ fn held_back(
     cover: &mut [f32],
     at: (u32, u32, u32),
     layer: Held<'_>,
+    // What the layers above are held back by where that rides their own
+    // drawing (`Scene::worn`); folded in here, as the fourth thing a
+    // coverage is held back by, so it survives being written over.
+    above: &[Above],
     clip: chitrakar_render::ClipRect,
     page: (u32, u32),
 ) -> Option<()> {
     let (x0, y0, w) = at;
+    for over in above {
+        let node = doc.node(over.id).ok()?;
+        held_back(
+            doc,
+            cover,
+            at,
+            Held {
+                mask: node.mask.as_ref(),
+                to: over.to,
+                bound: over.bound,
+                parent: over.parent,
+                turned: over.turned,
+            },
+            &[],
+            clip,
+            page,
+        )?;
+    }
     if let Some(mask) = layer.mask {
         let plane = chitrakar_render::mask_plane_over(doc, mask, layer.parent, clip, page);
         for (c, m) in cover.iter_mut().zip(plane) {
@@ -4473,6 +4689,11 @@ fn mask_texture(
     doc: &Document,
     id: NodeId,
     held: Held<'_>,
+    // Whether the masks of the layers above wearing an effect go on it
+    // too (`Scene::worn`): yes for a coverage over a layer's drawing and
+    // for the quad that lays a surface down, no for the drawing of a
+    // layer wearing an effect, whose surface's quad takes them instead.
+    fold: bool,
     out: &mut Scene,
 ) -> Option<(Option<usize>, [f32; 4])> {
     let parent = held.parent;
@@ -4533,7 +4754,8 @@ fn mask_texture(
     // any of this.
     let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
     let mut cover = vec![1.0; (w * h) as usize];
-    held_back(doc, &mut cover, (x0, y0, w), held, clip, page)?;
+    let above: &[Above] = if fold { &out.worn } else { &[] };
+    held_back(doc, &mut cover, (x0, y0, w), held, above, clip, page)?;
     let at = out.textures.len();
     out.textures.push(Image {
         width: w,
@@ -16366,6 +16588,283 @@ mod tests {
         assert!(
             (14..20).any(|y| green(17, y)),
             "and the layer's own edge, inside the base, is outlined"
+        );
+    }
+
+    /// A coverage under a coverage. A layer wearing an effect puts its
+    /// mask on its own drawing, by writing it over every coverage slot
+    /// the drawing left — and those slots were not all empty: a frame's
+    /// cut rides the same slot, so a masked frame with a shadow showed
+    /// what it held past its edge (page 4204 of the random pages); a
+    /// turned frame's cover does too, so one in a turned copy, masked and
+    /// shadowed, came out upright (3186); a group masked and outlined
+    /// lost the cut of the turned frame inside it (2924). A clipped group
+    /// is the same slot again, without any effect: what a paint layer in
+    /// it lays down is held to the layer below the group (830). Every
+    /// coverage built under such a layer folds the layer's in now, and
+    /// is put back once the layer's own has been written (`Scene::worn`,
+    /// `Scene::placed`); the four pages, and the one that found a frame's
+    /// cut left on that list after the frame (1115), are drawn as the CPU
+    /// draws them, and so are the three shapes directly.
+    #[test]
+    fn a_coverage_under_a_masked_layer_wearing_an_effect_is_kept() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Effect as E;
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let ellipse_mask = |rx: f32, ry: f32, at: (f32, f32)| chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx, ry },
+                transform: Transform::translation(at.0, at.1),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let shadow = E::DropShadow {
+            dx: 3.0,
+            dy: 2.0,
+            blur: 1.5,
+            color: ink(0.0, 0.0, 0.1),
+            opacity: 0.8,
+            spread: 0.0,
+        };
+        let outline = E::Outline {
+            width: 2.5,
+            color: ink(0.1, 0.6, 0.2),
+            opacity: 1.0,
+        };
+        let ground = |doc: &mut Document| {
+            add(
+                doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.85, 0.87, 0.9),
+                ),
+                Transform::default(),
+            );
+        };
+        let put = |doc: &mut Document, parent: NodeId, node: Box<Node>, at: Transform| {
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node,
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform { id, transform: at })
+                .unwrap();
+            id
+        };
+        let turned = Transform {
+            a: 0.94,
+            b: 0.34,
+            c: -0.34,
+            d: 0.94,
+            e: 0.0,
+            f: 0.0,
+        };
+        // A masked frame with a shadow, holding a rectangle wider and
+        // taller than itself.
+        let mut spilling = Document::new(80, 60, ColorMode::Rgb);
+        ground(&mut spilling);
+        let root = spilling.root();
+        let mut frame = Node::artboard("frame", 36.0, 26.0, None);
+        frame.mask = Some(ellipse_mask(16.0, 12.0, (18.0, 13.0)));
+        frame.effects = vec![shadow.clone()];
+        let frame = put(
+            &mut spilling,
+            root,
+            Box::new(frame),
+            Transform::translation(20.0, 15.0),
+        );
+        put(
+            &mut spilling,
+            frame,
+            filled(
+                "wide",
+                VectorShape::Rect {
+                    width: 50.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                RED,
+            ),
+            Transform::translation(-6.0, -8.0),
+        );
+        // A masked group with an outline, holding a turned frame with a
+        // ground of its own.
+        let mut turned_inside = Document::new(80, 60, ColorMode::Rgb);
+        ground(&mut turned_inside);
+        let root = turned_inside.root();
+        let mut group = Node::group("group");
+        group.mask = Some(ellipse_mask(20.0, 14.0, (22.0, 16.0)));
+        group.effects = vec![outline];
+        let group = put(
+            &mut turned_inside,
+            root,
+            Box::new(group),
+            Transform::translation(18.0, 12.0),
+        );
+        put(
+            &mut turned_inside,
+            group,
+            Box::new(Node::artboard("frame", 26.0, 18.0, Some(WHITE))),
+            Transform {
+                e: 8.0,
+                f: 4.0,
+                ..turned
+            },
+        );
+        // A masked frame with a shadow and a ground, in a group, and a
+        // turned copy of the group.
+        let mut copied = Document::new(80, 60, ColorMode::Rgb);
+        ground(&mut copied);
+        let root = copied.root();
+        let symbol = put(
+            &mut copied,
+            root,
+            Box::new(Node::group("symbol")),
+            Transform::translation(4.0, 2.0),
+        );
+        let mut frame = Node::artboard("frame", 26.0, 16.0, Some(WHITE));
+        frame.mask = Some(ellipse_mask(14.0, 9.0, (13.0, 8.0)));
+        frame.effects = vec![shadow];
+        let frame = put(
+            &mut copied,
+            symbol,
+            Box::new(frame),
+            Transform::translation(6.0, 6.0),
+        );
+        put(
+            &mut copied,
+            frame,
+            filled(
+                "tall",
+                VectorShape::Rect {
+                    width: 8.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+                BLUE,
+            ),
+            Transform::translation(7.0, -4.0),
+        );
+        put(
+            &mut copied,
+            root,
+            Box::new(Node::instance("used", symbol)),
+            Transform {
+                e: 30.0,
+                f: 22.0,
+                ..turned
+            },
+        );
+        for (what, doc) in [
+            (
+                "a masked frame with a shadow holding more than itself",
+                spilling,
+            ),
+            (
+                "a masked group with an outline holding a turned frame",
+                turned_inside,
+            ),
+            ("a turned copy of a masked frame with a shadow", copied),
+        ] {
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && over == 0 && in_mean < 0.002,
+                "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+        }
+        for seed in [830, 1115, 2924, 2956, 3186, 4204] {
+            let doc = chitrakar_doc::fixture::page(seed);
+            assert!(GpuRenderer::can_render(&doc), "page {seed} is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.01 && over == 0 && in_mean < 0.004,
+                "page {seed}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+        }
+    }
+
+    /// A frame standing wholly outside the frame it is in draws nothing,
+    /// and used to leave as soon as it knew — with the surface opened
+    /// for it, if it was faded or masked, never closed, so everything
+    /// drawn after it went into that surface and was never seen: page
+    /// 2956 of the random pages lost a whole paint layer that way. The
+    /// surface is taken back now, and a layer or a picture that turns
+    /// out to draw nothing leaves the same way.
+    #[test]
+    fn a_frame_outside_its_frame_leaves_what_follows_it_drawn() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(80, 60, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "ground",
+                VectorShape::Rect {
+                    width: 80.0,
+                    height: 60.0,
+                    radius: 0.0,
+                },
+                WHITE,
+            ),
+            Transform::default(),
+        );
+        let outer = add(
+            &mut doc,
+            Box::new(Node::artboard("outer", 20.0, 15.0, None)),
+            Transform::translation(10.0, 10.0),
+        );
+        let mut inner = Node::artboard("inner", 10.0, 10.0, Some(RED));
+        inner.opacity = 0.5;
+        doc.apply(Command::AddNode {
+            parent: outer,
+            index: 0,
+            node: Box::new(inner),
+        })
+        .unwrap();
+        let inner = doc.children_of(outer).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id: inner,
+            transform: Transform::translation(30.0, 20.0),
+        })
+        .unwrap();
+        add(
+            &mut doc,
+            filled("after", VectorShape::Ellipse { rx: 12.0, ry: 9.0 }, BLUE),
+            Transform::translation(50.0, 35.0),
+        );
+        assert!(GpuRenderer::can_render(&doc));
+        let mine = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let middle = mine.get(62, 44);
+        assert!(
+            middle.b > 0.5 && middle.r < 0.1,
+            "the ellipse after the frame is drawn ({middle:?})"
+        );
+        let (mean, worst) = difference(&mine, &reference);
+        assert!(
+            mean < 0.004 && worst < 0.1,
+            "drawn as the CPU draws it: mean {mean:.5}, worst {worst:.3}"
         );
     }
 
