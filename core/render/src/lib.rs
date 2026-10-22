@@ -2554,6 +2554,23 @@ fn draw_layer(
         let origin = (layer_clip.x0, layer_clip.y0);
         let window = Transform::translation(-(origin.0 as f32), -(origin.1 as f32));
         let mut layer = Surface::new(layer_clip.x1 - origin.0, layer_clip.y1 - origin.1);
+        // What is wanted of it is what is wanted of the page, as far
+        // past that as its effects and softening reach — they read the
+        // silhouette — in the layer's own coordinates; so a filter inside
+        // a group is worked out for the window too.
+        layer.wanted = dst.wanted.map(|w| {
+            let kept = grow(w, pad, dst.width, dst.height).intersect(layer_clip);
+            if kept.is_empty() {
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 0,
+                    y1: 0,
+                }
+            } else {
+                shift_clip(kept, origin)
+            }
+        });
         // Normal into the layer's own transparent surface; the node's blend
         // belongs to the composite below, once the effects are in place.
         render_child(
@@ -3321,6 +3338,24 @@ fn render_child(
                     y1: draw_clip.y1 - oy,
                 };
                 let mut sub = Surface::new(inner.x1, inner.y1);
+                // What is wanted of it is what is wanted of the page, in
+                // the window's coordinates, so a filter inside the group
+                // is worked out for the window too; the softening that
+                // lands on it reads the mask rather than the picture,
+                // but the room for it is given all the same.
+                sub.wanted = dst.wanted.map(|w| {
+                    let kept = grow(w, room, dst.width, dst.height).intersect(draw_clip);
+                    if kept.is_empty() {
+                        ClipRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: 0,
+                            y1: 0,
+                        }
+                    } else {
+                        shift_clip(kept, (ox, oy))
+                    }
+                });
                 render_group(doc, child, &mut sub, inner, window.compose(t), bare)?;
                 if node.mask.is_some() {
                     // The mask is read in the window's coordinates too.
@@ -21919,153 +21954,240 @@ mod tests {
     fn a_filter_is_worked_out_for_the_wanted_part_and_is_the_page_there() {
         use chitrakar_doc::Filter;
         let (w, h) = (96u32, 72u32);
-        let mut doc = Document::new(w, h, ColorMode::Rgb);
-        let root = doc.root();
-        let mut index = 0;
-        let mut add_at = |doc: &mut Document, node: Node, at: (f32, f32)| {
-            doc.apply(Command::AddNode {
-                parent: root,
-                index,
-                node: Box::new(node),
-            })
-            .unwrap();
-            let id = doc.children_of(root).unwrap()[index];
-            doc.apply(Command::SetTransform {
-                id,
-                transform: Transform::translation(at.0, at.1),
-            })
-            .unwrap();
-            index += 1;
-            id
-        };
-        // A checker of three-pixel cells, in two colours, so that every
-        // pixel has a neighbour of another colour within any blur.
-        for j in 0..h / 3 {
-            for i in 0..w / 3 {
-                if (i + j) % 2 == 0 {
-                    continue;
-                }
-                let (r, g, b) = if (i / 4 + j / 4) % 2 == 0 {
-                    (0.9, 0.3, 0.1)
-                } else {
-                    (0.1, 0.4, 0.95)
-                };
-                add_at(
-                    &mut doc,
-                    *filled_rect("cell", 3.0, 3.0, AuthoredColor::Srgb { r, g, b, a: 1.0 }),
-                    (i as f32 * 3.0, j as f32 * 3.0),
-                );
-            }
-        }
-        let zoom = add_at(
-            &mut doc,
-            Node::filter(
-                "zoom",
-                Filter::RadialBlur {
-                    amount: 0.2,
-                    spin: false,
-                    center: [0.5, 0.5],
-                },
-            ),
-            (0.0, 0.0),
-        );
-        let motion = add_at(
-            &mut doc,
-            Node::filter(
-                "motion",
-                Filter::MotionBlur {
-                    distance: 7.0,
-                    degrees: 30.0,
-                },
-            ),
-            (0.0, 0.0),
-        );
-        let spin = add_at(
-            &mut doc,
-            Node::filter(
-                "spin",
-                Filter::RadialBlur {
-                    amount: 25.0,
-                    spin: true,
-                    center: [0.3, 0.6],
-                },
-            ),
-            (0.0, 0.0),
-        );
-        assert_eq!(reach_above(&doc, spin), 0);
-        assert!(reach_above(&doc, motion) > 0);
-        assert!(reach_above(&doc, zoom) > reach_above(&doc, motion));
-        assert!(reach_above(&doc, zoom) < filter_reach(&doc));
-        let whole = render(&doc).unwrap();
-        let bare = {
-            let mut bare = doc.clone();
-            for id in [zoom, motion, spin] {
-                bare.apply(Command::SetVisible { id, visible: false })
-                    .unwrap();
-            }
-            render(&bare).unwrap()
-        };
-        let pad = filter_reach(&doc);
-        let same = |a: LinearRgba, b: LinearRgba| {
-            [a.r, a.g, a.b, a.a].map(f32::to_bits) == [b.r, b.g, b.b, b.a].map(f32::to_bits)
-        };
-        for wanted in [
-            ClipRect {
-                x0: 30,
-                y0: 20,
-                x1: 60,
-                y1: 50,
-            },
-            ClipRect {
-                x0: 0,
-                y0: 0,
-                x1: 25,
-                y1: 70,
-            },
-            ClipRect {
-                x0: 70,
-                y0: 60,
-                x1: 96,
-                y1: 72,
-            },
-            ClipRect {
-                x0: 45,
-                y0: 33,
-                x1: 46,
-                y1: 34,
-            },
-        ] {
-            let grown = wanted.grown(pad, w, h);
-            let mut surface = Surface::new(w, h);
-            surface.wanted = Some(wanted);
-            render_region(&doc, &mut surface, grown).unwrap();
-            for y in wanted.y0..wanted.y1 {
-                for x in wanted.x0..wanted.x1 {
-                    assert!(
-                        same(surface.get(x, y), whole.get(x, y)),
-                        "wanting {wanted:?}: {x},{y} is {:?}, the page {:?}",
-                        surface.get(x, y),
-                        whole.get(x, y)
+        // The three filters at the root; inside a plain group, which is
+        // drawn on a surface of its own; and inside a group wearing a
+        // shadow, which reads the group's silhouette past what is wanted.
+        type Holder = fn(&mut Document, NodeId) -> NodeId;
+        let builds: [(&str, Holder); 3] = [
+            ("at the root", |_, root| root),
+            ("in a group", |doc, root| {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: doc.children_of(root).unwrap().len(),
+                    node: Box::new(Node::group("g")),
+                })
+                .unwrap();
+                *doc.children_of(root).unwrap().last().unwrap()
+            }),
+            ("in a group with a shadow", |doc, root| {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: doc.children_of(root).unwrap().len(),
+                    node: Box::new(Node::group("g")),
+                })
+                .unwrap();
+                let g = *doc.children_of(root).unwrap().last().unwrap();
+                doc.apply(Command::SetEffects {
+                    id: g,
+                    effects: vec![chitrakar_doc::Effect::DropShadow {
+                        dx: 2.0,
+                        dy: 1.0,
+                        blur: 1.5,
+                        color: AuthoredColor::Srgb {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                        opacity: 0.8,
+                        spread: 0.0,
+                    }],
+                })
+                .unwrap();
+                g
+            }),
+        ];
+        for (where_, holder) in builds {
+            let mut doc = Document::new(w, h, ColorMode::Rgb);
+            let root = doc.root();
+            let add_at = |doc: &mut Document, parent: NodeId, node: Node, at: (f32, f32)| {
+                let index = doc.children_of(parent).unwrap().len();
+                doc.apply(Command::AddNode {
+                    parent,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+                let id = doc.children_of(parent).unwrap()[index];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(at.0, at.1),
+                })
+                .unwrap();
+                id
+            };
+            let holder = holder(&mut doc, root);
+            // A checker of three-pixel cells, in two colours, so that
+            // every pixel has a neighbour of another colour within any
+            // blur — under the filters, wherever they are, since a
+            // group's filters work on what the group holds — over a
+            // ground that fills the page, so the group's silhouette is
+            // the page whether or not the blurs are on, and so its shadow.
+            add_at(
+                &mut doc,
+                holder,
+                *filled_rect(
+                    "ground",
+                    w as f32,
+                    h as f32,
+                    AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.2,
+                        b: 0.25,
+                        a: 1.0,
+                    },
+                ),
+                (0.0, 0.0),
+            );
+            for j in 0..h / 3 {
+                for i in 0..w / 3 {
+                    if (i + j) % 2 == 0 {
+                        continue;
+                    }
+                    let (r, g, b) = if (i / 4 + j / 4) % 2 == 0 {
+                        (0.9, 0.3, 0.1)
+                    } else {
+                        (0.1, 0.4, 0.95)
+                    };
+                    add_at(
+                        &mut doc,
+                        holder,
+                        *filled_rect("cell", 3.0, 3.0, AuthoredColor::Srgb { r, g, b, a: 1.0 }),
+                        (i as f32 * 3.0, j as f32 * 3.0),
                     );
                 }
             }
-            // The margin's corners, as far from what is wanted as the
-            // whole stack reaches: past every filter's own part.
-            for (x, y) in [(grown.x0, grown.y0), (grown.x1 - 1, grown.y1 - 1)] {
-                let far = x + pad <= wanted.x0 || x >= wanted.x1 + pad;
-                if !far {
-                    continue;
+            let zoom = add_at(
+                &mut doc,
+                holder,
+                Node::filter(
+                    "zoom",
+                    Filter::RadialBlur {
+                        amount: 0.2,
+                        spin: false,
+                        center: [0.5, 0.5],
+                    },
+                ),
+                (0.0, 0.0),
+            );
+            let motion = add_at(
+                &mut doc,
+                holder,
+                Node::filter(
+                    "motion",
+                    Filter::MotionBlur {
+                        distance: 7.0,
+                        degrees: 30.0,
+                    },
+                ),
+                (0.0, 0.0),
+            );
+            let spin = add_at(
+                &mut doc,
+                holder,
+                Node::filter(
+                    "spin",
+                    Filter::RadialBlur {
+                        amount: 25.0,
+                        spin: true,
+                        center: [0.3, 0.6],
+                    },
+                ),
+                (0.0, 0.0),
+            );
+            assert_eq!(reach_above(&doc, spin), 0, "{where_}");
+            assert!(reach_above(&doc, motion) > 0, "{where_}");
+            assert!(
+                reach_above(&doc, zoom) > reach_above(&doc, motion),
+                "{where_}"
+            );
+            assert!(reach_above(&doc, zoom) < filter_reach(&doc), "{where_}");
+            let whole = render(&doc).unwrap();
+            let bare = {
+                let mut bare = doc.clone();
+                for id in [zoom, motion, spin] {
+                    bare.apply(Command::SetVisible { id, visible: false })
+                        .unwrap();
                 }
-                assert!(
-                    same(surface.get(x, y), bare.get(x, y)),
-                    "wanting {wanted:?}: the margin's corner {x},{y} is {:?}, with no filter {:?}",
-                    surface.get(x, y),
-                    bare.get(x, y)
-                );
-                assert!(
-                    !same(surface.get(x, y), whole.get(x, y)),
-                    "and the page's own pixel there is blurred"
-                );
+                render(&bare).unwrap()
+            };
+            let pad = filter_reach(&doc);
+            let same = |a: LinearRgba, b: LinearRgba| {
+                [a.r, a.g, a.b, a.a].map(f32::to_bits) == [b.r, b.g, b.b, b.a].map(f32::to_bits)
+            };
+            for wanted in [
+                ClipRect {
+                    x0: 30,
+                    y0: 20,
+                    x1: 60,
+                    y1: 50,
+                },
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 25,
+                    y1: 70,
+                },
+                ClipRect {
+                    x0: 70,
+                    y0: 60,
+                    x1: 96,
+                    y1: 72,
+                },
+                ClipRect {
+                    x0: 45,
+                    y0: 33,
+                    x1: 46,
+                    y1: 34,
+                },
+            ] {
+                let grown = wanted.grown(pad, w, h);
+                let mut surface = Surface::new(w, h);
+                surface.wanted = Some(wanted);
+                render_region(&doc, &mut surface, grown).unwrap();
+                // To the bit — except under a shadow, which is grown from
+                // a silhouette drawn on a surface cut to the region, and
+                // so comes out a float's width apart from the page's
+                // whether or not anything is trimmed.
+                let shadowed = holder != root && !doc.node(holder).unwrap().effects.is_empty();
+                let near = |a: LinearRgba, b: LinearRgba| {
+                    (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs())
+                        < 1e-5
+                };
+                for y in wanted.y0..wanted.y1 {
+                    for x in wanted.x0..wanted.x1 {
+                        let (p, q) = (surface.get(x, y), whole.get(x, y));
+                        assert!(
+                            if shadowed { near(p, q) } else { same(p, q) },
+                            "{where_}, wanting {wanted:?}: {x},{y} is {p:?}, the page {q:?}"
+                        );
+                    }
+                }
+                // The margin's corners, as far from what is wanted as the
+                // whole stack reaches: past every filter's own part, so
+                // left exactly as the page is with no filter on it — a
+                // shadow on the group reads the group's silhouette a
+                // little past what is wanted, which is less than the
+                // bottom blur's own reach, so the corner is still past it.
+                for (x, y) in [(grown.x0, grown.y0), (grown.x1 - 1, grown.y1 - 1)] {
+                    let far = x + pad <= wanted.x0 || x >= wanted.x1 + pad;
+                    if !far {
+                        continue;
+                    }
+                    let (p, q, page) = (surface.get(x, y), bare.get(x, y), whole.get(x, y));
+                    assert!(
+                        if shadowed { near(p, q) } else { same(p, q) },
+                        "{where_}, wanting {wanted:?}: the margin's corner {x},{y} is {p:?}, with no filter {q:?}"
+                    );
+                    assert!(
+                        !near(p, page),
+                        "{where_}: and the page's own pixel at {x},{y} is blurred"
+                    );
+                }
             }
         }
     }
