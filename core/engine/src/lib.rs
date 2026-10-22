@@ -8036,6 +8036,16 @@ impl Session {
                         x1: clip.x1 + 2 * past,
                         y1: clip.y1 + 2 * past,
                     };
+                    // Only the region is kept, so a filter need only be
+                    // worked out over it and as far past it as the
+                    // filters above read; the ring round it is there
+                    // to be read, and is composited but not filtered.
+                    scratch.wanted = Some(ClipRect {
+                        x0: clip.x0 + past,
+                        y0: clip.y0 + past,
+                        x1: clip.x1 + past,
+                        y1: clip.y1 + past,
+                    });
                     chitrakar_render::render_region_at(&self.doc, scratch, compute, shifted)?;
                     let cache = self.cache.as_mut().unwrap();
                     for y in clip.y0..clip.y1 {
@@ -11279,6 +11289,126 @@ mod tests {
     /// out past the page's edge and panned again has to be exactly what a
     /// session that only ever looked there shows: nothing of an earlier
     /// frame left beside the page, under a shadow's reach or a filter's.
+    /// A frame under a radial blur is worked out with a margin round the
+    /// window as wide as the blur reaches, and the blur only over the
+    /// window itself, since the margin is dropped: the frame is what a
+    /// plain render of the padded surface keeps of its middle, to the
+    /// bit, whole and repainted a region at a time, and the scratch
+    /// surface says which part of it the window was.
+    #[test]
+    fn a_frame_under_a_radial_blur_is_worked_out_for_the_window() {
+        let build = || {
+            let mut session = Session::new(160, 120, ColorMode::Rgb);
+            for (i, (x, y)) in [(10.0, 8.0), (60.0, 30.0), (110.0, 70.0), (30.0, 80.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let id = add_rect(&mut session, &format!("r{i}"), 26.0, 18.0);
+                session
+                    .apply(Command::SetTransform {
+                        id,
+                        transform: Transform::translation(x, y),
+                    })
+                    .unwrap();
+            }
+            let root = session.document().root();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: 4,
+                    node: Box::new(Node::filter(
+                        "zoom",
+                        chitrakar_doc::Filter::RadialBlur {
+                            amount: 0.3,
+                            spin: false,
+                            center: [0.5, 0.5],
+                        },
+                    )),
+                })
+                .unwrap();
+            session
+        };
+        let mut session = build();
+        session.set_viewport(1.25, -15.0, 10.0, 150, 110);
+        let frame = session.render_cached().unwrap().0.pixels.clone();
+        // The same frame, drawn plainly over a surface with the margin
+        // round it and all of it wanted — the margin the engine itself
+        // draws with, so the two work out every sample at the same place
+        // and come out the same to the bit, rather than a float's width
+        // apart from the view being shifted by a different whole number.
+        let past = chitrakar_render::filter_reach(session.document()) as f32 * 1.25;
+        let past = past.ceil() as u32;
+        let mut plain = Surface::new(150 + 2 * past, 110 + 2 * past);
+        let view = Transform {
+            a: 1.25,
+            d: 1.25,
+            e: -15.0 + past as f32,
+            f: 10.0 + past as f32,
+            ..Default::default()
+        };
+        let all = plain.full_clip();
+        chitrakar_render::render_region_at(session.document(), &mut plain, all, view).unwrap();
+        let same = |p: &chitrakar_color::LinearRgba, q: &chitrakar_color::LinearRgba| {
+            [p.r, p.g, p.b, p.a].map(f32::to_bits) == [q.r, q.g, q.b, q.a].map(f32::to_bits)
+        };
+        for y in 0..110u32 {
+            for x in 0..150u32 {
+                let (p, q) = (
+                    &frame[(y * 150 + x) as usize],
+                    &plain.get(x + past, y + past),
+                );
+                assert!(
+                    same(p, q),
+                    "at {x},{y} the frame is {p:?}, drawn plainly {q:?}"
+                );
+            }
+        }
+        assert_eq!(
+            session.scratch.as_ref().unwrap().wanted,
+            Some(chitrakar_render::ClipRect {
+                x0: past,
+                y0: past,
+                x1: 150 + past,
+                y1: 110 + past,
+            }),
+            "the window was what the scratch surface wanted"
+        );
+        // A region repainted — one rectangle moved — is what a session
+        // that only ever saw the moved page shows.
+        let id = session
+            .document()
+            .children_of(session.document().root())
+            .unwrap()[1];
+        session
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(70.0, 40.0),
+            })
+            .unwrap();
+        let (_, region) = session.render_cached().unwrap();
+        let region = region.expect("something was repainted");
+        assert!(
+            region.area() < 150 * 110,
+            "and not the whole frame ({region:?})"
+        );
+        let repainted = session.render_cached().unwrap().0.pixels.clone();
+        let mut fresh = build();
+        fresh
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(70.0, 40.0),
+            })
+            .unwrap();
+        fresh.set_viewport(1.25, -15.0, 10.0, 150, 110);
+        let whole = fresh.render_cached().unwrap().0.pixels.clone();
+        for (i, (p, q)) in repainted.iter().zip(&whole).enumerate() {
+            assert!(
+                same(p, q),
+                "repainted, pixel {i} is {p:?}, seen fresh {q:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_view_moved_shows_what_a_fresh_view_there_shows() {
         let build = || {

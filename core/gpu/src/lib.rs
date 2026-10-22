@@ -2434,6 +2434,7 @@ impl GpuRenderer {
             width,
             height,
             pixels,
+            wanted: None,
         }
     }
 }

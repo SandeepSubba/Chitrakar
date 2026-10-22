@@ -82,6 +82,16 @@ pub struct Surface {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<LinearRgba>,
+    /// The part of the surface its owner will keep, when that is less
+    /// than all of it: a frame drawn with a margin round the window, as
+    /// wide as the filters reach, so that what is inside the window reads
+    /// its neighbours past the window's edge. The margin has to be
+    /// *composited* — a blur inside the window reads it — but a filter
+    /// need not be worked out over it except as far as a filter above
+    /// reads its output (`reach_above`). Where it is `None`, all of the
+    /// surface is wanted, which is what a surface made for a layer of its
+    /// own is given, so nothing inside one is trimmed.
+    pub wanted: Option<ClipRect>,
 }
 
 impl Surface {
@@ -89,6 +99,7 @@ impl Surface {
         Self {
             width,
             height,
+            wanted: None,
             // Counted as sizes rather than as two `u32`s multiplied: a
             // pair whose product does not fit one is a panic in a debug
             // build and, worse, a small buffer with big dimensions
@@ -215,6 +226,17 @@ impl ClipRect {
             y0: self.y0.min(other.y0),
             x1: self.x1.max(other.x1),
             y1: self.y1.max(other.y1),
+        }
+    }
+
+    /// The rectangle `by` pixels wider on every side, held to a surface
+    /// `width` by `height`.
+    pub fn grown(&self, by: u32, width: u32, height: u32) -> ClipRect {
+        ClipRect {
+            x0: self.x0.saturating_sub(by),
+            y0: self.y0.saturating_sub(by),
+            x1: self.x1.saturating_add(by).min(width),
+            y1: self.y1.saturating_add(by).min(height),
         }
     }
 
@@ -815,133 +837,202 @@ pub fn effects_reach(doc: &Document) -> f32 {
 /// correct values for the unpadded interior even next to stale surroundings.
 pub fn filter_reach(doc: &Document) -> u32 {
     doc.nodes()
-        .map(|(id, node)| match &node.kind {
-            // A clone reads at an offset from where it paints, so a
-            // change at the source has to repaint the clone as well —
-            // which is the same problem a filter's radius poses, and
-            // takes the same answer.
-            //
-            // A healing stroke reaches further than that. The colour it
-            // takes is an average over the whole of it, so each pixel of
-            // it reads what is under every other pixel of it, and what
-            // is under every other pixel's source: its own length plus
-            // the offset.
-            NodeKind::Clone { strokes } => {
-                let scale = max_scale(ancestor_space(doc, *id).compose(node.transform));
-                let far = strokes
-                    .iter()
-                    .map(|s| {
-                        let offset = s.source[0].abs().max(s.source[1].abs());
-                        let length = match s.bounds().filter(|_| s.heal) {
-                            Some([x0, y0, x1, y1]) => (x1 - x0).max(y1 - y0),
-                            None => 0.0,
-                        };
-                        offset + length
-                    })
-                    .fold(0.0f32, f32::max);
-                ((far * scale).ceil() as u32).saturating_add(1)
-            }
-            // A block is the average of what it covers, so a change
-            // anywhere in one changes the whole of it.
-            NodeKind::Filter(Filter::Pixelate { size }) => {
-                ((size * max_scale(ancestor_space(doc, *id))).ceil() as u32).saturating_add(1)
-            }
-            // The window reaches its radius each way.
-            NodeKind::Filter(Filter::Median { radius }) => {
-                (median_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32)
-                    .saturating_add(1)
-            }
-            // A row's reach, then a column's of that: as far each way.
-            NodeKind::Filter(Filter::SurfaceBlur { radius, .. }) => {
-                (surface_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32)
-                    .saturating_add(1)
-            }
-            // Half the smear each way, and the most any pixel has is a
-            // corner's: its distance from the centre, at most the page's
-            // diagonal, times the share or the angle.
-            NodeKind::Filter(Filter::RadialBlur { amount, spin, .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
-                let far = (w * w + h * h).sqrt();
-                let reach = radial_reach(*amount, *spin) * far / 2.0 * scale;
-                if reach.is_finite() {
-                    (reach.ceil() as u32).saturating_add(2)
-                } else {
-                    u32::MAX
-                }
-            }
-            // A cell's middle can be its half diagonal away from a pixel
-            // in it.
-            NodeKind::Filter(Filter::Halftone { size, .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                ((halftone_cell(*size) * 0.71 * scale).ceil() as u32).saturating_add(2)
-            }
-            // A point inside the circle can be read from anywhere in it:
-            // across the whole of it for a twirl, out to its edge for a
-            // pinch.
-            NodeKind::Filter(Filter::Twirl { radius, center, .. })
-            | NodeKind::Filter(Filter::Pinch { radius, center, .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                let page = (doc.meta.width as f32, doc.meta.height as f32);
-                let (_, reach) = warp_circle(*radius, *center, page);
-                ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
-            }
-            // The most a point moves is at the corner: a third of the
-            // amount of the half diagonal.
-            NodeKind::Filter(Filter::LensCorrection { amount }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                let page = (doc.meta.width as f32, doc.meta.height as f32);
-                let (_, far) = lens_middle(page);
-                ((lens_k(*amount).abs() * far * scale).ceil() as u32).saturating_add(2)
-            }
-            // A square's far corner, the radius away each way.
-            NodeKind::Filter(Filter::OilPaint { radius }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                (oil_radius(*radius, scale) as u32)
-                    .saturating_mul(2)
-                    .saturating_add(2)
-            }
-            // A document pixel each way, and its corner's diagonal.
-            NodeKind::Filter(Filter::FindEdges { .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                (edge_step(scale) as u32)
-                    .saturating_mul(2)
-                    .saturating_add(2)
-            }
-            // A point is read from at most the amplitude away each way.
-            NodeKind::Filter(Filter::Ripple { amplitude, .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                let (a, _) = ripple_wave(*amplitude, 1.0);
-                ((a * scale).ceil() as u32).saturating_add(2)
-            }
-            // The two readings are the height away each side.
-            NodeKind::Filter(Filter::Emboss { height, .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                ((emboss_height(*height) * scale).ceil() as u32).saturating_add(2)
-            }
-            // Half the line each way, since it is centred on the pixel.
-            NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
-                let scale = max_scale(ancestor_space(doc, *id));
-                (((distance.abs() / 2.0) * scale).ceil() as u32).saturating_add(2)
-            }
-            NodeKind::Filter(Filter::GaussianBlur { sigma })
-            | NodeKind::Filter(Filter::Sharpen { sigma, .. })
-            | NodeKind::Filter(Filter::HighPass { sigma }) => {
-                // A filter's radius is written in the space it sits in, so
-                // a blur inside a group scaled up reaches further than its
-                // sigma says — and the padding has to know that or the
-                // region render leaves a halo of stale pixels behind.
-                let scale = max_scale(ancestor_space(doc, *id));
-                // Three iterated box blurs reach ~3 * box radius ≈ 2.9σ;
-                // round up generously.
-                ((sigma * scale * 3.0).ceil() as u32).saturating_add(2)
-            }
-            _ => 0,
-        })
+        .map(|(id, node)| node_reach(doc, *id, node))
         // Each reach already stops at the most there is; two that both
         // did, added plainly, wrapped round to almost nothing — a reach
         // too short by four billion pixels, or a panic in a debug build.
         .fold(0u32, u32::saturating_add)
+}
+
+/// How far, in pixels, the filters drawn *after* a layer read what it
+/// left: the summed reach of every layer later in the drawing order —
+/// its later siblings, its ancestors' later siblings, a copy of any of
+/// them — so that a filter worked out over the wanted region grown by
+/// this much leaves every filter above it reading pixels it did work
+/// out. Nothing drawn before the layer reads what it leaves, and a
+/// layer's effects read the layer's own silhouette rather than the page,
+/// so neither counts.
+///
+/// A layer a copy draws — the copy's original, or anything inside it —
+/// is drawn where the copy stands as well, under whatever is above the
+/// *copy*, so for it the answer is everything: it is never trimmed.
+pub fn reach_above(doc: &Document, id: NodeId) -> u32 {
+    let copied = doc.nodes().any(|(_, node)| match &node.kind {
+        NodeKind::Instance { of, .. } => {
+            let mut at = Some(id);
+            while let Some(n) = at {
+                if n == *of {
+                    return true;
+                }
+                at = doc.parent_of(n);
+            }
+            false
+        }
+        _ => false,
+    });
+    if copied {
+        return u32::MAX;
+    }
+    fn walk(doc: &Document, at: NodeId, of: NodeId, passed: &mut bool, sum: &mut u32) {
+        if let Ok(children) = doc.children_of(at) {
+            for &child in children {
+                walk(doc, child, of, passed, sum);
+            }
+        }
+        if at == of {
+            *passed = true;
+        } else if *passed {
+            if let Ok(node) = doc.node(at) {
+                // A copy draws what the original draws, so it reaches
+                // as far as everything the original holds.
+                let reach = match &node.kind {
+                    NodeKind::Instance { of: master, .. } => subtree_reach(doc, *master),
+                    _ => node_reach(doc, at, node),
+                };
+                *sum = sum.saturating_add(reach);
+            }
+        }
+    }
+    fn subtree_reach(doc: &Document, at: NodeId) -> u32 {
+        let own = doc.node(at).map(|n| node_reach(doc, at, n)).unwrap_or(0);
+        doc.children_of(at)
+            .map(|c| {
+                c.iter()
+                    .map(|&k| subtree_reach(doc, k))
+                    .fold(0u32, u32::saturating_add)
+            })
+            .unwrap_or(0)
+            .saturating_add(own)
+    }
+    let (mut passed, mut sum) = (false, 0u32);
+    walk(doc, doc.root(), id, &mut passed, &mut sum);
+    sum
+}
+
+/// One layer's share of [`filter_reach`].
+fn node_reach(doc: &Document, id: NodeId, node: &chitrakar_doc::Node) -> u32 {
+    let id = &id;
+    match &node.kind {
+        // A clone reads at an offset from where it paints, so a
+        // change at the source has to repaint the clone as well —
+        // which is the same problem a filter's radius poses, and
+        // takes the same answer.
+        //
+        // A healing stroke reaches further than that. The colour it
+        // takes is an average over the whole of it, so each pixel of
+        // it reads what is under every other pixel of it, and what
+        // is under every other pixel's source: its own length plus
+        // the offset.
+        NodeKind::Clone { strokes } => {
+            let scale = max_scale(ancestor_space(doc, *id).compose(node.transform));
+            let far = strokes
+                .iter()
+                .map(|s| {
+                    let offset = s.source[0].abs().max(s.source[1].abs());
+                    let length = match s.bounds().filter(|_| s.heal) {
+                        Some([x0, y0, x1, y1]) => (x1 - x0).max(y1 - y0),
+                        None => 0.0,
+                    };
+                    offset + length
+                })
+                .fold(0.0f32, f32::max);
+            ((far * scale).ceil() as u32).saturating_add(1)
+        }
+        // A block is the average of what it covers, so a change
+        // anywhere in one changes the whole of it.
+        NodeKind::Filter(Filter::Pixelate { size }) => {
+            ((size * max_scale(ancestor_space(doc, *id))).ceil() as u32).saturating_add(1)
+        }
+        // The window reaches its radius each way.
+        NodeKind::Filter(Filter::Median { radius }) => {
+            (median_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32).saturating_add(1)
+        }
+        // A row's reach, then a column's of that: as far each way.
+        NodeKind::Filter(Filter::SurfaceBlur { radius, .. }) => {
+            (surface_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32).saturating_add(1)
+        }
+        // Half the smear each way, and the most any pixel has is a
+        // corner's: its distance from the centre, at most the page's
+        // diagonal, times the share or the angle.
+        NodeKind::Filter(Filter::RadialBlur { amount, spin, .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
+            let far = (w * w + h * h).sqrt();
+            let reach = radial_reach(*amount, *spin) * far / 2.0 * scale;
+            if reach.is_finite() {
+                (reach.ceil() as u32).saturating_add(2)
+            } else {
+                u32::MAX
+            }
+        }
+        // A cell's middle can be its half diagonal away from a pixel
+        // in it.
+        NodeKind::Filter(Filter::Halftone { size, .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            ((halftone_cell(*size) * 0.71 * scale).ceil() as u32).saturating_add(2)
+        }
+        // A point inside the circle can be read from anywhere in it:
+        // across the whole of it for a twirl, out to its edge for a
+        // pinch.
+        NodeKind::Filter(Filter::Twirl { radius, center, .. })
+        | NodeKind::Filter(Filter::Pinch { radius, center, .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            let page = (doc.meta.width as f32, doc.meta.height as f32);
+            let (_, reach) = warp_circle(*radius, *center, page);
+            ((2.0 * reach * scale).ceil() as u32).saturating_add(2)
+        }
+        // The most a point moves is at the corner: a third of the
+        // amount of the half diagonal.
+        NodeKind::Filter(Filter::LensCorrection { amount }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            let page = (doc.meta.width as f32, doc.meta.height as f32);
+            let (_, far) = lens_middle(page);
+            ((lens_k(*amount).abs() * far * scale).ceil() as u32).saturating_add(2)
+        }
+        // A square's far corner, the radius away each way.
+        NodeKind::Filter(Filter::OilPaint { radius }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            (oil_radius(*radius, scale) as u32)
+                .saturating_mul(2)
+                .saturating_add(2)
+        }
+        // A document pixel each way, and its corner's diagonal.
+        NodeKind::Filter(Filter::FindEdges { .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            (edge_step(scale) as u32)
+                .saturating_mul(2)
+                .saturating_add(2)
+        }
+        // A point is read from at most the amplitude away each way.
+        NodeKind::Filter(Filter::Ripple { amplitude, .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            let (a, _) = ripple_wave(*amplitude, 1.0);
+            ((a * scale).ceil() as u32).saturating_add(2)
+        }
+        // The two readings are the height away each side.
+        NodeKind::Filter(Filter::Emboss { height, .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            ((emboss_height(*height) * scale).ceil() as u32).saturating_add(2)
+        }
+        // Half the line each way, since it is centred on the pixel.
+        NodeKind::Filter(Filter::MotionBlur { distance, .. }) => {
+            let scale = max_scale(ancestor_space(doc, *id));
+            (((distance.abs() / 2.0) * scale).ceil() as u32).saturating_add(2)
+        }
+        NodeKind::Filter(Filter::GaussianBlur { sigma })
+        | NodeKind::Filter(Filter::Sharpen { sigma, .. })
+        | NodeKind::Filter(Filter::HighPass { sigma }) => {
+            // A filter's radius is written in the space it sits in, so
+            // a blur inside a group scaled up reaches further than its
+            // sigma says — and the padding has to know that or the
+            // region render leaves a halo of stale pixels behind.
+            let scale = max_scale(ancestor_space(doc, *id));
+            // Three iterated box blurs reach ~3 * box radius ≈ 2.9σ;
+            // round up generously.
+            ((sigma * scale * 3.0).ceil() as u32).saturating_add(2)
+        }
+        _ => 0,
+    }
 }
 
 /// Render a document to a new full-size surface.
@@ -3405,7 +3496,16 @@ fn render_child(
             // stretches with whatever scales that space — the view, or a
             // group the filter sits inside.
             NodeKind::Filter(filter) => {
-                apply_filter(doc, filter, node.opacity, mask, dst, clip, parent)
+                // Worked out over what is wanted of the surface, and as
+                // far past it as the filters above read, rather than
+                // over the whole margin a frame is drawn with.
+                let write = match dst.wanted {
+                    Some(wanted) => wanted
+                        .grown(reach_above(doc, child), dst.width, dst.height)
+                        .intersect(clip),
+                    None => clip,
+                };
+                apply_filter(doc, filter, node.opacity, mask, dst, clip, write, parent)
             }
             NodeKind::Text(spec) => draw_text(dst, doc, spec, t, node.opacity, blend, clip, mask),
             NodeKind::Paint { strokes } => {
@@ -8182,20 +8282,31 @@ fn speck(x: i32, y: i32, seed: u32) -> f32 {
 fn smeared(
     original: &[LinearRgba],
     clip: ClipRect,
+    write: ClipRect,
     distance: f32,
     degrees: f32,
     view: Transform,
 ) -> Vec<LinearRgba> {
     let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+    let part = |original: &[LinearRgba]| {
+        let mut out = Vec::with_capacity(write.area() as usize);
+        for y in write.y0..write.y1 {
+            let row = ((y - clip.y0) as i64 * w) as usize;
+            out.extend_from_slice(
+                &original[row + (write.x0 - clip.x0) as usize..row + (write.x1 - clip.x0) as usize],
+            );
+        }
+        out
+    };
     if w <= 0 || h <= 0 {
-        return original.to_vec();
+        return part(original);
     }
     let t = degrees.to_radians();
     let (dx, dy) = (t.cos() * distance, t.sin() * distance);
     let (ox, oy) = (view.a * dx + view.c * dy, view.b * dx + view.d * dy);
     let far = (ox * ox + oy * oy).sqrt();
     if far < 0.5 {
-        return original.to_vec();
+        return part(original);
     }
     // Odd, so that the pixel itself is one of the samples and a smear of
     // one pixel is the pixel.
@@ -8203,9 +8314,9 @@ fn smeared(
     let n = ((far.ceil() as usize).saturating_add(1)).min(MOST) | 1;
     let half = (n / 2) as f32;
     let (sx, sy) = (ox / (n as f32 - 1.0), oy / (n as f32 - 1.0));
-    let mut out = Vec::with_capacity((w * h) as usize);
-    for y in 0..h {
-        for x in 0..w {
+    let mut out = Vec::with_capacity(write.area() as usize);
+    for y in (write.y0 - clip.y0) as i64..(write.y1 - clip.y0) as i64 {
+        for x in (write.x0 - clip.x0) as i64..(write.x1 - clip.x0) as i64 {
             let mut acc = LinearRgba::TRANSPARENT;
             for k in 0..n {
                 let step = k as f32 - half;
@@ -8260,9 +8371,14 @@ pub fn radial_reach(amount: f32, spin: bool) -> f32 {
 /// out once for each number of samples rather than at every pixel. Each
 /// pixel's samples are still added in the same order, so it is the same
 /// blur to the bit (`radially_smeared_by_pixel`).
+///
+/// Worked out over `write` alone, a part of `clip`, reading all of the
+/// snapshot: the rest of the clip is a frame's margin, there to be read.
+#[allow(clippy::too_many_arguments)]
 fn radially_smeared(
     original: &[LinearRgba],
     clip: ClipRect,
+    write: ClipRect,
     amount: f32,
     spin: bool,
     center: [f32; 2],
@@ -8271,11 +8387,21 @@ fn radially_smeared(
 ) -> Vec<LinearRgba> {
     let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
     let reach = radial_reach(amount, spin);
-    let Some(inv) = Inverse::of(view) else {
-        return original.to_vec();
+    let part = |original: &[LinearRgba]| {
+        let mut out = Vec::with_capacity(write.area() as usize);
+        for y in write.y0..write.y1 {
+            let row = ((y - clip.y0) as i64 * w) as usize;
+            out.extend_from_slice(
+                &original[row + (write.x0 - clip.x0) as usize..row + (write.x1 - clip.x0) as usize],
+            );
+        }
+        out
     };
-    if w <= 0 || h <= 0 || reach <= 0.0 {
-        return original.to_vec();
+    let Some(inv) = Inverse::of(view) else {
+        return part(original);
+    };
+    if w <= 0 || h <= 0 || reach <= 0.0 || write.is_empty() {
+        return part(original);
     }
     let at = |v: f32| if v.is_finite() { v } else { 0.5 };
     let (cx, cy) = (at(center[0]) * page.0, at(center[1]) * page.1);
@@ -8312,31 +8438,31 @@ fn radially_smeared(
     // wanted: the turn's sine and cosine, spun; zoomed, how far along the
     // line, twice.
     let mut steps: Vec<Vec<[f32; 2]>> = vec![Vec::new(); MOST / 2 + 1];
-    let mut out = vec![LinearRgba::TRANSPARENT; (w * h) as usize];
-    let (mut lines, mut counts) = (vec![(0.0f32, 0.0f32); w as usize], vec![0usize; w as usize]);
-    for y in 0..h {
-        let row = (y * w) as usize;
-        for x in 0..w {
-            let (fx, fy) = (
-                (x + clip.x0 as i64) as f32 + 0.5,
-                (y + clip.y0 as i64) as f32 + 0.5,
-            );
+    // Each pixel of `write`, in rows, `wide` to a row.
+    let wide = (write.x1 - write.x0) as usize;
+    let mut out = vec![LinearRgba::TRANSPARENT; write.area() as usize];
+    let (mut lines, mut counts) = (vec![(0.0f32, 0.0f32); wide], vec![0usize; wide]);
+    for y in write.y0..write.y1 {
+        let row = (y - write.y0) as usize * wide;
+        let read = (y - clip.y0) as usize * w as usize + (write.x0 - clip.x0) as usize;
+        for x in 0..wide {
+            let (fx, fy) = ((x as u32 + write.x0) as f32 + 0.5, y as f32 + 0.5);
             let (dx, dy) = inv.at(fx, fy);
             let (vx, vy) = (dx - cx, dy - cy);
             let length = (vx * vx + vy * vy).sqrt() * reach * scale;
-            lines[x as usize] = (vx, vy);
-            counts[x as usize] = if length < 0.5 {
-                out[row + x as usize] = original[row + x as usize];
+            lines[x] = (vx, vy);
+            counts[x] = if length < 0.5 {
+                out[row + x] = original[read + x];
                 0
             } else {
                 ((length.ceil() as usize).saturating_add(1)).min(MOST) | 1
             };
         }
         let mut x = 0;
-        while x < w as usize {
+        while x < wide {
             let n = counts[x];
             let mut end = x + 1;
-            while end < w as usize && counts[end] == n {
+            while end < wide && counts[end] == n {
                 end += 1;
             }
             if n > 0 {
@@ -8579,6 +8705,11 @@ fn apply_filter(
     mask: MaskRef<'_>,
     dst: &mut Surface,
     clip: ClipRect,
+    // The part of `clip` whose filtered pixels anything will read, the
+    // rest being a frame's margin: a filter that works from a snapshot
+    // reads all of `clip` and writes only this. The others still work
+    // over the whole of it.
+    write: ClipRect,
     // How the document is mapped onto the surface. A filter written in
     // document units needs the scale of it; one that has to line up with
     // the document — a grid of squares, a field of grain — needs the
@@ -8632,21 +8763,22 @@ fn apply_filter(
         } => {
             let original = blur::snapshot(dst, clip);
             let page = (doc.meta.width as f32, doc.meta.height as f32);
-            let smear = radially_smeared(&original, clip, *amount, *spin, *center, page, view);
-            let w = (clip.x1 - clip.x0) as usize;
-            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+            let smear =
+                radially_smeared(&original, clip, write, *amount, *spin, *center, page, view);
+            mix_within(dst, clip, write, &original, |o, _, x, y| {
                 let weight = opacity * coverage_at(doc, mask, x, y);
-                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                let at = (y - write.y0) as usize * (write.x1 - write.x0) as usize
+                    + (x - write.x0) as usize;
                 lerp(o, smear[at], weight)
             });
         }
         Filter::MotionBlur { distance, degrees } => {
             let original = blur::snapshot(dst, clip);
-            let smear = smeared(&original, clip, *distance, *degrees, view);
-            let w = (clip.x1 - clip.x0) as usize;
-            mix_snapshot(dst, clip, &original, |o, _, x, y| {
+            let smear = smeared(&original, clip, write, *distance, *degrees, view);
+            mix_within(dst, clip, write, &original, |o, _, x, y| {
                 let weight = opacity * coverage_at(doc, mask, x, y);
-                let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+                let at = (y - write.y0) as usize * (write.x1 - write.x0) as usize
+                    + (x - write.x0) as usize;
                 lerp(o, smear[at], weight)
             });
         }
@@ -9462,6 +9594,25 @@ fn mix_snapshot(
     let w = (clip.x1 - clip.x0) as usize;
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
+            let i = (y * dst.width + x) as usize;
+            let s = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
+            dst.pixels[i] = f(original[s], dst.pixels[i], x, y);
+        }
+    }
+}
+
+/// [`mix_snapshot`] over `write` alone, a part of the `clip` the
+/// snapshot was taken over; the rest is left as it is.
+fn mix_within(
+    dst: &mut Surface,
+    clip: ClipRect,
+    write: ClipRect,
+    original: &[LinearRgba],
+    f: impl Fn(LinearRgba, LinearRgba, u32, u32) -> LinearRgba,
+) {
+    let w = (clip.x1 - clip.x0) as usize;
+    for y in write.y0..write.y1 {
+        for x in write.x0..write.x1 {
             let i = (y * dst.width + x) as usize;
             let s = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
             dst.pixels[i] = f(original[s], dst.pixels[i], x, y);
@@ -18326,6 +18477,69 @@ mod tests {
     /// round it when spun: a dot right of the centre streaks sideways in
     /// the one and up and down in the other, and the centre itself is
     /// left alone by both.
+    /// A motion blur worked out over a part of the clip is that part of
+    /// the blur over the whole, to the bit — it reads the whole snapshot,
+    /// so a sample past the part's edge is the pixel there, not the edge
+    /// read again.
+    #[test]
+    fn a_motion_blur_over_a_part_is_that_part_of_the_whole() {
+        let clip = ClipRect {
+            x0: 5,
+            y0: 2,
+            x1: 5 + 53,
+            y1: 2 + 37,
+        };
+        let mut seed = 0x2545_f491_u32;
+        let original: Vec<LinearRgba> = (0..53 * 37)
+            .map(|_| {
+                let mut next = || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    (seed >> 8) as f32 / (1 << 24) as f32
+                };
+                let a = next();
+                LinearRgba {
+                    r: next() * a,
+                    g: next() * a,
+                    b: next() * a,
+                    a,
+                }
+            })
+            .collect();
+        let part = ClipRect {
+            x0: clip.x0 + 7,
+            y0: clip.y0 + 3,
+            x1: clip.x1 - 11,
+            y1: clip.y1 - 5,
+        };
+        let view = Transform {
+            a: 1.3,
+            b: 0.2,
+            c: -0.1,
+            d: 0.9,
+            e: 3.0,
+            f: -2.0,
+        };
+        for (distance, degrees) in [(0.0, 0.0), (6.0, 30.0), (25.0, 100.0), (400.0, -45.0)] {
+            let whole = smeared(&original, clip, clip, distance, degrees, view);
+            let of_part = smeared(&original, clip, part, distance, degrees, view);
+            assert_eq!(whole.len(), clip.area() as usize);
+            assert_eq!(of_part.len(), part.area() as usize);
+            for y in part.y0..part.y1 {
+                for x in part.x0..part.x1 {
+                    let a = of_part[((y - part.y0) * (part.x1 - part.x0) + x - part.x0) as usize];
+                    let b = whole[((y - clip.y0) * (clip.x1 - clip.x0) + x - clip.x0) as usize];
+                    assert!(
+                        [a.r, a.g, a.b, a.a].map(f32::to_bits)
+                            == [b.r, b.g, b.b, b.a].map(f32::to_bits),
+                        "{distance} at {degrees}: the part at {x},{y} is {a:?}, the whole {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The radial blur worked a run of pixels at a time is the radial blur
     /// worked a pixel at a time, to the bit: zoomed and spun, about the
     /// middle and about a corner, short and long enough to reach the
@@ -18390,16 +18604,43 @@ mod tests {
                 for center in [[0.5, 0.5], [0.0, 1.0], [0.9, 0.2]] {
                     let page = (70.0, 50.0);
                     let by_runs =
-                        radially_smeared(&original, clip, amount, spin, center, page, view);
+                        radially_smeared(&original, clip, clip, amount, spin, center, page, view);
                     let by_pixels = radially_smeared_by_pixel(
                         &original, clip, amount, spin, center, page, view,
                     );
                     assert_eq!(by_runs.len(), by_pixels.len());
+                    let same = |a: &LinearRgba, b: &LinearRgba| {
+                        [a.r, a.g, a.b, a.a].map(f32::to_bits)
+                            == [b.r, b.g, b.b, b.a].map(f32::to_bits)
+                    };
                     for (i, (a, b)) in by_runs.iter().zip(&by_pixels).enumerate() {
                         assert!(
-                            [a.r, a.g, a.b, a.a].map(f32::to_bits) == [b.r, b.g, b.b, b.a].map(f32::to_bits),
+                            same(a, b),
                             "{amount} spin {spin} about {center:?} under {view:?}: pixel {i} is {a:?}, by pixels {b:?}"
                         );
+                    }
+                    // And a part of the clip worked out on its own is that
+                    // part of the whole, reading the whole snapshot.
+                    let part = ClipRect {
+                        x0: clip.x0 + 9,
+                        y0: clip.y0 + 4,
+                        x1: clip.x1 - 13,
+                        y1: clip.y1 - 6,
+                    };
+                    let of_part =
+                        radially_smeared(&original, clip, part, amount, spin, center, page, view);
+                    assert_eq!(of_part.len(), part.area() as usize);
+                    for y in part.y0..part.y1 {
+                        for x in part.x0..part.x1 {
+                            let a = &of_part
+                                [((y - part.y0) * (part.x1 - part.x0) + x - part.x0) as usize];
+                            let b = &by_pixels
+                                [((y - clip.y0) * (clip.x1 - clip.x0) + x - clip.x0) as usize];
+                            assert!(
+                                same(a, b),
+                                "{amount} spin {spin} about {center:?} under {view:?}: the part at {x},{y} is {a:?}, the whole {b:?}"
+                            );
+                        }
                     }
                     long |= amount == 1.0 && view.a == 3.0;
                 }
@@ -21661,6 +21902,282 @@ mod tests {
         assert!(
             wide.get(13, 30).a > 0.9,
             "ten pixels reaches where five did not"
+        );
+    }
+
+    /// A frame drawn with a margin round the window keeps only the
+    /// window, so a filter is worked out over the window and as far past
+    /// it as the filters above read, not over the margin — and the
+    /// window comes out the same as the whole page there, to the bit,
+    /// under a stack of filters that read each other: a zoom blur, a
+    /// motion blur over it, a spin blur over that, and a clone layer
+    /// lifting from under it, over a fine checker that any blur changes.
+    /// The margin's corner, where nothing above reaches, is left exactly
+    /// as the page is with no filter on it at all, which is how the test
+    /// knows the trimming is live rather than the whole margin filtered.
+    #[test]
+    fn a_filter_is_worked_out_for_the_wanted_part_and_is_the_page_there() {
+        use chitrakar_doc::Filter;
+        let (w, h) = (96u32, 72u32);
+        let mut doc = Document::new(w, h, ColorMode::Rgb);
+        let root = doc.root();
+        let mut index = 0;
+        let mut add_at = |doc: &mut Document, node: Node, at: (f32, f32)| {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at.0, at.1),
+            })
+            .unwrap();
+            index += 1;
+            id
+        };
+        // A checker of three-pixel cells, in two colours, so that every
+        // pixel has a neighbour of another colour within any blur.
+        for j in 0..h / 3 {
+            for i in 0..w / 3 {
+                if (i + j) % 2 == 0 {
+                    continue;
+                }
+                let (r, g, b) = if (i / 4 + j / 4) % 2 == 0 {
+                    (0.9, 0.3, 0.1)
+                } else {
+                    (0.1, 0.4, 0.95)
+                };
+                add_at(
+                    &mut doc,
+                    *filled_rect("cell", 3.0, 3.0, AuthoredColor::Srgb { r, g, b, a: 1.0 }),
+                    (i as f32 * 3.0, j as f32 * 3.0),
+                );
+            }
+        }
+        let zoom = add_at(
+            &mut doc,
+            Node::filter(
+                "zoom",
+                Filter::RadialBlur {
+                    amount: 0.2,
+                    spin: false,
+                    center: [0.5, 0.5],
+                },
+            ),
+            (0.0, 0.0),
+        );
+        let motion = add_at(
+            &mut doc,
+            Node::filter(
+                "motion",
+                Filter::MotionBlur {
+                    distance: 7.0,
+                    degrees: 30.0,
+                },
+            ),
+            (0.0, 0.0),
+        );
+        let spin = add_at(
+            &mut doc,
+            Node::filter(
+                "spin",
+                Filter::RadialBlur {
+                    amount: 25.0,
+                    spin: true,
+                    center: [0.3, 0.6],
+                },
+            ),
+            (0.0, 0.0),
+        );
+        assert_eq!(reach_above(&doc, spin), 0);
+        assert!(reach_above(&doc, motion) > 0);
+        assert!(reach_above(&doc, zoom) > reach_above(&doc, motion));
+        assert!(reach_above(&doc, zoom) < filter_reach(&doc));
+        let whole = render(&doc).unwrap();
+        let bare = {
+            let mut bare = doc.clone();
+            for id in [zoom, motion, spin] {
+                bare.apply(Command::SetVisible { id, visible: false })
+                    .unwrap();
+            }
+            render(&bare).unwrap()
+        };
+        let pad = filter_reach(&doc);
+        let same = |a: LinearRgba, b: LinearRgba| {
+            [a.r, a.g, a.b, a.a].map(f32::to_bits) == [b.r, b.g, b.b, b.a].map(f32::to_bits)
+        };
+        for wanted in [
+            ClipRect {
+                x0: 30,
+                y0: 20,
+                x1: 60,
+                y1: 50,
+            },
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 25,
+                y1: 70,
+            },
+            ClipRect {
+                x0: 70,
+                y0: 60,
+                x1: 96,
+                y1: 72,
+            },
+            ClipRect {
+                x0: 45,
+                y0: 33,
+                x1: 46,
+                y1: 34,
+            },
+        ] {
+            let grown = wanted.grown(pad, w, h);
+            let mut surface = Surface::new(w, h);
+            surface.wanted = Some(wanted);
+            render_region(&doc, &mut surface, grown).unwrap();
+            for y in wanted.y0..wanted.y1 {
+                for x in wanted.x0..wanted.x1 {
+                    assert!(
+                        same(surface.get(x, y), whole.get(x, y)),
+                        "wanting {wanted:?}: {x},{y} is {:?}, the page {:?}",
+                        surface.get(x, y),
+                        whole.get(x, y)
+                    );
+                }
+            }
+            // The margin's corners, as far from what is wanted as the
+            // whole stack reaches: past every filter's own part.
+            for (x, y) in [(grown.x0, grown.y0), (grown.x1 - 1, grown.y1 - 1)] {
+                let far = x + pad <= wanted.x0 || x >= wanted.x1 + pad;
+                if !far {
+                    continue;
+                }
+                assert!(
+                    same(surface.get(x, y), bare.get(x, y)),
+                    "wanting {wanted:?}: the margin's corner {x},{y} is {:?}, with no filter {:?}",
+                    surface.get(x, y),
+                    bare.get(x, y)
+                );
+                assert!(
+                    !same(surface.get(x, y), whole.get(x, y)),
+                    "and the page's own pixel there is blurred"
+                );
+            }
+        }
+    }
+
+    /// A filter drawn through a copy is drawn where the copy stands, under
+    /// whatever is above the *copy* — so trimming it to what the filters
+    /// above the original read, with nothing above the original, left a
+    /// motion blur above the copy reading an unfiltered margin. A copied
+    /// filter is worked out over the whole clip instead.
+    #[test]
+    fn a_filter_drawn_through_a_copy_is_the_page_under_what_is_above_the_copy() {
+        use chitrakar_doc::Filter;
+        let (w, h) = (80u32, 60u32);
+        let mut doc = Document::new(w, h, ColorMode::Rgb);
+        let root = doc.root();
+        let mut index = 0;
+        let mut add = |doc: &mut Document, node: Node, at: (f32, f32)| {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at.0, at.1),
+            })
+            .unwrap();
+            index += 1;
+            id
+        };
+        for j in 0..h / 3 {
+            for i in 0..w / 3 {
+                if (i + j) % 2 == 0 {
+                    continue;
+                }
+                add(
+                    &mut doc,
+                    *filled_rect(
+                        "cell",
+                        3.0,
+                        3.0,
+                        AuthoredColor::Srgb {
+                            r: 0.9,
+                            g: 0.3,
+                            b: 0.1,
+                            a: 1.0,
+                        },
+                    ),
+                    (i as f32 * 3.0, j as f32 * 3.0),
+                );
+            }
+        }
+        // The original ends up at the top, with nothing above it; its
+        // copy stands under the motion blur.
+        let zoom = add(
+            &mut doc,
+            Node::filter(
+                "zoom",
+                Filter::RadialBlur {
+                    amount: 0.3,
+                    spin: false,
+                    center: [0.5, 0.5],
+                },
+            ),
+            (0.0, 0.0),
+        );
+        add(&mut doc, Node::instance("copy", zoom), (0.0, 0.0));
+        add(
+            &mut doc,
+            Node::filter(
+                "motion",
+                Filter::MotionBlur {
+                    distance: 9.0,
+                    degrees: 0.0,
+                },
+            ),
+            (0.0, 0.0),
+        );
+        doc.apply(Command::MoveNode {
+            id: zoom,
+            parent: root,
+            index: index - 1,
+        })
+        .unwrap();
+        assert_eq!(doc.children_of(root).unwrap().last(), Some(&zoom));
+        let whole = render(&doc).unwrap();
+        let pad = filter_reach(&doc);
+        let wanted = ClipRect {
+            x0: 20,
+            y0: 15,
+            x1: 50,
+            y1: 40,
+        };
+        let mut surface = Surface::new(w, h);
+        surface.wanted = Some(wanted);
+        render_region(&doc, &mut surface, wanted.grown(pad, w, h)).unwrap();
+        for y in wanted.y0..wanted.y1 {
+            for x in wanted.x0..wanted.x1 {
+                let (p, q) = (surface.get(x, y), whole.get(x, y));
+                assert!(
+                    [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                        == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                    "{x},{y} is {p:?}, the page {q:?}"
+                );
+            }
+        }
+        assert_eq!(
+            reach_above(&doc, zoom),
+            u32::MAX,
+            "a copied filter is never trimmed"
         );
     }
 
