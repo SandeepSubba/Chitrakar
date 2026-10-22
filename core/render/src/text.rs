@@ -1319,6 +1319,27 @@ pub struct TextRaster {
     /// natural (unscaled) pixels: the origin for text in lines, and the
     /// glyphs' extent for text along a guide, which can run anywhere.
     pub origin: (f32, f32),
+    /// Where each row's ink is: the first texel with any coverage and
+    /// one past the last, `(0, 0)` for a row with none. Most of a block
+    /// is not ink — the leading between lines, the short line's end —
+    /// and the painter skips what it would only find empty.
+    pub ink: Vec<(u32, u32)>,
+}
+
+/// Each row's ink, for [`TextRaster::ink`].
+pub fn row_ink(width: u32, height: u32, coverage: &[f32]) -> Vec<(u32, u32)> {
+    (0..height as usize)
+        .map(|j| {
+            let row = &coverage[j * width as usize..(j + 1) * width as usize];
+            match (
+                row.iter().position(|c| *c > 0.0),
+                row.iter().rposition(|c| *c > 0.0),
+            ) {
+                (Some(a), Some(b)) => (a as u32, b as u32 + 1),
+                _ => (0, 0),
+            }
+        })
+        .collect()
 }
 
 impl TextRaster {
@@ -1727,6 +1748,7 @@ impl TextRaster {
             colors: Vec::new(),
             tint: Vec::new(),
             origin: (0.0, 0.0),
+            ink: vec![(0, 0)],
         }
     }
 }
@@ -1855,6 +1877,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         }
     }
     let colors = cuts.colors();
+    let ink = row_ink(width, height, &coverage);
     TextRaster {
         width,
         height,
@@ -1862,6 +1885,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         colors,
         tint,
         origin: (-phase[0] / scale, -phase[1] / scale),
+        ink,
     }
 }
 
@@ -1896,6 +1920,7 @@ fn rasterize_along(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
             }
         });
     }
+    let ink = row_ink(width, height, &coverage);
     TextRaster {
         width,
         height,
@@ -1903,6 +1928,7 @@ fn rasterize_along(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
         colors,
         tint,
         origin: ((x0 - phase[0]) / scale, (y0 - phase[1]) / scale),
+        ink,
     }
 }
 

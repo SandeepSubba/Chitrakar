@@ -7987,6 +7987,24 @@ fn rounded_by_rows() -> bool {
     true
 }
 
+/// Whether text standing square on the page is painted over its ink
+/// alone (`draw_text`) or over the whole of its box; a test toggles it
+/// to hold the one to the other.
+#[cfg(not(test))]
+fn text_by_ink() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEXT_BY_INK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn text_by_ink() -> bool {
+    TEXT_BY_INK.with(|b| b.get())
+}
+
 #[cfg(test)]
 thread_local! {
     static ROUNDED_BY_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
@@ -11679,8 +11697,47 @@ fn draw_text(
             None => return,
         };
     let (ox, oy) = raster.origin;
+    // Standing square on the page, a row of the window reads two rows
+    // of the raster, and only the part of it over those rows' ink can
+    // come out as anything: the rest is skipped rather than sampled and
+    // found empty, which over a block is most of it. Not a pixel is
+    // drawn differently, since what is skipped would have sampled
+    // nothing but noughts.
+    let upright = t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 && text_by_ink();
     for py in bbox.y0..bbox.y1 {
-        for px in bbox.x0..bbox.x1 {
+        let (x_from, x_to) = if upright {
+            let (_, ly) = inv.at(0.0, py as f32 + 0.5);
+            let v0 = ((ly - oy) * scale - 0.5).floor();
+            let (mut lo, mut hi) = (u32::MAX, 0u32);
+            for j in [v0, v0 + 1.0] {
+                if j >= 0.0 && j < raster.height as f32 {
+                    let (a, b) = raster.ink[j as usize];
+                    if b > a {
+                        lo = lo.min(a);
+                        hi = hi.max(b);
+                    }
+                }
+            }
+            if lo >= hi {
+                continue;
+            }
+            // Texels `lo..hi` are read by a sample whose own texel is
+            // one before `lo` up to one before `hi`: a sample position
+            // from `lo - 1` to `hi`, a block position from there, and
+            // the window's pixels under those, a pixel to spare each way.
+            let (la, lb) = (
+                (lo as f32 - 0.5) / scale + ox,
+                (hi as f32 + 0.5) / scale + ox,
+            );
+            let (da, db) = (t.e + la * t.a, t.e + lb * t.a);
+            let (d0, d1) = (da.min(db), da.max(db));
+            let x_from = (d0 - 1.0).floor().max(bbox.x0 as f32) as u32;
+            let x_to = (d1 + 1.0).ceil().min(bbox.x1 as f32).max(x_from as f32) as u32;
+            (x_from, x_to)
+        } else {
+            (bbox.x0, bbox.x1)
+        };
+        for px in x_from..x_to {
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             let (lx, ly) = (lx - ox, ly - oy);
             if lx < 0.0 || ly < 0.0 {
@@ -19290,6 +19347,139 @@ mod tests {
             corners_seen > 60,
             "and the corners were where the arcs are ({corners_seen})"
         );
+    }
+
+    /// Text painted over its ink alone is text painted over the whole of
+    /// its box, to the bit: at the page's own size and zoomed, shifted
+    /// by fractions, flipped, cut by a clip, with several lines and a
+    /// short last one, and a block turned on the page, which takes the
+    /// whole box as before. And a raster's ink extents hold every inked
+    /// texel and nothing but ink at their ends.
+    #[test]
+    fn text_painted_over_its_ink_is_text_painted_over_its_box() {
+        let spec = |text: &str, size: f32| chitrakar_doc::TextSpec::new(text, size, RED);
+        let raster = text::rasterize(&spec("Ink\nand a wider line\nx", 20.0));
+        assert_eq!(raster.ink.len(), raster.height as usize);
+        let mut inked = 0;
+        for (j, &(a, b)) in raster.ink.iter().enumerate() {
+            let row = &raster.coverage[j * raster.width as usize..(j + 1) * raster.width as usize];
+            for (i, c) in row.iter().enumerate() {
+                if *c > 0.0 {
+                    assert!(
+                        (a as usize) <= i && i < b as usize,
+                        "row {j}: texel {i} is inked outside {a}..{b}"
+                    );
+                    inked += 1;
+                }
+            }
+            if b > a {
+                assert!(
+                    row[a as usize] > 0.0 && row[b as usize - 1] > 0.0,
+                    "row {j}: the ends of {a}..{b} are ink"
+                );
+            }
+        }
+        assert!(inked > 100, "and there was ink ({inked})");
+        let draw = |by_ink: bool, text: &str, size: f32, t: Transform, clip: Option<ClipRect>| {
+            TEXT_BY_INK.with(|b| b.set(by_ink));
+            let mut doc = Document::new(120, 90, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::text("t", spec(text, size))),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform { id, transform: t })
+                .unwrap();
+            let mut surface = Surface::new(120, 90);
+            let clip = clip.unwrap_or(surface.full_clip());
+            render_region(&doc, &mut surface, clip).unwrap();
+            TEXT_BY_INK.with(|b| b.set(true));
+            surface
+        };
+        let cases = [
+            (
+                "Ink\nand a wider line\nx",
+                18.0,
+                Transform::translation(6.0, 5.0),
+                None,
+            ),
+            (
+                "Ink\nand a wider line\nx",
+                14.0,
+                Transform {
+                    a: 1.7,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.7,
+                    e: 3.3,
+                    f: 2.1,
+                },
+                None,
+            ),
+            (
+                "Ink\nand a wider line\nx",
+                18.0,
+                Transform::translation(-8.5, -4.25),
+                None,
+            ),
+            (
+                "Ink\nand a wider line\nx",
+                18.0,
+                Transform {
+                    a: -1.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.0,
+                    e: 110.0,
+                    f: 5.0,
+                },
+                None,
+            ),
+            (
+                "Ink\nand a wider line\nx",
+                18.0,
+                Transform::translation(6.0, 5.0),
+                Some(ClipRect {
+                    x0: 10,
+                    y0: 8,
+                    x1: 70,
+                    y1: 50,
+                }),
+            ),
+            (
+                "Turned",
+                22.0,
+                Transform {
+                    a: 0.8,
+                    b: 0.6,
+                    c: -0.6,
+                    d: 0.8,
+                    e: 40.0,
+                    f: 10.0,
+                },
+                None,
+            ),
+        ];
+        let mut inked_pixels = 0;
+        for (text, size, t, clip) in cases {
+            let by_ink = draw(true, text, size, t, clip);
+            let by_box = draw(false, text, size, t, clip);
+            for (i, (p, q)) in by_ink.pixels.iter().zip(&by_box.pixels).enumerate() {
+                assert!(
+                    [p.r, p.g, p.b, p.a].map(f32::to_bits) == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                    "{text:?} at {size} under {t:?}: pixel {},{} is {p:?} over the ink, {q:?} over the box",
+                    i % 120,
+                    i / 120
+                );
+                if p.a > 0.0 {
+                    inked_pixels += 1;
+                }
+            }
+        }
+        assert!(inked_pixels > 500, "and text was drawn ({inked_pixels})");
     }
 
     /// The radial blur worked a run of pixels at a time is the radial blur
