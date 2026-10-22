@@ -7228,6 +7228,143 @@ fn fill_rect_scanlines(
     }
 }
 
+/// The same rasterizer for a rounded rectangle standing square on the
+/// page. A row of it through the straight part is the square-cornered
+/// rectangle's row — the same product of two overlaps, to the bit — and
+/// only a row through the corners is anything else: there each sub-row
+/// is one span, from the arc on the left to the arc on the right, a
+/// square root apart, exact across and thirty-two deep down. Pixel by
+/// pixel it was the same product away from the corners and, at them, a
+/// box of two hundred and fifty-six point tests a pixel — which quantized
+/// the arc by the pattern that sampled it and was most of what a page of
+/// rounded rectangles cost to draw.
+#[allow(clippy::too_many_arguments)]
+fn fill_rounded_rect_scanlines(
+    dst: &mut Surface,
+    doc: &Document,
+    width: f32,
+    height: f32,
+    radius: f32,
+    t: Transform,
+    inv: Inverse,
+    paint: &Paint,
+    mode: BlendMode,
+    bbox: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    const N: u32 = 32;
+    let span = |lo: f32, hi: f32, at: u32| {
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+    };
+    if bbox.x1 <= bbox.x0 || bbox.y1 <= bbox.y0 {
+        return;
+    }
+    let r = corner_radius(width, height, radius);
+    let n = (bbox.x1 - bbox.x0) as usize;
+    let across: Vec<f32> = (0..n)
+        .map(|i| span(t.e, t.e + width * t.a, bbox.x0 + i as u32))
+        .collect();
+    // The columns between the corners, where a pixel sees two straight
+    // edges whatever row it is on — the top edge and the bottom are
+    // straight there too — and takes the exact product like the square
+    // rect's.
+    let between: Vec<bool> = (0..n)
+        .map(|i| {
+            let px = (bbox.x0 + i as u32) as f32;
+            let (xa, _) = inv.at(px, 0.0);
+            let (xb, _) = inv.at(px + 1.0, 0.0);
+            xa.min(xb) >= r && xa.max(xb) <= width - r
+        })
+        .collect();
+    // Where those columns start and end on the surface: a sub-row's
+    // span is gathered only outside them, over the corners, since the
+    // middle of it is the product anyway and gathering it over the
+    // whole span thirty-two times a row was most of the fill's cost.
+    let middle = {
+        let first = between.iter().position(|b| *b);
+        let last = between.iter().rposition(|b| *b);
+        match (first, last) {
+            (Some(a), Some(b)) => Some((
+                (bbox.x0 as usize + a) as f32,
+                (bbox.x0 as usize + b + 1) as f32,
+            )),
+            _ => None,
+        }
+    };
+    let mut cov = vec![0.0f32; n];
+    let mut xs: Vec<f32> = Vec::with_capacity(4);
+    for py in bbox.y0..bbox.y1 {
+        // The row's reach in the shape's own space: a row wholly between
+        // the corners is a straight row.
+        let (_, ya) = inv.at(0.0, py as f32);
+        let (_, yb) = inv.at(0.0, py as f32 + 1.0);
+        let (ly0, ly1) = (ya.min(yb), ya.max(yb));
+        let down = span(t.f, t.f + height * t.d, py);
+        if ly0 >= r && ly1 <= height - r {
+            if down <= 0.0 {
+                continue;
+            }
+            for (c, a) in cov.iter_mut().zip(&across) {
+                *c = *a * down;
+            }
+            blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
+            continue;
+        }
+        if ly1 <= 0.0 || ly0 >= height {
+            continue;
+        }
+        cov.fill(0.0);
+        for j in 0..N {
+            let sy = py as f32 + (j as f32 + 0.5) / N as f32;
+            let (_, y) = inv.at(0.0, sy);
+            if y <= 0.0 || y >= height {
+                continue;
+            }
+            // How far the arc stands in from the side at this height:
+            // nothing along the straight part, and at a corner the
+            // circle's own shortfall.
+            let dy = if y < r {
+                r - y
+            } else if y > height - r {
+                y - (height - r)
+            } else {
+                0.0
+            };
+            let inset = if dy > 0.0 {
+                r - (r * r - dy * dy).max(0.0).sqrt()
+            } else {
+                0.0
+            };
+            let (x0, x1) = (t.e + inset * t.a, t.e + (width - inset) * t.a);
+            let (lo, hi) = (x0.min(x1), x0.max(x1));
+            xs.clear();
+            match middle {
+                Some((mx0, mx1)) => {
+                    xs.push(lo);
+                    xs.push(hi.min(mx0));
+                    xs.push(lo.max(mx1));
+                    xs.push(hi);
+                }
+                None => {
+                    xs.push(lo);
+                    xs.push(hi);
+                }
+            }
+            add_spans(&mut cov, &xs, bbox, N);
+        }
+        for ((c, a), _) in cov
+            .iter_mut()
+            .zip(&across)
+            .zip(&between)
+            .filter(|(_, b)| **b)
+        {
+            *c = *a * down;
+        }
+        blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
+    }
+}
+
 /// The same rasterizer for an ellipse standing square on the page: its
 /// spans are two roots of a quadratic rather than a list of crossings, so
 /// there is no polygon to flatten it into and nothing to sample.
@@ -7392,6 +7529,12 @@ fn paint_shape(
     {
         if *radius <= 0.0 && t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 {
             fill_rect_scanlines(dst, doc, *width, *height, t, inv, paint, mode, bbox, mask);
+            return;
+        }
+        if *radius > 0.0 && t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 && rounded_by_rows() {
+            fill_rounded_rect_scanlines(
+                dst, doc, *width, *height, *radius, t, inv, paint, mode, bbox, mask,
+            );
             return;
         }
     }
@@ -7666,6 +7809,24 @@ pub fn picture_taps(t: Transform) -> Option<([f32; 2], [u32; 2])> {
 #[cfg(not(test))]
 fn by_rows() -> bool {
     true
+}
+
+/// Whether a rounded rectangle standing square on the page is drawn a
+/// row at a time (`fill_rounded_rect_scanlines`) or a pixel at a time;
+/// a test toggles it to hold the one to the other.
+#[cfg(not(test))]
+fn rounded_by_rows() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static ROUNDED_BY_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn rounded_by_rows() -> bool {
+    ROUNDED_BY_ROWS.with(|b| b.get())
 }
 
 #[cfg(test)]
@@ -18665,6 +18826,136 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A rounded rectangle drawn a row at a time is the rounded rectangle
+    /// drawn a pixel at a time: to the bit along every row clear of the
+    /// corners, and at the corners within the quantization the box of
+    /// samples had — a few hundredths — with the arc's area the same to
+    /// a fraction of a pixel; with a radius that is small, one that is
+    /// half the side so the ends are semicircles, and one asked for
+    /// larger than that and held to it; at whole and fractional places
+    /// and zooms, flipped as well as upright, and cut by a clip.
+    #[test]
+    fn a_rounded_rectangle_by_rows_is_the_rounded_rectangle_by_pixels() {
+        let draw =
+            |by_rows: bool, w: f32, h: f32, radius: f32, t: Transform, clip: Option<ClipRect>| {
+                ROUNDED_BY_ROWS.with(|b| b.set(by_rows));
+                let mut doc = Document::new(80, 60, ColorMode::Rgb);
+                let root = doc.root();
+                let mut node = Node::vector(
+                    "r",
+                    VectorShape::Rect {
+                        width: w,
+                        height: h,
+                        radius,
+                    },
+                );
+                if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                    *fill = Some(AuthoredColor::Srgb {
+                        r: 0.2,
+                        g: 0.5,
+                        b: 0.9,
+                        a: 1.0,
+                    });
+                }
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 0,
+                    node: Box::new(node),
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[0];
+                doc.apply(Command::SetTransform { id, transform: t })
+                    .unwrap();
+                let mut surface = Surface::new(80, 60);
+                let clip = clip.unwrap_or(surface.full_clip());
+                render_region(&doc, &mut surface, clip).unwrap();
+                ROUNDED_BY_ROWS.with(|b| b.set(true));
+                surface
+            };
+        let cases = [
+            (40.0, 25.0, 4.0, Transform::translation(10.0, 8.0), None),
+            (40.0, 25.0, 12.5, Transform::translation(10.3, 8.7), None),
+            (40.0, 25.0, 30.0, Transform::translation(5.0, 5.0), None),
+            (
+                30.0,
+                20.0,
+                6.0,
+                Transform {
+                    a: 1.7,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.7,
+                    e: 3.3,
+                    f: 2.1,
+                },
+                None,
+            ),
+            (
+                30.0,
+                20.0,
+                6.0,
+                Transform {
+                    a: -1.5,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.2,
+                    e: 60.0,
+                    f: 10.0,
+                },
+                None,
+            ),
+            (
+                40.0,
+                25.0,
+                8.0,
+                Transform::translation(10.0, 8.0),
+                Some(ClipRect {
+                    x0: 12,
+                    y0: 10,
+                    x1: 45,
+                    y1: 30,
+                }),
+            ),
+        ];
+        let mut corners_seen = 0;
+        for (w, h, radius, t, clip) in cases {
+            let rows = draw(true, w, h, radius, t, clip);
+            let pixels = draw(false, w, h, radius, t, clip);
+            let r = corner_radius(w, h, radius);
+            let inv = Inverse::of(t).unwrap();
+            let (mut area_rows, mut area_pixels) = (0.0f64, 0.0f64);
+            for y in 0..60u32 {
+                for x in 0..80u32 {
+                    let (p, q) = (rows.get(x, y), pixels.get(x, y));
+                    area_rows += p.a as f64;
+                    area_pixels += q.a as f64;
+                    let same = [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                        == [q.r, q.g, q.b, q.a].map(f32::to_bits);
+                    if clear_of_corners(w, h, r, inv, x, y) {
+                        assert!(same, "radius {radius} under {t:?}: at {x},{y}, clear of the corners, {p:?} by rows and {q:?} by pixels");
+                    } else {
+                        let d = (p.a - q.a)
+                            .abs()
+                            .max((p.r - q.r).abs())
+                            .max((p.b - q.b).abs());
+                        assert!(d < 0.07, "radius {radius} under {t:?}: at a corner, {x},{y}, {p:?} by rows and {q:?} by pixels");
+                        if q.a > 0.0 && q.a < 1.0 {
+                            corners_seen += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                (area_rows - area_pixels).abs() < 0.6,
+                "radius {radius} under {t:?}: {area_rows} covered by rows, {area_pixels} by pixels"
+            );
+        }
+        assert!(
+            corners_seen > 40,
+            "and the corners were where the arc is ({corners_seen})"
+        );
     }
 
     /// The radial blur worked a run of pixels at a time is the radial blur

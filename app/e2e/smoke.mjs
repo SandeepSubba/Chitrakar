@@ -13904,7 +13904,9 @@ assert(
   const pp = await phone.newPage();
   await pp.goto("http://localhost:8123/");
   await pp.waitForSelector("#engine-canvas");
-  // Kept once the worker has been told what the visit loaded.
+  // Kept once the worker has been told what the visit loaded — the
+  // fonts among them, which arrive last, when text is first set, and on
+  // a slow machine a moment after the engine.
   let kept = [];
   for (let i = 0; i < 60; i++) {
     kept = await pp.evaluate(async () => {
@@ -13912,7 +13914,13 @@ assert(
       const c = await caches.open("chitrakar");
       return (await c.keys()).map((r) => new URL(r.url).pathname);
     });
-    if (kept.some((p) => p.endsWith(".wasm")) && kept.includes("/")) break;
+    if (
+      kept.some((p) => p.endsWith(".wasm")) &&
+      kept.includes("/") &&
+      kept.some((p) => p.startsWith("/fonts/"))
+    ) {
+      break;
+    }
     await pp.waitForTimeout(250);
   }
   assert(

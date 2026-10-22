@@ -5397,10 +5397,48 @@ mod tests {
             vec!["shadow"],
             "the shadow the card's"
         );
-        let worst = worst_apart(&doc, &brought_in(&svg, 64, 48));
+        // The page as it was: the geometry to a hundredth or so, judged
+        // with the effects off — the card comes back as a path, whose
+        // corners are a flattened arc rather than the rounded
+        // rectangle's own, and the outline, grown from where the
+        // group's silhouette is half covered, stands a pixel over
+        // wherever the shadow's blur lands a pixel within a hair of
+        // half. With the effects on, that is a few pixels of feather
+        // beside the band, and no more.
+        let back = brought_in(&svg, 64, 48);
+        let bare = |doc: &Document| {
+            let mut bare = doc.clone();
+            let ids: Vec<_> = bare.nodes().map(|(id, _)| *id).collect();
+            for id in ids {
+                if !bare.node(id).unwrap().effects.is_empty() {
+                    bare.apply(Command::SetEffects {
+                        id,
+                        effects: Vec::new(),
+                    })
+                    .unwrap();
+                }
+            }
+            bare
+        };
+        let worst = worst_apart(&bare(&doc), &bare(&back));
         assert!(
             worst < 0.03,
             "and the page came back as it was, worst {worst}"
+        );
+        let (p, q) = (
+            chitrakar_render::render(&doc).unwrap(),
+            chitrakar_render::render(&back).unwrap(),
+        );
+        let apart = p
+            .pixels
+            .iter()
+            .zip(&q.pixels)
+            .filter(|(a, b)| (a.a - b.a).abs() > 0.03)
+            .count();
+        let worst = worst_apart(&doc, &back);
+        assert!(
+            apart <= 6 && worst < 0.3,
+            "and with its effects on, all but a feather pixel or so ({apart} pixels apart by more than a hundredth, the worst by {worst})"
         );
     }
 
