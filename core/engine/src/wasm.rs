@@ -126,25 +126,9 @@ impl WasmSession {
     /// empty array when nothing changed. Read pixels via
     /// `frame_ptr`/`frame_len`.
     pub fn render_frame(&mut self) -> Result<Vec<u32>, JsError> {
-        let (fw, fh) = self.inner.present_size();
-        let expected = (fw * fh * 4) as usize;
-        let first_frame = self.frame.len() != expected;
-        if first_frame {
-            self.frame = vec![0; expected];
-        }
-        let full = crate::ClipRect {
-            x0: 0,
-            y0: 0,
-            x1: fw,
-            y1: fh,
+        let Some(clip) = self.inner.present_into(&mut self.frame).map_err(to_js)? else {
+            return Ok(Vec::new());
         };
-        let (_, dirty) = self.inner.render_cached().map_err(to_js)?;
-        let clip = match (dirty, first_frame) {
-            (Some(clip), _) => clip,
-            (None, false) => return Ok(Vec::new()),
-            (None, true) => full,
-        };
-        self.inner.encode_present_region(clip, &mut self.frame);
         Ok(vec![clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0])
     }
 

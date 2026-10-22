@@ -342,12 +342,27 @@ pub struct Session {
     /// in document pixels — `render_cached` carries it into the cache's own
     /// resolution.
     stale: Option<ClipRect>,
+    /// More regions of `cache` to recompute, in document pixels: a pan by
+    /// whole pixels exposes a strip along one edge and a strip along
+    /// another, and the one box round both would be most of the window.
+    stale_more: Vec<ClipRect>,
     /// Set when the whole presented surface must be redrawn rather than a
     /// region of the page: a new or resized cache, or a viewport that has
-    /// moved. The dirty region is tracked in document pixels and so cannot
-    /// say anything about the part of the surface the page does not cover,
-    /// which is exactly the part a pan leaves stale.
+    /// moved other than by whole pixels at the same scale. The dirty
+    /// region is tracked in document pixels and so cannot say anything
+    /// about the part of the surface the page does not cover, which is
+    /// exactly the part such a move leaves stale.
     stale_all: bool,
+    /// How far the cache has been shifted by pans since the last
+    /// `render_cached`, in its own pixels, and after it how far it was
+    /// shifted by the pans before that one (`last_shift`): what was
+    /// presented can be shifted the same way rather than encoded whole.
+    shifted: Option<(i32, i32)>,
+    last_shift: Option<(i32, i32)>,
+    /// The regions of the cache the last `render_cached` recomputed, in
+    /// its own pixels — after a shift, the part of it a presented copy
+    /// cannot get by shifting (`last_repainted`).
+    repainted: Vec<ClipRect>,
     /// Resolution the cache is kept at, as a multiple of document pixels.
     /// Presenting a magnified document at 1.0 and letting the display
     /// enlarge the result is what makes a zoomed-in canvas look soft; the
@@ -447,7 +462,11 @@ impl Session {
             cache: None,
             scratch: None,
             stale: None,
+            stale_more: Vec::new(),
             stale_all: true,
+            shifted: None,
+            last_shift: None,
+            repainted: Vec::new(),
             view_scale: 1.0,
             view_origin: (0.0, 0.0),
             viewport: None,
@@ -7945,19 +7964,31 @@ impl Session {
             self.showing = chitrakar_render::Showing::Everything;
             self.stale_all = true;
         }
-        let doc_clip = self.stale.take();
+        let doc_clips: Vec<ClipRect> = self
+            .stale
+            .take()
+            .into_iter()
+            .chain(std::mem::take(&mut self.stale_more))
+            .collect();
         let everything = std::mem::take(&mut self.stale_all);
-        match (everything, doc_clip) {
-            (false, None) => Ok((self.cache.as_ref().unwrap(), None)),
-            (everything, doc_clip) => {
-                // The dirty region arrives in document pixels; the cache is
-                // kept in the view's, so carry it through the view and
-                // widen it outwards to whole pixels rather than trusting a
-                // rounded edge.
-                let clip = if everything {
-                    full
-                } else {
-                    let d = doc_clip.unwrap();
+        self.last_shift = self.shifted.take();
+        self.repainted.clear();
+        if !everything && doc_clips.is_empty() {
+            // Nothing to recompute — but after a shift whose exposed
+            // strips all lay beside the page, the cache has still moved,
+            // and what was presented from it has to move too.
+            let moved = self.last_shift.map(|_| full);
+            return Ok((self.cache.as_ref().unwrap(), moved));
+        }
+        // The dirty regions arrive in document pixels; the cache is kept
+        // in the view's, so carry each through the view and widen it
+        // outwards to whole pixels rather than trusting a rounded edge.
+        let clips: Vec<ClipRect> = if everything {
+            vec![full]
+        } else {
+            doc_clips
+                .iter()
+                .map(|d| {
                     ClipRect::from_float(
                         d.x0 as f32 * scale + view.e,
                         d.y0 as f32 * scale + view.f,
@@ -7967,12 +7998,41 @@ impl Session {
                         h,
                     )
                     .intersect(full)
-                };
-                if clip.is_empty() {
-                    // The change happened off-screen. Nothing to present,
-                    // but the cache is still whole.
-                    return Ok((self.cache.as_ref().unwrap(), None));
-                }
+                })
+                .filter(|c| !c.is_empty())
+                .collect()
+        };
+        if clips.is_empty() {
+            // The change happened off-screen. Nothing to recompute, but
+            // the cache is still whole — and after a shift it has still
+            // moved, so all of it is to be presented again.
+            let moved = self.last_shift.map(|_| full);
+            return Ok((self.cache.as_ref().unwrap(), moved));
+        }
+        for clip in clips.iter().copied() {
+            self.repaint(clip, view, scale, full)?;
+            self.repainted.push(clip);
+        }
+        let changed = if self.last_shift.is_some() {
+            full
+        } else {
+            clips.iter().skip(1).fold(clips[0], |a, c| a.union(*c))
+        };
+        Ok((self.cache.as_ref().unwrap(), Some(changed)))
+    }
+
+    /// One region of the cache recomputed from the document, in the
+    /// cache's own pixels.
+    fn repaint(
+        &mut self,
+        clip: ClipRect,
+        view: Transform,
+        scale: f32,
+        full: ClipRect,
+    ) -> Result<(), EngineError> {
+        let (w, h) = (full.x1, full.y1);
+        {
+            {
                 // Filters sample neighbors: a region render is only correct
                 // deeper than the filter stack's reach inside its own edge.
                 // So compute a padded region in scratch and copy back just
@@ -8056,9 +8116,52 @@ impl Session {
                     }
                     self.pixels_recomputed += compute.area();
                 }
-                Ok((self.cache.as_ref().unwrap(), Some(clip)))
+                Ok(())
             }
         }
+    }
+
+    /// The frame as it is presented: `frame` brought up to date with the
+    /// cache as sRGB bytes, four a pixel, and the part of it that changed
+    /// — all of it the first time, or after a pan, nothing when nothing
+    /// did. After a pan the bytes are moved the way the cache was and
+    /// only the strips the pan exposed are encoded again, since encoding
+    /// is most of what presenting a frame costs.
+    pub fn present_into(&mut self, frame: &mut Vec<u8>) -> Result<Option<ClipRect>, EngineError> {
+        let (fw, fh) = self.present_size();
+        let expected = (fw * fh * 4) as usize;
+        let first_frame = frame.len() != expected;
+        if first_frame {
+            *frame = vec![0; expected];
+        }
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: fw,
+            y1: fh,
+        };
+        let (_, dirty) = self.render_cached()?;
+        let clip = match (dirty, first_frame) {
+            (Some(clip), _) => clip,
+            (None, false) => return Ok(None),
+            (None, true) => full,
+        };
+        if let (Some((dx, dy)), false) = (self.last_shift, first_frame) {
+            shift_rows(
+                frame,
+                fw as usize * 4,
+                fh as usize,
+                dx as i64 * 4,
+                dy as i64,
+                0u8,
+            );
+            for region in self.repainted.clone() {
+                self.encode_present_region(region, frame);
+            }
+            return Ok(Some(full));
+        }
+        self.encode_present_region(clip, frame);
+        Ok(Some(clip))
     }
 
     /// The document-to-surface mapping the cache is kept in.
@@ -8117,9 +8220,13 @@ impl Session {
         if same {
             return;
         }
+        let panned = self.pan_to(scale, (x, y), size);
         self.view_scale = scale;
         self.view_origin = (x, y);
         self.viewport = Some(size);
+        if panned {
+            return;
+        }
         // Everything the surface shows has moved; none of it can be reused,
         // and that includes the part beside the page, which a document-space
         // dirty region has no way to name. The surfaces themselves can be:
@@ -8129,7 +8236,99 @@ impl Session {
         // milliseconds a frame in a browser, for nothing. A view of
         // another size gets new ones (`render_cached`).
         self.stale = None;
+        self.stale_more.clear();
         self.stale_all = true;
+        self.shifted = None;
+    }
+
+    /// A view moved by whole pixels at the same scale over the same
+    /// window shows what the last one showed, moved over: the cache is
+    /// shifted, and only the strip along each edge the move exposed is
+    /// left to recompute — in document pixels, held to the page, since
+    /// past the page's edge there is nothing to draw and the shift left
+    /// nothing there. Whole pixels so that every pixel kept is the pixel
+    /// a fresh render puts there, to the bit: moved a whole number of
+    /// its own pixels, a sample lands where it landed. Nothing when the
+    /// whole surface is stale anyway, or the view is moving further than
+    /// the window is wide, or either origin is not on a whole pixel.
+    fn pan_to(&mut self, scale: f32, to: (f32, f32), size: (u32, u32)) -> bool {
+        let from = self.view_origin;
+        let whole = |v: f32| (v - v.round()).abs() < 1e-4;
+        if self.stale_all
+            || self.viewport != Some(size)
+            || (scale - self.view_scale).abs() >= 1e-4
+            || !(whole(from.0) && whole(from.1) && whole(to.0) && whole(to.1))
+        {
+            return false;
+        }
+        let Some(cache) = self.cache.as_mut() else {
+            return false;
+        };
+        if (cache.width, cache.height) != size {
+            return false;
+        }
+        let (dx, dy) = (
+            (to.0.round() - from.0.round()) as i64,
+            (to.1.round() - from.1.round()) as i64,
+        );
+        let (w, h) = (size.0 as i64, size.1 as i64);
+        if dx.abs() >= w || dy.abs() >= h {
+            return false;
+        }
+        shift_rows(
+            &mut cache.pixels,
+            w as usize,
+            h as usize,
+            dx,
+            dy,
+            chitrakar_color::LinearRgba::TRANSPARENT,
+        );
+        // The strips the move exposed, in the new view's document pixels.
+        let scale = self.view_scale;
+        let doc = |x0: i64, y0: i64, x1: i64, y1: i64| {
+            Bounds::Rect(
+                (x0 as f32 - to.0) / scale,
+                (y0 as f32 - to.1) / scale,
+                (x1 as f32 - to.0) / scale,
+                (y1 as f32 - to.1) / scale,
+            )
+        };
+        let (dw, dh) = (self.doc.meta.width, self.doc.meta.height);
+        let mut expose = |b: Bounds| {
+            if let Some(clip) = b.to_clip(dw, dh) {
+                self.stale_more.push(clip);
+            }
+        };
+        // A strip down one side, and a strip along the top or bottom of
+        // the columns that strip does not already cover.
+        if dx > 0 {
+            expose(doc(0, 0, dx, h));
+        } else if dx < 0 {
+            expose(doc(w + dx, 0, w, h));
+        }
+        let (x0, x1) = if dx > 0 { (dx, w) } else { (0, w + dx) };
+        if dy > 0 {
+            expose(doc(x0, 0, x1, dy));
+        } else if dy < 0 {
+            expose(doc(x0, h + dy, x1, h));
+        }
+        let (sx, sy) = self.shifted.unwrap_or((0, 0));
+        self.shifted = Some((sx + dx as i32, sy + dy as i32));
+        true
+    }
+
+    /// How far the cache was shifted by pans before the last
+    /// `render_cached`, in its own pixels, if it was: a presented copy of
+    /// it can be shifted the same way and take only `last_repainted`
+    /// from it.
+    pub fn last_shift(&self) -> Option<(i32, i32)> {
+        self.last_shift
+    }
+
+    /// The regions of the cache the last `render_cached` recomputed, in
+    /// its own pixels.
+    pub fn last_repainted(&self) -> &[ClipRect] {
+        &self.repainted
     }
 
     pub fn view_scale(&self) -> f32 {
@@ -9166,6 +9365,41 @@ fn clones_within(doc: &Document, id: NodeId, out: &mut Vec<NodeId>, depth: usize
     }
     for child in doc.children_of(id).unwrap_or_default() {
         clones_within(doc, *child, out, depth + 1);
+    }
+}
+
+/// Rows of `w` elements, `h` of them, moved over by `dx` and down by
+/// `dy`: what was at `(x, y)` is at `(x + dx, y + dy)`, what moves off
+/// the edge is gone, and what is exposed along the edges is `blank`. In
+/// place, row by row in the order that reads a row before it is written.
+pub fn shift_rows<T: Copy>(buf: &mut [T], w: usize, h: usize, dx: i64, dy: i64, blank: T) {
+    debug_assert_eq!(buf.len(), w * h);
+    if dx == 0 && dy == 0 {
+        return;
+    }
+    let (wi, hi) = (w as i64, h as i64);
+    let rows: Box<dyn Iterator<Item = i64>> = if dy > 0 {
+        Box::new((0..hi).rev())
+    } else {
+        Box::new(0..hi)
+    };
+    for y in rows {
+        let row = y as usize * w;
+        let sy = y - dy;
+        if sy < 0 || sy >= hi || dx.abs() >= wi {
+            buf[row..row + w].fill(blank);
+            continue;
+        }
+        let src = sy as usize * w;
+        if dx >= 0 {
+            let d = dx as usize;
+            buf.copy_within(src..src + w - d, row + d);
+            buf[row..row + d].fill(blank);
+        } else {
+            let d = (-dx) as usize;
+            buf.copy_within(src + d..src + w, row);
+            buf[row + w - d..row + w].fill(blank);
+        }
     }
 }
 
@@ -11405,6 +11639,399 @@ mod tests {
             assert!(
                 same(p, q),
                 "repainted, pixel {i} is {p:?}, seen fresh {q:?}"
+            );
+        }
+    }
+
+    /// Rows shifted every way: what moves off an edge is gone, what is
+    /// exposed is blank, and a shift as wide as a row blanks the lot.
+    #[test]
+    fn rows_shifted_are_the_rows_moved_over() {
+        let grid = |w: usize, h: usize| -> Vec<u32> { (0..(w * h) as u32).collect() };
+        for (dx, dy) in [
+            (0, 0),
+            (1, 0),
+            (-2, 0),
+            (0, 1),
+            (0, -3),
+            (2, 1),
+            (-1, -1),
+            (3, -2),
+            (5, 0),
+            (0, 4),
+            (-5, 4),
+        ] {
+            let (w, h) = (5usize, 4usize);
+            let mut rows = grid(w, h);
+            shift_rows(&mut rows, w, h, dx, dy, u32::MAX);
+            for y in 0..h as i64 {
+                for x in 0..w as i64 {
+                    let (sx, sy) = (x - dx, y - dy);
+                    let want = if sx < 0 || sy < 0 || sx >= w as i64 || sy >= h as i64 {
+                        u32::MAX
+                    } else {
+                        (sy * w as i64 + sx) as u32
+                    };
+                    assert_eq!(
+                        rows[y as usize * w + x as usize],
+                        want,
+                        "({dx},{dy}) at {x},{y}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A view panned by whole pixels is drawn from the frame before it:
+    /// shifted, with only the strips the pan exposed recomputed — and it
+    /// is what a session that only ever looked there shows, to the bit,
+    /// under a blur's reach and a shadow's, beside the page as well as
+    /// on it, and after an edit. A pan that is not by whole pixels, or
+    /// further than the window is wide, is drawn whole as before.
+    #[test]
+    fn a_view_panned_by_whole_pixels_shows_what_a_fresh_view_there_shows() {
+        let build = || {
+            let mut session = Session::new(160, 120, ColorMode::Rgb);
+            for (i, (x, y, w, h)) in [
+                (10.0, 8.0, 50.0, 40.0),
+                (90.0, 30.0, 40.0, 60.0),
+                (40.0, 70.0, 70.0, 30.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = add_rect(&mut session, &format!("r{i}"), w, h);
+                session
+                    .apply(Command::SetTransform {
+                        id,
+                        transform: Transform::translation(x, y),
+                    })
+                    .unwrap();
+                if i == 1 {
+                    session
+                        .apply(Command::SetEffects {
+                            id,
+                            effects: vec![chitrakar_doc::Effect::DropShadow {
+                                dx: 5.0,
+                                dy: 4.0,
+                                blur: 3.0,
+                                color: chitrakar_color::AuthoredColor::Srgb {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.2,
+                                    a: 1.0,
+                                },
+                                opacity: 0.8,
+                                spread: 0.0,
+                            }],
+                        })
+                        .unwrap();
+                }
+            }
+            let root = session.document().root();
+            session
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: 3,
+                    node: Box::new(Node::filter(
+                        "blur",
+                        chitrakar_doc::Filter::GaussianBlur { sigma: 2.5 },
+                    )),
+                })
+                .unwrap();
+            session
+        };
+        // Within a float's noise rather than to the bit: the strips are
+        // drawn as a region, and a blur drawn over a region sums its
+        // rows from a different first pixel than one drawn over the
+        // whole, which is a rounding apart — as every region repaint
+        // after an edit already is. What is kept is the frame before,
+        // and that is the bit it was.
+        let same = |a: &[chitrakar_color::LinearRgba], b: &[chitrakar_color::LinearRgba]| {
+            a.len() == b.len()
+                && a.iter().zip(b).all(|(p, q)| {
+                    [p.r - q.r, p.g - q.g, p.b - q.b, p.a - q.a]
+                        .iter()
+                        .all(|d| d.abs() < 1e-5)
+                })
+        };
+        let (w, h) = (150u32, 110u32);
+        let mut moved = build();
+        moved.set_viewport(1.5, -20.0, 10.0, w, h);
+        moved.render_cached().unwrap();
+        let (mut x, mut y) = (-20.0f32, 10.0f32);
+        // Right and down, left, up and right, a long way left to beside
+        // the page, and back onto it.
+        for (dx, dy) in [
+            (17.0, 9.0),
+            (-30.0, 0.0),
+            (0.0, -25.0),
+            (120.0, -40.0),
+            (-90.0, 60.0),
+        ] {
+            x += dx;
+            y += dy;
+            let before = moved.pixels_recomputed();
+            moved.set_viewport(1.5, x, y, w, h);
+            let (frame, changed) = moved.render_cached().unwrap();
+            let frame = frame.pixels.clone();
+            assert_eq!(
+                changed,
+                Some(ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w,
+                    y1: h
+                }),
+                "panned by ({dx},{dy}), all of the frame is to be presented"
+            );
+            assert_eq!(moved.last_shift(), Some((dx as i32, dy as i32)));
+            // What is repainted is the strips the pan exposed, each
+            // widened by the pixel a region is rounded out by.
+            let strips: u64 = moved.last_repainted().iter().map(|c| c.area()).sum();
+            let (ax, ay) = (dx.abs() as u64, dy.abs() as u64);
+            let exposed = (w * h) as u64 - (w as u64 - ax) * (h as u64 - ay);
+            assert!(
+                strips <= exposed + 6 * (w + h) as u64,
+                "panned by ({dx},{dy}), {strips} pixels were repainted for {exposed} exposed: {:?}",
+                moved.last_repainted()
+            );
+            // What is computed is the strips with the blur's and the
+            // shadow's margin round each, which over a window this small
+            // is more than the window; over a real one it is a tenth.
+            let _ = before;
+            let mut fresh = build();
+            fresh.set_viewport(1.5, x, y, w, h);
+            let whole = fresh.render_cached().unwrap().0.pixels.clone();
+            if !same(&frame, &whole) {
+                let mut off = Vec::new();
+                for (i, (p, q)) in frame.iter().zip(&whole).enumerate() {
+                    if !same(std::slice::from_ref(p), std::slice::from_ref(q)) {
+                        off.push((i as u32 % w, i as u32 / w, *p, *q));
+                    }
+                }
+                panic!(
+                    "panned by ({dx},{dy}) to {x},{y}, the frame is not the fresh view's: {} pixels, first {:?}, last {:?}; repainted {:?}",
+                    off.len(),
+                    &off[..off.len().min(3)],
+                    off.last(),
+                    moved.last_repainted()
+                );
+            }
+        }
+        // An edit, then a pan: the edit's region and the strips.
+        let id = moved
+            .document()
+            .children_of(moved.document().root())
+            .unwrap()[0];
+        moved
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(25.0, 20.0),
+            })
+            .unwrap();
+        x += 8.0;
+        y -= 5.0;
+        moved.set_viewport(1.5, x, y, w, h);
+        let frame = moved.render_cached().unwrap().0.pixels.clone();
+        let mut fresh = build();
+        fresh
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(25.0, 20.0),
+            })
+            .unwrap();
+        fresh.set_viewport(1.5, x, y, w, h);
+        assert!(
+            same(&frame, &fresh.render_cached().unwrap().0.pixels),
+            "after an edit and a pan"
+        );
+        // Not by whole pixels: drawn whole.
+        x += 0.5;
+        moved.set_viewport(1.5, x, y, w, h);
+        let before = moved.pixels_recomputed();
+        moved.render_cached().unwrap();
+        assert_eq!(moved.last_shift(), None);
+        assert!(moved.pixels_recomputed() - before >= (w * h) as u64);
+        // Back on whole pixels, from a half: drawn whole too, since the
+        // frame before was not on them.
+        x += 0.5;
+        moved.set_viewport(1.5, x, y, w, h);
+        moved.render_cached().unwrap();
+        assert_eq!(moved.last_shift(), None);
+        // Further than the window is wide: drawn whole.
+        x += 200.0;
+        moved.set_viewport(1.5, x, y, w, h);
+        moved.render_cached().unwrap();
+        assert_eq!(moved.last_shift(), None);
+        let mut fresh = build();
+        fresh
+            .apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(25.0, 20.0),
+            })
+            .unwrap();
+        fresh.set_viewport(1.5, x, y, w, h);
+        assert!(same(
+            &moved.render_cached().unwrap().0.pixels.clone(),
+            &fresh.render_cached().unwrap().0.pixels
+        ));
+    }
+
+    /// The smoke suite's own pan, step by step: a page zoomed at a
+    /// point, then dragged by whole pixels in six steps and back in six.
+    #[test]
+    fn a_page_dragged_about_and_back_is_the_fresh_page() {
+        let build = || {
+            let mut session = Session::new(400, 300, ColorMode::Rgb);
+            let id = add_rect(&mut session, "r", 140.0, 110.0);
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(60.0, 50.0),
+                })
+                .unwrap();
+            session
+        };
+        let (w, h) = (1108u32, 858u32);
+        let (zoom, mut x, mut y) = (1.2f32, -12.0f32, 10.0f32);
+        let mut moved = build();
+        moved.set_viewport(zoom, x, y, w, h);
+        let first = moved.render_cached().unwrap().0.pixels.clone();
+        let steps = [
+            (6.0, 4.0),
+            (6.0, 4.0),
+            (6.0, 4.0),
+            (6.0, 4.0),
+            (6.0, 4.0),
+            (7.0, 3.0),
+        ];
+        for (dx, dy) in steps
+            .iter()
+            .chain(steps.iter().map(|_| &(0.0, 0.0)).take(0))
+        {
+            x += dx;
+            y += dy;
+            moved.set_viewport(zoom, x, y, w, h);
+            moved.render_cached().unwrap();
+        }
+        for (dx, dy) in steps {
+            x -= dx;
+            y -= dy;
+            moved.set_viewport(zoom, x, y, w, h);
+            moved.render_cached().unwrap();
+        }
+        assert_eq!((x, y), (-12.0, 10.0));
+        let back = moved.render_cached().unwrap().0.pixels.clone();
+        let off = first
+            .iter()
+            .zip(&back)
+            .enumerate()
+            .filter(|(_, (p, q))| (p.a - q.a).abs() > 1e-5 || (p.r - q.r).abs() > 1e-5)
+            .map(|(i, _)| (i as u32 % w, i as u32 / w))
+            .take(4)
+            .collect::<Vec<_>>();
+        assert!(
+            off.is_empty(),
+            "dragged about and back, the page is not the page: {off:?}"
+        );
+    }
+
+    /// What is presented through a run of pans — the bytes, moved and
+    /// patched — is what a fresh session presents of the same view, to
+    /// the byte for a plain page and within a rounding under a blur;
+    /// including pans whose exposed strips lie wholly beside the page,
+    /// where there is nothing to repaint but the frame has still moved,
+    /// and a frame that never moved presents nothing.
+    #[test]
+    fn a_frame_presented_through_pans_is_the_frame_presented_whole() {
+        let build = |blurred: bool| {
+            let mut session = Session::new(400, 300, ColorMode::Rgb);
+            let id = add_rect(&mut session, "r", 140.0, 110.0);
+            session
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(60.0, 50.0),
+                })
+                .unwrap();
+            if blurred {
+                let root = session.document().root();
+                session
+                    .apply(Command::AddNode {
+                        parent: root,
+                        index: 1,
+                        node: Box::new(Node::filter(
+                            "blur",
+                            chitrakar_doc::Filter::GaussianBlur { sigma: 3.0 },
+                        )),
+                    })
+                    .unwrap();
+            }
+            session
+        };
+        for blurred in [false, true] {
+            let (w, h) = (700u32, 500u32);
+            let (zoom, mut x, mut y) = (1.2f32, -12.0f32, 10.0f32);
+            let mut moved = build(blurred);
+            moved.set_viewport(zoom, x, y, w, h);
+            let mut frame = Vec::new();
+            assert!(moved.present_into(&mut frame).unwrap().is_some());
+            assert_eq!(
+                moved.present_into(&mut frame).unwrap(),
+                None,
+                "nothing moved, nothing presented"
+            );
+            let steps = [
+                (6.0, 4.0),
+                (6.0, 4.0),
+                (6.0, 4.0),
+                (6.0, 4.0),
+                (6.0, 4.0),
+                (7.0, 3.0),
+            ];
+            let mut beside = 0;
+            for (dx, dy) in steps
+                .iter()
+                .map(|&(a, b)| (a, b))
+                .chain(steps.iter().map(|&(a, b)| (-a, -b)))
+            {
+                x += dx;
+                y += dy;
+                moved.set_viewport(zoom, x, y, w, h);
+                let changed = moved.present_into(&mut frame).unwrap();
+                assert_eq!(
+                    changed,
+                    Some(ClipRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: w,
+                        y1: h
+                    }),
+                    "panned by ({dx},{dy}), all of the frame is presented"
+                );
+                if moved.last_repainted().is_empty() {
+                    beside += 1;
+                }
+                let mut fresh = build(blurred);
+                fresh.set_viewport(zoom, x, y, w, h);
+                let mut whole = Vec::new();
+                fresh.present_into(&mut whole).unwrap();
+                let off = frame
+                    .iter()
+                    .zip(&whole)
+                    .enumerate()
+                    .filter(|(_, (a, b))| a.abs_diff(**b) > if blurred { 1 } else { 0 })
+                    .map(|(i, (a, b))| ((i / 4) as u32 % w, (i / 4) as u32 / w, *a, *b))
+                    .take(4)
+                    .collect::<Vec<_>>();
+                assert!(
+                    off.is_empty(),
+                    "blurred {blurred}, panned by ({dx},{dy}) to {x},{y}: the presented bytes are not the fresh frame's: {off:?}"
+                );
+            }
+            assert!(
+                beside > 0,
+                "and some pans exposed only what lies beside the page"
             );
         }
     }

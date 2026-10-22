@@ -589,6 +589,35 @@ const MAX_ZOOM = 8;
 const DRAFT_MS = 70;
 /** How long the view keeps still before the draft is drawn sharp. */
 const SETTLE_MS = 160;
+
+/** Where the page's origin is put for the engine, in device pixels.
+ *
+ * A view panned by whole pixels at the same zoom is drawn by the engine
+ * from the frame before it, shifted, with only the strips the pan
+ * exposed drawn afresh — which it can only do when both origins are on
+ * whole pixels, so every pixel kept is the pixel a fresh frame would put
+ * there. A zoom at the pointer lands anywhere, so while the view is
+ * only panning — the zoom and the window as they were, the origin
+ * moved — the origin is rounded, by under half a device pixel; at rest
+ * and on a zoom it is given exactly, so nothing moves that did not.
+ * Asked again for the same view it answers the same, so an attribute
+ * rendered before the effect runs agrees with what the engine gets. */
+function engineOrigin(
+  last: { scale: number; w: number; h: number; rawX: number; rawY: number; x: number; y: number },
+  view: View,
+  viewport: [number, number],
+  dpr: number,
+): { x: number; y: number; panned: boolean } {
+  const scale = Math.min(64, Math.max(0.01, view.zoom * dpr));
+  const [w, h] = [Math.round(viewport[0] * dpr), Math.round(viewport[1] * dpr)];
+  const [rawX, rawY] = [view.x * dpr, view.y * dpr];
+  const same = last.scale === scale && last.w === w && last.h === h;
+  if (same && last.rawX === rawX && last.rawY === rawY) {
+    return { x: last.x, y: last.y, panned: false };
+  }
+  if (same) return { x: Math.round(rawX), y: Math.round(rawY), panned: true };
+  return { x: rawX, y: rawY, panned: false };
+}
 const MIN_SIZE = 2; // doc pixels, resize clamp
 
 interface View {
@@ -1774,6 +1803,12 @@ export function App() {
   const cpuStaleRef = useRef(false);
   /** The view the engine was last told, for a frame drawn elsewhere. */
   const viewArgsRef = useRef({ scale: 1, x: 0, y: 0 });
+  /** The view the engine was last given, and what it was given for it:
+   * the origin in device pixels, rounded to whole ones while the view
+   * is only panning (`engineOrigin`). Read during render for the
+   * attributes that place things over the page, and written by the
+   * effect that hands the view to the engine, so the two agree. */
+  const engineViewRef = useRef({ scale: 1, w: 0, h: 0, rawX: NaN, rawY: NaN, x: 0, y: 0 });
   gpuOnRef.current = isTauri() && prefs.gpuFrames;
 
   /** The frame and nothing else: from the desktop shell's graphics
@@ -2604,10 +2639,11 @@ export function App() {
   // drafts and a heavy one only while it moves.
   useEffect(() => {
     if (!session) return;
+    const { x: ox, y: oy, panned } = engineOrigin(engineViewRef.current, view, viewport, dpr);
     const full = (): [number, number, number, number, number] => [
       view.zoom * dpr,
-      view.x * dpr,
-      view.y * dpr,
+      ox,
+      oy,
       Math.round(viewport[0] * dpr),
       Math.round(viewport[1] * dpr),
     ];
@@ -2630,12 +2666,22 @@ export function App() {
     }
     viewArgsRef.current = {
       scale: Math.min(64, Math.max(0.01, view.zoom * dpr)),
-      x: view.x * dpr,
-      y: view.y * dpr,
+      x: ox,
+      y: oy,
+    };
+    engineViewRef.current = {
+      scale: Math.min(64, Math.max(0.01, view.zoom * dpr)),
+      w: Math.round(viewport[0] * dpr),
+      h: Math.round(viewport[1] * dpr),
+      rawX: view.x * dpr,
+      rawY: view.y * dpr,
+      x: ox,
+      y: oy,
     };
     // Resizing the element clears its backing store, and the engine tracks
-    // what it has already presented, so it has to be told.
-    session.invalidate();
+    // what it has already presented, so it has to be told — unless the
+    // view only panned, when the engine presents the whole frame anyway.
+    if (!panned) session.invalidate();
     present(session);
   }, [session, view, viewport, dpr, docSize, present]);
 
@@ -10322,8 +10368,8 @@ export function App() {
             /* Where the document's origin sits in the backing store, and
                how many of its pixels one document pixel takes — published
                so anything reading it can convert into it. */
-            data-origin-x={view.x * dpr}
-            data-origin-y={view.y * dpr}
+            data-origin-x={engineOrigin(engineViewRef.current, view, viewport, dpr).x}
+            data-origin-y={engineOrigin(engineViewRef.current, view, viewport, dpr).y}
             data-frame-scale={view.zoom * dpr}
             style={{ width: viewport[0], height: viewport[1] }}
             onDoubleClick={onCanvasDoubleClick}

@@ -14350,6 +14350,102 @@ assert(
   });
 }
 
+// 11m. A view panned by whole device pixels is drawn by the engine from
+// the frame before it, shifted, with only the strips the pan exposed
+// drawn afresh — so a page panned about, zoomed at the pointer first so
+// its origin is not on a whole pixel until a pan rounds it, shows what
+// it would show drawn whole: the shapes where they have moved to, the
+// backdrop where the page has moved away from, and after panning back,
+// the very bytes it showed before.
+{
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [box.x + (x / 400) * box.width, box.y + (y / 300) * box.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(60, 50));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 160), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Escape");
+  // Zoomed at a point, which puts the origin anywhere.
+  await page.mouse.move(...at(137, 91));
+  await page.mouse.wheel(0, -120);
+  await page.waitForTimeout(400);
+  const originOf = () =>
+    page.evaluate(() => {
+      const c = document.getElementById("engine-canvas");
+      return [Number(c.dataset.originX), Number(c.dataset.originY)];
+    });
+  const [zx, zy] = await originOf();
+  assert(!Number.isInteger(zx) || !Number.isInteger(zy), `zoomed at a point, the origin is anywhere (${zx},${zy})`);
+  const canvasBytes = () =>
+    page.evaluate(() => {
+      const c = document.getElementById("engine-canvas");
+      const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+      let h = 0;
+      for (let i = 0; i < d.length; i += 7) h = (h * 31 + d[i]) >>> 0;
+      const prev = window.__bytes;
+      const diffs = [];
+      if (prev) {
+        for (let i = 0; i < d.length && diffs.length < 6; i += 4) {
+          if (d[i] !== prev[i] || d[i + 1] !== prev[i + 1] || d[i + 2] !== prev[i + 2] || d[i + 3] !== prev[i + 3]) {
+            diffs.push([(i / 4) % c.width, Math.floor(i / 4 / c.width), [prev[i], prev[i + 1], prev[i + 2], prev[i + 3]], [d[i], d[i + 1], d[i + 2], d[i + 3]]]);
+          }
+        }
+        let n = 0;
+        for (let i = 0; i < d.length; i++) if (d[i] !== prev[i]) n++;
+        diffs.push(["differing bytes", n, c.width, c.height]);
+      }
+      window.__bytes = d;
+      return [h, d.length, JSON.stringify(diffs)];
+    });
+  const pan = async (dx, dy) => {
+    const [sx, sy] = at(300, 250);
+    await page.keyboard.down("Space");
+    await page.waitForTimeout(150);
+    await page.mouse.move(sx, sy);
+    await page.mouse.down();
+    await page.mouse.move(sx + dx, sy + dy, { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+    await page.keyboard.up("Space");
+    await page.waitForTimeout(300);
+  };
+  // The first pan puts the origin on whole pixels, under half a pixel
+  // from where the zoom left it; a pan there and back is where the
+  // page then rests.
+  await pan(1, 0);
+  await pan(-1, 0);
+  const [ox, oy] = await originOf();
+  assert(Number.isInteger(ox) && Number.isInteger(oy), `panned, the origin is on whole pixels (${ox},${oy})`);
+  assert(Math.abs(ox - zx) <= 0.5 && Math.abs(oy - zy) <= 0.5, `and under half a pixel from the zoom's (${ox},${oy} against ${zx},${zy})`);
+  const inside = await canvasPixel(130, 100);
+  const outside = await canvasPixel(20, 20);
+  assert(inside[3] === 255 && outside[3] === 0, `the rect is drawn and the page beside it is clear (${inside}, ${outside})`);
+  const before = await canvasBytes();
+  await pan(37, 23);
+  const [ox2, oy2] = await originOf();
+  const dpr = await page.evaluate(() => window.devicePixelRatio);
+  assert(
+    ox2 - ox === Math.round(37 * dpr) && oy2 - oy === Math.round(23 * dpr),
+    `panned by whole pixels (${ox2 - ox},${oy2 - oy})`,
+  );
+  const moved = await canvasPixel(130, 100);
+  assert(moved.every((v, i) => v === inside[i]), `the rect is where the page moved to (${moved} against ${inside})`);
+  const still = await canvasPixel(20, 20);
+  assert(still[3] === 0, "and the page beside it is still clear");
+  await pan(-37, -23);
+  const [ox3, oy3] = await originOf();
+  assert(ox3 === ox && oy3 === oy, `panned back (${ox3},${oy3} against ${ox},${oy})`);
+  const after = await canvasBytes();
+  assert(
+    after[0] === before[0] && after[1] === before[1],
+    `and shows the bytes it showed before (${after[0]} against ${before[0]}; first differing pixels ${after[2]})`,
+  );
+}
+
 // 9aw. Dissolving a group answers for what the group itself was
 // carrying. A group is somewhere to put layers and also a layer in its
 // own right: it can be hidden, or made half-transparent, and those two
