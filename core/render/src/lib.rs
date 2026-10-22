@@ -8251,7 +8251,147 @@ pub fn radial_reach(amount: f32, spin: bool) -> f32 {
 /// long in device pixels, up to a cap. Sampled between pixels, since
 /// every pixel's line runs at its own angle; past the snapshot's edge
 /// the edge is read again, as the motion blur reads it.
+///
+/// Worked a row at a time, and along the row a run of pixels taking the
+/// same number of samples at a time, one sample for the whole run before
+/// the next: neighbouring pixels' samples are neighbours in the snapshot,
+/// where a pixel's own samples are a line across it, a row apart each.
+/// The steps along the line — a turn's sine and cosine, spun — are worked
+/// out once for each number of samples rather than at every pixel. Each
+/// pixel's samples are still added in the same order, so it is the same
+/// blur to the bit (`radially_smeared_by_pixel`).
 fn radially_smeared(
+    original: &[LinearRgba],
+    clip: ClipRect,
+    amount: f32,
+    spin: bool,
+    center: [f32; 2],
+    page: (f32, f32),
+    view: Transform,
+) -> Vec<LinearRgba> {
+    let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+    let reach = radial_reach(amount, spin);
+    let Some(inv) = Inverse::of(view) else {
+        return original.to_vec();
+    };
+    if w <= 0 || h <= 0 || reach <= 0.0 {
+        return original.to_vec();
+    }
+    let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+    let (cx, cy) = (at(center[0]) * page.0, at(center[1]) * page.1);
+    let scale = max_scale(view);
+    let sample = |fx: f32, fy: f32| {
+        // Device pixel centres sit at (i + 0.5); read the four round
+        // the point, each held to the snapshot.
+        let (u, v) = (fx - 0.5 - clip.x0 as f32, fy - 0.5 - clip.y0 as f32);
+        let (u0, v0) = (u.floor(), v.floor());
+        let (tx, ty) = (u - u0, v - v0);
+        let (x0, y0) = (u0 as i64, v0 as i64);
+        let (a, b, c, d) = if x0 >= 0 && y0 >= 0 && x0 + 1 < w && y0 + 1 < h {
+            // Inside, where holding to the snapshot holds nothing back.
+            let i = (y0 * w + x0) as usize;
+            let j = i + w as usize;
+            (original[i], original[i + 1], original[j], original[j + 1])
+        } else {
+            let get = |x: f32, y: f32| {
+                let (x, y) = ((x as i64).clamp(0, w - 1), (y as i64).clamp(0, h - 1));
+                original[(y * w + x) as usize]
+            };
+            (
+                get(u0, v0),
+                get(u0 + 1.0, v0),
+                get(u0, v0 + 1.0),
+                get(u0 + 1.0, v0 + 1.0),
+            )
+        };
+        lerp(lerp(a, b, tx), lerp(c, d, tx), ty)
+    };
+    // Odd, so that the pixel itself is one of the samples.
+    const MOST: usize = 129;
+    // The steps for each odd number of samples, worked out when first
+    // wanted: the turn's sine and cosine, spun; zoomed, how far along the
+    // line, twice.
+    let mut steps: Vec<Vec<[f32; 2]>> = vec![Vec::new(); MOST / 2 + 1];
+    let mut out = vec![LinearRgba::TRANSPARENT; (w * h) as usize];
+    let (mut lines, mut counts) = (vec![(0.0f32, 0.0f32); w as usize], vec![0usize; w as usize]);
+    for y in 0..h {
+        let row = (y * w) as usize;
+        for x in 0..w {
+            let (fx, fy) = (
+                (x + clip.x0 as i64) as f32 + 0.5,
+                (y + clip.y0 as i64) as f32 + 0.5,
+            );
+            let (dx, dy) = inv.at(fx, fy);
+            let (vx, vy) = (dx - cx, dy - cy);
+            let length = (vx * vx + vy * vy).sqrt() * reach * scale;
+            lines[x as usize] = (vx, vy);
+            counts[x as usize] = if length < 0.5 {
+                out[row + x as usize] = original[row + x as usize];
+                0
+            } else {
+                ((length.ceil() as usize).saturating_add(1)).min(MOST) | 1
+            };
+        }
+        let mut x = 0;
+        while x < w as usize {
+            let n = counts[x];
+            let mut end = x + 1;
+            while end < w as usize && counts[end] == n {
+                end += 1;
+            }
+            if n > 0 {
+                if steps[n / 2].is_empty() {
+                    let half = (n / 2) as f32;
+                    steps[n / 2] = (0..n)
+                        .map(|k| {
+                            let t = (k as f32 - half) / (n as f32 - 1.0);
+                            if spin {
+                                let (s, c) = (reach * t).sin_cos();
+                                [s, c]
+                            } else {
+                                let k = 1.0 + reach * t;
+                                [k, k]
+                            }
+                        })
+                        .collect();
+                }
+                let run = &mut out[row + x..row + end];
+                for &[s, c] in &steps[n / 2] {
+                    for (acc, &(vx, vy)) in run.iter_mut().zip(&lines[x..end]) {
+                        let (qx, qy) = if spin {
+                            (cx + vx * c - vy * s, cy + vx * s + vy * c)
+                        } else {
+                            (cx + vx * s, cy + vy * c)
+                        };
+                        let (px, py) = (
+                            view.a * qx + view.c * qy + view.e,
+                            view.b * qx + view.d * qy + view.f,
+                        );
+                        let s = sample(px, py);
+                        acc.r += s.r;
+                        acc.g += s.g;
+                        acc.b += s.b;
+                        acc.a += s.a;
+                    }
+                }
+                let k = 1.0 / n as f32;
+                for acc in run {
+                    acc.r *= k;
+                    acc.g *= k;
+                    acc.b *= k;
+                    acc.a *= k;
+                }
+            }
+            x = end;
+        }
+    }
+    out
+}
+
+/// The radial blur a pixel at a time, as it was first written: what
+/// `radially_smeared` is held to, bit for bit.
+#[cfg(test)]
+fn radially_smeared_by_pixel(
     original: &[LinearRgba],
     clip: ClipRect,
     amount: f32,
@@ -18186,6 +18326,91 @@ mod tests {
     /// round it when spun: a dot right of the centre streaks sideways in
     /// the one and up and down in the other, and the centre itself is
     /// left alone by both.
+    /// The radial blur worked a run of pixels at a time is the radial blur
+    /// worked a pixel at a time, to the bit: zoomed and spun, about the
+    /// middle and about a corner, short and long enough to reach the
+    /// sample cap, under a view that turns and scales unevenly, and over a
+    /// clip that is not at the surface's corner, so the edges are read
+    /// again as they were.
+    #[test]
+    fn a_radial_blur_by_runs_is_the_radial_blur_by_pixels() {
+        let clip = ClipRect {
+            x0: 7,
+            y0: 3,
+            x1: 7 + 61,
+            y1: 3 + 47,
+        };
+        let mut seed = 0x9e37_79b9_u32;
+        let original: Vec<LinearRgba> = (0..61 * 47)
+            .map(|_| {
+                let mut next = || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    (seed >> 8) as f32 / (1 << 24) as f32
+                };
+                let a = next();
+                LinearRgba {
+                    r: next() * a,
+                    g: next() * a,
+                    b: next() * a,
+                    a,
+                }
+            })
+            .collect();
+        let views = [
+            Transform::default(),
+            Transform {
+                a: 1.1,
+                b: 0.4,
+                c: -0.25,
+                d: 0.85,
+                e: 8.0,
+                f: -6.0,
+            },
+            Transform {
+                a: 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: 2.0,
+                e: -20.0,
+                f: 4.0,
+            },
+        ];
+        let mut long = false;
+        for view in views {
+            for (amount, spin) in [
+                (0.05, false),
+                (0.3, false),
+                (1.0, false),
+                (4.0, true),
+                (40.0, true),
+                (180.0, true),
+            ] {
+                for center in [[0.5, 0.5], [0.0, 1.0], [0.9, 0.2]] {
+                    let page = (70.0, 50.0);
+                    let by_runs =
+                        radially_smeared(&original, clip, amount, spin, center, page, view);
+                    let by_pixels = radially_smeared_by_pixel(
+                        &original, clip, amount, spin, center, page, view,
+                    );
+                    assert_eq!(by_runs.len(), by_pixels.len());
+                    for (i, (a, b)) in by_runs.iter().zip(&by_pixels).enumerate() {
+                        assert!(
+                            [a.r, a.g, a.b, a.a].map(f32::to_bits) == [b.r, b.g, b.b, b.a].map(f32::to_bits),
+                            "{amount} spin {spin} about {center:?} under {view:?}: pixel {i} is {a:?}, by pixels {b:?}"
+                        );
+                    }
+                    long |= amount == 1.0 && view.a == 3.0;
+                }
+            }
+        }
+        assert!(
+            long,
+            "and a smear long enough to reach the cap was among them"
+        );
+    }
+
     #[test]
     fn a_radial_blur_smears_out_from_its_centre_or_round_it() {
         let white = AuthoredColor::Srgb {
