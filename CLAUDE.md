@@ -232,6 +232,17 @@ are still menu rows and should stay that way: a frame's export multiple
 and its name are the *document's* (`export_scale`), which the window's
 own scale cannot express.
 
+## Measuring
+
+`tools/bench/` (see its README) times the editor in headless Chromium:
+`engine/run.mjs` every adjustment and filter over a 12-megapixel
+photograph through the WASM engine alone, and `app/gesture.mjs` a drag
+or a run of wheel zooms through the page itself, with `THROTTLE=4` for
+a phone's speed and `PROF=1` for where the time went. For looking at an
+app change by hand or driving it from a script, keep `npm run dev`
+running on :5173 rather than rebuilding each time; only the smoke suite
+needs `dist`, and refuses one older than any source.
+
 ## Claude Code plugin
 
 `tools/chitrakar-plugin/` packages this workflow: `/chitrakar:verify` (the
