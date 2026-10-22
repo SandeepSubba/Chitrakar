@@ -70,7 +70,9 @@ impl Running {
 
 /// The light at which the display encoding's step `i` gives way to step
 /// `i + 1`: halfway between them as shown, which is where rounding the
-/// encoded value changes its mind.
+/// encoded value changes its mind. What the bins were found by before
+/// the encoder's table, kept as what the table is held to.
+#[cfg(test)]
 fn step_edges() -> [f32; 255] {
     let mut e = [0.0f32; 255];
     for (i, edge) in e.iter_mut().enumerate() {
@@ -90,8 +92,11 @@ pub fn median(pixels: &[LinearRgba], w: usize, h: usize, radius: usize) -> Vec<L
     // falls among the 255 edges between steps, in light, rather than by
     // encoding every value: a search of eight comparisons where the
     // encoding is a power.
-    let edges = step_edges();
-    let shown = |v: f32| edges.partition_point(|&e| e <= v) as u8;
+    // Binned by the frame encoder's own table — a compare or two a
+    // channel — rather than a search of the edges, which is the same
+    // bin (`a_channel_is_binned_the_way_its_eight_bits_are`).
+    let srgb8 = chitrakar_color::Srgb8::new();
+    let shown = |v: f32| srgb8.channel(v);
     let binned: Vec<[u8; 4]> = pixels
         .iter()
         .map(|p| {
@@ -156,6 +161,50 @@ pub fn median(pixels: &[LinearRgba], w: usize, h: usize, radius: usize) -> Vec<L
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The encoder's byte for a channel is the bin the step edges put it
+    /// in, everywhere across the range, below nothing and above white —
+    /// except within a float of an edge itself, where the edge, worked
+    /// out as the light at the midpoint, sits a rounding off the
+    /// encoder's exact threshold and the two can name either bin. No
+    /// pixel of a picture lands there.
+    #[test]
+    fn a_channel_is_binned_the_way_its_eight_bits_are() {
+        let edges = step_edges();
+        let by_edges = |v: f32| edges.partition_point(|&e| e <= v) as u8;
+        let srgb8 = chitrakar_color::Srgb8::new();
+        let sweep: Vec<f32> = (0..=200_000)
+            .map(|i| i as f32 / 200_000.0 * 1.1 - 0.05)
+            .collect();
+        let near_an_edge = |v: f32| edges.iter().any(|e| e.to_bits().abs_diff(v.to_bits()) <= 1);
+        for &v in &sweep {
+            let (a, b) = (srgb8.channel(v), by_edges(v));
+            if near_an_edge(v) {
+                assert!(
+                    a.abs_diff(b) <= 1,
+                    "at {v}, a float from an edge: {a} against {b}"
+                );
+            } else {
+                assert_eq!(a, b, "at {v}");
+            }
+        }
+        let mut apart = 0;
+        for e in edges {
+            for v in [
+                e,
+                f32::from_bits(e.to_bits() - 1),
+                f32::from_bits(e.to_bits() + 1),
+            ] {
+                let (a, b) = (srgb8.channel(v), by_edges(v));
+                assert!(a.abs_diff(b) <= 1, "at the edge {v}: {a} against {b}");
+                apart += (a != b) as usize;
+            }
+        }
+        assert!(
+            apart > 0 && apart < 300,
+            "{apart} of the edges' floats name the other bin"
+        );
+    }
 
     fn grey(v: f32) -> LinearRgba {
         let l = chitrakar_color::srgb_to_linear(v);
