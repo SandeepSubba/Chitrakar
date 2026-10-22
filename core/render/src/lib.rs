@@ -1456,6 +1456,38 @@ pub fn copies_a_blend(doc: &Document, id: NodeId) -> bool {
 /// Whether a layer is a copy — directly or through other copies — of a
 /// clone layer, which paints with what is under it and so, like an
 /// adjustment, comes back with nothing from a surface of its own.
+/// Whether a copy draws a clone layer anywhere in what it copies: the
+/// original itself, as [`copies_a_clone`] asks, or one held inside it —
+/// a frame or a group with a clone among its layers, or a copy of one.
+/// A clone paints with what is under it, so a copy of anything holding
+/// one is as much of a problem on a surface of its own as a copy of the
+/// clone itself, and was not being recognised as one: a copy of a frame
+/// holding a clone, wearing a mask, was drawn by the GPU backend where
+/// the reference renderer draws something else (page 3635 of the
+/// fixture's random pages).
+pub fn copies_a_clone_within(doc: &Document, id: NodeId) -> bool {
+    fn holds_a_clone(doc: &Document, at: NodeId, depth: usize) -> bool {
+        if depth >= chitrakar_doc::MAX_DEPTH {
+            return false;
+        }
+        let Ok(node) = doc.node(at) else {
+            return false;
+        };
+        match &node.kind {
+            NodeKind::Clone { .. } => true,
+            NodeKind::Instance { of, .. } => holds_a_clone(doc, *of, depth + 1),
+            _ => doc
+                .children_of(at)
+                .map(|c| c.iter().any(|&k| holds_a_clone(doc, k, depth + 1)))
+                .unwrap_or(false),
+        }
+    }
+    match doc.node(id).map(|n| &n.kind) {
+        Ok(NodeKind::Instance { of, .. }) => holds_a_clone(doc, *of, 0),
+        _ => false,
+    }
+}
+
 pub fn copies_a_clone(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
     for _ in 0..chitrakar_doc::MAX_DEPTH {

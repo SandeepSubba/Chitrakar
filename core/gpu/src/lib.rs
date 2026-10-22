@@ -3004,7 +3004,12 @@ fn one(
     // and fade mixed back in afterwards — and never on a surface of its
     // own, which is where this backend sends a copy that is masked,
     // faded, held, blended or given an effect. A plain copy it draws.
-    if chitrakar_render::copies_a_clone(doc, child)
+    // And a copy of anything *holding* a clone layer — a frame or a
+    // group with one among its layers — dressed in anything, for the
+    // same reason: on a surface of its own the clone has nothing under
+    // it to paint with.
+    if (chitrakar_render::copies_a_clone(doc, child)
+        || chitrakar_render::copies_a_clone_within(doc, child))
         && (node.mask.is_some()
             || node.opacity < 1.0
             || held_to.is_some()
@@ -16361,6 +16366,119 @@ mod tests {
         assert!(
             (14..20).any(|y| green(17, y)),
             "and the layer's own edge, inside the base, is outlined"
+        );
+    }
+
+    /// A copy of a frame that holds a clone layer, wearing a mask, is
+    /// handed back, as a copy of the clone itself is: on a surface of
+    /// its own the clone has nothing under it to paint with. A plain
+    /// copy of the frame is drawn, and drawn the way the CPU draws it.
+    /// Page 3635 of the fixture's random pages is such a copy wearing a
+    /// mask and effects, and was drawn — differently.
+    #[test]
+    fn a_copy_of_a_frame_holding_a_clone_wearing_anything_is_handed_back() {
+        let page = chitrakar_doc::fixture::page(3635);
+        assert!(!GpuRenderer::can_render(&page), "page 3635 is handed back");
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(64, 48, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: filled(
+                "ground",
+                VectorShape::Rect {
+                    width: 64.0,
+                    height: 48.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.5,
+                    b: 0.8,
+                    a: 1.0,
+                },
+            ),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::artboard("frame", 30.0, 20.0, None)),
+        })
+        .unwrap();
+        let frame = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::SetTransform {
+            id: frame,
+            transform: Transform::translation(4.0, 6.0),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: frame,
+            index: 0,
+            node: Box::new(Node::clone_layer("lift")),
+        })
+        .unwrap();
+        let lift = doc.children_of(frame).unwrap()[0];
+        doc.apply(Command::AddStroke {
+            id: lift,
+            index: 0,
+            stroke: Box::new(chitrakar_doc::PaintStroke {
+                points: vec![[6.0, 6.0], [20.0, 12.0]],
+                radii: vec![5.0],
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                softness: 0.0,
+                erase: false,
+                source: [-3.0, 2.0],
+                heal: false,
+                clip: None,
+            }),
+            on_mask: false,
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(Node::instance("copy", frame)),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[2];
+        doc.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(26.0, 18.0),
+        })
+        .unwrap();
+        assert!(GpuRenderer::can_render(&doc), "a plain copy is drawn");
+        let mine = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, _) = difference(&mine, &reference);
+        assert!(mean < 0.002, "and drawn the way the CPU draws it ({mean})");
+        doc.apply(Command::SetMask {
+            id: copy,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 14.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(2.0, 2.0),
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&doc),
+            "wearing a mask, it is handed back"
         );
     }
 
