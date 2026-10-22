@@ -7365,6 +7365,158 @@ fn fill_rounded_rect_scanlines(
     }
 }
 
+/// Where a rounded rectangle grown by `o` on every side — its corners
+/// then of radius `ro` — spans a line at local height `y`: from the arc
+/// on the left to the arc on the right, or nothing where the line misses
+/// it.
+fn rounded_span_at(width: f32, height: f32, o: f32, ro: f32, y: f32) -> Option<(f32, f32)> {
+    let (top, bottom) = (-o, height + o);
+    if y <= top || y >= bottom || width + 2.0 * o <= 0.0 {
+        return None;
+    }
+    let dy = if y < top + ro {
+        top + ro - y
+    } else if y > bottom - ro {
+        y - (bottom - ro)
+    } else {
+        0.0
+    };
+    let inset = if dy > 0.0 {
+        ro - (ro * ro - dy * dy).max(0.0).sqrt()
+    } else {
+        0.0
+    };
+    let (x0, x1) = (-o + inset, width + o - inset);
+    (x1 > x0).then_some((x0, x1))
+}
+
+/// The same rasterizer for the band of a plain stroke round a rectangle
+/// standing square on the page, rounded or not: the outline grown by the
+/// band's far side less the outline grown by its near one, each a
+/// rounded rectangle of its own. A row clear of every corner is the
+/// difference of two products, as it is pixel by pixel (to the bit),
+/// the columns clear of the corners are that difference on every row,
+/// and at a corner each sub-row is one span on each side of the band,
+/// between the two arcs, exact across and thirty-two deep.
+#[allow(clippy::too_many_arguments)]
+fn fill_rect_band_scanlines(
+    dst: &mut Surface,
+    doc: &Document,
+    width: f32,
+    height: f32,
+    radius: f32,
+    stroke: &StrokeGeom<'_>,
+    t: Transform,
+    inv: Inverse,
+    paint: &Paint,
+    mode: BlendMode,
+    bbox: ClipRect,
+    mask: MaskRef<'_>,
+) {
+    const N: u32 = 32;
+    if bbox.x1 <= bbox.x0 || bbox.y1 <= bbox.y0 {
+        return;
+    }
+    let span = |lo: f32, hi: f32, at: u32| {
+        let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
+    };
+    let (lo, hi) = match stroke.align {
+        StrokeAlign::Inside => (-stroke.width, 0.0),
+        StrokeAlign::Centre => (-stroke.width / 2.0, stroke.width / 2.0),
+        StrokeAlign::Outside => (0.0, stroke.width),
+    };
+    let r = corner_radius(width, height, radius);
+    let reach = r + hi.abs().max(lo.abs());
+    let (ro, ri) = ((r + hi).max(0.0), (r + lo).max(0.0));
+    let n = (bbox.x1 - bbox.x0) as usize;
+    // The two products' across factors, a column each, and which columns
+    // are clear of the corners whatever the row.
+    let outer_across: Vec<f32> = (0..n)
+        .map(|i| span(t.e - hi * t.a, t.e + (width + hi) * t.a, bbox.x0 + i as u32))
+        .collect();
+    let inner_across: Vec<f32> = (0..n)
+        .map(|i| span(t.e - lo * t.a, t.e + (width + lo) * t.a, bbox.x0 + i as u32))
+        .collect();
+    let between: Vec<bool> = (0..n)
+        .map(|i| {
+            let px = (bbox.x0 + i as u32) as f32;
+            let (xa, _) = inv.at(px, 0.0);
+            let (xb, _) = inv.at(px + 1.0, 0.0);
+            xa.min(xb) >= reach && xa.max(xb) <= width - reach
+        })
+        .collect();
+    let middle = match (
+        between.iter().position(|b| *b),
+        between.iter().rposition(|b| *b),
+    ) {
+        (Some(a), Some(b)) => Some((
+            (bbox.x0 as usize + a) as f32,
+            (bbox.x0 as usize + b + 1) as f32,
+        )),
+        _ => None,
+    };
+    let product = |i: usize, outer_down: f32, inner_down: f32| {
+        (outer_across[i] * outer_down - inner_across[i] * inner_down).clamp(0.0, 1.0)
+    };
+    let mut cov = vec![0.0f32; n];
+    let mut xs: Vec<f32> = Vec::with_capacity(8);
+    for py in bbox.y0..bbox.y1 {
+        let (_, ya) = inv.at(0.0, py as f32);
+        let (_, yb) = inv.at(0.0, py as f32 + 1.0);
+        let (ly0, ly1) = (ya.min(yb), ya.max(yb));
+        let outer_down = span(t.f - hi * t.d, t.f + (height + hi) * t.d, py);
+        let inner_down = span(t.f - lo * t.d, t.f + (height + lo) * t.d, py);
+        if ly0 >= reach && ly1 <= height - reach {
+            if outer_down <= 0.0 {
+                continue;
+            }
+            for (i, c) in cov.iter_mut().enumerate() {
+                *c = product(i, outer_down, inner_down);
+            }
+            blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
+            continue;
+        }
+        if ly1 <= -hi.max(0.0) || ly0 >= height + hi.max(0.0) {
+            continue;
+        }
+        cov.fill(0.0);
+        for j in 0..N {
+            let sy = py as f32 + (j as f32 + 0.5) / N as f32;
+            let (_, y) = inv.at(0.0, sy);
+            let Some((ox0, ox1)) = rounded_span_at(width, height, hi, ro, y) else {
+                continue;
+            };
+            let pieces: [Option<(f32, f32)>; 2] = match rounded_span_at(width, height, lo, ri, y) {
+                Some((ix0, ix1)) => [Some((ox0, ix0.max(ox0))), Some((ix1.min(ox1), ox1))],
+                None => [Some((ox0, ox1)), None],
+            };
+            xs.clear();
+            for (a, b) in pieces.into_iter().flatten() {
+                let (x0, x1) = (t.e + a * t.a, t.e + b * t.a);
+                let (lo_x, hi_x) = (x0.min(x1), x0.max(x1));
+                match middle {
+                    Some((mx0, mx1)) => {
+                        xs.push(lo_x);
+                        xs.push(hi_x.min(mx0));
+                        xs.push(lo_x.max(mx1));
+                        xs.push(hi_x);
+                    }
+                    None => {
+                        xs.push(lo_x);
+                        xs.push(hi_x);
+                    }
+                }
+            }
+            add_spans(&mut cov, &xs, bbox, N);
+        }
+        for i in (0..n).filter(|&i| between[i]) {
+            cov[i] = product(i, outer_down, inner_down);
+        }
+        blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
+    }
+}
+
 /// The same rasterizer for an ellipse standing square on the page: its
 /// spans are two roots of a quadratic rather than a list of crossings, so
 /// there is no polygon to flatten it into and nothing to sample.
@@ -7534,6 +7686,22 @@ fn paint_shape(
         if *radius > 0.0 && t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 && rounded_by_rows() {
             fill_rounded_rect_scanlines(
                 dst, doc, *width, *height, *radius, t, inv, paint, mode, bbox, mask,
+            );
+            return;
+        }
+    }
+    if let (
+        VectorShape::Rect {
+            width,
+            height,
+            radius,
+        },
+        Some(s),
+    ) = (shape, stroke)
+    {
+        if s.pieces.is_empty() && t.b.abs() <= 1e-6 && t.c.abs() <= 1e-6 && rounded_by_rows() {
+            fill_rect_band_scanlines(
+                dst, doc, *width, *height, *radius, s, t, inv, paint, mode, bbox, mask,
             );
             return;
         }
@@ -18955,6 +19123,172 @@ mod tests {
         assert!(
             corners_seen > 40,
             "and the corners were where the arc is ({corners_seen})"
+        );
+    }
+
+    /// A rectangle's stroke band drawn a row at a time is the band drawn
+    /// a pixel at a time: to the bit wherever a pixel is clear of the
+    /// corners, within a few hundredths at them, and the same area to a
+    /// fraction of a pixel — inside, centred and outside the edge, thin
+    /// and thicker than the corner's radius and thicker than half the
+    /// rectangle, round a square corner as well as a round one, at
+    /// fractional places and zooms and flipped.
+    #[test]
+    fn a_rectangles_band_by_rows_is_the_band_by_pixels() {
+        let draw = |by_rows: bool,
+                    w: f32,
+                    h: f32,
+                    radius: f32,
+                    stroke: chitrakar_doc::Stroke,
+                    t: Transform| {
+            ROUNDED_BY_ROWS.with(|b| b.set(by_rows));
+            let mut doc = Document::new(80, 60, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "r",
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius,
+                },
+            );
+            if let NodeKind::Vector { stroke: s, .. } = &mut node.kind {
+                *s = Some(stroke);
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform { id, transform: t })
+                .unwrap();
+            let mut surface = Surface::new(80, 60);
+            let clip = surface.full_clip();
+            render_region(&doc, &mut surface, clip).unwrap();
+            ROUNDED_BY_ROWS.with(|b| b.set(true));
+            surface
+        };
+        let stroke = |width: f32, align: StrokeAlign| chitrakar_doc::Stroke {
+            color: AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.2,
+                b: 0.3,
+                a: 1.0,
+            },
+            width,
+            widths: Vec::new(),
+            cap: StrokeCap::Butt,
+            join: StrokeJoin::Miter,
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            align: Some(align),
+            start_marker: chitrakar_doc::Marker::None,
+            end_marker: chitrakar_doc::Marker::None,
+        };
+        let zoomed = Transform {
+            a: 1.6,
+            b: 0.0,
+            c: 0.0,
+            d: 1.6,
+            e: 4.3,
+            f: 3.1,
+        };
+        let flipped = Transform {
+            a: -1.3,
+            b: 0.0,
+            c: 0.0,
+            d: 1.1,
+            e: 62.0,
+            f: 8.0,
+        };
+        let cases = [
+            (
+                40.0,
+                25.0,
+                5.0,
+                stroke(2.0, StrokeAlign::Inside),
+                Transform::translation(10.0, 8.0),
+            ),
+            (
+                40.0,
+                25.0,
+                5.0,
+                stroke(3.0, StrokeAlign::Centre),
+                Transform::translation(10.4, 8.6),
+            ),
+            (
+                40.0,
+                25.0,
+                5.0,
+                stroke(2.5, StrokeAlign::Outside),
+                Transform::translation(12.0, 9.0),
+            ),
+            (
+                40.0,
+                25.0,
+                4.0,
+                stroke(7.0, StrokeAlign::Inside),
+                Transform::translation(10.0, 8.0),
+            ),
+            (
+                30.0,
+                20.0,
+                6.0,
+                stroke(14.0, StrokeAlign::Centre),
+                Transform::translation(20.0, 15.0),
+            ),
+            (
+                40.0,
+                25.0,
+                0.0,
+                stroke(3.0, StrokeAlign::Centre),
+                Transform::translation(10.5, 8.5),
+            ),
+            (30.0, 20.0, 6.0, stroke(2.0, StrokeAlign::Outside), zoomed),
+            (30.0, 20.0, 6.0, stroke(2.0, StrokeAlign::Inside), flipped),
+        ];
+        let mut corners_seen = 0;
+        for (w, h, radius, stroke, t) in cases {
+            let align = stroke.align.unwrap();
+            let rows = draw(true, w, h, radius, stroke.clone(), t);
+            let pixels = draw(false, w, h, radius, stroke.clone(), t);
+            let (lo, hi) = match align {
+                StrokeAlign::Inside => (-stroke.width, 0.0),
+                StrokeAlign::Centre => (-stroke.width / 2.0, stroke.width / 2.0),
+                StrokeAlign::Outside => (0.0, stroke.width),
+            };
+            let reach = corner_radius(w, h, radius) + hi.abs().max(lo.abs());
+            let inv = Inverse::of(t).unwrap();
+            let (mut area_rows, mut area_pixels) = (0.0f64, 0.0f64);
+            for y in 0..60u32 {
+                for x in 0..80u32 {
+                    let (p, q) = (rows.get(x, y), pixels.get(x, y));
+                    area_rows += p.a as f64;
+                    area_pixels += q.a as f64;
+                    let same = [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                        == [q.r, q.g, q.b, q.a].map(f32::to_bits);
+                    if clear_of_corners(w, h, reach, inv, x, y) {
+                        assert!(same, "{align:?} {} wide, radius {radius} under {t:?}: at {x},{y}, clear of the corners, {p:?} by rows and {q:?} by pixels", stroke.width);
+                    } else {
+                        let d = (p.a - q.a).abs();
+                        assert!(d < 0.07, "{align:?} {} wide, radius {radius} under {t:?}: at a corner, {x},{y}, {p:?} by rows and {q:?} by pixels", stroke.width);
+                        if q.a > 0.0 && q.a < 1.0 {
+                            corners_seen += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                (area_rows - area_pixels).abs() < 0.8,
+                "{align:?} {} wide, radius {radius} under {t:?}: {area_rows} covered by rows, {area_pixels} by pixels",
+                stroke.width
+            );
+        }
+        assert!(
+            corners_seen > 60,
+            "and the corners were where the arcs are ({corners_seen})"
         );
     }
 
