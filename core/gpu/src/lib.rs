@@ -5190,16 +5190,16 @@ fn adjustment_of(doc: &Document, adj: &chitrakar_doc::Adjustment) -> Option<Adju
             [0.0; 4],
         ),
         A::PhotoFilter {
+            color,
+            density,
             preserve_luminosity,
-            ..
         } => {
             // The glass is resolved where a CMYK document's press profile
             // is to hand, as a gradient map's stops are.
-            let Some(chitrakar_render::Prepared::Glass(glass, k)) =
-                chitrakar_render::prepare(doc, adj)
-            else {
-                return None;
-            };
+            let (glass, k) = chitrakar_render::photo_filter_glass(
+                chitrakar_render::resolve_color(doc, color),
+                *density,
+            );
             plain(
                 [23.0, glass[0], glass[1], glass[2]],
                 [k, if *preserve_luminosity { 1.0 } else { 0.0 }, 0.0, 0.0],

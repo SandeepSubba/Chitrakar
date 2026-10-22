@@ -4380,6 +4380,16 @@ fn on_curve(table: &Curve, v: f32) -> f32 {
     a + (b - a) * f
 }
 
+/// Three channels through [`Prepared::Through`]: each read from its
+/// table up to white, and above white carried on by its gain.
+fn through(tables: &[Vec<f32>; 3], over: &[f32; 3], r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let f = |v: f32, c: usize| {
+        let inside = v.clamp(0.0, 1.0);
+        on_steps(&tables[c], inside) + (v - inside).hi(0.0) * over[c]
+    };
+    (f(r, 0), f(g, 1), f(b, 2))
+}
+
 /// `on_curve` over a table held as a slice: `CURVE_STEPS` steps from
 /// nothing to one. A table of any other length is not one of these, and
 /// reads as the identity rather than out of its end.
@@ -11394,9 +11404,6 @@ pub struct CurveLuts {
 /// shape to it belongs here.
 pub enum Prepared {
     Curves(CurveLuts),
-    /// A photo filter's glass, resolved: its colour in light, straight,
-    /// and how strongly it is laid (`photo_filter_glass`).
-    Glass([f32; 3], f32),
     /// A gradient map's ramp, resolved, put in order and read off into a
     /// table. Resolving is also where a CMYK document's stops go through
     /// its press profile, which is the one place the document is still
@@ -11408,6 +11415,30 @@ pub enum Prepared {
     /// An exposure's gain, `2^stops`: one power a pass rather than one a
     /// pixel, which in a browser is a routine in software.
     Gain(f32),
+    /// A channel's crossing through an adjustment that works on each
+    /// channel alone on the values a device shows — an invert, a
+    /// posterize, a photo filter's glass — read from one table a channel
+    /// over the light in it, as a curves layer's is, rather than worked
+    /// out with a power or two a channel a pixel; and what a channel
+    /// above white is carried on by, per unit above it. Worked out at
+    /// `CURVE_STEPS` steps and read between them, so it is within a few
+    /// hundred-thousandths of the formula, and a posterize's steps are
+    /// each a four-thousandth of the light wide rather than sharp
+    /// (`a_channel_adjustment_by_table_is_the_adjustment_by_powers`).
+    Through([Vec<f32>; 3], [f32; 3]),
+    /// A threshold's level in light, so the brightness a pixel shows at
+    /// is compared without crossing the curve — exactly, since the
+    /// curve is monotone, with the formula itself asked only within a
+    /// whisker of the level, where the two could round apart.
+    Level(f32),
+}
+
+/// A table of a per-channel function over the light in a channel, at
+/// `CURVE_STEPS` steps from nothing to white, for [`Prepared::Through`].
+fn through_table(f: impl Fn(f32) -> f32) -> Vec<f32> {
+    (0..=CURVE_STEPS)
+        .map(|i| f(i as f32 / CURVE_STEPS as f32))
+        .collect()
 }
 
 /// How finely a gradient map's ramp is read off before the pass.
@@ -11473,8 +11504,30 @@ pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
         }
         Adjustment::PhotoFilter { color, density, .. } => {
             let (glass, k) = photo_filter_glass(resolve_color(doc, color), *density);
-            Some(Prepared::Glass(glass, k))
+            let tables =
+                std::array::from_fn(|c| through_table(|v| photo_filter_channel(v, glass[c], k).0));
+            let over = std::array::from_fn(|c| 1.0 + (glass[c] - 1.0) * k);
+            Some(Prepared::Through(tables, over))
         }
+        Adjustment::Invert { amount } => {
+            let k = amount.clamp(0.0, 1.0);
+            let table = through_table(|v| invert_channel(v, k).0);
+            Some(Prepared::Through(
+                [table.clone(), table.clone(), table],
+                [1.0 - k; 3],
+            ))
+        }
+        Adjustment::Posterize { levels } => {
+            let steps = posterize_steps(*levels);
+            let table = through_table(|v| posterize_channel(v, steps));
+            Some(Prepared::Through(
+                [table.clone(), table.clone(), table],
+                [0.0; 3],
+            ))
+        }
+        Adjustment::Threshold { level } => Some(Prepared::Level(chitrakar_color::srgb_to_linear(
+            threshold_level(*level),
+        ))),
         Adjustment::ColorLookup { table, size, .. } => doc
             .resource(table)
             .and_then(|r| chitrakar_doc::lut::decode(*size, r.width, r.height, &r.rgba8))
@@ -11634,6 +11687,47 @@ pub fn curve_lut(points: &[[f32; 2]]) -> Vec<f32> {
 /// its levels, read whole and held to 2..=255, less the black one. A
 /// number that is no number is the most levels there are, which is the
 /// nearest thing to leaving the picture alone.
+/// One channel through an invert of `k`, on the values a device shows,
+/// and what is above white is carried on by: what is above white has
+/// no display value to invert — sRGB's curve stops at one — so it is
+/// held back, the part that fits is inverted, and what was held back is
+/// returned in proportion to how much of the layer is *not* the
+/// inversion. At `k` zero that is all of it, and the layer is the
+/// identity it is asked to be rather than a highlight crusher.
+fn invert_channel(v: f32, k: f32) -> (f32, f32) {
+    let inside = v.clamp(0.0, 1.0);
+    let over = (v - inside).hi(0.0);
+    let s = chitrakar_color::linear_to_srgb(inside);
+    (
+        chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k),
+        over * (1.0 - k),
+    )
+}
+
+/// One channel held to `steps` evenly spaced steps as a device shows
+/// them: steps even in light would crowd all but one band into the
+/// shadows. Above white is white.
+fn posterize_channel(v: f32, steps: f32) -> f32 {
+    let s = chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0));
+    chitrakar_color::srgb_to_linear((s * steps).rounded() / steps)
+}
+
+/// One channel through a photo filter's glass `g`, laid at `k`: the
+/// colour through the glass, mixed back in by how strongly the glass is
+/// laid, on the values a device shows, where a density is judged — and
+/// what is above white through the glass in light, carried on by the
+/// second answer.
+fn photo_filter_channel(v: f32, g: f32, k: f32) -> (f32, f32) {
+    let inside = v.clamp(0.0, 1.0);
+    let over = v - inside;
+    let s = chitrakar_color::linear_to_srgb(inside);
+    let gs = chitrakar_color::linear_to_srgb(g.clamp(0.0, 1.0));
+    (
+        chitrakar_color::srgb_to_linear(s + (s * gs - s) * k),
+        over * (1.0 + (g - 1.0) * k),
+    )
+}
+
 pub fn posterize_steps(levels: f32) -> f32 {
     if levels.is_finite() {
         levels.round().clamp(2.0, 255.0) - 1.0
@@ -12033,57 +12127,48 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 )
             }
         }
-        Adjustment::Invert { amount } => {
-            // On the values a device shows: light inverted is not what
-            // anyone means by a negative, since linear 0.5 shows as 188
-            // and would come back a near-black rather than itself.
-            let k = amount.clamp(0.0, 1.0);
-            let f = |v: f32| {
-                // What is above white has no display value to invert —
-                // sRGB's curve stops at one — so it is held back, the
-                // part that fits is inverted, and what was held back is
-                // returned in proportion to how much of the layer is
-                // *not* the inversion. At `amount` zero that is all of
-                // it, and the layer is the identity it is asked to be
-                // rather than a highlight crusher.
-                let inside = v.clamp(0.0, 1.0);
-                let over = (v - inside).hi(0.0);
-                let s = chitrakar_color::linear_to_srgb(inside);
-                chitrakar_color::srgb_to_linear(s + (1.0 - s - s) * k) + over * (1.0 - k)
-            };
-            (f(r), f(g), f(b))
-        }
-        Adjustment::Posterize { levels } => {
-            // Evenly spaced as a device shows them: steps even in light
-            // would crowd all but one band into the shadows.
-            let steps = posterize_steps(*levels);
-            let f = |v: f32| {
-                let s = chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0));
-                chitrakar_color::srgb_to_linear((s * steps).rounded() / steps)
-            };
-            (f(r), f(g), f(b))
-        }
+        // On the values a device shows: light inverted is not what
+        // anyone means by a negative, since linear 0.5 shows as 188 and
+        // would come back a near-black rather than itself. From the
+        // table a pass has prepared, or by the formula without one.
+        Adjustment::Invert { amount } => match ready {
+            Some(Prepared::Through(tables, over)) => through(tables, over, r, g, b),
+            _ => {
+                let k = amount.clamp(0.0, 1.0);
+                let f = |v: f32| {
+                    let (inside, over) = invert_channel(v, k);
+                    inside + over
+                };
+                (f(r), f(g), f(b))
+            }
+        },
+        Adjustment::Posterize { levels } => match ready {
+            Some(Prepared::Through(tables, over)) => through(tables, over, r, g, b),
+            _ => {
+                let steps = posterize_steps(*levels);
+                (
+                    posterize_channel(r, steps),
+                    posterize_channel(g, steps),
+                    posterize_channel(b, steps),
+                )
+            }
+        },
         Adjustment::PhotoFilter {
             color,
             density,
             preserve_luminosity,
         } => {
-            let (glass, k) = match ready {
-                Some(Prepared::Glass(glass, k)) => (*glass, *k),
-                _ => photo_filter_glass(to_working(color), *density),
+            let (nr, ng, nb) = match ready {
+                Some(Prepared::Through(tables, over)) => through(tables, over, r, g, b),
+                _ => {
+                    let (glass, k) = photo_filter_glass(to_working(color), *density);
+                    let f = |v: f32, g: f32| {
+                        let (inside, over) = photo_filter_channel(v, g, k);
+                        inside + over
+                    };
+                    (f(r, glass[0]), f(g, glass[1]), f(b, glass[2]))
+                }
             };
-            // The colour through the glass, mixed back in by how strongly
-            // the glass is laid: on the values a device shows, where a
-            // density is judged, and what is above white through the
-            // glass in light.
-            let f = |v: f32, g: f32| {
-                let inside = v.clamp(0.0, 1.0);
-                let over = v - inside;
-                let s = chitrakar_color::linear_to_srgb(inside);
-                let gs = chitrakar_color::linear_to_srgb(g.clamp(0.0, 1.0));
-                chitrakar_color::srgb_to_linear(s + (s * gs - s) * k) + over * (1.0 + (g - 1.0) * k)
-            };
-            let (nr, ng, nb) = (f(r, glass[0]), f(g, glass[1]), f(b, glass[2]));
             if !*preserve_luminosity {
                 (nr, ng, nb)
             } else {
@@ -12137,7 +12222,14 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 + chitrakar_doc::LUMA[1] * g
                 + chitrakar_doc::LUMA[2] * b)
                 .clamp(0.0, 1.0);
-            let on = chitrakar_color::linear_to_srgb(l) >= threshold_level(*level);
+            let level = threshold_level(*level);
+            let on = match ready {
+                // The level brought into light instead, since the curve
+                // is monotone — except within a whisker of it, where the
+                // two could round apart, and the curve is asked.
+                Some(Prepared::Level(lin)) if (l - lin).abs() > 1e-6 => l > *lin,
+                _ => chitrakar_color::linear_to_srgb(l) >= level,
+            };
             let v = if on { 1.0 } else { 0.0 };
             (v, v, v)
         }
@@ -25114,6 +25206,150 @@ mod tests {
                 (lo - 0.5).abs() < 0.01 && (hi - 0.5).abs() < 0.01,
                 "{name}: the grey runs from {lo:.4} to {hi:.4}, where it should be 0.5"
             );
+        }
+    }
+
+    /// An invert, a posterize, a photo filter and a threshold are read
+    /// from what a pass prepares — a table a channel, or the level in
+    /// light — rather than worked out with powers a pixel, and have to
+    /// stay what the formula says: within five hundred-thousandths of
+    /// it for the smooth ones, across the deepest shadow where the
+    /// encoding is steepest, the middle, white and above white; between
+    /// the two steps either side for a posterize, whose table is read
+    /// between its entries and so rounds a step's edge off over one
+    /// four-thousandth of the light, and exactly the formula's step
+    /// everywhere else; and exactly for a threshold, either side of its
+    /// level and at it.
+    #[test]
+    fn a_channel_adjustment_by_table_is_the_adjustment_by_powers() {
+        let doc = Document::new(4, 4, ColorMode::Rgb);
+        let glass = |r: f32, g: f32, b: f32, a: f32| AuthoredColor::Srgb { r, g, b, a };
+        let smooth = [
+            Adjustment::Invert { amount: 1.0 },
+            Adjustment::Invert { amount: 0.35 },
+            Adjustment::Invert { amount: 0.0 },
+            Adjustment::PhotoFilter {
+                color: glass(0.93, 0.6, 0.1, 1.0),
+                density: 0.4,
+                preserve_luminosity: false,
+            },
+            Adjustment::PhotoFilter {
+                color: glass(0.2, 0.5, 1.0, 0.7),
+                density: 0.9,
+                preserve_luminosity: true,
+            },
+        ];
+        let pixel = |r: f32, g: f32, b: f32| LinearRgba {
+            r: r * 0.8,
+            g: g * 0.8,
+            b: b * 0.8,
+            a: 0.8,
+        };
+        let sweep = (0..=3000).map(|i| i as f32 / 2500.0);
+        let mut worst = 0.0f32;
+        for adj in &smooth {
+            let ready = prepare(&doc, adj).expect("prepared");
+            assert!(matches!(ready, Prepared::Through(..)));
+            for v in sweep.clone() {
+                for px in [
+                    pixel(v, v * 0.5, 1.0 - v.min(1.0)),
+                    pixel(1.0 - v.min(1.0), v, v * v),
+                ] {
+                    let by_table = apply_adjustment(adj, Some(&ready), px);
+                    let by_powers = apply_adjustment(adj, None, px);
+                    for (a, b) in [
+                        (by_table.r, by_powers.r),
+                        (by_table.g, by_powers.g),
+                        (by_table.b, by_powers.b),
+                    ] {
+                        // The most is at the seam of the encoding, where
+                        // its straight part meets the power law and an
+                        // invert at full strength is at its steepest: a
+                        // thousandth of an eight-bit step.
+                        let d = (a - b).abs();
+                        assert!(d < 5e-5, "{adj:?} at {px:?}: {a} by table, {b} by powers");
+                        worst = worst.max(d);
+                    }
+                    assert_eq!(by_table.a, by_powers.a);
+                }
+            }
+        }
+        assert!(worst > 0.0, "the table is read between its entries");
+        for levels in [2.0, 4.0, 17.0, 255.0] {
+            let adj = Adjustment::Posterize { levels };
+            let ready = prepare(&doc, &adj).expect("prepared");
+            let steps = posterize_steps(levels);
+            let mut rounded = 0;
+            for v in sweep.clone() {
+                let px = pixel(v, v * 0.5, 1.0 - v.min(1.0));
+                let by_table = apply_adjustment(&adj, Some(&ready), px);
+                let by_powers = apply_adjustment(&adj, None, px);
+                for (c, (a, b)) in [
+                    (by_table.r, by_powers.r),
+                    (by_table.g, by_powers.g),
+                    (by_table.b, by_powers.b),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let light = [px.r, px.g, px.b][c] / px.a;
+                    // The entries either side of the light: between
+                    // them, and the formula's own step where both are it.
+                    let x = light.clamp(0.0, 1.0) * CURVE_STEPS as f32;
+                    let (lo, hi) = (
+                        x.floor() / CURVE_STEPS as f32,
+                        x.ceil() / CURVE_STEPS as f32,
+                    );
+                    let (lo, hi) = (
+                        posterize_channel(lo, steps) * px.a,
+                        posterize_channel(hi, steps) * px.a,
+                    );
+                    if (lo - hi).abs() < 1e-7 {
+                        assert!(
+                            (a - b).abs() < 2e-6,
+                            "{levels} levels at {light}: {a} by table, {b} by the formula"
+                        );
+                    } else {
+                        assert!(
+                            a >= lo.min(hi) - 1e-7 && a <= lo.max(hi) + 1e-7,
+                            "{levels} levels at {light}: {a} is not between the steps {lo} and {hi}"
+                        );
+                        rounded += 1;
+                    }
+                }
+            }
+            // Some land in the cell a step's edge falls in, and most do
+            // not: at 255 levels a sixteenth of them.
+            assert!(
+                rounded > 0 && rounded * 8 < 9000,
+                "{levels} levels: {rounded} readings on a step's edge"
+            );
+        }
+        for level in [0.0, 0.18, 0.5, 0.73, 1.0] {
+            let adj = Adjustment::Threshold { level };
+            let ready = prepare(&doc, &adj).expect("prepared");
+            let lin = chitrakar_color::srgb_to_linear(level);
+            // Either side of the level, at it, and a float's width away.
+            let near = [
+                lin,
+                f32::from_bits(lin.to_bits().saturating_sub(1)),
+                f32::from_bits(lin.to_bits().saturating_add(1)),
+                lin - 1e-7,
+                lin + 1e-7,
+                lin - 2e-6,
+                lin + 2e-6,
+            ];
+            for v in sweep.clone().chain(near) {
+                for px in [pixel(v, v, v), pixel(v, 0.2, 0.9), pixel(0.1, v, 0.4)] {
+                    let by_level = apply_adjustment(&adj, Some(&ready), px);
+                    let by_curve = apply_adjustment(&adj, None, px);
+                    assert_eq!(
+                        by_level.r.to_bits(),
+                        by_curve.r.to_bits(),
+                        "threshold {level} at {px:?}: {by_level:?} by the level, {by_curve:?} by the curve"
+                    );
+                }
+            }
         }
     }
 
