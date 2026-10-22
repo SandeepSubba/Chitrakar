@@ -342,9 +342,15 @@ pub struct Session {
     /// in document pixels — `render_cached` carries it into the cache's own
     /// resolution.
     stale: Option<ClipRect>,
-    /// More regions of `cache` to recompute, in document pixels: a pan by
-    /// whole pixels exposes a strip along one edge and a strip along
-    /// another, and the one box round both would be most of the window.
+    /// More regions of `cache` to recompute — in the cache's own pixels,
+    /// unlike `stale`: a pan by whole pixels exposes a strip along one
+    /// edge and a strip along another, and the one box round both would
+    /// be most of the window. In the cache's pixels because a strip can
+    /// lie beside the page, where a document-space region cannot reach
+    /// and where there is still something to draw: an effect cast past
+    /// the page's edge, as far as `effects_reach`. Clamped to the page,
+    /// a strip beside it was cleared and never drawn again, and a shadow
+    /// at the page's edge went missing as the page was panned.
     stale_more: Vec<ClipRect>,
     /// Set when the whole presented surface must be redrawn rather than a
     /// region of the page: a new or resized cache, or a viewport that has
@@ -7964,29 +7970,25 @@ impl Session {
             self.showing = chitrakar_render::Showing::Everything;
             self.stale_all = true;
         }
-        let doc_clips: Vec<ClipRect> = self
-            .stale
-            .take()
-            .into_iter()
-            .chain(std::mem::take(&mut self.stale_more))
-            .collect();
+        let doc_clip = self.stale.take();
+        let strips = std::mem::take(&mut self.stale_more);
         let everything = std::mem::take(&mut self.stale_all);
         self.last_shift = self.shifted.take();
         self.repainted.clear();
-        if !everything && doc_clips.is_empty() {
-            // Nothing to recompute — but after a shift whose exposed
-            // strips all lay beside the page, the cache has still moved,
-            // and what was presented from it has to move too.
+        if !everything && doc_clip.is_none() && strips.is_empty() {
+            // Nothing to recompute — but after a shift the cache has
+            // still moved, and what was presented from it has to move too.
             let moved = self.last_shift.map(|_| full);
             return Ok((self.cache.as_ref().unwrap(), moved));
         }
-        // The dirty regions arrive in document pixels; the cache is kept
-        // in the view's, so carry each through the view and widen it
+        // The dirty region arrives in document pixels; the cache is kept
+        // in the view's, so carry it through the view and widen it
         // outwards to whole pixels rather than trusting a rounded edge.
+        // The strips a pan exposed are in the cache's pixels already.
         let clips: Vec<ClipRect> = if everything {
             vec![full]
         } else {
-            doc_clips
+            doc_clip
                 .iter()
                 .map(|d| {
                     ClipRect::from_float(
@@ -7997,8 +7999,9 @@ impl Session {
                         w,
                         h,
                     )
-                    .intersect(full)
                 })
+                .chain(strips)
+                .map(|c| c.intersect(full))
                 .filter(|c| !c.is_empty())
                 .collect()
         };
@@ -8052,11 +8055,21 @@ impl Session {
                 // reach can come from a file saying anything.
                 const PAST_THE_WINDOW: u32 = 1024;
                 let effects = chitrakar_render::effects_reach(&self.doc) * scale;
+                // And as far as a feathered mask softens: a feather at
+                // the window's edge with no room past it clamps there,
+                // and the pixel depends on where the window is — a seam
+                // once a pan keeps the frame before it.
+                let softening = chitrakar_render::softening_reach(&self.doc) * scale;
                 let past = if effects > 0.0 {
                     ((effects * 2.0).ceil() as u32).saturating_add(2)
                 } else {
                     0
                 }
+                .max(if softening > 0.0 {
+                    (softening.ceil() as u32).saturating_add(2)
+                } else {
+                    0
+                })
                 .max(pad)
                 .min(PAST_THE_WINDOW);
                 // Less than the page: one layer on its own, or the
@@ -8283,34 +8296,30 @@ impl Session {
             dy,
             chitrakar_color::LinearRgba::TRANSPARENT,
         );
-        // The strips the move exposed, in the new view's document pixels.
-        let scale = self.view_scale;
-        let doc = |x0: i64, y0: i64, x1: i64, y1: i64| {
-            Bounds::Rect(
-                (x0 as f32 - to.0) / scale,
-                (y0 as f32 - to.1) / scale,
-                (x1 as f32 - to.0) / scale,
-                (y1 as f32 - to.1) / scale,
-            )
-        };
-        let (dw, dh) = (self.doc.meta.width, self.doc.meta.height);
-        let mut expose = |b: Bounds| {
-            if let Some(clip) = b.to_clip(dw, dh) {
-                self.stale_more.push(clip);
+        // The strips the move exposed, in the cache's own pixels — whole,
+        // beside the page as well as on it.
+        let mut expose = |x0: i64, y0: i64, x1: i64, y1: i64| {
+            if x1 > x0 && y1 > y0 {
+                self.stale_more.push(ClipRect {
+                    x0: x0 as u32,
+                    y0: y0 as u32,
+                    x1: x1 as u32,
+                    y1: y1 as u32,
+                });
             }
         };
         // A strip down one side, and a strip along the top or bottom of
         // the columns that strip does not already cover.
         if dx > 0 {
-            expose(doc(0, 0, dx, h));
+            expose(0, 0, dx, h);
         } else if dx < 0 {
-            expose(doc(w + dx, 0, w, h));
+            expose(w + dx, 0, w, h);
         }
         let (x0, x1) = if dx > 0 { (dx, w) } else { (0, w + dx) };
         if dy > 0 {
-            expose(doc(x0, 0, x1, dy));
+            expose(x0, 0, x1, dy);
         } else if dy < 0 {
-            expose(doc(x0, h + dy, x1, h));
+            expose(x0, h + dy, x1, h);
         }
         let (sx, sy) = self.shifted.unwrap_or((0, 0));
         self.shifted = Some((sx + dx as i32, sy + dy as i32));
@@ -12009,9 +12018,20 @@ mod tests {
                     }),
                     "panned by ({dx},{dy}), all of the frame is presented"
                 );
-                if moved.last_repainted().is_empty() {
+                // A strip wholly beside the page is still repainted — an
+                // effect can be cast past the page's edge.
+                let page_x = (x, x + 400.0 * zoom);
+                if moved
+                    .last_repainted()
+                    .iter()
+                    .any(|c| (c.x1 as f32) <= page_x.0 || (c.x0 as f32) >= page_x.1)
+                {
                     beside += 1;
                 }
+                assert!(
+                    !moved.last_repainted().is_empty(),
+                    "panned by ({dx},{dy}): the strips are repainted, beside the page too"
+                );
                 let mut fresh = build(blurred);
                 fresh.set_viewport(zoom, x, y, w, h);
                 let mut whole = Vec::new();
@@ -12034,6 +12054,110 @@ mod tests {
                 "and some pans exposed only what lies beside the page"
             );
         }
+    }
+
+    /// A page nobody wrote, through a window lying beside a group that
+    /// holds a radial blur: the group's surface wants nothing of the
+    /// window, and the blur, asked to write that nothing grown by the
+    /// reach above and cut to its clip, was handed an inverted rectangle
+    /// and took a slice of its snapshot by edges before the clip's —
+    /// arithmetic past nought, found by an audit over random pages.
+    #[test]
+    fn a_window_beside_a_group_of_blurs_on_a_page_nobody_wrote_draws() {
+        // As the audit had it: the window two-thirds of the page, the
+        // origin from the seed, three pans and an edit.
+        let doc = chitrakar_doc::fixture::page(33);
+        let (pw, ph) = (doc.meta.width, doc.meta.height);
+        let (w, h) = ((pw * 2 / 3).max(8), (ph * 2 / 3).max(8));
+        let (mut x, mut y) = (-10.0f32, -13.0f32);
+        let mut s = Session::new(1, 1, ColorMode::Rgb);
+        s.doc = doc.clone();
+        s.stale_all = true;
+        s.set_viewport(1.0, x, y, w, h);
+        s.render_cached().unwrap();
+        for (dx, dy) in [(7.0, 3.0), (-15.0, 9.0), (4.0, -20.0)] {
+            x += dx;
+            y += dy;
+            s.set_viewport(1.0, x, y, w, h);
+            s.render_cached().unwrap();
+        }
+        let root = s.document().root();
+        let id = s.document().children_of(root).unwrap()[0];
+        let t = s.document().node(id).unwrap().transform;
+        s.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                e: t.e + 5.0,
+                f: t.f - 3.0,
+                ..t
+            },
+        })
+        .unwrap();
+        let frame = s.render_cached().unwrap().0.pixels.clone();
+        let mut fresh = Session::new(1, 1, ColorMode::Rgb);
+        fresh.doc = s.document().clone();
+        fresh.stale_all = true;
+        fresh.set_viewport(1.0, x, y, w, h);
+        let whole = fresh.render_cached().unwrap().0.pixels.clone();
+        assert!(frame
+            .iter()
+            .zip(&whole)
+            .all(|(p, q)| (p.a - q.a).abs() < 0.002 && (p.r - q.r).abs() < 0.002));
+    }
+
+    /// Two pages nobody wrote, each through a window and panned by whole
+    /// pixels, held to a session that only ever looked there — the pan
+    /// path drawing the frame before it, shifted, and the strips the pan
+    /// exposed afresh. Page 488 holds a copy of a page-sized layer that
+    /// stands past the page's edge, and is drawn there: a strip exposed
+    /// beside the page has it too, which a strip marked in document
+    /// pixels and clamped to the page never drew again. Page 14 holds a
+    /// text block under a feathered mask: a feather at the window's edge
+    /// with no room past it clamps there, so the pixel depended on where
+    /// the window was, and a pan that kept it left a seam. Both from an
+    /// audit of six hundred such pages, which is clean now.
+    #[test]
+    fn pages_nobody_wrote_panned_through_a_window_are_the_fresh_view() {
+        let compare = |seed: u64, scale: f32, from: (f32, f32), by: (f32, f32)| {
+            let doc = chitrakar_doc::fixture::page(seed);
+            let (pw, ph) = (doc.meta.width, doc.meta.height);
+            let (w, h) = ((pw * 2 / 3).max(8), (ph * 2 / 3).max(8));
+            let mut moved = Session::new(1, 1, ColorMode::Rgb);
+            moved.doc = doc.clone();
+            moved.stale_all = true;
+            moved.set_viewport(scale, from.0, from.1, w, h);
+            moved.render_cached().unwrap();
+            let (x, y) = (from.0 + by.0, from.1 + by.1);
+            moved.set_viewport(scale, x, y, w, h);
+            let frame = moved.render_cached().unwrap().0.pixels.clone();
+            assert_eq!(moved.last_shift(), Some((by.0 as i32, by.1 as i32)));
+            let mut fresh = Session::new(1, 1, ColorMode::Rgb);
+            fresh.doc = doc;
+            fresh.stale_all = true;
+            fresh.set_viewport(scale, x, y, w, h);
+            let whole = fresh.render_cached().unwrap().0.pixels.clone();
+            let mut worst = (0.0f32, 0u32, 0u32);
+            for (i, (p, q)) in frame.iter().zip(&whole).enumerate() {
+                let d = [(p.r - q.r), (p.g - q.g), (p.b - q.b), (p.a - q.a)]
+                    .iter()
+                    .map(|v| v.abs())
+                    .fold(0.0f32, f32::max);
+                if d > worst.0 {
+                    worst = (d, i as u32 % w, i as u32 / w);
+                }
+            }
+            assert!(
+                worst.0 < 0.002,
+                "page {seed} panned by {by:?}: {:?} by {} at {},{}",
+                frame[(worst.2 * w + worst.1) as usize].to_srgb8(),
+                worst.0,
+                worst.1,
+                worst.2
+            );
+        };
+        // As the audit had them: the origin from the seed, a pan of 7,3.
+        compare(488, 0.5, (-5.0, -9.0), (7.0, 3.0));
+        compare(14, 1.5, (-14.0, -11.0), (7.0, 3.0));
     }
 
     #[test]

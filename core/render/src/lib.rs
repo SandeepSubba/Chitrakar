@@ -831,6 +831,22 @@ pub fn effects_reach(doc: &Document) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
+/// How far, in document pixels, any feathered mask on the page softens
+/// past its own edge — a layer's own, one inside a group, one on what a
+/// copy copies, each measured in the space it is drawn in. A window
+/// drawn without that much room past its own edge gives a feather at
+/// the edge nothing to soften against, and the pixel there comes out
+/// a little different from the same pixel with the window elsewhere:
+/// a seam, once a pan keeps the frame before it.
+pub fn softening_reach(doc: &Document) -> f32 {
+    let reach = softening_within(doc, doc.root(), Transform::default(), 0);
+    if reach.is_finite() {
+        reach
+    } else {
+        0.0
+    }
+}
+
 /// How far, in pixels, the document's filter stack can carry a change:
 /// the summed sample reach of every filter layer (sequential filters
 /// compound). A region render whose clip is padded by this much computes
@@ -8680,6 +8696,9 @@ fn smeared(
     view: Transform,
 ) -> Vec<LinearRgba> {
     let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
+    if write.is_empty() {
+        return Vec::new();
+    }
     let part = |original: &[LinearRgba]| {
         let mut out = Vec::with_capacity(write.area() as usize);
         for y in write.y0..write.y1 {
@@ -8779,6 +8798,13 @@ fn radially_smeared(
 ) -> Vec<LinearRgba> {
     let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
     let reach = radial_reach(amount, spin);
+    // Nothing wanted of this clip — a window lying wholly beside the
+    // group the filter is in — is nothing to write: an empty rectangle
+    // can be an inverted one, with its far edge before the clip's near
+    // one, and taking a slice by it was arithmetic past nought.
+    if write.is_empty() {
+        return Vec::new();
+    }
     let part = |original: &[LinearRgba]| {
         let mut out = Vec::with_capacity(write.area() as usize);
         for y in write.y0..write.y1 {
@@ -8792,7 +8818,7 @@ fn radially_smeared(
     let Some(inv) = Inverse::of(view) else {
         return part(original);
     };
-    if w <= 0 || h <= 0 || reach <= 0.0 || write.is_empty() {
+    if w <= 0 || h <= 0 || reach <= 0.0 {
         return part(original);
     }
     let at = |v: f32| if v.is_finite() { v } else { 0.5 };
@@ -23095,6 +23121,103 @@ mod tests {
                         "{where_}: and the page's own pixel at {x},{y} is blurred"
                     );
                 }
+            }
+        }
+    }
+
+    /// A window lying wholly beside a group holding a radial blur and a
+    /// motion blur wants nothing of the group's surface — and what the
+    /// filters are then asked to write, that nothing grown by the reach
+    /// above and cut to their clip, is an inverted rectangle. It drew
+    /// nothing, as it should, after taking a slice of the snapshot by
+    /// edges that lay before the clip's — arithmetic past nought, found
+    /// by an audit over random pages.
+    #[test]
+    fn a_window_beside_a_group_of_blurs_asks_nothing_of_them() {
+        use chitrakar_doc::Filter;
+        let mut doc = Document::new(120, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let g = doc.children_of(root).unwrap()[0];
+        let mut index = 0;
+        let mut add = |doc: &mut Document, node: Node, at: (f32, f32)| {
+            doc.apply(Command::AddNode {
+                parent: g,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(g).unwrap()[index];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(at.0, at.1),
+            })
+            .unwrap();
+            index += 1;
+        };
+        add(
+            &mut doc,
+            *filled_rect(
+                "r",
+                30.0,
+                30.0,
+                AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.3,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ),
+            (5.0, 10.0),
+        );
+        add(
+            &mut doc,
+            Node::filter(
+                "zoom",
+                Filter::RadialBlur {
+                    amount: 0.3,
+                    spin: false,
+                    center: [0.5, 0.5],
+                },
+            ),
+            (0.0, 0.0),
+        );
+        add(
+            &mut doc,
+            Node::filter(
+                "motion",
+                Filter::MotionBlur {
+                    distance: 6.0,
+                    degrees: 20.0,
+                },
+            ),
+            (0.0, 0.0),
+        );
+        let whole = render(&doc).unwrap();
+        // Wanting the right end of the page alone, while drawing the
+        // whole of it: the group's window is the left, and wants nothing.
+        let wanted = ClipRect {
+            x0: 100,
+            y0: 0,
+            x1: 120,
+            y1: 60,
+        };
+        let mut surface = Surface::new(120, 60);
+        surface.wanted = Some(wanted);
+        let all = surface.full_clip();
+        render_region(&doc, &mut surface, all).unwrap();
+        for y in 0..60 {
+            for x in 100..120 {
+                let (p, q) = (surface.get(x, y), whole.get(x, y));
+                assert!(
+                    (p.a - q.a).abs() < 1e-5 && (p.r - q.r).abs() < 1e-5,
+                    "at {x},{y}: {p:?} against the page's {q:?}"
+                );
             }
         }
     }
