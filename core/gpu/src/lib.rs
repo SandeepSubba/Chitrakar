@@ -296,6 +296,12 @@ enum Draw {
         /// ones over it after, which is the order the CPU renderer takes
         /// and the only one an inner shadow makes sense in.
         effects: Vec<Painted>,
+        /// The coverage the surface's own way down is held by — the
+        /// masks of the layers above, and nothing of what the layer is
+        /// held to or the frame it is in, which its drawing already took
+        /// once (`Item::mask` is the effects', which take that cut again
+        /// as the reference cuts an effect by the base).
+        down: Option<usize>,
     },
 }
 
@@ -3176,14 +3182,14 @@ fn one(
     // on both sides, and a page held to a turned base agrees to a
     // two-thousandth on average, its interiors exactly. Held to something
     // turned, it is drawn. Held to a brush layer — soft all the way round —
-    // it still goes back.
-    if !node.effects.is_empty() {
-        if let Some(base) = held_to {
-            if matches!(doc.node(base).ok()?.kind, NodeKind::Paint { .. }) {
-                return none!();
-            }
-        }
-    }
+    // it went back a while longer, on a drift measured before the
+    // reference cut by alpha; asked again after, a rectangle with a
+    // shadow, an outline or an inner shadow held to a brushed shape is
+    // within a four-hundredth on average and its interiors exact, the
+    // worst pixel being the soft cut's own edge as it is for the bare
+    // held layer, and the random pages that hold one (58) draw as the
+    // reference draws them. So it is drawn
+    // (`an_effect_held_to_a_brush_layer_is_drawn`).
     // An upright frame, faded or masked and brought down by Normal,
     // holding something that reads the page: the reference draws it
     // where it stands — on a surface of its own what it holds would have
@@ -4087,6 +4093,7 @@ fn one(
                             quad,
                             blend: BlendMode::Normal,
                             effects: Vec::new(),
+                            down: at,
                         },
                         mask: at,
                         within: None,
@@ -4282,6 +4289,9 @@ fn one(
     // drawing rather than on the way down, since a mask decides what the
     // silhouette is and so what the shadow is a shadow of.
     let mut laid = None;
+    // The quad that lays the surface down, when there is one, so its
+    // own coverage can be told from the effects'.
+    let mut lay_quad: Option<std::ops::Range<u32>> = None;
     // A frame above cuts what the layer *lays down*, and not the
     // silhouette its effects grew from: the CPU renderer builds a field
     // over a window grown past the frame's edge by the effect's own
@@ -4453,10 +4463,12 @@ fn one(
             }
             out.draws.push(Item::of(Draw::Mix { quad }));
         } else {
+            lay_quad = Some(quad.clone());
             out.draws.push(Item::of(Draw::Close {
                 quad,
                 blend: node.blend,
                 effects,
+                down: None,
             }));
         }
     }
@@ -4588,6 +4600,49 @@ fn one(
             texture: over,
             quad: box_over,
         });
+        // The surface's own way down is held by the masks above and
+        // nothing else: what the layer is held to, and the frame it is
+        // in, were taken once on its drawing — the reference cuts a
+        // held layer once, before anything is made of it — and taken
+        // again here they were squared wherever the cut is soft. A
+        // rectangle with a shadow held to a brushed shape came down a
+        // quarter short along the whole of the brush's edge. The effects
+        // keep the cut: the reference cuts an effect by the base as well.
+        if let Some(lay) = lay_quad {
+            let (down, box_down) = if out.worn.is_empty() {
+                (None, NO_MASK)
+            } else {
+                mask_texture(
+                    doc,
+                    child,
+                    Held {
+                        mask: None,
+                        to: None,
+                        bound: None,
+                        parent,
+                        turned: None,
+                    },
+                    true,
+                    out,
+                )?
+            };
+            for v in &mut out.vertices[lay.start as usize..lay.end as usize] {
+                v.mask = box_down;
+            }
+            if let Some(Item {
+                draw: Draw::Close { down: d, .. },
+                ..
+            }) = out.draws.last_mut()
+            {
+                *d = down;
+            }
+            out.placed.push(Settled {
+                vertices: lay.start as usize..lay.end as usize,
+                draws: out.draws.len()..out.draws.len(),
+                texture: down,
+                quad: box_down,
+            });
+        }
     }
     Some(())
 }
@@ -6774,6 +6829,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                 quad,
                 blend,
                 effects,
+                down,
             } => {
                 let from = stack.pop().unwrap_or(0);
                 clear = false;
@@ -6814,7 +6870,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                         lay: Some(Opening::Lay {
                             from,
                             quad: quad.clone(),
-                            mask: item.mask,
+                            mask: *down,
                             blend: *blend,
                         }),
                         items: i..i,
@@ -9868,16 +9924,19 @@ mod tests {
         assert!(mean < 0.002, "mean {mean:.5}, worst {worst:.3}");
     }
 
-    /// A layer wearing an effect held to a brush layer goes back.
+    /// A layer wearing an effect held to a brush layer is drawn, the way
+    /// the reference draws it.
     ///
     /// Where the cut a held layer is given is soft, the two renderers
-    /// compound it with the effect differently — the open question on
-    /// the roadmap, for which a base standing at an angle already goes
-    /// back. A brushed base is soft all the way round, and a rectangle
-    /// with a shadow held to one drifted by twice the level the pages
-    /// nobody wrote are held to. Bare, the same held layer is drawn.
+    /// once compounded it with the effect differently, and a brushed
+    /// base is soft all the way round: a rectangle with a shadow held to
+    /// one drifted by twice the level the pages nobody wrote are held
+    /// to, and went back. Since the reference cuts by the base's alpha
+    /// the two agree — interiors exact, and the worst pixel no worse
+    /// than the bare held layer's own soft edge — for a shadow, an
+    /// outline and an inner shadow alike.
     #[test]
-    fn an_effect_held_to_a_brush_layer_goes_back() {
+    fn an_effect_held_to_a_brush_layer_is_drawn() {
         let mut doc = Document::new(40, 30, ColorMode::Rgb);
         let mut brush = Node::paint("brushed");
         if let NodeKind::Paint { strokes } = &mut brush.kind {
@@ -9912,22 +9971,59 @@ mod tests {
         })
         .unwrap();
         assert!(GpuRenderer::can_render(&doc), "bare, it is drawn");
-        doc.apply(Command::SetEffects {
-            id: held,
-            effects: vec![chitrakar_doc::Effect::DropShadow {
-                dx: 2.0,
-                dy: -1.5,
-                blur: 1.3,
-                color: BLUE,
-                opacity: 1.0,
-                spread: 0.0,
-            }],
-        })
-        .unwrap();
-        assert!(
-            !GpuRenderer::can_render(&doc),
-            "wearing a shadow, it goes back"
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (_, bare_worst) = difference(
+            &gpu.render(&doc).unwrap(),
+            &chitrakar_render::render(&doc).unwrap(),
         );
+        use chitrakar_doc::Effect as E;
+        for (what, effects) in [
+            (
+                "a shadow",
+                vec![E::DropShadow {
+                    dx: 2.0,
+                    dy: -1.5,
+                    blur: 1.3,
+                    color: BLUE,
+                    opacity: 1.0,
+                    spread: 0.0,
+                }],
+            ),
+            (
+                "an outline",
+                vec![E::Outline {
+                    width: 2.0,
+                    color: BLUE,
+                    opacity: 1.0,
+                }],
+            ),
+            (
+                "an inner shadow",
+                vec![E::InnerShadow {
+                    dx: 2.0,
+                    dy: 2.0,
+                    blur: 1.0,
+                    color: BLUE,
+                    opacity: 0.8,
+                    spread: 0.0,
+                }],
+            ),
+        ] {
+            doc.apply(Command::SetEffects { id: held, effects })
+                .unwrap();
+            assert!(GpuRenderer::can_render(&doc), "wearing {what}, it is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && worst < bare_worst + 0.05 && over == 0 && in_mean < 0.002,
+                "wearing {what}: mean {mean:.5} (worst {worst:.3}, bare {bare_worst:.3}), \
+                 interiors {in_mean:.5} (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+        }
     }
 
     /// A masked copy of a blended layer wearing an effect goes back.
