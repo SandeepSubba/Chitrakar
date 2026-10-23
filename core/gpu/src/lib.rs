@@ -2990,16 +2990,14 @@ fn one(
                 // a fiftieth and the page went back. The reading is the
                 // page's own cut now (`clip_coverage_at`), effects left
                 // out exactly where the page leaves them out, so a base
-                // wearing one is a base like any other —
-                //
-                // — except a frame. A frame wearing effects is drawn by a
-                // road of its own on both sides (in place, when what it
-                // holds works on the page), and a layer held to one came
-                // out a sixtieth apart on a page nobody wrote. Those stay
-                // the CPU's.
-                if !b.effects.is_empty() && matches!(b.kind, NodeKind::Artboard { .. }) {
-                    return none!();
-                }
+                // wearing one is a base like any other — a frame wearing
+                // effects included, which stayed the CPU's a while longer
+                // on a sixtieth of drift on a page nobody wrote, measured
+                // while a surface's way down was still taking the cut
+                // twice (`Draw::Close::down`); asked again after, a layer
+                // held to a frame casting a shadow is the reference's
+                // picture (`a_layer_held_to_a_base_with_a_shadow_is_held_
+                // to_the_base`) and so are the random pages that hold one.
                 Some(base)
             }
         }
@@ -18807,7 +18805,9 @@ mod tests {
     /// by before the base's effects are drawn, so the shadow is under
     /// the base and nothing above shows through it. The backend read the
     /// base drawn whole, shadow and all, and handed such a page back; it
-    /// reads the page's own cut now (`clip_coverage_at`).
+    /// reads the page's own cut now (`clip_coverage_at`). A frame as the
+    /// base too, which went back a while longer on a drift that turned
+    /// out to be the way down taking the cut twice.
     #[test]
     fn a_layer_held_to_a_base_with_a_shadow_is_held_to_the_base() {
         let Some(gpu) = gpu_or_skip() else {
@@ -18818,13 +18818,33 @@ mod tests {
             height: 20.0,
             radius: 0.0,
         };
-        for blend in [BlendMode::Normal, BlendMode::Multiply] {
+        for (blend, framed) in [
+            (BlendMode::Normal, false),
+            (BlendMode::Multiply, false),
+            (BlendMode::Normal, true),
+            (BlendMode::Multiply, true),
+        ] {
             let mut doc = Document::new(48, 48, ColorMode::Rgb);
-            let base = add(
-                &mut doc,
-                filled("base", rect.clone(), RED),
-                Transform::translation(8.0, 8.0),
-            );
+            let base = if framed {
+                let frame = add(
+                    &mut doc,
+                    Box::new(Node::artboard("base", 20.0, 20.0, Some(RED))),
+                    Transform::translation(8.0, 8.0),
+                );
+                doc.apply(Command::AddNode {
+                    parent: frame,
+                    index: 0,
+                    node: filled("in it", VectorShape::Ellipse { rx: 6.0, ry: 6.0 }, WHITE),
+                })
+                .unwrap();
+                frame
+            } else {
+                add(
+                    &mut doc,
+                    filled("base", rect.clone(), RED),
+                    Transform::translation(8.0, 8.0),
+                )
+            };
             doc.apply(Command::SetEffects {
                 id: base,
                 effects: vec![chitrakar_doc::Effect::DropShadow {
@@ -18851,14 +18871,16 @@ mod tests {
                 .unwrap();
             assert!(
                 GpuRenderer::can_render(&doc),
-                "{blend:?}: held to a base that casts a shadow"
+                "{blend:?} (frame {framed}): held to a base that casts a shadow"
             );
             let mine = gpu.render(&doc).unwrap();
             let reference = chitrakar_render::render(&doc).unwrap();
             let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
             assert!(
-                mean < 0.004 && worst < 0.2,
-                "{blend:?}: mean {mean:.5}, worst {worst:.3}"
+                mean < 0.004 && worst < 0.2 && over == 0 && in_mean < 0.002,
+                "{blend:?} (frame {framed}): mean {mean:.5}, worst {worst:.3}, interiors \
+                 {in_mean:.5} (worst {in_worst:.3} at {spot:?}, {over} over)"
             );
             // Where only the shadow is — past the base, inside the layer
             // above — nothing of the layer above shows.
