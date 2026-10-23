@@ -594,7 +594,12 @@ without reading anything else.*
   the engine's own frames went, by the WebAssembly engine alone, is in
   each entry near the end of this section; the next thing to look at on
   the shadows page is the coverage blur itself and the window surfaces
-  each shadowed layer allocates.
+  each shadowed layer allocates. Tried and not taken: leaving a shadow
+  unstamped under the pixels its own opaque layer will cover in Normal
+  (exact, since the layer over anything is the layer). On that page the
+  shape is about a third of each shadow's window, the rest being halo,
+  and the gain was about 2% of a frame, inside the bench's noise — not
+  worth a surface threaded through every effect call.
 - **Renderer performance:** the transform inverse is solved once per shape
   (`Inverse`), not per coverage sample — a boundary pixel asks for up to
   twenty-one. Groups only paint where their contents can land, and a group
