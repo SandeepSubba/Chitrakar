@@ -8071,6 +8071,24 @@ fn text_by_ink() -> bool {
     true
 }
 
+/// Whether text with no shear or turn reads its raster a row of samples
+/// at a time (`TextRaster::rows_at`) or a sample at a time; a test
+/// toggles it to hold the one to the other.
+#[cfg(not(test))]
+fn text_by_rows() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEXT_BY_ROWS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn text_by_rows() -> bool {
+    TEXT_BY_ROWS.with(|b| b.get())
+}
+
 #[cfg(test)]
 thread_local! {
     static TEXT_BY_INK: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
@@ -11823,13 +11841,25 @@ fn draw_text(
         } else {
             (bbox.x0, bbox.x1)
         };
+        // With no shear or turn at all, a row of the window is a row of
+        // the block — the inverse's own shear is a signed nought, which
+        // moves no sum — so the two raster rows it reads are picked once
+        // for the row rather than at every pixel (`TextRaster::rows_at`,
+        // the same sample to the bit).
+        let rows = (t.b == 0.0 && t.c == 0.0 && text_by_rows()).then(|| {
+            let (_, ly) = inv.at(0.0, py as f32 + 0.5);
+            raster.rows_at((ly - oy) * scale)
+        });
         for px in x_from..x_to {
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             let (lx, ly) = (lx - ox, ly - oy);
             if lx < 0.0 || ly < 0.0 {
                 continue;
             }
-            let c = raster.sample_at(lx * scale, ly * scale);
+            let c = match &rows {
+                Some(rows) => rows.sample_at(lx * scale),
+                None => raster.sample_at(lx * scale, ly * scale),
+            };
             if c <= 0.0 {
                 continue;
             }
@@ -19773,6 +19803,147 @@ mod tests {
             }
         }
         assert!(inked_pixels > 500, "and text was drawn ({inked_pixels})");
+    }
+
+    /// A text raster read a row of samples at a time is the raster read a
+    /// sample at a time, to the bit: at every place tried — between
+    /// texels, on them, half a texel off each edge and further, below
+    /// nothing, and not a number — and so a block drawn either way is the
+    /// same block, at its own size and zoomed, shifted by fractions,
+    /// flipped across and upside down, cut by a clip, and in more than
+    /// one colour.
+    #[test]
+    fn a_row_of_samples_is_the_samples() {
+        let spec = |text: &str, size: f32| chitrakar_doc::TextSpec::new(text, size, RED);
+        let raster = text::rasterize(&spec("Rows\nand rows of ink", 17.0));
+        let (w, h) = (raster.width as f32, raster.height as f32);
+        let mut seed = 0x1357_9bdfu32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let mut places: Vec<f32> = (0..60).map(|_| next() * (w + 6.0) - 3.0).collect();
+        places.extend([
+            -1.0,
+            -0.5,
+            0.0,
+            0.25,
+            0.5,
+            1.0,
+            w - 0.5,
+            w,
+            w + 0.5,
+            w + 2.0,
+            f32::NAN,
+        ]);
+        let mut heights: Vec<f32> = (0..40).map(|_| next() * (h + 6.0) - 3.0).collect();
+        heights.extend([-1.0, -0.5, 0.0, 0.5, 1.5, h - 0.5, h, h + 0.5, f32::NAN]);
+        let mut inked = 0;
+        for y in &heights {
+            let rows = raster.rows_at(*y);
+            for x in &places {
+                let (a, b) = (rows.sample_at(*x), raster.sample_at(*x, *y));
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "at ({x}, {y}): {a} by rows, {b} alone"
+                );
+                if a > 0.0 {
+                    inked += 1;
+                }
+            }
+        }
+        assert!(inked > 100, "and ink was read ({inked})");
+        let draw = |by_rows: bool, text: &str, t: Transform, clip: Option<ClipRect>| {
+            TEXT_BY_ROWS.with(|b| b.set(by_rows));
+            let mut doc = Document::new(120, 90, ColorMode::Rgb);
+            let root = doc.root();
+            let mut block = spec(text, 16.0);
+            // Two colours, so the per-pixel tint is read beside the rows.
+            let mut blue = chitrakar_doc::StyleRun::over(0, 3);
+            blue.fill = Some(BLUE);
+            block.runs = vec![blue];
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::text("t", block)),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            doc.apply(Command::SetTransform { id, transform: t })
+                .unwrap();
+            let mut surface = Surface::new(120, 90);
+            let clip = clip.unwrap_or(surface.full_clip());
+            render_region(&doc, &mut surface, clip).unwrap();
+            TEXT_BY_ROWS.with(|b| b.set(true));
+            surface
+        };
+        let scaled = |k: f32, e: f32, f: f32| Transform {
+            a: k,
+            b: 0.0,
+            c: 0.0,
+            d: k,
+            e,
+            f,
+        };
+        let cases = [
+            (Transform::translation(6.0, 5.0), None),
+            (scaled(1.7, 3.3, 2.1), None),
+            (scaled(0.45, 1.25, 0.75), None),
+            (Transform::translation(-8.5, -4.25), None),
+            (
+                Transform {
+                    a: -1.0,
+                    b: 0.0,
+                    c: 0.0,
+                    d: 1.0,
+                    e: 110.0,
+                    f: 5.0,
+                },
+                None,
+            ),
+            (
+                Transform {
+                    a: 1.3,
+                    b: 0.0,
+                    c: 0.0,
+                    d: -0.9,
+                    e: 4.0,
+                    f: 80.0,
+                },
+                None,
+            ),
+            (
+                Transform::translation(6.0, 5.0),
+                Some(ClipRect {
+                    x0: 10,
+                    y0: 8,
+                    x1: 70,
+                    y1: 50,
+                }),
+            ),
+        ];
+        let mut drawn = 0;
+        for (t, clip) in cases {
+            let text = "Two colours\nand a second line";
+            let by_rows = draw(true, text, t, clip);
+            let alone = draw(false, text, t, clip);
+            for (i, (p, q)) in by_rows.pixels.iter().zip(&alone.pixels).enumerate() {
+                assert!(
+                    [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                        == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                    "under {t:?}: pixel {},{} is {p:?} by rows, {q:?} a sample at a time",
+                    i % 120,
+                    i / 120
+                );
+                if p.a > 0.0 {
+                    drawn += 1;
+                }
+            }
+        }
+        assert!(drawn > 500, "and text was drawn ({drawn})");
     }
 
     /// The radial blur worked a run of pixels at a time is the radial blur

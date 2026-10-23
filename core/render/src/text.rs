@@ -1369,6 +1369,34 @@ impl TextRaster {
         top * (1.0 - fy) + bottom * fy
     }
 
+    /// The two rows a sample at height `y` reads, picked once for a whole
+    /// row of samples: what [`sample_at`](Self::sample_at) works out
+    /// again for every one of them, along with four bounds checks, when
+    /// a block standing square on the page samples one row of the raster
+    /// pair across a whole row of the window. The same arithmetic in the
+    /// same order, so a sample read through these is the sample read
+    /// directly, to the bit (`a_row_of_samples_is_the_samples`).
+    pub fn rows_at(&self, y: f32) -> RasterRows<'_> {
+        let v = y - 0.5;
+        let v0 = v.floor();
+        let w = self.width as usize;
+        // `sample` reads nothing below the top or past the bottom, and
+        // takes a NaN's row as the first, which `as` does too.
+        let row = |j: f32| -> &[f32] {
+            if j < 0.0 || j >= self.height as f32 {
+                &[]
+            } else {
+                let j = j as usize;
+                &self.coverage[j * w..(j + 1) * w]
+            }
+        };
+        RasterRows {
+            top: row(v0),
+            bottom: row(v0 + 1.0),
+            fy: v - v0,
+        }
+    }
+
     /// Which of `colors` inked the pixel `x, y` falls in, or nothing when
     /// the block is all one colour. Nearest rather than mixed: a colour
     /// is a choice, not a quantity, and blending two of them across the
@@ -1383,6 +1411,34 @@ impl TextRaster {
             return None;
         }
         Some(self.tint[(j as u32 * self.width + i as u32) as usize] as usize)
+    }
+}
+
+/// Two rows of a raster and where between them a row of samples falls
+/// (`TextRaster::rows_at`).
+pub struct RasterRows<'a> {
+    top: &'a [f32],
+    bottom: &'a [f32],
+    fy: f32,
+}
+
+impl RasterRows<'_> {
+    /// [`TextRaster::sample_at`] at `x` on these rows.
+    #[inline]
+    pub fn sample_at(&self, x: f32) -> f32 {
+        let u = x - 0.5;
+        let u0 = u.floor();
+        let fx = u - u0;
+        let at = |row: &[f32], i: f32| {
+            if i < 0.0 {
+                0.0
+            } else {
+                row.get(i as usize).copied().unwrap_or(0.0)
+            }
+        };
+        let top = at(self.top, u0) * (1.0 - fx) + at(self.top, u0 + 1.0) * fx;
+        let bottom = at(self.bottom, u0) * (1.0 - fx) + at(self.bottom, u0 + 1.0) * fx;
+        top * (1.0 - self.fy) + bottom * self.fy
     }
 }
 
