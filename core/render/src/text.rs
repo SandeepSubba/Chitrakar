@@ -323,7 +323,7 @@ fn leaned(
 ) -> Option<ab_glyph::OutlinedGlyph> {
     use ab_glyph::{point, OutlineCurve, Point};
     let lean = |p: Point| point(p.x + slant * p.y, p.y);
-    let mut outline = font.outline(glyph.id)?;
+    let mut outline = kept_outline(font, glyph.id)?;
     for curve in &mut outline.curves {
         match curve {
             OutlineCurve::Line(a, b) => {
@@ -548,6 +548,62 @@ fn shaped(
     }
     kept.insert(key, placed.clone());
     placed
+}
+
+/// A glyph's outline in font units, as the font gives it.
+///
+/// The same at every size, every place and every frame — a glyph is
+/// scaled and placed after — and reading it out of the font file was a
+/// sixth of what rasterizing a page of text cost, every glyph of every
+/// block parsed again each time the page was drawn at a new zoom. Kept by
+/// the face and the glyph, and let go of wholesale past a few faces'
+/// worth. An outline kept is the outline read, so a glyph drawn from one
+/// is the glyph drawn from the other to the bit
+/// (`a_glyph_from_a_kept_outline_is_the_glyph`).
+fn kept_outline(font: &FontRef<'static>, id: ab_glyph::GlyphId) -> Option<ab_glyph::Outline> {
+    use std::sync::{Arc, Mutex};
+    type Kept = HashMap<(usize, u16), Option<Arc<ab_glyph::Outline>>>;
+    static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
+    const MOST: usize = 8192;
+    if !keep_outlines() {
+        return font.outline(id);
+    }
+    // The face lives as long as the program (`Fonts` are leaked), so
+    // where it is says which it is.
+    let key = (font as *const FontRef<'static> as usize, id.0);
+    if let Some(found) = KEPT
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|k| k.get(&key).cloned())
+    {
+        return found.map(|o| (*o).clone());
+    }
+    let outline = font.outline(id);
+    let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
+    let kept = kept.get_or_insert_with(HashMap::new);
+    if kept.len() >= MOST {
+        kept.clear();
+    }
+    kept.insert(key, outline.clone().map(Arc::new));
+    outline
+}
+
+/// Whether outlines are kept (`kept_outline`) or read from the font each
+/// time; a test toggles it to hold the one to the other.
+#[cfg(not(test))]
+fn keep_outlines() -> bool {
+    true
+}
+
+#[cfg(test)]
+thread_local! {
+    static KEEP_OUTLINES: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+#[cfg(test)]
+fn keep_outlines() -> bool {
+    KEEP_OUTLINES.with(|b| b.get())
 }
 
 /// Where a line's start sits, given the block's alignment and the room a
@@ -946,7 +1002,7 @@ fn turned(
         let x = p.x + slant * p.y;
         point(x * cos + p.y * sin, -x * sin + p.y * cos)
     };
-    let mut outline = font.outline(glyph.id)?;
+    let mut outline = kept_outline(font, glyph.id)?;
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     let mut note = |p: Point| {
         x0 = x0.min(p.x);
@@ -1882,7 +1938,9 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
                 let outlined = if cut.slant > 0.0 {
                     leaned(face.font, glyph, cut.slant, face.scale_factor())
                 } else {
-                    face.font.outline_glyph(glyph)
+                    // What `outline_glyph` does, from a kept outline.
+                    kept_outline(face.font, glyph.id)
+                        .map(|o| ab_glyph::OutlinedGlyph::new(glyph, o, face.scale_factor()))
                 };
                 if let Some(outlined) = outlined {
                     let bounds = outlined.px_bounds();
@@ -2605,6 +2663,63 @@ mod tests {
         let first = (0..r.height).find(|&y| inked(y)).unwrap_or(0);
         let last = (0..r.height).rev().find(|&y| inked(y)).unwrap_or(0);
         (first, last + 1)
+    }
+
+    /// A glyph drawn from a kept outline is the glyph drawn from one read
+    /// out of the font, to the bit, and the second time a glyph is asked
+    /// for (from what was kept) is the first: upright, leaned for an
+    /// italic the face has no oblique for, set along a ring so each glyph
+    /// is turned, at two sizes and a fraction of a pixel off the grid.
+    #[test]
+    fn a_glyph_from_a_kept_outline_is_the_glyph() {
+        let upright = spec("Kept glyphs, kept again.", 23.0);
+        let mut italic = upright.clone();
+        italic.italic = true;
+        let mut ring = upright.clone();
+        ring.along = Some(VectorShape::Ellipse { rx: 60.0, ry: 40.0 });
+        // And another face, drawn between the others' turns, so an
+        // outline kept for one face is never handed to another: the same
+        // glyph number is another letter there.
+        const MONO: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        register_font("Kept Test Mono", MONO.to_vec()).unwrap();
+        let mut mono = upright.clone();
+        mono.font = "Kept Test Mono".into();
+        let draw = |keep: bool, s: &TextSpec, scale: f32, phase: [f32; 2]| {
+            KEEP_OUTLINES.with(|k| k.set(keep));
+            let r = rasterize_on_grid(s, scale, phase);
+            KEEP_OUTLINES.with(|k| k.set(true));
+            r
+        };
+        let mut inked = 0;
+        for (what, s) in [
+            ("upright", &upright),
+            ("in another face", &mono),
+            ("leaned", &italic),
+            ("on a ring", &ring),
+        ] {
+            for (scale, phase) in [(1.0, [0.0, 0.0]), (2.37, [0.31, 0.77])] {
+                let read = draw(false, s, scale, phase);
+                // Twice kept: the first fills what is kept, the second
+                // draws from it.
+                for _ in 0..2 {
+                    let kept = draw(true, s, scale, phase);
+                    assert_eq!(
+                        (kept.width, kept.height),
+                        (read.width, read.height),
+                        "{what}"
+                    );
+                    for (i, (a, b)) in kept.coverage.iter().zip(&read.coverage).enumerate() {
+                        assert_eq!(
+                            a.to_bits(),
+                            b.to_bits(),
+                            "{what} at {scale}: texel {i} is {a} from a kept outline, {b} read"
+                        );
+                    }
+                }
+                inked += read.coverage.iter().filter(|c| **c > 0.0).count();
+            }
+        }
+        assert!(inked > 1000, "and glyphs were drawn ({inked})");
     }
 
     #[test]
