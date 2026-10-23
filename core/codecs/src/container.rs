@@ -1180,6 +1180,12 @@ mod tests {
             "/document/nodes/*/kind/Vector/shape/Ellipse:ry",
             "/document/nodes/*/kind/Vector/shape/Path:closed",
             "/document/nodes/*/kind/Vector/shape/Path:points",
+            // A polygon cannot be missing its size or its count, as a
+            // rectangle cannot its width; its depth and its corner radius
+            // are additive and are not here.
+            "/document/nodes/*/kind/Vector/shape/Polygon:points",
+            "/document/nodes/*/kind/Vector/shape/Polygon:rx",
+            "/document/nodes/*/kind/Vector/shape/Polygon:ry",
             "/document/nodes/*/kind/Raster:height",
             "/document/nodes/*/kind/Raster:resource_id",
             // A colour lookup cannot be missing its table or its grid.

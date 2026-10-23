@@ -15859,6 +15859,89 @@ mod tests {
         );
     }
 
+    /// The shared fixture's star is a star, and a rounded one: drawn
+    /// alone, it is not the pentagon its five outer corners make, nor the
+    /// sharp star of the same numbers. Asked directly, since every
+    /// renderer and exporter here reaches a polygon through the one path
+    /// `as_path` makes of it, so a polygon drawn as something else would
+    /// be drawn as that something else everywhere, and every comparison
+    /// over the fixture would hold.
+    #[test]
+    fn the_fixtures_star_is_a_rounded_star() {
+        let f = chitrakar_doc::fixture::everything();
+        let alone = |doc: &Document| {
+            let mut surface = Surface::new(doc.meta.width, doc.meta.height);
+            let clip = surface.full_clip();
+            render_showing_at(
+                doc,
+                &mut surface,
+                clip,
+                Transform::default(),
+                Showing::Alone(f.star),
+            )
+            .unwrap();
+            surface
+        };
+        let NodeKind::Vector {
+            shape: VectorShape::Polygon { inner, corner, .. },
+            ..
+        } = &f.doc.node(f.star).unwrap().kind
+        else {
+            panic!("the fixture's star is a polygon");
+        };
+        assert!(*inner < 1.0 && *corner > 0.0, "a star, rounded");
+        let star = alone(&f.doc);
+        let covered = star.pixels.iter().filter(|p| p.a > 0.5).count();
+        assert!(covered > 30, "the star is on the page ({covered} pixels)");
+        let with = |change: &dyn Fn(&mut VectorShape)| {
+            let mut doc = f.doc.clone();
+            let NodeKind::Vector { shape, fill, .. } = doc.node(f.star).unwrap().kind.clone()
+            else {
+                unreachable!()
+            };
+            let mut shape = shape;
+            change(&mut shape);
+            doc.apply(Command::SetKind {
+                id: f.star,
+                kind: Box::new(NodeKind::Vector {
+                    shape,
+                    fill,
+                    stroke: None,
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+            alone(&doc)
+        };
+        let differing = |a: &Surface, b: &Surface| {
+            a.pixels
+                .iter()
+                .zip(&b.pixels)
+                .filter(|(p, q)| (p.a - q.a).abs() > 0.05)
+                .count()
+        };
+        let pentagon = with(&|s| {
+            if let VectorShape::Polygon { inner, .. } = s {
+                *inner = 1.0;
+            }
+        });
+        let sharp = with(&|s| {
+            if let VectorShape::Polygon { corner, .. } = s {
+                *corner = 0.0;
+            }
+        });
+        assert!(
+            differing(&star, &pentagon) > 20,
+            "its points are pulled in ({} pixels differ from the pentagon)",
+            differing(&star, &pentagon)
+        );
+        assert!(
+            differing(&star, &sharp) > 5,
+            "and its corners are rounded ({} pixels differ from the sharp star)",
+            differing(&star, &sharp)
+        );
+    }
+
     #[test]
     fn a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put() {
         let f = chitrakar_doc::fixture::everything();

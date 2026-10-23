@@ -6884,27 +6884,41 @@ mod tests {
             let name = f.doc.node(id).unwrap().name.clone();
             let gone_mine = gpu.render(&without).unwrap();
             let gone_theirs = chitrakar_render::render(&without).unwrap();
-            // What the layer put down, on each backend in turn.
-            let (mut n, mut worst, mut drew) = (0usize, 0.0f32, 0usize);
-            for i in 0..theirs.pixels.len() {
-                let (a, b) = (&mine.pixels[i], &gone_mine.pixels[i]);
-                let (c, d) = (&theirs.pixels[i], &gone_theirs.pixels[i]);
-                let mut most = 0.0f32;
-                let mut theirs_put = 0.0f32;
-                for (u, v, y, z) in [
-                    (a.r, b.r, c.r, d.r),
-                    (a.g, b.g, c.g, d.g),
-                    (a.b, b.b, c.b, d.b),
-                    (a.a, b.a, c.a, d.a),
-                ] {
-                    let scale = (y - z).abs().max(1.0);
-                    most = most.max(((u - v) - (y - z)).abs() / scale);
-                    theirs_put = theirs_put.max((y - z).abs());
-                }
-                if theirs_put > 0.01 {
-                    drew += 1;
-                }
-                if most > 0.1 {
+            // What the layer put down, on each backend in turn: how far
+            // the two disagree at each pixel, and how much the reference
+            // put there.
+            let put: Vec<(f32, f32)> = (0..theirs.pixels.len())
+                .map(|i| {
+                    let (a, b) = (&mine.pixels[i], &gone_mine.pixels[i]);
+                    let (c, d) = (&theirs.pixels[i], &gone_theirs.pixels[i]);
+                    let mut most = 0.0f32;
+                    let mut theirs_put = 0.0f32;
+                    for (u, v, y, z) in [
+                        (a.r, b.r, c.r, d.r),
+                        (a.g, b.g, c.g, d.g),
+                        (a.b, b.b, c.b, d.b),
+                        (a.a, b.a, c.a, d.a),
+                    ] {
+                        let scale = (y - z).abs().max(1.0);
+                        most = most.max(((u - v) - (y - z)).abs() / scale);
+                        theirs_put = theirs_put.max((y - z).abs());
+                    }
+                    (most, theirs_put)
+                })
+                .collect();
+            let drew = put.iter().filter(|(_, p)| *p > 0.01).count();
+            // The most the reference changed any pixel by is the layer
+            // put down whole; a pixel it changed by less than nine tenths
+            // of that is one of the layer's edges, where the reference's
+            // exact coverage and this backend's four samples a pixel
+            // part company by up to a quarter and a little more. An edge
+            // is allowed that; everything else — the inside of the
+            // layer, and the page beside it — is held to a tenth.
+            let full = put.iter().map(|(_, p)| *p).fold(0.0f32, f32::max);
+            let (mut n, mut worst) = (0usize, 0.0f32);
+            for &(most, theirs_put) in &put {
+                let edge = theirs_put < 0.9 * full;
+                if most > if edge { 0.35 } else { 0.1 } {
                     n += 1;
                     worst = worst.max(most);
                 }
@@ -6918,13 +6932,17 @@ mod tests {
             // what is being asked for: what is, is that the two backends
             // put down the same layer. A tenth of the layer's own pixels
             // is wide enough for antialiasing to differ along an edge and
-            // far too narrow for a layer to go missing.
+            // far too narrow for a layer to go missing. (It was the whole
+            // of the allowance once, and a star ten pixels across — all
+            // edge — could not pass it: its edges differed by what four
+            // samples a pixel do, on more than a tenth of itself.)
             let allowed = (drew / 10).max(4);
             assert!(
                 n <= allowed,
                 "{name:?} is not the layer the reference puts down: {n} of \
-                 the {drew} pixels it inks differ by more than a tenth, the \
-                 worst by {worst:.4} ({allowed} allowed)"
+                 the {drew} pixels it inks differ by more than a tenth (an \
+                 edge, by more than a sample's worth), the worst by \
+                 {worst:.4} ({allowed} allowed)"
             );
         }
         // A backend that drew nothing, or a fixture whose layers land off

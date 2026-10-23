@@ -88,6 +88,9 @@ pub struct Fixture {
     pub spaced: NodeId,
     /// A block set as a numbered list, two items.
     pub listed: NodeId,
+    /// A star: five points pulled in by half, its corners rounded — the
+    /// one kind of shape nothing here held.
+    pub star: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1751,6 +1754,50 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A polygon. Three kinds of shape stood here — rectangles, ellipses
+    // and paths — and the fourth, a live polygon or star whose count
+    // and depth stay numbers, never had: it was drawn on pages nobody
+    // wrote and in its own tests, and no file, clipboard, undo run,
+    // dirty region or exporter here had ever met one. A star rather
+    // than a plain polygon, with its corners rounded, so all three of
+    // the numbers that make it one are in play — a star of five has ten
+    // corners, and a rounded corner is an arc between two sides that
+    // meet at an angle a rectangle's never do. Small and near the top
+    // right corner, where nothing else is; its edit gives it two more
+    // points and pulls them in further, which moves every corner.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: {
+            let mut node = Node::vector(
+                "star",
+                VectorShape::Polygon {
+                    rx: 5.0,
+                    ry: 5.0,
+                    points: 5,
+                    inner: 0.5,
+                    corner: 0.6,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut node.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.75,
+                    b: 0.2,
+                    a: 1.0,
+                });
+            }
+            Box::new(node)
+        },
+    })
+    .unwrap();
+    let star = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: star,
+        transform: Transform::translation(68.0, 2.0),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -2007,6 +2054,7 @@ pub fn everything() -> Fixture {
         again,
         spaced,
         listed,
+        star,
         stroke,
     }
 }
@@ -3497,6 +3545,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         again,
         spaced,
         listed,
+        star,
         stroke,
         ..
     } = f;
@@ -3769,6 +3818,28 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 spec.width = 60.0;
                 spec
             })),
+        },
+        // Two more points, pulled in further: every corner of the star
+        // moves, and its box does not.
+        Command::SetKind {
+            id: *star,
+            kind: Box::new(NodeKind::Vector {
+                shape: VectorShape::Polygon {
+                    rx: 5.0,
+                    ry: 5.0,
+                    points: 7,
+                    inner: 0.4,
+                    corner: 0.6,
+                },
+                fill: Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.75,
+                    b: 0.2,
+                    a: 1.0,
+                }),
+                stroke: None,
+                gradient: None,
+            }),
         },
         // The numbers taken off: paragraphs again, every line of the
         // block moved left by the measure the markers took.
