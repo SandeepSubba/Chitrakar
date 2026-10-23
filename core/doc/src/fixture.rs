@@ -98,6 +98,13 @@ pub struct Fixture {
     /// kind of filter here that reads what is under it from somewhere
     /// else.
     pub swirled: NodeId,
+    /// A third picture, on the same bytes as the first two, with its
+    /// corners moved: the one placement of a picture the standing
+    /// document had never held, drawn through a projective map rather
+    /// than a matrix, so that every audit that carries a picture
+    /// somewhere — a file, a clipboard, another renderer, the GPU — is
+    /// asked to carry four corners rather than six numbers.
+    pub cornered: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1908,6 +1915,42 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A picture with its corners moved: in perspective, on the same
+    // bytes as the two pictures above. A placed picture had stood
+    // upright, scaled and turned here, every one of them a matrix; this
+    // one goes to its four corners by the projective map that takes its
+    // rectangle there, which is not a matrix and cannot be written as
+    // one, so a file, a clipboard, an exporter and the second renderer
+    // are each asked to carry the corners rather than six numbers. Its
+    // edit moves the corners, which moves every pixel of it and its box.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::raster(
+            "cornered",
+            RasterRef {
+                resource_id: resource_id.clone(),
+                width: 8,
+                height: 8,
+                corners: Some([[0.0, 0.0], [11.0, 1.0], [7.0, 11.0], [-3.0, 7.0]]),
+            },
+        )),
+    })
+    .unwrap();
+    let cornered = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: cornered,
+        transform: Transform {
+            a: 1.5,
+            b: 0.0,
+            c: 0.0,
+            d: 1.5,
+            e: 3.0,
+            f: 46.0,
+        },
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -2167,6 +2210,7 @@ pub fn everything() -> Fixture {
         star,
         wheel,
         swirled,
+        cornered,
         stroke,
     }
 }
@@ -3660,6 +3704,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         star,
         wheel,
         swirled,
+        cornered,
         stroke,
         ..
     } = f;
@@ -3955,6 +4000,18 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 } = &mut kind
                 {
                     *angle = 300.0;
+                }
+                kind
+            }),
+        },
+        // The corners moved the other way: every pixel of the picture
+        // moves, and so does its box.
+        Command::SetKind {
+            id: *cornered,
+            kind: Box::new({
+                let mut kind = f.doc.node(*cornered).unwrap().kind.clone();
+                if let NodeKind::Raster(r) = &mut kind {
+                    r.corners = Some([[1.0, -3.0], [8.0, 0.0], [8.0, 11.0], [0.0, 8.0]]);
                 }
                 kind
             }),
