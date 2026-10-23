@@ -1199,6 +1199,12 @@ mod tests {
             "/document/nodes/*/kind/Vector/shape/Polygon:ry",
             "/document/nodes/*/kind/Raster:height",
             "/document/nodes/*/kind/Raster:resource_id",
+            // A twirl cannot be missing how far it turns, and a mask that
+            // is an ellipse cannot be missing its size, as one that is a
+            // rectangle cannot.
+            "/document/nodes/*/kind/Filter/Twirl:degrees",
+            "/document/nodes/*/mask/kind/Vector/shape/Ellipse:rx",
+            "/document/nodes/*/mask/kind/Vector/shape/Ellipse:ry",
             // A colour lookup cannot be missing its table or its grid.
             "/document/nodes/*/kind/Adjustment/ColorLookup:size",
             "/document/nodes/*/kind/Adjustment/ColorLookup:table",

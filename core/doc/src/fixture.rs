@@ -94,6 +94,10 @@ pub struct Fixture {
     /// An ellipse filled by a conic gradient — the one kind of gradient
     /// nothing here held.
     pub wheel: NodeId,
+    /// A twirl over the middle of the page, masked to a disc: the one
+    /// kind of filter here that reads what is under it from somewhere
+    /// else.
+    pub swirled: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1863,6 +1867,47 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A filter that moves pixels. Two kinds of filter stood here — a
+    // blur, which is a neighbourhood, and grain, which is a function of
+    // where a pixel is — and the third kind, a warp that reads what is
+    // under it from *somewhere else* on the page, never had: a twirl
+    // takes the pixel a turn away from the one it writes, so a region
+    // repainted on its own has to read past its own edge, a window
+    // drawn on its own past the window, and a pan carries the whirl
+    // with the page rather than with the view, since its centre and
+    // its radius are shares of the page. Over the middle of the page,
+    // a quarter turn at the centre easing out to a circle half the
+    // page's shorter side across; masked to a disc inside that circle,
+    // so the warp shows where the mask lets it and the audits that read
+    // the rest of the page read it as it was. Its edit turns it the
+    // other way, which moves every pixel inside the disc.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::filter(
+            "swirled",
+            crate::Filter::Twirl {
+                degrees: 90.0,
+                radius: 0.5,
+                center: [0.5, 0.5],
+            },
+        )),
+    })
+    .unwrap();
+    let swirled = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetMask {
+        id: swirled,
+        mask: Some(Box::new(Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx: 11.0, ry: 11.0 },
+                transform: Transform::translation(29.0, 19.0),
+            },
+            invert: false,
+            feather: 0.0,
+        })),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -2121,6 +2166,7 @@ pub fn everything() -> Fixture {
         listed,
         star,
         wheel,
+        swirled,
         stroke,
     }
 }
@@ -3613,6 +3659,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         listed,
         star,
         wheel,
+        swirled,
         stroke,
         ..
     } = f;
@@ -3884,6 +3931,16 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 );
                 spec.width = 60.0;
                 spec
+            })),
+        },
+        // Turned the other way, and less: every pixel inside the disc
+        // moves.
+        Command::SetKind {
+            id: *swirled,
+            kind: Box::new(NodeKind::Filter(crate::Filter::Twirl {
+                degrees: -60.0,
+                radius: 0.5,
+                center: [0.5, 0.5],
             })),
         },
         // The seam turned half way round: every colour of the wheel

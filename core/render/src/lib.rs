@@ -16048,6 +16048,130 @@ mod tests {
         );
     }
 
+    /// The shared fixture's twirl turns what is under it inside its disc
+    /// and touches nothing outside: the page with the twirl against the
+    /// page with it hidden differs inside the mask's disc and nowhere
+    /// else, to the bit; turned the other way, as its edit turns it, it
+    /// is a different whirl; and a region across the disc drawn on its
+    /// own, padded by the filters' reach, is the whole page there. Asked
+    /// directly, since a warp that read from the wrong place would be
+    /// read from there by every renderer alike, and the fixture's own
+    /// padded-region audit crosses no part of this disc.
+    #[test]
+    fn the_fixtures_twirl_turns_inside_its_disc_and_nothing_outside() {
+        let f = chitrakar_doc::fixture::everything();
+        let page = |doc: &Document| render(doc).unwrap();
+        let with = page(&f.doc);
+        let mut hidden = f.doc.clone();
+        hidden
+            .apply(Command::SetVisible {
+                id: f.swirled,
+                visible: false,
+            })
+            .unwrap();
+        let without = page(&hidden);
+        let (cx, cy, r) = (29.0 + 11.0, 19.0 + 11.0, 11.0);
+        let (mut inside_differ, mut outside_differ, mut inside) = (0usize, 0usize, 0usize);
+        for y in 0..with.height {
+            for x in 0..with.width {
+                let (p, q) = (with.get(x, y), without.get(x, y));
+                let same = [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                    == [q.r, q.g, q.b, q.a].map(f32::to_bits);
+                let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+                // A pixel wholly inside the disc, a pixel clear of it.
+                if dx * dx + dy * dy < (r - 1.5) * (r - 1.5) {
+                    inside += 1;
+                    if !same {
+                        inside_differ += 1;
+                    }
+                } else if dx * dx + dy * dy > (r + 1.5) * (r + 1.5) && !same {
+                    outside_differ += 1;
+                }
+            }
+        }
+        assert!(
+            inside_differ > inside / 4,
+            "the whirl shows inside the disc ({inside_differ} of {inside} pixels moved)"
+        );
+        assert_eq!(outside_differ, 0, "and nothing outside the disc moved");
+        let mut other_way = f.doc.clone();
+        other_way
+            .apply(Command::SetKind {
+                id: f.swirled,
+                kind: Box::new(NodeKind::Filter(chitrakar_doc::Filter::Twirl {
+                    degrees: -60.0,
+                    radius: 0.5,
+                    center: [0.5, 0.5],
+                })),
+            })
+            .unwrap();
+        let turned = page(&other_way);
+        let differing = with
+            .pixels
+            .iter()
+            .zip(&turned.pixels)
+            .filter(|(p, q)| {
+                (p.r - q.r).abs() > 0.02 || (p.g - q.g).abs() > 0.02 || (p.b - q.b).abs() > 0.02
+            })
+            .count();
+        assert!(
+            differing > inside / 4,
+            "turned the other way it is another whirl ({differing} pixels differ)"
+        );
+        // And a region across the disc, drawn on its own and padded by
+        // the twirl's own reach — what the engine's padding of every
+        // repaint comes to when the twirl reaches furthest — is the page
+        // drawn whole inside the region: the twirl reads the pixel a
+        // turn away from the one it writes, and the reach is what says
+        // how far away that can be. The padded audit over the fixture
+        // asks its rectangles, and none of them crosses this disc, so a
+        // reach cut to a tenth passed it; padded by the page's widest
+        // reach it would pass here too, since the blur's is as wide.
+        let pad = node_reach(&f.doc, f.swirled, f.doc.node(f.swirled).unwrap());
+        for clip in [
+            ClipRect {
+                x0: 24,
+                y0: 14,
+                x1: 44,
+                y1: 34,
+            },
+            ClipRect {
+                x0: 36,
+                y0: 20,
+                x1: 44,
+                y1: 40,
+            },
+            ClipRect {
+                x0: 20,
+                y0: 30,
+                x1: 60,
+                y1: 31,
+            },
+        ] {
+            let grown = ClipRect {
+                x0: clip.x0.saturating_sub(pad),
+                y0: clip.y0.saturating_sub(pad),
+                x1: (clip.x1 + pad).min(with.width),
+                y1: (clip.y1 + pad).min(with.height),
+            };
+            let mut part = Surface::new(with.width, with.height);
+            render_region(&f.doc, &mut part, grown).unwrap();
+            for y in clip.y0..clip.y1 {
+                for x in clip.x0..clip.x1 {
+                    let (p, q) = (part.get(x, y), with.get(x, y));
+                    let d = [(p.r, q.r), (p.g, q.g), (p.b, q.b), (p.a, q.a)]
+                        .iter()
+                        .map(|(u, v)| (u - v).abs())
+                        .fold(0.0f32, f32::max);
+                    assert!(
+                        d < 1e-4,
+                        "{clip:?} padded by {pad}: pixel {x},{y} is {p:?} drawn on its own, {q:?} on the whole page"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put() {
         let f = chitrakar_doc::fixture::everything();
