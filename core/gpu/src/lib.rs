@@ -2816,12 +2816,6 @@ fn one(
             .into_iter()
             .flatten()
             .collect();
-        // A bevel is lit at the stamp, which is the pass a blend mode
-        // takes over to bring a picture down by; the two have not been
-        // taught to share it, so a blended layer's bevel is the CPU's.
-        if node.blend != BlendMode::Normal && shadings.iter().any(|s| s.lit.is_some()) {
-            return none!();
-        }
         shadings
     };
     // Its colour overlays, folded into one colour and one strength by the
@@ -4105,24 +4099,37 @@ fn one(
                 // the field at it gains what it read.
                 let gain = [s.gain[0], s.gain[1], 0.0];
                 let blended = node.blend != BlendMode::Normal;
-                let settle = if blended {
-                    out.push(page_quad(on, 1.0, carried, [0.0; 4], gain))
-                } else {
-                    0..0
-                };
-                let quad = match s.lit {
-                    // Lit at the stamp: where the light comes from in
-                    // place of an offset (a bevel has none), the colour
-                    // of this half, and how high the heights stand and
-                    // which half it is in place of a gain.
-                    Some(lit) => out.push(page_quad(
-                        (down, out.surface),
-                        opacity,
+                // A bevel's half is lit where the light comes from in
+                // place of an offset (a bevel has none), the colour of
+                // this half, and how high the heights stand and which
+                // half it is in place of a gain. Lit at the stamp, or —
+                // when the stamp is the layer's blend bringing a picture
+                // down — on the settling pass beforehand, where the
+                // field and the layer's coverage are both to hand, which
+                // is the same arrangement an offset takes. A blended
+                // layer's bevel used to go back, the two passes not
+                // having been taught to share the stamp.
+                let lit_by = |lit: Lit| {
+                    (
                         [lit.toward[0], lit.toward[1], 1.0, owed],
                         s.tint,
                         [lit.lift, 0.0, lit.part],
-                    )),
-                    None => out.push(page_quad(
+                    )
+                };
+                let settle = match (blended, s.lit) {
+                    (true, Some(lit)) => {
+                        let (params, tint, extra) = lit_by(lit);
+                        out.push(page_quad(on, 1.0, params, tint, extra))
+                    }
+                    (true, None) => out.push(page_quad(on, 1.0, carried, [0.0; 4], gain)),
+                    (false, _) => 0..0,
+                };
+                let quad = match s.lit {
+                    Some(lit) if !blended => {
+                        let (params, tint, extra) = lit_by(lit);
+                        out.push(page_quad((down, out.surface), opacity, params, tint, extra))
+                    }
+                    _ => out.push(page_quad(
                         (down, out.surface),
                         opacity,
                         if blended {
@@ -7566,7 +7573,8 @@ mod tests {
     /// in white, blurred into heights, the slope read off its eight
     /// neighbours and the highlight and the shadow laid by it — on a
     /// rounded card and a disc, faded, lit from four sides and in a group
-    /// turned and scaled. A blended layer's bevel goes back.
+    /// turned and scaled; and on a blended layer, where it is lit on the
+    /// settling pass the blend leaves it.
     #[test]
     fn a_bevel_lights_what_the_cpu_lights() {
         use chitrakar_doc::Effect as E;
@@ -7678,16 +7686,40 @@ mod tests {
                 );
             }
         }
-        let blended = page(
-            1.0,
-            vec![bevel(120.0, 6.0, 1.0)],
-            Transform::default(),
-            BlendMode::Multiply,
-        );
-        assert!(
-            !GpuRenderer::can_render(&blended),
-            "a blended layer's bevel goes back"
-        );
+        // A blended layer's bevel, lit on the settling pass rather than
+        // at the stamp, which the blend has: the same reading, and the
+        // same page, as the reference's — and not the page with the
+        // bevel left off, which a settling pass that lit nothing would
+        // draw.
+        for (blend, opacity) in [
+            (BlendMode::Multiply, 1.0f32),
+            (BlendMode::Screen, 0.7),
+            (BlendMode::Overlay, 1.0),
+            (BlendMode::Difference, 0.5),
+        ] {
+            let doc = page(
+                opacity,
+                vec![bevel(120.0, 6.0, 1.0)],
+                Transform::default(),
+                blend,
+            );
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a {blend:?} layer's bevel is drawn"
+            );
+            let mine = gpu.render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &chitrakar_render::render(&doc).unwrap());
+            assert!(
+                mean < 0.001 && worst < 0.025,
+                "{blend:?} at {opacity}: mean {mean:.5}, worst {worst:.4}"
+            );
+            let bare = page(opacity, vec![], Transform::default(), blend);
+            let (apart, _) = difference(&mine, &chitrakar_render::render(&bare).unwrap());
+            assert!(
+                apart > 0.002,
+                "{blend:?} at {opacity}: the bevel shows ({apart:.5} from none)"
+            );
+        }
     }
 
     /// An effect on a group, and on a brush layer: built from what the

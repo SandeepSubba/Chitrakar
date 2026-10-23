@@ -2066,6 +2066,12 @@ fn fs_effect(in: ImageOut) -> @location(0) vec4f {
 // it to read.
 @fragment
 fn fs_settle(in: ImageOut) -> @location(0) vec4f {
+    // A bevel's half is lit here on the same terms: the heights are on
+    // the field, the layer's coverage is where the backdrop goes, and
+    // what the stamp is left with is the lit half as a picture.
+    if in.extra.z != 0.0 {
+        return bevel_lit(in);
+    }
     var out = gained(field_at(in.uv, vec2f(in.params.x, in.params.y)), in.extra.xy);
     if in.params.z != 0.0 {
         out = out * textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0).a * in.params.w;
