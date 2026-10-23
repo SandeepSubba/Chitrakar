@@ -606,7 +606,15 @@ without reading anything else.*
   rows byte by byte cost more than the pixels it saved — an empty
   page's frame went from 5 ms to 10 and the text page's from 22.5 to
   24.6. The encoder's test keeps the repeated rows it was given, so an
-  encoder that tries this again has them to answer.
+  encoder that tries this again has them to answer. And WebAssembly's
+  128-bit lanes (`-C target-feature=+simd128` on the wasm target):
+  measured through a WASI build of the engine's bench, the photograph
+  went from 26.3–27.0 ms a frame to 24.3–24.7 — eight per cent, from
+  whatever the compiler vectorises on its own. Not taken: a page built
+  with them does not load at all in a browser without them (Safari
+  before 16.4, 2023), and eight per cent is not worth either dropping
+  those or shipping the engine twice and choosing at load. Worth more
+  once a loop is written for the lanes rather than left to the compiler.
 - **Renderer performance:** the transform inverse is solved once per shape
   (`Inverse`), not per coverage sample — a boundary pixel asks for up to
   twenty-one. Groups only paint where their contents can land, and a group
