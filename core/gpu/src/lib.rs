@@ -3086,10 +3086,47 @@ fn one(
             .unwrap_or(false),
         _ => false,
     };
-    if (rewrites || (copies_any_blend && node.blend == BlendMode::Normal))
+    // Such a copy is drawn where it stands now, and what it wears goes
+    // down as a coverage after all: it is kept off the surface a dressed
+    // copy would otherwise go to (`alone`, below), and its mask and the
+    // layer it is held to ride `Scene::worn` into whatever the copied
+    // layer builds — the adjustment's own quad, or the surface a blended
+    // layer comes down on — while its fade is inherited by them. That is
+    // the reference's `lerp(before, drawn, cover)` to the letter, since a
+    // mix of a mix by the same base is one mix by the product.
+    // A copy of a blended layer that *wears effects*, dressed, is the
+    // one such copy still handed back: the reference draws it where it
+    // stands and mixes the whole composite back by the cover, and here
+    // the fade would reach the shadow and the layer each on its own,
+    // which where they meet is not a mix of the composite.
+    let copied_effects = match &node.kind {
+        NodeKind::Instance { of, .. } => doc.node(*of).is_ok_and(|m| !m.effects.is_empty()),
+        _ => false,
+    };
+    let copies_a_dressed_blend =
+        copies_any_blend && node.blend == BlendMode::Normal && !copied_effects;
+    let dressed_rewrite =
+        (rewrites || copies_a_dressed_blend) && matches!(node.kind, NodeKind::Instance { .. });
+    if copies_any_blend
+        && node.blend == BlendMode::Normal
+        && copied_effects
         && matches!(node.kind, NodeKind::Instance { .. })
         && (node.mask.is_some() || node.opacity < 1.0 || held_to.is_some())
     {
+        return none!();
+    }
+    // Except a copy of a blended layer that is *held* and wears nothing
+    // else. The reference's cover road — the copied layer drawn where it
+    // stands and mixed back — is taken for a mask or a fade on such a
+    // copy, and a copy that is only held goes to a surface of its own
+    // there, where the blend it copies meets nothing and is spent: a
+    // held copy of a Multiply text came out in the text's own colour,
+    // and what this backend drew, the blend meeting the page under it,
+    // was the picture the reference's own rule describes. That is the
+    // reference's to fix; until it is, the page goes back rather than
+    // being drawn right against a reference drawn wrong (pages 886 and
+    // 5564, the first two held copies of blends the random pages hold).
+    if dressed_rewrite && !rewrites && held_to.is_some() {
         return none!();
     }
     // A copy of a clone layer, dressed in anything at all, goes back too.
@@ -3213,6 +3250,15 @@ fn one(
         || (matches!(node.kind, NodeKind::Artboard { .. })
             && (node.opacity < 1.0 || node.mask.is_some())
             && !chitrakar_render::reads_backdrop(doc, child).ok()?)
+        // A frame held to the layer under it, whatever it holds: the
+        // reference puts a held frame on a surface of its own and cuts
+        // the surface to that layer's alpha on the way down, which is
+        // what the quad that brings a surface down does here with what
+        // a layer is held to. Drawn where it stands, the frame's arm
+        // returns before that cut, so a held frame used to go back.
+        || (matches!(node.kind, NodeKind::Artboard { .. })
+            && turned_frame.is_none()
+            && held_to.is_some())
         // And a copy on the same terms. What a copy draws is a whole
         // layer, and that layer may be a group whose children overlap: a
         // fade, a mask or the alpha it is held to, taken as each child
@@ -3221,6 +3267,7 @@ fn one(
         // surface is what lands — which is also what the CPU renderer
         // does with such a copy.
         || (matches!(node.kind, NodeKind::Instance { .. })
+            && !dressed_rewrite
             && (node.opacity < 1.0 || node.mask.is_some() || held_to.is_some()))
         // And a copy whose stand-ins read the page: what such a copy
         // draws is a list of layers rather than the group itself, and a
@@ -4077,11 +4124,10 @@ fn one(
             // Held to the layer under it, the whole frame — its ground and
             // everything in it — is cut to that layer. This arm draws
             // what is inside straight in and returns before the cut every
-            // other layer takes, so a held frame came out uncut: a frame
-            // over an ellipse showed its whole rectangle. It goes back.
-            if held_to.is_some() {
-                return none!();
-            }
+            // other layer takes, so a held frame came out uncut once: a
+            // frame over an ellipse showed its whole rectangle. A held
+            // upright frame is on a surface of its own now (`alone`), and
+            // the cut is taken where the surface comes down.
             let box_ = chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height]);
             let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) = box_ else {
                 return none!();
@@ -4207,8 +4253,11 @@ fn one(
             // On a surface of its own the fade and the cut belong to the
             // quad that brings the surface back, so what is drawn into it
             // is drawn whole and unbounded — which is what the group arm
-            // above does for the same reason.
-            let inner = if alone { 1.0 } else { opacity };
+            // above does for the same reason. Off one, the copy's own fade
+            // goes down with what it draws: a faded copy of an adjustment
+            // (`dressed_rewrite`) is the adjustment at that much of its
+            // strength.
+            let inner = if alone { 1.0 } else { node.opacity * opacity };
             let within = if alone { None } else { bound };
             if stand_ins.is_empty() {
                 one(doc, *of, t.compose(back), inner, within, false, out)?;
@@ -14352,7 +14401,9 @@ mod tests {
     /// drawn now, its reading stopped at the frame's edge
     /// (`a_filter_inside_a_frame_reads_only_the_frame`), and asked here
     /// at the zoom too; drawing it found a fourth, a frame wearing an
-    /// effect while holding what works on the page, which goes back.
+    /// effect while holding what works on the page, which goes back. The
+    /// second is drawn now as well, on a surface of its own cut to the
+    /// layer it is held to.
     #[test]
     fn a_frame_between_pixels_is_drawn_and_what_it_cannot_hold_goes_back() {
         use chitrakar_doc::Filter as F;
@@ -14469,14 +14520,45 @@ mod tests {
                 "a blended frame working on the page",
                 page(Some(curves), BlendMode::Exclusion, false),
             ),
-            (
-                "a frame held to the layer under it",
-                page(None, BlendMode::Normal, true),
-            ),
             ("a frame wearing an effect working on the page", shadowed),
         ] {
             assert!(!GpuRenderer::can_render(&doc), "{what} goes back");
         }
+        // A frame held to the layer under it is drawn, cut to that
+        // layer: nothing of it where the ellipse is not, its ground
+        // where the ellipse is.
+        // The ellipse moved under the frame, so that the frame straddles
+        // its edge: an ellipse's box starts at its origin, and where the
+        // page puts it the two barely meet.
+        let mut held = page(None, BlendMode::Normal, true);
+        let under = held.children_of(held.root()).unwrap()[0];
+        held.apply(Command::SetTransform {
+            id: under,
+            transform: Transform::translation(20.0, 10.0),
+        })
+        .unwrap();
+        for (name, view, size) in views {
+            assert!(
+                GpuRenderer::can_render_view(&held, view, size),
+                "a held frame at {name} is drawn"
+            );
+            let drawn = gpu.render_view(&held, view, size).unwrap();
+            let mut surface = Surface::new(size.0, size.1);
+            let clip = surface.full_clip();
+            chitrakar_render::render_region_at(&held, &mut surface, clip, view).unwrap();
+            let (mean, worst) = difference(&drawn, &surface);
+            assert!(
+                mean < 0.002 && worst < 0.15,
+                "a held frame at {name}: mean channel difference {mean:.5} (worst {worst:.4})"
+            );
+        }
+        let drawn = gpu.render(&held).unwrap();
+        assert!(drawn.get(12, 9).a < 0.01, "cut away outside the ellipse");
+        let ground = drawn.get(40, 25);
+        assert!(
+            ground.a > 0.99 && ground.r > 0.8 && ground.g > 0.8,
+            "the frame's ground inside it, over the ellipse ({ground:?})"
+        );
     }
 
     /// A frame with a mask that also wears an effect is drawn. Its
@@ -16808,19 +16890,20 @@ mod tests {
         }
     }
 
-    /// A copy of an adjustment held to the layer below goes back to the
-    /// reference renderer.
+    /// A copy of an adjustment held to the layer below is drawn, held:
+    /// the adjustment lands inside the shape and nowhere else.
     ///
-    /// Being held to something is a coverage, and this backend's masks
-    /// ride the one coverage slot a layer already uses, so there is no
-    /// pass here for it — the same reason a mask or a fade on such a
-    /// copy is handed back. Drawn anyway, what the copy copies was given
-    /// a transparent page to change and came back with nothing, so the
-    /// copy vanished; and the reference renderer lost it the same way,
-    /// so the two agreed and the cross-renderer audits said nothing. It
-    /// is fixed there and declined here.
+    /// Being held to something is a coverage. It used to go back — this
+    /// backend's masks ride the one coverage slot a layer already uses,
+    /// and being held sent the copy to a surface of its own, where what
+    /// it copies was given a transparent page to change and came back
+    /// with nothing, so the copy vanished; the reference renderer lost
+    /// it the same way once, so the two agreed and the audits said
+    /// nothing. Fixed there, and drawn here now: such a copy is kept off
+    /// the surface and what it is held to rides `Scene::worn` into the
+    /// adjustment's own quad.
     #[test]
-    fn a_copy_of_an_adjustment_held_to_a_shape_goes_back() {
+    fn a_copy_of_an_adjustment_held_to_a_shape_is_held() {
         use chitrakar_doc::{Adjustment, Command, Node, Transform, VectorShape};
         let rect = |name: &str, w: f32, h: f32| {
             let mut n = Node::vector(
@@ -16844,9 +16927,17 @@ mod tests {
         let page = |held_copy: bool| {
             let mut doc = chitrakar_doc::Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
             let root = doc.root();
+            // A ground under everything, so that what the copy does
+            // beside the shape can be seen.
             doc.apply(Command::AddNode {
                 parent: root,
                 index: 0,
+                node: rect("ground", 40.0, 30.0),
+            })
+            .unwrap();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
                 node: Box::new(Node::adjustment(
                     "the original",
                     Adjustment::BrightnessContrast {
@@ -16856,10 +16947,10 @@ mod tests {
                 )),
             })
             .unwrap();
-            let orig = doc.children_of(root).unwrap()[0];
+            let orig = doc.children_of(root).unwrap()[1];
             doc.apply(Command::AddNode {
                 parent: root,
-                index: 1,
+                index: 2,
                 node: rect("base", 20.0, 20.0),
             })
             .unwrap();
@@ -16879,21 +16970,44 @@ mod tests {
             c.transform = Transform::translation(2.0, 2.0);
             doc.apply(Command::AddNode {
                 parent: root,
-                index: 2,
+                index: 3,
                 node: Box::new(c),
             })
             .unwrap();
             doc
         };
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        for (held, what) in [(false, "not held"), (true, "held to the shape")] {
+            let doc = page(held);
+            assert!(GpuRenderer::can_render(&doc), "{what}: drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && over == 0 && in_mean < 0.002,
+                "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+        }
+        // Held, the copy's brightening lands inside the shape and nowhere
+        // else: beside the shape the page is what the original alone
+        // makes of it.
+        let held = gpu.render(&page(true)).unwrap();
+        let free = gpu.render(&page(false)).unwrap();
+        let inside = (held.get(10, 10), free.get(10, 10));
+        let beside = (held.get(30, 25), free.get(30, 25));
         assert!(
-            !GpuRenderer::can_render(&page(true)),
-            "a copy of an adjustment held to a shape goes back"
+            (inside.0.r - inside.1.r).abs() < 0.01,
+            "inside the shape the held copy brightens as the free one does"
         );
-        // And the same page with the copy not held is still drawn, so
-        // this is not declining copies of adjustments wholesale.
         assert!(
-            GpuRenderer::can_render(&page(false)),
-            "one that is not held is still drawn"
+            beside.0.r < beside.1.r - 0.02,
+            "beside it the held copy brightens nothing ({:?} against {:?})",
+            beside.0,
+            beside.1
         );
     }
 
@@ -17680,10 +17794,16 @@ mod tests {
             })
             .unwrap();
         assert!(
-            !GpuRenderer::can_render(&framed),
-            "a frame held to an adjustment is a held frame, and goes back"
+            GpuRenderer::can_render(&framed),
+            "a frame held to an adjustment is a held frame, drawn on a surface of its own"
         );
-        let (apart, _) = difference(&chitrakar_render::render(&framed).unwrap(), &in_place);
+        let held = chitrakar_render::render(&framed).unwrap();
+        let (mean, worst) = difference(&gpu.render(&framed).unwrap(), &held);
+        assert!(
+            mean < 0.004,
+            "the held frame as the reference draws it: mean {mean:.5}, worst {worst:.3}"
+        );
+        let (apart, _) = difference(&held, &in_place);
         assert!(
             apart > 0.01,
             "and there is something at stake: held, the reference draws it on a \
@@ -19604,25 +19724,24 @@ mod tests {
         }
     }
 
-    /// A copy of a blended layer wearing a mask goes back.
+    /// A copy of a blended layer wearing a mask is drawn where it
+    /// stands, the blend meeting the page really under it.
     ///
     /// The blend belongs to what the copy draws, not to the copy. On a
-    /// surface of its own it meets a transparent page, and every
+    /// surface of its own it would meet a transparent page, and every
     /// separable blend collapses to Normal against nothing — `ab` is
     /// zero, so the blended term drops out — which spends the blend and
-    /// never asks for it again. A mask is what sends a copy to a surface
-    /// here, so a masked copy of a blended layer loses the blend.
-    ///
-    /// The reference renderer hands the copy's mask down as a coverage
-    /// and draws what it copies where it stands, so the blend meets the
-    /// page really under it. That is a pass this backend has no shape
-    /// for, so the page goes back — the same answer, and the same
-    /// reason, as a copy of an adjustment wearing one.
+    /// never asks for it again. A mask used to send a copy to a surface
+    /// here, so a masked copy of a blended layer lost the blend, and the
+    /// page went back. The reference renderer hands the copy's mask down
+    /// as a coverage instead, and so does this now: the copy stays off
+    /// the surface and its mask rides `Scene::worn` onto the surface the
+    /// blended layer itself comes down on.
     ///
     /// Found by a mask that hides nothing changing six of six hundred
-    /// random pages.
+    /// random pages, which is the first thing asked here still.
     #[test]
-    fn a_copy_of_a_blend_wearing_a_mask_goes_back() {
+    fn a_copy_of_a_blend_wearing_a_mask_is_drawn_where_it_stands() {
         let build = |masked: bool| {
             let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
             add(
@@ -19693,16 +19812,8 @@ mod tests {
         };
 
         let (masked, _) = build(true);
-        assert!(
-            !GpuRenderer::can_render(&masked),
-            "a copy of a blended layer wearing a mask has to go back: the \
-             mask puts it on a surface of its own, where the blend it copies \
-             meets nothing"
-        );
-
-        // Declining is worth something only because the two draw
-        // differently — and the mask here hides nothing, so on the
-        // renderer that is right they must not.
+        // The mask here hides nothing, so on the renderer that is right
+        // the masked copy is the unmasked one.
         let (plain, _) = build(false);
         let (mean, worst) = difference(
             &chitrakar_render::render(&masked).unwrap(),
@@ -19714,48 +19825,75 @@ mod tests {
              mask hides nothing: mean {mean:.6}, worst {worst:.4}"
         );
 
-        // And no wider than it needs: unmasked, it is drawn, the way the
-        // reference renderer draws it.
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
+        for (doc, what) in [(&plain, "unmasked"), (&masked, "masked")] {
+            assert!(
+                GpuRenderer::can_render(doc),
+                "a copy of a blended layer, {what}, is drawn"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(doc).unwrap(),
+                &chitrakar_render::render(doc).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "{what}, it draws what the reference draws: mean {mean:.5}, \
+                 worst {worst:.3}"
+            );
+        }
+        // And a mask that does hide something: the copy's multiply lands
+        // inside it and the ground beside it is untouched.
+        let (mut hiding, copy) = build(false);
+        hiding
+            .apply(Command::SetMask {
+                id: copy,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 12.0,
+                            height: 10.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(18.0, 12.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        assert!(GpuRenderer::can_render(&hiding));
+        let mine = gpu.render(&hiding).unwrap();
+        let (mean, worst) = difference(&mine, &chitrakar_render::render(&hiding).unwrap());
+        assert!(mean < 0.004, "hiding: mean {mean:.5}, worst {worst:.3}");
+        let ground = chitrakar_color::srgb_to_linear(0.30);
         assert!(
-            GpuRenderer::can_render(&plain),
-            "a copy of a blended layer wearing nothing is still drawn"
+            (mine.get(36, 26).r - ground).abs() < 0.01,
+            "beside the mask the ground"
         );
-        let (mean, worst) = difference(
-            &gpu.render(&plain).unwrap(),
-            &chitrakar_render::render(&plain).unwrap(),
-        );
-        assert!(
-            mean < 0.004,
-            "unmasked it draws what the reference draws: mean {mean:.5}, \
-             worst {worst:.3}"
-        );
+        assert!(mine.get(22, 15).r < ground, "inside it the multiply");
     }
 
-    /// A copy of an adjustment wearing a mask or a fade goes back.
+    /// A copy of an adjustment wearing a mask or a fade is drawn where it
+    /// stands, the mask and the fade going down as a coverage.
     ///
     /// What such a copy draws is a change to what is under it, so it can
     /// never go on a surface of its own — there is nothing under a fresh
-    /// surface to change. A mask or an opacity below one is exactly what
-    /// sends a copy to a surface here, and drawing it anyway is how this
-    /// backend used to lose the layer altogether: masked by a mask that
-    /// hides nothing, the copy drew what hiding it drew.
-    ///
+    /// surface to change. A mask or an opacity below one is what used to
+    /// send a copy to a surface here, and drawing it anyway was how this
+    /// backend lost the layer altogether: masked by a mask that hides
+    /// nothing, the copy drew what hiding it drew. So the page went back.
     /// The renderer being matched hands the copy's mask and opacity down
-    /// as a coverage instead, which is a pass this one has no shape for —
-    /// its own masks ride the single coverage slot a layer already uses.
-    /// So the page goes back, which is the same answer a mask inside a
-    /// masked layer with an effect gets, and for the same reason.
+    /// as a coverage instead, and so does this now: the copy is kept off
+    /// the surface, its mask rides `Scene::worn` into the adjustment's
+    /// own quad and its fade is inherited by it, which is the reference's
+    /// mix by the product.
     ///
-    /// Three things asserted, and the last two are what keep the limit
-    /// honest: that the page is refused; that the *unworn* copy is still
-    /// drawn and drawn the reference renderer's way, so the refusal is no
-    /// wider than it needs to be; and that the two pictures really differ,
-    /// so what is declined is a wrong answer rather than a scruple.
+    /// Asked masked, faded, and both, each against the reference and
+    /// against the copy hidden, so a copy that vanished cannot pass.
     #[test]
-    fn a_copy_of_an_adjustment_wearing_something_goes_back() {
+    fn a_copy_of_an_adjustment_wearing_something_is_drawn_where_it_stands() {
         let build = |dressed: bool| {
             let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
             add(
@@ -19810,51 +19948,58 @@ mod tests {
             (doc, copy)
         };
 
-        let (dressed, _) = build(true);
-        assert!(
-            !GpuRenderer::can_render(&dressed),
-            "a copy of an adjustment wearing a mask has to go back: it cannot \
-             be put on a surface of its own, and a mask is what would put it \
-             there"
-        );
-
-        // Declining is only worth something because the mask changes the
-        // picture, which is asked of the renderer that draws it correctly.
-        let (plain, copy) = build(false);
-        let mut hidden = dressed.clone();
-        hidden
-            .apply(Command::SetVisible {
-                id: copy,
-                visible: false,
-            })
-            .unwrap();
-        let (mean, _) = difference(
-            &chitrakar_render::render(&dressed).unwrap(),
-            &chitrakar_render::render(&hidden).unwrap(),
-        );
-        assert!(
-            mean > 0.01,
-            "the mask has to leave something of the copy showing or there is \
-             nothing to decline: {mean:.5} against the copy hidden"
-        );
-
-        // And no wider than it needs: undressed, it is drawn, the way the
-        // reference renderer draws it.
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
-        assert!(
-            GpuRenderer::can_render(&plain),
-            "a copy of an adjustment wearing nothing is still drawn"
-        );
-        let (mean, worst) = difference(
-            &gpu.render(&plain).unwrap(),
-            &chitrakar_render::render(&plain).unwrap(),
-        );
-        assert!(
-            mean < 0.004,
-            "undressed it draws what the reference draws: mean {mean:.5}, \
-             worst {worst:.3}"
-        );
+        let (plain, _) = build(false);
+        let (masked, copy) = build(true);
+        let mut faded = plain.clone();
+        faded
+            .apply(Command::SetOpacity {
+                id: copy,
+                opacity: 0.4,
+            })
+            .unwrap();
+        let mut both = masked.clone();
+        both.apply(Command::SetOpacity {
+            id: copy,
+            opacity: 0.4,
+        })
+        .unwrap();
+        for (doc, what) in [
+            (&plain, "wearing nothing"),
+            (&masked, "masked"),
+            (&faded, "faded"),
+            (&both, "masked and faded"),
+        ] {
+            assert!(
+                GpuRenderer::can_render(doc),
+                "a copy of an adjustment {what} is drawn"
+            );
+            let mine = gpu.render(doc).unwrap();
+            let reference = chitrakar_render::render(doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && over == 0 && in_mean < 0.002,
+                "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+            // And not vanished: the copy hidden is another picture.
+            let mut hidden = doc.clone();
+            hidden
+                .apply(Command::SetVisible {
+                    id: copy,
+                    visible: false,
+                })
+                .unwrap();
+            let (apart, _) = difference(&mine, &chitrakar_render::render(&hidden).unwrap());
+            // Masked to a corner and faded to less than half, the copy is
+            // a small change to the page; still a change.
+            assert!(
+                apart > 0.002,
+                "{what}: the copy shows ({apart:.5} from it hidden)"
+            );
+        }
     }
 }
