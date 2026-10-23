@@ -15942,6 +15942,107 @@ mod tests {
         );
     }
 
+    /// The shared fixture's wheel is filled round its centre: drawn alone,
+    /// it is not the same wheel turned half round, nor the wheel with its
+    /// colours running the other way, and the stop that is half there
+    /// lets the page through part of it. Asked directly, since every
+    /// renderer reads a conic gradient through the one `conic_turn`, and
+    /// SVG exports it as a picture of what the engine draws, so a turn
+    /// measured wrongly would be measured wrongly everywhere and every
+    /// comparison over the fixture would hold.
+    #[test]
+    fn the_fixtures_wheel_turns_round_its_centre() {
+        let f = chitrakar_doc::fixture::everything();
+        let alone = |doc: &Document| {
+            let mut surface = Surface::new(doc.meta.width, doc.meta.height);
+            let clip = surface.full_clip();
+            render_showing_at(
+                doc,
+                &mut surface,
+                clip,
+                Transform::default(),
+                Showing::Alone(f.wheel),
+            )
+            .unwrap();
+            surface
+        };
+        let NodeKind::Vector {
+            gradient: Some(chitrakar_doc::Gradient::Conic { stops, .. }),
+            ..
+        } = &f.doc.node(f.wheel).unwrap().kind
+        else {
+            panic!("the fixture's wheel wears a conic gradient");
+        };
+        assert!(
+            stops.iter().any(|s| s.color.flat().alpha() < 1.0),
+            "a stop half there"
+        );
+        let wheel = alone(&f.doc);
+        // Alone on a clear page, its alpha is the gradient's own: whole
+        // where the whole stops are, part there round the half stop and
+        // along its edge.
+        let (mut covered, mut through) = (0usize, 0usize);
+        for p in &wheel.pixels {
+            if p.a > 0.3 {
+                covered += 1;
+            }
+            if p.a > 0.1 && p.a < 0.9 {
+                through += 1;
+            }
+        }
+        assert!(
+            covered > 40 && through > 5,
+            "it is on the page, and the page shows through part of it ({covered} on, {through} part there)"
+        );
+        let with = |change: &dyn Fn(&mut chitrakar_doc::Gradient)| {
+            let mut doc = f.doc.clone();
+            let mut kind = doc.node(f.wheel).unwrap().kind.clone();
+            if let NodeKind::Vector {
+                gradient: Some(g), ..
+            } = &mut kind
+            {
+                change(g);
+            }
+            doc.apply(Command::SetKind {
+                id: f.wheel,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            alone(&doc)
+        };
+        let differing = |a: &Surface, b: &Surface| {
+            a.pixels
+                .iter()
+                .zip(&b.pixels)
+                .filter(|(p, q)| {
+                    (p.r - q.r).abs() > 0.05 || (p.g - q.g).abs() > 0.05 || (p.a - q.a).abs() > 0.05
+                })
+                .count()
+        };
+        let turned = with(&|g| {
+            if let chitrakar_doc::Gradient::Conic { angle, .. } = g {
+                *angle += 180.0;
+            }
+        });
+        let backwards = with(&|g| {
+            if let chitrakar_doc::Gradient::Conic { stops, .. } = g {
+                for s in stops.iter_mut() {
+                    s.offset = 1.0 - s.offset;
+                }
+            }
+        });
+        assert!(
+            differing(&wheel, &turned) > 20,
+            "it turns ({} pixels differ turned half round)",
+            differing(&wheel, &turned)
+        );
+        assert!(
+            differing(&wheel, &backwards) > 20,
+            "and runs one way ({} pixels differ run backwards)",
+            differing(&wheel, &backwards)
+        );
+    }
+
     #[test]
     fn a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put() {
         let f = chitrakar_doc::fixture::everything();

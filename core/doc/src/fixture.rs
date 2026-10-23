@@ -91,6 +91,9 @@ pub struct Fixture {
     /// A star: five points pulled in by half, its corners rounded — the
     /// one kind of shape nothing here held.
     pub star: NodeId,
+    /// An ellipse filled by a conic gradient — the one kind of gradient
+    /// nothing here held.
+    pub wheel: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1798,6 +1801,68 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A conic gradient. A linear one and a radial one stood here, and
+    // the third kind — colour going *round* a centre, with a seam where
+    // the last stop meets the first — never had: it was drawn on pages
+    // nobody wrote and in the exporters' own tests, where it is the one
+    // gradient SVG cannot say (it goes as a pattern of a picture of
+    // itself) and PDF needs a function of its own for. On an ellipse of
+    // its own, in a box that is not square, so the turn is measured in
+    // the box rather than on the page; started a third of a turn round,
+    // so the seam is not on an axis; with a stop that is half there, so
+    // what is under it shows through part of the wheel. Its edit turns
+    // the seam half way round, which moves every colour of it.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: {
+            let mut node = Node::vector("wheel", VectorShape::Ellipse { rx: 6.0, ry: 4.5 });
+            if let NodeKind::Vector { gradient, .. } = &mut node.kind {
+                *gradient = Some(Gradient::Conic {
+                    center: [0.5, 0.5],
+                    angle: 120.0,
+                    stops: vec![
+                        GradientStop {
+                            offset: 0.0,
+                            color: chitrakar_color::AuthoredColor::Srgb {
+                                r: 0.9,
+                                g: 0.2,
+                                b: 0.3,
+                                a: 1.0,
+                            },
+                        },
+                        GradientStop {
+                            offset: 0.45,
+                            color: chitrakar_color::AuthoredColor::Srgb {
+                                r: 0.2,
+                                g: 0.7,
+                                b: 0.9,
+                                a: 0.5,
+                            },
+                        },
+                        GradientStop {
+                            offset: 1.0,
+                            color: chitrakar_color::AuthoredColor::Srgb {
+                                r: 0.95,
+                                g: 0.85,
+                                b: 0.3,
+                                a: 1.0,
+                            },
+                        },
+                    ],
+                });
+            }
+            Box::new(node)
+        },
+    })
+    .unwrap();
+    let wheel = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: wheel,
+        transform: Transform::translation(54.0, 1.5),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -2055,6 +2120,7 @@ pub fn everything() -> Fixture {
         spaced,
         listed,
         star,
+        wheel,
         stroke,
     }
 }
@@ -3546,6 +3612,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         spaced,
         listed,
         star,
+        wheel,
         stroke,
         ..
     } = f;
@@ -3818,6 +3885,22 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 spec.width = 60.0;
                 spec
             })),
+        },
+        // The seam turned half way round: every colour of the wheel
+        // moves, and its box does not.
+        Command::SetKind {
+            id: *wheel,
+            kind: Box::new({
+                let mut kind = f.doc.node(*wheel).unwrap().kind.clone();
+                if let NodeKind::Vector {
+                    gradient: Some(Gradient::Conic { angle, .. }),
+                    ..
+                } = &mut kind
+                {
+                    *angle = 300.0;
+                }
+                kind
+            }),
         },
         // Two more points, pulled in further: every corner of the star
         // moves, and its box does not.

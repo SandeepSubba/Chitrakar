@@ -1175,6 +1175,17 @@ mod tests {
             "/document/nodes/*/kind/Vector/gradient/Radial:center",
             "/document/nodes/*/kind/Vector/gradient/Radial:radius",
             "/document/nodes/*/kind/Vector/gradient/Radial:stops",
+            // A conic gradient cannot be missing its centre or its stops,
+            // as a radial one cannot; its angle is additive and is not
+            // here.
+            "/document/nodes/*/kind/Vector/gradient/Conic/stops/*/color/Srgb:a",
+            "/document/nodes/*/kind/Vector/gradient/Conic/stops/*/color/Srgb:b",
+            "/document/nodes/*/kind/Vector/gradient/Conic/stops/*/color/Srgb:g",
+            "/document/nodes/*/kind/Vector/gradient/Conic/stops/*/color/Srgb:r",
+            "/document/nodes/*/kind/Vector/gradient/Conic/stops/*:color",
+            "/document/nodes/*/kind/Vector/gradient/Conic/stops/*:offset",
+            "/document/nodes/*/kind/Vector/gradient/Conic:center",
+            "/document/nodes/*/kind/Vector/gradient/Conic:stops",
             // An ellipse drawn as a layer, not only as a mask.
             "/document/nodes/*/kind/Vector/shape/Ellipse:rx",
             "/document/nodes/*/kind/Vector/shape/Ellipse:ry",
