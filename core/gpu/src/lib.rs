@@ -2609,44 +2609,6 @@ impl Scene {
     }
 }
 
-/// Whether anything a layer *draws* carries a mask of its own — its
-/// children, or, for a copy, the layer it copies and that one's children.
-/// The layer itself is not counted: its own mask is the other half of the
-/// pair this asks about.
-fn draws_something_masked(doc: &Document, id: NodeId) -> bool {
-    fn walk(doc: &Document, id: NodeId, depth: usize) -> bool {
-        if depth > 32 {
-            // Deeper than anything here, and a ring would otherwise spin.
-            return true;
-        }
-        let Ok(node) = doc.node(id) else {
-            return false;
-        };
-        if depth > 0 && node.mask.is_some() {
-            return true;
-        }
-        // A stroke laid inside a region rides the same slot with that
-        // region, the layer's own included: a copy of a brush layer with
-        // one, masked and outlined, drew its outline from the wrong
-        // coverage — a page nobody wrote, once its strokes carried
-        // regions.
-        if let NodeKind::Paint { strokes } | NodeKind::Clone { strokes } = &node.kind {
-            if strokes.iter().any(|s| s.clip.is_some()) {
-                return true;
-            }
-        }
-        if let NodeKind::Instance { of, .. } = &node.kind {
-            if walk(doc, *of, depth + 1) {
-                return true;
-            }
-        }
-        doc.children_of(id)
-            .map(|kids| kids.iter().any(|k| walk(doc, *k, depth + 1)))
-            .unwrap_or(false)
-    }
-    walk(doc, id, 0)
-}
-
 /// Everything the page needs drawn onto a surface of `size`, with the
 /// document mapped through `view` on the way — or `None` when some of it
 /// cannot be.
@@ -2818,28 +2780,16 @@ fn one(
         ) {
             return None;
         }
-        // One coverage texture, and here two things want it. An effect is
-        // built from the layer's silhouette, and that silhouette is what
-        // the layer's own mask decides — so the mask rides the slot for
-        // the silhouette pass. If something *inside* the layer is masked
-        // too, its mask wants the same slot and does not get it: the
-        // child's mask is dropped, and not only from the shadow. Measured
-        // rather than reasoned — a masked group holding a masked ellipse
-        // and casting a drop shadow came out pixel for pixel like the
-        // reference renderer's answer for the same page with the child's
-        // mask *removed*, while the reference renderer's own answer
-        // differed from that by two hundredths of the page and two thirds
-        // of a channel at its worst.
-        //
-        // Either mask alone is fine, which is what makes this narrow: with
-        // no mask on the layer the child's rides the slot and is honoured,
-        // and with no mask inside there is nothing to collide. So the page
-        // goes back only for the pair of them, which is the same answer a
-        // stroke carrying a region gets on a layer whose own mask is
-        // already on that slot.
-        if node.mask.is_some() && draws_something_masked(doc, child) {
-            return None;
-        }
+        // A mask inside a masked layer used to send the page back: one
+        // coverage slot, and a layer wearing an effect put its own mask
+        // on it over everything it drew, so a mask inside was dropped,
+        // and not only from the shadow. Every coverage built under such
+        // a layer folds the layer's own mask in now and is put back once
+        // the layer's has been written (`Scene::worn`, `Scene::placed`),
+        // so the pair is drawn — a masked group holding a masked ellipse
+        // and casting a shadow is the reference's picture of it
+        // (`a_mask_inside_a_masked_layer_is_drawn`), and the random
+        // pages went from 3081 drawn to 3107 with none apart.
         let shadings: Vec<Shading> = node
             .effects
             .iter()
@@ -16886,6 +16836,176 @@ mod tests {
         );
     }
 
+    /// A mask inside a masked layer is drawn, the way the reference draws
+    /// it: a masked group holding a masked ellipse and casting a drop
+    /// shadow — the page this backend used to hand back, where the
+    /// ellipse's mask was dropped from the shadow and from the ellipse —
+    /// and a masked frame holding a masked rectangle wider than itself,
+    /// wearing an outline. Each against the reference to the audit's
+    /// thresholds, and each told from the same page with the inner mask
+    /// taken off, so a mask dropped cannot pass; and each with either
+    /// mask alone, which was always drawn and has to stay drawn.
+    ///
+    /// One coverage texture is why the pair was handed back: an effect
+    /// is built from the layer's silhouette, the layer's own mask
+    /// decides that silhouette and so rode the slot, and a mask on
+    /// something inside wanted the same slot and did not get it — not a
+    /// softer shadow but the child's mask dropped altogether, pixel for
+    /// pixel the reference's page with that mask removed. Seed 4898 of
+    /// the random pages found it, and a test here asserted the refusal
+    /// until the coverages learned to fold the layer's mask in and be
+    /// put back (`Scene::worn`, `Scene::placed`).
+    #[test]
+    fn a_mask_inside_a_masked_layer_is_drawn() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Effect as E;
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let ellipse_mask = |rx: f32, ry: f32, at: (f32, f32)| chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Ellipse { rx, ry },
+                transform: Transform::translation(at.0, at.1),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let put = |doc: &mut Document, parent: NodeId, node: Box<Node>, at: Transform| {
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node,
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform { id, transform: at })
+                .unwrap();
+            id
+        };
+        let ground = |doc: &mut Document| {
+            add(
+                doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 80.0,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    ink(0.85, 0.87, 0.9),
+                ),
+                Transform::default(),
+            );
+        };
+        // The pair the comment at the decline described.
+        let mut grouped = Document::new(80, 60, ColorMode::Rgb);
+        ground(&mut grouped);
+        let root = grouped.root();
+        let mut group = Node::group("group");
+        group.mask = Some(ellipse_mask(22.0, 16.0, (20.0, 14.0)));
+        group.effects = vec![E::DropShadow {
+            dx: 4.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: ink(0.0, 0.0, 0.1),
+            opacity: 0.8,
+            spread: 0.0,
+        }];
+        let group = put(
+            &mut grouped,
+            root,
+            Box::new(group),
+            Transform::translation(12.0, 10.0),
+        );
+        let mut dot = filled("dot", VectorShape::Ellipse { rx: 16.0, ry: 12.0 }, RED);
+        dot.mask = Some(ellipse_mask(10.0, 14.0, (12.0, -2.0)));
+        let inner_of_group = put(&mut grouped, group, dot, Transform::translation(6.0, 4.0));
+        // A masked frame holding a masked rectangle wider than itself.
+        let mut framed = Document::new(80, 60, ColorMode::Rgb);
+        ground(&mut framed);
+        let root = framed.root();
+        let mut frame = Node::artboard("frame", 36.0, 26.0, None);
+        frame.mask = Some(ellipse_mask(16.0, 12.0, (18.0, 13.0)));
+        frame.effects = vec![E::Outline {
+            width: 2.0,
+            color: ink(0.1, 0.5, 0.2),
+            opacity: 0.9,
+        }];
+        let frame = put(
+            &mut framed,
+            root,
+            Box::new(frame),
+            Transform::translation(20.0, 15.0),
+        );
+        let mut wide = filled(
+            "wide",
+            VectorShape::Rect {
+                width: 50.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+            BLUE,
+        );
+        wide.mask = Some(ellipse_mask(14.0, 9.0, (10.0, 8.0)));
+        let inner_of_frame = put(&mut framed, frame, wide, Transform::translation(-6.0, -8.0));
+        for (what, doc, inner) in [
+            (
+                "a masked group holding a masked ellipse, with a shadow",
+                grouped,
+                inner_of_group,
+            ),
+            (
+                "a masked frame holding a masked rectangle, outlined",
+                framed,
+                inner_of_frame,
+            ),
+        ] {
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && over == 0 && in_mean < 0.002,
+                "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+            let mut unmasked = doc.clone();
+            unmasked
+                .apply(Command::SetMask {
+                    id: inner,
+                    mask: None,
+                })
+                .unwrap();
+            let dropped = chitrakar_render::render(&unmasked).unwrap();
+            let (apart, _) = difference(&mine, &dropped);
+            assert!(
+                apart > 0.004,
+                "{what}: the inner mask shows ({apart:.5} from the page without it)"
+            );
+            // Either mask alone was never in question and still is not.
+            let mut bare = doc.clone();
+            let outer = bare.parent_of(inner).unwrap();
+            bare.apply(Command::SetMask {
+                id: outer,
+                mask: None,
+            })
+            .unwrap();
+            for (alone, page) in [
+                ("the inner mask alone", unmasked),
+                ("its own mask alone", bare),
+            ] {
+                assert!(GpuRenderer::can_render(&page), "{what}, {alone}, is drawn");
+                let (mean, _) = difference(
+                    &gpu.render(&page).unwrap(),
+                    &chitrakar_render::render(&page).unwrap(),
+                );
+                assert!(mean < 0.004, "{what}, {alone}: mean {mean:.5}");
+            }
+        }
+    }
+
     /// A copy of a frame that holds a clone layer, wearing a mask, is
     /// handed back, as a copy of the clone itself is: on a surface of
     /// its own the clone has nothing under it to paint with. A plain
@@ -18003,169 +18123,6 @@ mod tests {
             "subnormal"
         );
         assert!(f16_to_f32(0x7c00).is_infinite());
-    }
-
-    /// A layer's own mask and a mask inside it want the same slot, and
-    /// where an effect is asking for the silhouette they cannot share it.
-    ///
-    /// One coverage texture. An effect is built from the layer's
-    /// silhouette and the layer's own mask is what decides that
-    /// silhouette, so the mask rides the slot for the silhouette pass; a
-    /// mask on something *inside* the layer wants the same slot and does
-    /// not get it. What that cost was not a softer shadow but the child's
-    /// mask dropped altogether — this backend's answer for such a page was
-    /// the reference renderer's answer for the same page *with the child's
-    /// mask removed*, pixel for pixel.
-    ///
-    /// So the page goes back, which is the same answer a stroke carrying a
-    /// region gets on a layer whose own mask is already on that slot.
-    ///
-    /// Three things are asserted and the second two are what keep the limit
-    /// honest: that the page is refused; that either mask *alone* is still
-    /// drawn, and drawn the way the reference renderer draws it, so the
-    /// refusal is no wider than the collision; and that the two pictures
-    /// really are different, so what is being declined is a wrong answer
-    /// rather than a scruple. Found at seed 4898 of the random pages, which
-    /// is three of them.
-    #[test]
-    fn a_mask_inside_a_masked_layer_with_effects_goes_back() {
-        let at = Transform::translation(14.0, 10.0);
-        let region = |w: f32, h: f32, x: f32, y: f32| chitrakar_doc::Mask {
-            kind: chitrakar_doc::MaskKind::Vector {
-                shape: VectorShape::Rect {
-                    width: w,
-                    height: h,
-                    radius: 0.0,
-                },
-                transform: Transform::translation(x, y),
-            },
-            invert: false,
-            feather: 0.0,
-        };
-        // `inside` masks the child, `outside` masks the group holding it.
-        let build = |inside: bool, outside: bool| {
-            let mut doc = Document::new(48, 36, chitrakar_color::ColorMode::Rgb);
-            add(
-                &mut doc,
-                filled(
-                    "ground",
-                    VectorShape::Rect {
-                        width: 48.0,
-                        height: 36.0,
-                        radius: 0.0,
-                    },
-                    AuthoredColor::Srgb {
-                        r: 0.2,
-                        g: 0.6,
-                        b: 0.75,
-                        a: 1.0,
-                    },
-                ),
-                Transform::default(),
-            );
-            let group = add(
-                &mut doc,
-                Box::new(Node::group("holds it")),
-                Transform::default(),
-            );
-            let mut child = filled(
-                "child",
-                VectorShape::Ellipse { rx: 9.0, ry: 6.0 },
-                AuthoredColor::Srgb {
-                    r: 0.85,
-                    g: 0.35,
-                    b: 0.2,
-                    a: 1.0,
-                },
-            );
-            if inside {
-                child.mask = Some(region(14.0, 30.0, 8.0, 4.0));
-            }
-            doc.apply(Command::AddNode {
-                parent: group,
-                index: 0,
-                node: child,
-            })
-            .unwrap();
-            let kid = doc.children_of(group).unwrap()[0];
-            doc.apply(Command::SetTransform {
-                id: kid,
-                transform: at,
-            })
-            .unwrap();
-            if outside {
-                doc.apply(Command::SetMask {
-                    id: group,
-                    mask: Some(Box::new(region(30.0, 14.0, 4.0, 12.0))),
-                })
-                .unwrap();
-            }
-            // The shadow is what asks for the silhouette, and so what
-            // turns two masks into a collision.
-            doc.apply(Command::SetEffects {
-                id: group,
-                effects: vec![chitrakar_doc::Effect::DropShadow {
-                    dx: 4.0,
-                    dy: 3.0,
-                    blur: 2.5,
-                    color: AuthoredColor::Srgb {
-                        r: 0.0,
-                        g: 0.0,
-                        b: 0.0,
-                        a: 1.0,
-                    },
-                    opacity: 0.85,
-                    spread: 0.0,
-                }],
-            })
-            .unwrap();
-            doc
-        };
-
-        let both = build(true, true);
-        assert!(
-            !GpuRenderer::can_render(&both),
-            "a mask inside a masked layer with an effect has to go back: \
-             one coverage texture, and the child's mask is what gets dropped"
-        );
-        // Declining is only worth anything because the two pictures differ.
-        // What this backend drew was the page without the child's mask, so
-        // that is what the difference is measured against.
-        let as_if_dropped = build(false, true);
-        let (mean, worst) = difference(
-            &chitrakar_render::render(&both).unwrap(),
-            &chitrakar_render::render(&as_if_dropped).unwrap(),
-        );
-        assert!(
-            mean > 0.01 && worst > 0.5,
-            "the child's mask has to matter to the picture or there is \
-             nothing to decline: mean {mean:.5}, worst {worst:.3}"
-        );
-
-        // And no wider than the collision: either mask alone is drawn, and
-        // drawn the way the reference renderer draws it.
-        let Some(gpu) = gpu_or_skip() else {
-            return;
-        };
-        for (inside, outside, what) in [
-            (true, false, "a mask inside it and none of its own"),
-            (false, true, "a mask of its own and none inside it"),
-        ] {
-            let doc = build(inside, outside);
-            assert!(
-                GpuRenderer::can_render(&doc),
-                "a layer with an effect and {what} is still drawn"
-            );
-            let (mean, worst) = difference(
-                &gpu.render(&doc).unwrap(),
-                &chitrakar_render::render(&doc).unwrap(),
-            );
-            assert!(
-                mean < 0.004,
-                "with {what} it draws what the reference draws: \
-                 mean {mean:.5}, worst {worst:.3}"
-            );
-        }
     }
 
     /// A frame casts the shadow of its own rectangle, on both sides.
