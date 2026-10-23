@@ -28,6 +28,32 @@ pub enum Beyond {
 }
 
 pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32, beyond: Beyond) {
+    let width = surface.width;
+    gaussian_blur_lanes(&mut surface.pixels, width, clip, sigma, beyond);
+}
+
+/// [`gaussian_blur`] over a plane of coverage laid out as a surface of
+/// `width` is: the same passes, a quarter of the arithmetic. What a
+/// shadow is cast from is a coverage — the silhouette — and its colour is
+/// one tint over all of it, so it is the coverage that is blurred and the
+/// tint that is laid where the shadow lands.
+pub fn gaussian_blur_cover(
+    cover: &mut [f32],
+    width: u32,
+    clip: ClipRect,
+    sigma: f32,
+    beyond: Beyond,
+) {
+    gaussian_blur_lanes(cover, width, clip, sigma, beyond);
+}
+
+fn gaussian_blur_lanes<T: Lane>(
+    pixels: &mut [T],
+    width: u32,
+    clip: ClipRect,
+    sigma: f32,
+    beyond: Beyond,
+) {
     if sigma <= 0.01 || clip.is_empty() {
         return;
     }
@@ -35,8 +61,8 @@ pub fn gaussian_blur(surface: &mut Surface, clip: ClipRect, sigma: f32, beyond: 
     let d = ((sigma * 3.0 * (2.0 * std::f32::consts::PI).sqrt() / 4.0) + 0.5).floor() as i32;
     let radius = (d.max(1) / 2).max(1);
     for _ in 0..3 {
-        box_blur_axis(surface, clip, radius, true, beyond);
-        box_blur_down(surface, clip, radius, beyond);
+        axis_pass(pixels, width, clip, radius, true, beyond);
+        down_pass(pixels, width, clip, radius, beyond);
     }
 }
 
@@ -169,36 +195,88 @@ pub fn snapshot(surface: &Surface, clip: ClipRect) -> Vec<LinearRgba> {
     out
 }
 
-fn add(a: LinearRgba, b: LinearRgba) -> LinearRgba {
-    LinearRgba {
-        r: a.r + b.r,
-        g: a.g + b.g,
-        b: a.b + b.b,
-        a: a.a + b.a,
+/// What a box pass sums: a picture's pixel, four channels, or one
+/// channel of coverage. The same additions in the same order either way,
+/// so a plane of coverage blurred is, to the bit, the alpha a picture of
+/// that coverage blurs to (`a_plane_blurs_to_the_alpha_of_its_picture`).
+pub(crate) trait Lane: Copy {
+    const ZERO: Self;
+    fn add(self, other: Self) -> Self;
+    fn sub(self, other: Self) -> Self;
+    fn scale(self, s: f32) -> Self;
+}
+
+impl Lane for LinearRgba {
+    const ZERO: Self = LinearRgba::TRANSPARENT;
+    #[inline]
+    fn add(self, b: Self) -> Self {
+        LinearRgba {
+            r: self.r + b.r,
+            g: self.g + b.g,
+            b: self.b + b.b,
+            a: self.a + b.a,
+        }
+    }
+    #[inline]
+    fn sub(self, b: Self) -> Self {
+        LinearRgba {
+            r: self.r - b.r,
+            g: self.g - b.g,
+            b: self.b - b.b,
+            a: self.a - b.a,
+        }
+    }
+    #[inline]
+    fn scale(self, s: f32) -> Self {
+        LinearRgba {
+            r: self.r * s,
+            g: self.g * s,
+            b: self.b * s,
+            a: self.a * s,
+        }
     }
 }
 
-fn sub(a: LinearRgba, b: LinearRgba) -> LinearRgba {
-    LinearRgba {
-        r: a.r - b.r,
-        g: a.g - b.g,
-        b: a.b - b.b,
-        a: a.a - b.a,
+impl Lane for f32 {
+    const ZERO: Self = 0.0;
+    #[inline]
+    fn add(self, b: Self) -> Self {
+        self + b
     }
-}
-
-fn scale(a: LinearRgba, s: f32) -> LinearRgba {
-    LinearRgba {
-        r: a.r * s,
-        g: a.g * s,
-        b: a.b * s,
-        a: a.a * s,
+    #[inline]
+    fn sub(self, b: Self) -> Self {
+        self - b
+    }
+    #[inline]
+    fn scale(self, s: f32) -> Self {
+        self * s
     }
 }
 
 /// One box-blur pass along an axis with a sliding-window running sum.
+#[cfg(test)]
 fn box_blur_axis(
     surface: &mut Surface,
+    clip: ClipRect,
+    radius: i32,
+    horizontal: bool,
+    beyond: Beyond,
+) {
+    axis_pass(
+        &mut surface.pixels,
+        surface.width,
+        clip,
+        radius,
+        horizontal,
+        beyond,
+    );
+}
+
+/// [`box_blur_axis`] over any grid of lanes: a picture's pixels, or a
+/// plane of coverage (`gaussian_blur_cover`).
+fn axis_pass<T: Lane>(
+    pixels: &mut [T],
+    width: u32,
     clip: ClipRect,
     radius: i32,
     horizontal: bool,
@@ -217,7 +295,7 @@ fn box_blur_axis(
     // nobody comes back from.
     let radius = radius.min(len);
     let norm = 1.0 / (2 * radius + 1) as f32;
-    let mut line: Vec<LinearRgba> = vec![LinearRgba::TRANSPARENT; len as usize];
+    let mut line: Vec<T> = vec![T::ZERO; len as usize];
 
     let index = |lane: u32, i: i32| -> usize {
         let (x, y) = if horizontal {
@@ -225,23 +303,23 @@ fn box_blur_axis(
         } else {
             (clip.x0 + lane, clip.y0 + i as u32)
         };
-        (y * surface.width + x) as usize
+        (y * width + x) as usize
     };
 
     for lane in 0..lanes {
         for (i, slot) in line.iter_mut().enumerate() {
-            *slot = surface.pixels[index(lane, i as i32)];
+            *slot = pixels[index(lane, i as i32)];
         }
         let at = |i: i32| {
             if beyond == Beyond::Nothing && (i < 0 || i >= len) {
-                return LinearRgba::TRANSPARENT;
+                return T::ZERO;
             }
             line[i.clamp(0, len - 1) as usize]
         };
         // Prime the window centered on i = 0.
-        let mut sum = LinearRgba::TRANSPARENT;
+        let mut sum = T::ZERO;
         for i in -radius..=radius {
-            sum = add(sum, at(i));
+            sum = sum.add(at(i));
         }
         // Only the first `radius` and the last `radius + 1` can read past
         // the line's ends; between them every read is inside it and needs
@@ -249,28 +327,28 @@ fn box_blur_axis(
         // (`a_blur_in_three_runs_is_the_same_blur`).
         let head = radius.min(len);
         let tail = (len - radius - 1).max(head);
-        let step = |i: i32, sum: &mut LinearRgba, inside: bool| {
+        let step = |i: i32, sum: &mut T, inside: bool| {
             *sum = if inside {
-                add(*sum, line[(i + radius + 1) as usize])
+                sum.add(line[(i + radius + 1) as usize])
             } else {
-                add(*sum, at(i + radius + 1))
+                sum.add(at(i + radius + 1))
             };
             *sum = if inside {
-                sub(*sum, line[(i - radius) as usize])
+                sum.sub(line[(i - radius) as usize])
             } else {
-                sub(*sum, at(i - radius))
+                sum.sub(at(i - radius))
             };
         };
         if horizontal {
-            let row = ((clip.y0 + lane) * surface.width + clip.x0) as usize;
-            let out = &mut surface.pixels[row..row + len as usize];
+            let row = ((clip.y0 + lane) * width + clip.x0) as usize;
+            let out = &mut pixels[row..row + len as usize];
             for i in 0..len {
-                out[i as usize] = scale(sum, norm);
+                out[i as usize] = sum.scale(norm);
                 step(i, &mut sum, i >= head && i < tail);
             }
         } else {
             for i in 0..len {
-                surface.pixels[index(lane, i)] = scale(sum, norm);
+                pixels[index(lane, i)] = sum.scale(norm);
                 step(i, &mut sum, i >= head && i < tail);
             }
         }
@@ -293,33 +371,34 @@ fn box_blur_axis(
 /// ring of the last `radius + 1` — the window reaches `radius` back from
 /// the row just written — and the first row on its own, for a window
 /// that repeats the top edge.
+#[cfg(test)]
 fn box_blur_down(surface: &mut Surface, clip: ClipRect, radius: i32, beyond: Beyond) {
+    down_pass(&mut surface.pixels, surface.width, clip, radius, beyond);
+}
+
+/// [`box_blur_down`] over any grid of lanes.
+fn down_pass<T: Lane>(pixels: &mut [T], width: u32, clip: ClipRect, radius: i32, beyond: Beyond) {
     let (cols, len) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as i32);
     if len == 0 || cols == 0 {
         return;
     }
     let radius = radius.min(len);
     let norm = 1.0 / (2 * radius + 1) as f32;
-    let width = surface.width as usize;
+    let width = width as usize;
     let row_at = |j: i32| (clip.y0 as usize + j as usize) * width + clip.x0 as usize;
-    let first: Vec<LinearRgba> = surface.pixels[row_at(0)..row_at(0) + cols].to_vec();
+    let first: Vec<T> = pixels[row_at(0)..row_at(0) + cols].to_vec();
     let ring_len = (radius + 1) as usize;
-    let mut ring: Vec<LinearRgba> = vec![LinearRgba::TRANSPARENT; ring_len * cols];
-    let mut sum = vec![LinearRgba::TRANSPARENT; cols];
-    let add_row = |sum: &mut [LinearRgba],
-                   surface: &Surface,
-                   ring: &[LinearRgba],
-                   j: i32,
-                   done: i32,
-                   sign: f32| {
+    let mut ring: Vec<T> = vec![T::ZERO; ring_len * cols];
+    let mut sum = vec![T::ZERO; cols];
+    let add_row = |sum: &mut [T], pixels: &[T], ring: &[T], j: i32, done: i32, sign: f32| {
         if beyond == Beyond::Nothing && (j < 0 || j >= len) {
             // Nothing: adding or taking away transparent leaves the sum
             // as it was, bit for bit.
             for s in sum.iter_mut() {
                 *s = if sign > 0.0 {
-                    add(*s, LinearRgba::TRANSPARENT)
+                    s.add(T::ZERO)
                 } else {
-                    sub(*s, LinearRgba::TRANSPARENT)
+                    s.sub(T::ZERO)
                 };
             }
             return;
@@ -330,8 +409,8 @@ fn box_blur_down(surface: &mut Surface, clip: ClipRect, radius: i32, beyond: Bey
         // reaches further back — or the first row, which a window
         // repeating the top edge reads to the end.
         let j = j.clamp(0, len - 1);
-        let row: &[LinearRgba] = if j > done {
-            &surface.pixels[row_at(j)..row_at(j) + cols]
+        let row: &[T] = if j > done {
+            &pixels[row_at(j)..row_at(j) + cols]
         } else if j == 0 {
             &first
         } else {
@@ -339,28 +418,89 @@ fn box_blur_down(surface: &mut Surface, clip: ClipRect, radius: i32, beyond: Bey
             &ring[at..at + cols]
         };
         for (s, p) in sum.iter_mut().zip(row) {
-            *s = if sign > 0.0 { add(*s, *p) } else { sub(*s, *p) };
+            *s = if sign > 0.0 { s.add(*p) } else { s.sub(*p) };
         }
     };
     // Prime every column's window centred on the first row.
     for j in -radius..=radius {
-        add_row(&mut sum, surface, &ring, j, -1, 1.0);
+        add_row(&mut sum, pixels, &ring, j, -1, 1.0);
     }
     for i in 0..len {
         // Keep the row as it was before its answer goes over it.
         let at = (i as usize % ring_len) * cols;
         let start = row_at(i);
-        ring[at..at + cols].copy_from_slice(&surface.pixels[start..start + cols]);
-        for (out, s) in surface.pixels[start..start + cols].iter_mut().zip(&sum) {
-            *out = scale(*s, norm);
+        ring[at..at + cols].copy_from_slice(&pixels[start..start + cols]);
+        for (out, s) in pixels[start..start + cols].iter_mut().zip(&sum) {
+            *out = s.scale(norm);
         }
-        add_row(&mut sum, surface, &ring, i + radius + 1, i, 1.0);
-        add_row(&mut sum, surface, &ring, i - radius, i, -1.0);
+        add_row(&mut sum, pixels, &ring, i + radius + 1, i, 1.0);
+        add_row(&mut sum, pixels, &ring, i - radius, i, -1.0);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// A plane of coverage blurred is, to the bit, the alpha channel of a
+    /// picture of that coverage blurred: the same passes, the same
+    /// additions in the same order, one channel instead of four. Over a
+    /// clip that is not the whole surface, with the edge repeated and
+    /// with nothing past it, and at softnesses from a pixel to past the
+    /// clip's own size.
+    #[test]
+    fn a_plane_blurs_to_the_alpha_of_its_picture() {
+        let (w, h) = (53u32, 41u32);
+        let mut seed = 0x0bad_5eedu32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let picture: Vec<LinearRgba> = (0..w * h)
+            .map(|_| {
+                let a = if next() < 0.4 { 0.0 } else { next() };
+                LinearRgba {
+                    r: next() * a,
+                    g: next() * a,
+                    b: next() * a,
+                    a,
+                }
+            })
+            .collect();
+        for clip in [
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            },
+            ClipRect {
+                x0: 6,
+                y0: 3,
+                x1: 47,
+                y1: 30,
+            },
+        ] {
+            for beyond in [Beyond::Edge, Beyond::Nothing] {
+                for sigma in [0.6, 2.0, 5.5, 40.0] {
+                    let mut s = Surface::new(w, h);
+                    s.pixels.copy_from_slice(&picture);
+                    let mut plane: Vec<f32> = picture.iter().map(|p| p.a).collect();
+                    gaussian_blur(&mut s, clip, sigma, beyond);
+                    gaussian_blur_cover(&mut plane, w, clip, sigma, beyond);
+                    for (i, (p, c)) in s.pixels.iter().zip(&plane).enumerate() {
+                        assert_eq!(
+                            p.a.to_bits(),
+                            c.to_bits(),
+                            "sigma {sigma} over {clip:?}: pixel {i} is {} as a picture, {c} as a plane",
+                            p.a
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     /// A softness wider than what it is being drawn on.
     ///
     /// Typed at a page that cannot hold it, or read out of a file that
@@ -502,12 +642,12 @@ mod tests {
                 };
                 let mut sum = LinearRgba::TRANSPARENT;
                 for i in -radius..=radius {
-                    sum = add(sum, at(i));
+                    sum = sum.add(at(i));
                 }
                 for i in 0..len {
-                    surface.pixels[(y * w + clip.x0 + i as u32) as usize] = scale(sum, norm);
-                    sum = add(sum, at(i + radius + 1));
-                    sum = sub(sum, at(i - radius));
+                    surface.pixels[(y * w + clip.x0 + i as u32) as usize] = sum.scale(norm);
+                    sum = sum.add(at(i + radius + 1));
+                    sum = sum.sub(at(i - radius));
                 }
             }
         };

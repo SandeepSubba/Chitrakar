@@ -3686,10 +3686,10 @@ fn draw_effect(
                 return;
             }
             let tint = scale_alpha(resolve_color(doc, color), *opacity);
-            let field = silhouette(layer, origin, layer_clip, tint, false, blur * scale);
+            let cover = silhouette(layer, origin, layer_clip, false, blur * scale);
             stamp(
                 dst,
-                &field,
+                Field::Cover(&cover, layer.width, tint),
                 origin,
                 along(*dx, *dy),
                 layer_clip,
@@ -3715,10 +3715,10 @@ fn draw_effect(
             // kept inside it: what shows is the part of that shadow the
             // silhouette itself covers, which is the edge, from inside.
             let tint = scale_alpha(resolve_color(doc, color), *opacity);
-            let field = silhouette(layer, origin, layer_clip, tint, true, blur * scale);
+            let cover = silhouette(layer, origin, layer_clip, true, blur * scale);
             stamp(
                 dst,
-                &field,
+                Field::Cover(&cover, layer.width, tint),
                 origin,
                 along(*dx, *dy),
                 layer_clip,
@@ -3765,7 +3765,7 @@ fn draw_effect(
             );
             stamp(
                 dst,
-                &lit,
+                Field::Colour(&lit),
                 origin,
                 (0.0, 0.0),
                 layer_clip,
@@ -3786,10 +3786,10 @@ fn draw_effect(
                 return;
             }
             let tint = scale_alpha(resolve_color(doc, color), *opacity);
-            let field = outline_band(layer, origin, layer_clip, tint, w, layer_opacity);
+            let band = outline_band(layer, origin, layer_clip, w, layer_opacity);
             stamp(
                 dst,
-                &field,
+                Field::Cover(&band, layer.width, tint),
                 origin,
                 (0.0, 0.0),
                 layer_clip,
@@ -3821,19 +3821,13 @@ fn bevel_field(
     layer_opacity: f32,
     [hi, lo]: [LinearRgba; 2],
 ) -> Surface {
-    let white = LinearRgba {
-        r: 1.0,
-        g: 1.0,
-        b: 1.0,
-        a: 1.0,
-    };
-    let field = silhouette(layer, origin, clip, white, false, light.sigma);
+    let field = silhouette(layer, origin, clip, false, light.sigma);
     let lift = light.surface_scale / layer_opacity.max(1e-3);
     let height = |x: i64, y: i64| {
         if x < clip.x0 as i64 || y < clip.y0 as i64 || x >= clip.x1 as i64 || y >= clip.y1 as i64 {
             return 0.0;
         }
-        field.pixels[at_in(origin, field.width, x as u32, y as u32)].a
+        field[at_in(origin, layer.width, x as u32, y as u32)]
     };
     let [lx, ly, lz] = light.toward;
     let mut out = Surface::new(layer.width, layer.height);
@@ -3861,24 +3855,28 @@ fn bevel_field(
     out
 }
 
-/// The layer's silhouette (or, inverted, the hole around it) in one flat
-/// colour, blurred. Tinting before the blur rather than after is the same
-/// answer — the tint is constant and the blur is linear — and it means one
-/// surface instead of two.
+/// The layer's silhouette (or, inverted, the hole around it) as a plane
+/// of coverage laid out as the layer's surface is, blurred.
+///
+/// A coverage rather than a colour: an effect's colour is one tint over
+/// the whole of it, so the tint goes on where the field lands (`stamp`,
+/// `Field::Cover`) and the blur works one channel rather than four. It
+/// was a picture of the tint once, blurred in all four channels — the
+/// same answer, the blur being linear, to a rounding — and a page of
+/// shapes casting shadows spent most of its frame there.
 fn silhouette(
     layer: &Surface,
     origin: (u32, u32),
     clip: ClipRect,
-    tint: LinearRgba,
     invert: bool,
     sigma: f32,
-) -> Surface {
-    let mut out = Surface::new(layer.width, layer.height);
+) -> Vec<f32> {
+    let mut out = vec![0.0f32; layer.pixels.len()];
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
             let i = at_in(origin, layer.width, x, y);
             let a = layer.pixels[i].a;
-            out.pixels[i] = scale_alpha(tint, if invert { 1.0 - a } else { a });
+            out[i] = if invert { 1.0 - a } else { a };
         }
     }
     // Past the window this was built over there is nothing — the window
@@ -3887,8 +3885,9 @@ fn silhouette(
     // that edge where the *surface* cut the window short, and there
     // repeating it would invent silhouette and cast a heavier shadow for
     // a layer near the page's edge than for the same layer in the middle.
-    blur::gaussian_blur(
+    blur::gaussian_blur_cover(
         &mut out,
+        layer.width,
         shift_clip(clip, origin),
         sigma,
         blur::Beyond::Nothing,
@@ -3973,10 +3972,9 @@ fn outline_band(
     layer: &Surface,
     origin: (u32, u32),
     clip: ClipRect,
-    tint: LinearRgba,
     width: f32,
     layer_opacity: f32,
-) -> Surface {
+) -> Vec<f32> {
     let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
     let mut inside = vec![false; w * h];
     // Off the layer's surface is uncovered, which is what it is.
@@ -4017,7 +4015,8 @@ fn outline_band(
     // far at 22.5° than it did along the axis, which is a circle drawn
     // as an octagon. One idea of distance in the file rather than two.
     let dist = squared_distance(&inside, w, h);
-    let mut out = Surface::new(layer.width, layer.height);
+    // A coverage, tinted where it lands, as a shadow's is.
+    let mut out = vec![0.0f32; layer.pixels.len()];
     for y in 0..h {
         for x in 0..w {
             // The distance counts from pixel centre to pixel centre, and
@@ -4029,7 +4028,7 @@ fn outline_band(
                 continue;
             }
             let i = at_in(origin, layer.width, x as u32 + clip.x0, y as u32 + clip.y0);
-            out.pixels[i] = scale_alpha(tint, cover);
+            out[i] = cover;
         }
     }
     out
@@ -4042,7 +4041,7 @@ fn outline_band(
 #[allow(clippy::too_many_arguments)]
 fn stamp(
     dst: &mut Surface,
-    field: &Surface,
+    field: Field<'_>,
     origin: (u32, u32),
     offset: (f32, f32),
     field_clip: ClipRect,
@@ -4058,32 +4057,71 @@ fn stamp(
     if hi_x < lo_x || hi_y < lo_y {
         return;
     }
-    for y in write.y0..write.y1 {
-        for x in write.x0..write.x1 {
-            let (sx, sy) = (x as f32 - ox, y as f32 - oy);
-            if sx < lo_x - 1.0 || sy < lo_y - 1.0 || sx > hi_x + 1.0 || sy > hi_y + 1.0 {
-                continue;
-            }
-            let (fx, fy) = (sx.floor(), sy.floor());
-            let (tx, ty) = (sx - fx, sy - fy);
-            // Off the window the field was built over there is nothing,
-            // rather than its edge repeated. Which is the same answer
-            // either way where the window is the layer's box grown by
-            // how far the effect reaches — the field is nothing at that
-            // box's edge — and a different one where the *surface* cut
-            // the window short. There the field's edge is not nothing,
-            // and repeating it gives a layer near the page's edge a
-            // heavier shadow than the same layer in the middle: a
-            // shadow that is not a function of the layer alone.
-            let at = |px: f32, py: f32| {
-                if px < lo_x || py < lo_y || px > hi_x || py > hi_y {
-                    return LinearRgba::TRANSPARENT;
+    // Where a pixel reads the field depends on its column alone across
+    // and its row alone down, so both are worked out once a column and
+    // once a row rather than at every pixel: the tap either side, as an
+    // index into the field's lines when it is on the window and nothing
+    // when it is off, and how far between them — the same arithmetic,
+    // so the same taps and weights to the bit.
+    //
+    // Off the window the field was built over there is nothing, rather
+    // than its edge repeated. Which is the same answer either way where
+    // the window is the layer's box grown by how far the effect reaches
+    // — the field is nothing at that box's edge — and a different one
+    // where the *surface* cut the window short. There the field's edge
+    // is not nothing, and repeating it gives a layer near the page's
+    // edge a heavier shadow than the same layer in the middle: a shadow
+    // that is not a function of the layer alone.
+    let taps = |from: u32, to: u32, shift: f32, lo: f32, hi: f32, start: u32| {
+        (from..to)
+            .map(|v| {
+                let s = v as f32 - shift;
+                if s < lo - 1.0 || s > hi + 1.0 {
+                    return None;
                 }
-                field.pixels[at_in(origin, field.width, px as u32, py as u32)]
+                let f = s.floor();
+                let on = |p: f32| (p >= lo && p <= hi).then(|| p as u32 - start);
+                Some((on(f), on(f + 1.0), s - f))
+            })
+            .collect::<Vec<_>>()
+    };
+    let across = taps(write.x0, write.x1, ox, lo_x, hi_x, origin.0);
+    let down = taps(write.y0, write.y1, oy, lo_y, hi_y, origin.1);
+    for (y, row) in (write.y0..write.y1).zip(&down) {
+        let Some((r0, r1, ty)) = *row else {
+            continue;
+        };
+        for (x, col) in (write.x0..write.x1).zip(&across) {
+            let Some((c0, c1, tx)) = *col else {
+                continue;
             };
-            let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
-            let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
-            let mut src = lerp(top, bottom, ty);
+            let mut src = match field {
+                Field::Colour(field) => {
+                    let at = |c: Option<u32>, r: Option<u32>| match (c, r) {
+                        (Some(c), Some(r)) => field.pixels[(r * field.width + c) as usize],
+                        _ => LinearRgba::TRANSPARENT,
+                    };
+                    let top = lerp(at(c0, r0), at(c1, r0), tx);
+                    let bottom = lerp(at(c0, r1), at(c1, r1), tx);
+                    lerp(top, bottom, ty)
+                }
+                // The same four taps of one channel, and the tint laid by
+                // what they come to.
+                Field::Cover(cover, width, tint) => {
+                    let at = |c: Option<u32>, r: Option<u32>| match (c, r) {
+                        (Some(c), Some(r)) => cover[(r * width + c) as usize],
+                        _ => 0.0,
+                    };
+                    let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+                    let top = mix(at(c0, r0), at(c1, r0), tx);
+                    let bottom = mix(at(c0, r1), at(c1, r1), tx);
+                    let c = mix(top, bottom, ty);
+                    if c <= 0.0 {
+                        continue;
+                    }
+                    scale_alpha(tint, c)
+                }
+            };
             if let Some(g) = gain {
                 src = g.apply(src);
             }
@@ -4105,6 +4143,15 @@ fn stamp(
             dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
         }
     }
+}
+
+/// What an effect lays down: a picture of it (a bevel's light, two
+/// colours), or a coverage laid out as the layer's surface is — its
+/// width given — and the one tint over all of it (a shadow, an outline).
+#[derive(Clone, Copy)]
+enum Field<'a> {
+    Colour(&'a Surface),
+    Cover(&'a [f32], u32, LinearRgba),
 }
 
 /// A shadow's spread, as the stamp lays it down: the field's coverage
@@ -19167,6 +19214,362 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The stamp as it was, a pixel at a time: where each pixel reads
+    /// the field worked out at the pixel. The stamp now works that out
+    /// once a column and once a row (`a_stamp_by_rows_and_columns_is_the_stamp_by_pixels`).
+    #[allow(clippy::too_many_arguments)]
+    fn stamp_a_pixel_at_a_time(
+        dst: &mut Surface,
+        field: Field<'_>,
+        origin: (u32, u32),
+        offset: (f32, f32),
+        field_clip: ClipRect,
+        write: ClipRect,
+        blend: BlendMode,
+        keep_inside: Option<&Surface>,
+        gain: Option<Gain>,
+        held: Option<&Cover>,
+    ) {
+        let (ox, oy) = offset;
+        let (lo_x, hi_x) = (field_clip.x0 as f32, field_clip.x1 as f32 - 1.0);
+        let (lo_y, hi_y) = (field_clip.y0 as f32, field_clip.y1 as f32 - 1.0);
+        if hi_x < lo_x || hi_y < lo_y {
+            return;
+        }
+        for y in write.y0..write.y1 {
+            for x in write.x0..write.x1 {
+                let (sx, sy) = (x as f32 - ox, y as f32 - oy);
+                if sx < lo_x - 1.0 || sy < lo_y - 1.0 || sx > hi_x + 1.0 || sy > hi_y + 1.0 {
+                    continue;
+                }
+                let (fx, fy) = (sx.floor(), sy.floor());
+                let (tx, ty) = (sx - fx, sy - fy);
+                // Off the window the field was built over there is nothing,
+                // rather than its edge repeated. Which is the same answer
+                // either way where the window is the layer's box grown by
+                // how far the effect reaches — the field is nothing at that
+                // box's edge — and a different one where the *surface* cut
+                // the window short. There the field's edge is not nothing,
+                // and repeating it gives a layer near the page's edge a
+                // heavier shadow than the same layer in the middle: a
+                // shadow that is not a function of the layer alone.
+                let inside = |px: f32, py: f32| !(px < lo_x || py < lo_y || px > hi_x || py > hi_y);
+                let mut src = match field {
+                    Field::Colour(field) => {
+                        let at = |px: f32, py: f32| {
+                            if !inside(px, py) {
+                                return LinearRgba::TRANSPARENT;
+                            }
+                            field.pixels[at_in(origin, field.width, px as u32, py as u32)]
+                        };
+                        let top = lerp(at(fx, fy), at(fx + 1.0, fy), tx);
+                        let bottom = lerp(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
+                        lerp(top, bottom, ty)
+                    }
+                    // The same four taps of one channel, and the tint laid by
+                    // what they come to.
+                    Field::Cover(cover, width, tint) => {
+                        let at = |px: f32, py: f32| {
+                            if !inside(px, py) {
+                                return 0.0;
+                            }
+                            cover[at_in(origin, width, px as u32, py as u32)]
+                        };
+                        let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+                        let top = mix(at(fx, fy), at(fx + 1.0, fy), tx);
+                        let bottom = mix(at(fx, fy + 1.0), at(fx + 1.0, fy + 1.0), tx);
+                        let c = mix(top, bottom, ty);
+                        if c <= 0.0 {
+                            continue;
+                        }
+                        scale_alpha(tint, c)
+                    }
+                };
+                if let Some(g) = gain {
+                    src = g.apply(src);
+                }
+                let i = (y * dst.width + x) as usize;
+                if let Some(inside) = keep_inside {
+                    src = scale_alpha(src, inside.pixels[at_in(origin, inside.width, x, y)].a);
+                }
+                // Held to the layer under it: an effect is cut by that
+                // layer's alpha as the layer itself is. A clipping group
+                // shows nothing outside its base; cut to the rectangle the
+                // base was drawn in instead, a shadow held to a disc filled
+                // the corners of the disc's box.
+                if let Some(c) = held {
+                    src = scale_alpha(src, c.alpha_at(x, y));
+                }
+                if src.a <= 0.0 {
+                    continue;
+                }
+                dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
+            }
+        }
+    }
+
+    /// An effect laid down with where it reads the field worked out once
+    /// a column and once a row is the effect laid down working it out at
+    /// every pixel, to the bit: a coverage and a picture, at offsets
+    /// between pixels either way and whole ones, with a window the field
+    /// was built over that is smaller than what is written and off the
+    /// surface's corner, a spread's gain, kept inside the layer and held
+    /// to a layer under it.
+    #[test]
+    fn a_stamp_by_rows_and_columns_is_the_stamp_by_pixels() {
+        let (w, h) = (40u32, 30u32);
+        let origin = (6u32, 4u32);
+        let mut seed = 0x051a_b1e5_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let mut picture = Surface::new(w, h);
+        let mut cover = vec![0.0f32; (w * h) as usize];
+        let mut layer = Surface::new(w, h);
+        for ((p, c), l) in picture
+            .pixels
+            .iter_mut()
+            .zip(cover.iter_mut())
+            .zip(layer.pixels.iter_mut())
+        {
+            let a = next();
+            *p = LinearRgba {
+                r: next() * a,
+                g: next() * a,
+                b: next() * a,
+                a,
+            };
+            *c = if next() < 0.2 { 0.0 } else { next() };
+            *l = LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: next(),
+            };
+        }
+        let held = Cover {
+            alpha: (0..64 * 50).map(|_| next()).collect(),
+            origin: (0, 0),
+            width: 64,
+            height: 50,
+        };
+        let tint = LinearRgba {
+            r: 0.1,
+            g: 0.2,
+            b: 0.3,
+            a: 0.6,
+        };
+        let field_clip = ClipRect {
+            x0: origin.0 + 3,
+            y0: origin.1 + 2,
+            x1: origin.0 + w - 4,
+            y1: origin.1 + h - 3,
+        };
+        let write = ClipRect {
+            x0: origin.0,
+            y0: origin.1,
+            x1: origin.0 + w,
+            y1: origin.1 + h,
+        };
+        let mut drawn = 0;
+        for offset in [
+            (0.0, 0.0),
+            (2.0, -3.0),
+            (1.37, 2.81),
+            (-2.6, -0.45),
+            (11.5, 0.5),
+        ] {
+            for colour in [false, true] {
+                for (keep, gain, held) in [
+                    (false, None, None),
+                    (true, Gain::of(0.5, tint), None),
+                    (false, None, Some(&held)),
+                ] {
+                    let field = if colour {
+                        Field::Colour(&picture)
+                    } else {
+                        Field::Cover(&cover, w, tint)
+                    };
+                    let keep = keep.then_some(&layer);
+                    let mut by_rows = Surface::new(64, 50);
+                    let mut by_pixels = Surface::new(64, 50);
+                    for p in by_rows.pixels.iter_mut().chain(by_pixels.pixels.iter_mut()) {
+                        *p = LinearRgba {
+                            r: 0.2,
+                            g: 0.2,
+                            b: 0.2,
+                            a: 1.0,
+                        };
+                    }
+                    stamp(
+                        &mut by_rows,
+                        field,
+                        origin,
+                        offset,
+                        field_clip,
+                        write,
+                        BlendMode::Multiply,
+                        keep,
+                        gain,
+                        held,
+                    );
+                    stamp_a_pixel_at_a_time(
+                        &mut by_pixels,
+                        field,
+                        origin,
+                        offset,
+                        field_clip,
+                        write,
+                        BlendMode::Multiply,
+                        keep,
+                        gain,
+                        held,
+                    );
+                    for (i, (p, q)) in by_rows.pixels.iter().zip(&by_pixels.pixels).enumerate() {
+                        assert!(
+                            [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                                == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                            "offset {offset:?}, colour {colour}: pixel {i} is {p:?} by rows, {q:?} by pixels"
+                        );
+                        if p.r != 0.2 {
+                            drawn += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(drawn > 10_000, "and the fields landed ({drawn})");
+    }
+
+    /// An effect cast from a coverage and tinted where it lands is the
+    /// effect cast from a picture of the tint: a layer's silhouette
+    /// blurred as one channel and stamped with its tint against the same
+    /// silhouette tinted first, blurred in four channels and stamped as
+    /// it was. Within two parts in a million, a thousandth of an eight-bit
+    /// step — the tint multiplies before the sums in the one and after
+    /// them in the other, and a spread's gain enlarges that — at
+    /// offsets between pixels, inverted for an inner shadow kept inside
+    /// the layer, and with a spread's gain; and to the bit with no blur
+    /// and no offset, which is how an outline's band is laid. The window
+    /// the layer was drawn in starts away from the surface's corner, so
+    /// a coverage read with the wrong width or origin comes out wrong.
+    #[test]
+    fn an_effect_from_a_coverage_is_the_effect_from_its_tinted_picture() {
+        let (w, h) = (48u32, 36u32);
+        let origin = (5u32, 7u32);
+        let mut layer = Surface::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let (dx, dy) = (x as f32 - 22.0, y as f32 - 17.0);
+                let d = (dx * dx / 140.0 + dy * dy / 60.0).sqrt();
+                let a = (6.0 * (1.0 - d)).clamp(0.0, 1.0) * 0.9;
+                layer.pixels[(y * w + x) as usize] = LinearRgba {
+                    r: 0.7 * a,
+                    g: 0.2 * a,
+                    b: 0.1 * a,
+                    a,
+                };
+            }
+        }
+        let window = ClipRect {
+            x0: origin.0,
+            y0: origin.1,
+            x1: origin.0 + w,
+            y1: origin.1 + h,
+        };
+        let tint = LinearRgba {
+            r: 0.05,
+            g: 0.1,
+            b: 0.4,
+            a: 0.8,
+        };
+        // The way a shadow was built before: the tint over the
+        // silhouette, four channels, blurred.
+        let tinted = |invert: bool, sigma: f32| {
+            let mut out = Surface::new(w, h);
+            for (o, p) in out.pixels.iter_mut().zip(&layer.pixels) {
+                *o = scale_alpha(tint, if invert { 1.0 - p.a } else { p.a });
+            }
+            blur::gaussian_blur(
+                &mut out,
+                shift_clip(window, origin),
+                sigma,
+                blur::Beyond::Nothing,
+            );
+            out
+        };
+        let mut compared = 0;
+        for (what, invert, sigma, offset, keep, spread) in [
+            ("a shadow", false, 2.3, (3.4, 2.7), false, 0.0),
+            (
+                "a shadow with a spread",
+                false,
+                1.6,
+                (-2.2, 1.5),
+                false,
+                0.6,
+            ),
+            ("an inner shadow", true, 1.2, (1.7, -2.4), true, 0.0),
+            ("unblurred, in place", false, 0.0, (0.0, 0.0), false, 0.0),
+        ] {
+            let mut by_cover = Surface::new(70, 60);
+            let mut by_picture = Surface::new(70, 60);
+            let cover = silhouette(&layer, origin, window, invert, sigma);
+            let picture = tinted(invert, sigma);
+            let write = window;
+            stamp(
+                &mut by_cover,
+                Field::Cover(&cover, w, tint),
+                origin,
+                offset,
+                window,
+                write,
+                BlendMode::Normal,
+                keep.then_some(&layer),
+                Gain::of(spread, tint),
+                None,
+            );
+            stamp(
+                &mut by_picture,
+                Field::Colour(&picture),
+                origin,
+                offset,
+                window,
+                write,
+                BlendMode::Normal,
+                keep.then_some(&layer),
+                Gain::of(spread, tint),
+                None,
+            );
+            let exact = sigma == 0.0 && offset == (0.0, 0.0);
+            for (i, (p, q)) in by_cover.pixels.iter().zip(&by_picture.pixels).enumerate() {
+                let worst = [(p.r, q.r), (p.g, q.g), (p.b, q.b), (p.a, q.a)]
+                    .iter()
+                    .map(|(u, v)| (u - v).abs())
+                    .fold(0.0f32, f32::max);
+                if exact {
+                    assert!(
+                        [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                            == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                        "{what}: pixel {i} is {p:?} from the coverage, {q:?} from the picture"
+                    );
+                } else {
+                    assert!(
+                        worst < 2e-6,
+                        "{what}: pixel {i} is {p:?} from the coverage, {q:?} from the picture"
+                    );
+                }
+                if q.a > 0.01 {
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 1000, "and the effects landed ({compared})");
     }
 
     /// A frame encoded a region at a time, taking the bytes of the pixel
