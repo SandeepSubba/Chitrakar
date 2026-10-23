@@ -139,9 +139,17 @@ impl Surface {
     /// A pixel the same as the one before it on the row takes that one's
     /// bytes rather than being encoded again. Most of a page is a ground,
     /// a fill or the inside of a picture's flat sky, so most pixels are
-    /// the pixel before them, and four comparisons are cheaper than three
+    /// the pixel before them, and a comparison is cheaper than three
     /// trips through the curve's table. Compared by bits, so a pixel
     /// takes another's bytes only when it is that pixel.
+    ///
+    /// The four channels' bits are compared one by one and the four bytes
+    /// written as one array, rather than compared and copied as slices:
+    /// in WebAssembly an array comparison and a four-byte slice copy are
+    /// each a call into the runtime's `memcmp` and `memcpy`, a pixel at a
+    /// time, and those calls were most of what this cost in a browser —
+    /// enough that the runs saved a tenth there where they save
+    /// two-thirds natively.
     pub fn encode_srgb8_region(&self, clip: ClipRect, out: &mut [u8]) {
         let srgb8 = chitrakar_color::Srgb8::new();
         let bits = |p: &LinearRgba| [p.r.to_bits(), p.g.to_bits(), p.b.to_bits(), p.a.to_bits()];
@@ -159,11 +167,12 @@ impl Surface {
                 .zip(out[a * 4..b * 4].chunks_exact_mut(4))
             {
                 let k = bits(px);
-                if k != key {
+                if k[0] != key[0] || k[1] != key[1] || k[2] != key[2] || k[3] != key[3] {
                     key = k;
                     bytes = srgb8.encode(*px);
                 }
-                dst.copy_from_slice(&bytes);
+                let dst: &mut [u8; 4] = dst.try_into().expect("a chunk of four");
+                *dst = bytes;
             }
         }
     }
