@@ -3105,6 +3105,13 @@ fn one(
             }
         }
     }
+    let copy_isolates = match &node.kind {
+        NodeKind::Instance { of, .. } if chitrakar_render::takes_stand_ins(doc, *of) => {
+            let parts = chitrakar_render::copy_children(doc, child).ok()?;
+            !parts.is_empty() && chitrakar_render::any_reads_backdrop(doc, &parts).ok()?
+        }
+        _ => false,
+    };
     let alone = turned_frame.is_some()
         || !shadings.is_empty()
         // A layer in a colour overlay, which is recoloured where its
@@ -3151,7 +3158,15 @@ fn one(
         // surface is what lands — which is also what the CPU renderer
         // does with such a copy.
         || (matches!(node.kind, NodeKind::Instance { .. })
-            && (node.opacity < 1.0 || node.mask.is_some() || held_to.is_some()));
+            && (node.opacity < 1.0 || node.mask.is_some() || held_to.is_some()))
+        // And a copy whose stand-ins read the page: what such a copy
+        // draws is a list of layers rather than the group itself, and a
+        // group holding an adjustment, a filter, a clone layer or a
+        // blend is isolated so that what is inside it changes only what
+        // is inside it. The reference puts the copy on a surface of its
+        // own on exactly those terms (`isolate` in its copy arm), and
+        // this used to hand the page back instead.
+        || copy_isolates;
     // Except a clone layer, never: what it paints with is what is under
     // it, and a surface of its own would have nothing under it to paint
     // with. Its blend, its opacity and its mask go on each stroke as it
@@ -4113,16 +4128,9 @@ fn one(
             if stand_ins.is_empty() {
                 one(doc, *of, t.compose(back), inner, within, false, out)?;
             } else {
-                // What a copy with stand-ins draws is a list of layers
-                // rather than the group itself, and a group holding an
-                // adjustment, a filter, a clone layer or a blend is
-                // isolated so that what is inside it changes only what
-                // is inside it. The CPU renderer puts such a copy on a
-                // surface of its own; this pass draws straight in, which
-                // is a different picture, so the page goes back.
-                if chitrakar_render::any_reads_backdrop(doc, &stand_ins).ok()? {
-                    return none!();
-                }
+                // A copy whose stand-ins read the page is on a surface
+                // of its own by now (`copy_isolates`), so what they read
+                // is the copy's own surface, as it is on the reference.
                 for part in stand_ins {
                     one(doc, part, t, inner, within, false, out)?;
                 }
@@ -18033,16 +18041,19 @@ mod tests {
     }
 
     /// A copy standing in for a layer of a group that reads what is
-    /// under it goes back, and the same page without the reading is
-    /// drawn the way the CPU renderer draws it.
+    /// under it is drawn on a surface of its own, the way the CPU
+    /// renderer draws it, and so is the same page without the reading.
     ///
     /// What a copy with stand-ins draws is a list of layers rather than
     /// the group, and a group holding an adjustment is isolated so that
     /// the adjustment reaches its neighbours and nothing beneath. This
-    /// pass lays that list straight down, which is a different picture,
-    /// so the one it cannot draw it says so about.
+    /// pass used to lay that list straight down, which is a different
+    /// picture, and handed the page back rather than draw it; it puts
+    /// the copy on a surface on the reference's own terms now
+    /// (`copy_isolates`), so the exposure inside the copy darkens the
+    /// copy's own mark and nothing of the ground.
     #[test]
-    fn a_copy_standing_in_where_the_group_reads_the_backdrop_goes_back() {
+    fn a_copy_standing_in_where_the_group_reads_the_backdrop_is_isolated() {
         let square = VectorShape::Rect {
             width: 20.0,
             height: 20.0,
@@ -18119,23 +18130,35 @@ mod tests {
             .unwrap();
             doc
         };
-        assert!(
-            !GpuRenderer::can_render(&page(true)),
-            "a copy standing in where the group reads what is under it"
-        );
-        let plain = page(false);
-        assert!(
-            GpuRenderer::can_render(&plain),
-            "and without the reading it is an ordinary copy"
-        );
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
-        let (mean, worst) = difference(
-            &gpu.render(&plain).unwrap(),
-            &chitrakar_render::render(&plain).unwrap(),
+        for (reading, what) in [
+            (false, "an ordinary copy"),
+            (
+                true,
+                "a copy standing in where the group reads what is under it",
+            ),
+        ] {
+            let doc = page(reading);
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.001 && over == 0 && in_mean < 0.001,
+                "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+        }
+        // And isolated: the exposure inside the copy darkens the copy's
+        // own mark and nothing of the ground under it.
+        let under = gpu.render(&page(true)).unwrap().get(72, 40);
+        assert!(
+            (under.r - chitrakar_color::srgb_to_linear(0.6)).abs() < 0.01,
+            "the ground beside the copy's mark is untouched ({under:?})"
         );
-        assert!(mean < 0.001, "a copy that differs: {mean}, worst {worst:?}");
     }
 
     /// Ink authored for a press, in every place a colour can be written
