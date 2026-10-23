@@ -3218,8 +3218,8 @@ fn render_child(
                             let mut drawn = dst.pixels[i];
                             if let Some((sub, origin)) = &alone {
                                 let paint = sub.pixels[at_in(*origin, sub.width, x, y)];
-                                let laid = blend_pixel(paint, under, BlendMode::Normal);
-                                let met = blend_pixel(paint, under, blend);
+                                let laid = blend_or_over(paint, under, BlendMode::Normal);
+                                let met = blend_or_over(paint, under, blend);
                                 let alpha = drawn.a;
                                 let keep = |m: f32, d: f32, l: f32| (m + d - l).max(0.0);
                                 drawn = LinearRgba {
@@ -3550,7 +3550,8 @@ fn render_child(
                                 continue;
                             }
                             let i = (py * dst.width + px) as usize;
-                            dst.pixels[i] = blend_pixel(scale_alpha(src, c), dst.pixels[i], blend);
+                            dst.pixels[i] =
+                                blend_or_over(scale_alpha(src, c), dst.pixels[i], blend);
                         }
                     }
                 } else {
@@ -4725,7 +4726,7 @@ fn fill_region(dst: &mut Surface, clip: ClipRect, color: LinearRgba, mode: Blend
     for y in clip.y0..clip.y1 {
         for x in clip.x0..clip.x1 {
             let i = (y * dst.width + x) as usize;
-            dst.pixels[i] = blend_pixel(color, dst.pixels[i], mode);
+            dst.pixels[i] = blend_or_over(color, dst.pixels[i], mode);
         }
     }
 }
@@ -7310,7 +7311,7 @@ fn blend_row(
             for (p, &a) in span.iter_mut().zip(cov) {
                 let a = a.min(1.0);
                 if a > 0.0 {
-                    *p = blend_pixel(scale_alpha(flat, a), *p, mode);
+                    *p = blend_or_over(scale_alpha(flat, a), *p, mode);
                 }
             }
         }
@@ -7327,7 +7328,7 @@ fn blend_row(
         }
         let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
         let i = (py * dst.width + px) as usize;
-        dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
+        dst.pixels[i] = blend_or_over(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
     }
 }
 
@@ -7882,7 +7883,7 @@ fn paint_shape(
             }
             let (lx, ly) = inv.at(px as f32 + 0.5, py as f32 + 0.5);
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
+            dst.pixels[i] = blend_or_over(scale_alpha(paint.at(lx, ly), c), dst.pixels[i], mode);
         }
     }
 }
@@ -8017,6 +8018,9 @@ fn draw_raster(
             (hi.min(at as f32 + 1.0) - lo.max(at as f32)).clamp(0.0, 1.0)
         };
         let (w, h) = (res.width as f32, res.height as f32);
+        // No mask is a coverage of one everywhere, which is what
+        // `coverage_at` would say for each pixel; said once.
+        let unmasked = mask.mask.is_none();
         let any_y = bbox.y0 as f32 + 0.5;
         let any_x = bbox.x0 as f32 + 0.5;
         // Where a column reads, between which two texels and how far, and
@@ -8041,7 +8045,12 @@ fn draw_raster(
                 if edge <= 0.0 {
                     continue;
                 }
-                let cov = coverage_at(doc, mask, px, py) * edge * opacity;
+                let held = if unmasked {
+                    1.0
+                } else {
+                    coverage_at(doc, mask, px, py)
+                };
+                let cov = held * edge * opacity;
                 if cov <= 0.0 {
                     continue;
                 }
@@ -8049,7 +8058,7 @@ fn draw_raster(
                 let bottom = lerp(texel(x0, y1), texel(x1, y1), fx);
                 let src = scale_alpha(lerp(top, bottom, fy), cov);
                 let i = (py * dst.width + px) as usize;
-                dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+                dst.pixels[i] = blend_or_over(src, dst.pixels[i], mode);
             }
         }
         return;
@@ -8108,7 +8117,7 @@ fn draw_raster(
             };
             let src = scale_alpha(sampled, cov);
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+            dst.pixels[i] = blend_or_over(src, dst.pixels[i], mode);
         }
     }
 }
@@ -8484,7 +8493,7 @@ fn draw_raster_warped(
             };
             let src = scale_alpha(sampled, cov);
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(src, dst.pixels[i], mode);
+            dst.pixels[i] = blend_or_over(src, dst.pixels[i], mode);
         }
     }
 }
@@ -10790,9 +10799,9 @@ fn draw_clone(
                 let i = (py * dst.width + px) as usize;
                 let src = scale_alpha(lifted, weight);
                 if let Some(aside) = laid.as_deref_mut() {
-                    aside.pixels[i] = blend_pixel(src, aside.pixels[i], BlendMode::Normal);
+                    aside.pixels[i] = blend_or_over(src, aside.pixels[i], BlendMode::Normal);
                 }
-                dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
+                dst.pixels[i] = blend_or_over(src, dst.pixels[i], blend);
             }
         }
     }
@@ -11835,7 +11844,7 @@ fn draw_paint(
             if src.a <= 0.0 && src.r == 0.0 && src.g == 0.0 && src.b == 0.0 {
                 continue;
             }
-            dst.pixels[i] = blend_pixel(scale_alpha(src, w), dst.pixels[i], blend);
+            dst.pixels[i] = blend_or_over(scale_alpha(src, w), dst.pixels[i], blend);
         }
     }
 }
@@ -11947,7 +11956,7 @@ fn draw_text(
                 .and_then(|i| palette.get(i).copied())
                 .unwrap_or(color);
             let i = (py * dst.width + px) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(ink, c * opacity * cov), dst.pixels[i], mode);
+            dst.pixels[i] = blend_or_over(scale_alpha(ink, c * opacity * cov), dst.pixels[i], mode);
         }
     }
 }
@@ -19240,6 +19249,69 @@ mod tests {
                         "{distance} at {degrees}: the part at {x},{y} is {a:?}, the whole {b:?}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The blend with Normal taken where it is called is the blend, to the
+    /// bit, in every mode — over pixels opaque, part there, absent, and
+    /// colour with no cover, on either side. Every hot loop in the
+    /// renderer calls it rather than `blend_pixel`, so the two must never
+    /// come to disagree.
+    #[test]
+    fn a_blend_with_normal_taken_inline_is_the_blend() {
+        use BlendMode as M;
+        let modes = [
+            M::Normal,
+            M::Multiply,
+            M::Screen,
+            M::Overlay,
+            M::Darken,
+            M::Lighten,
+            M::ColorDodge,
+            M::ColorBurn,
+            M::HardLight,
+            M::SoftLight,
+            M::Difference,
+            M::Exclusion,
+            M::Hue,
+            M::Saturation,
+            M::Color,
+            M::Luminosity,
+        ];
+        let mut seed = 0x3c6e_f372u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let mut pixel = || {
+            let roll = next();
+            let a = if roll < 0.2 {
+                0.0
+            } else if roll < 0.5 {
+                1.0
+            } else {
+                next()
+            };
+            let lit = if roll > 0.95 { 1.0 } else { a };
+            LinearRgba {
+                r: next() * lit,
+                g: next() * lit,
+                b: next() * lit,
+                a,
+            }
+        };
+        for _ in 0..4000 {
+            let (s, d) = (pixel(), pixel());
+            for mode in modes {
+                let (p, q) = (blend_or_over(s, d, mode), blend_pixel(s, d, mode));
+                assert!(
+                    [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                        == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                    "{mode:?}: {s:?} over {d:?} is {p:?} inline, {q:?} by the table"
+                );
             }
         }
     }
