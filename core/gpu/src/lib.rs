@@ -185,6 +185,14 @@ enum Draw {
         cover: std::ops::Range<u32>,
         ramp: Option<usize>,
     },
+    /// A picture with its corners moved: the quad is the box round it
+    /// on the device and the fragment reads the picture back through
+    /// the map the quad carries; `texture` holds the picture with every
+    /// level of its pyramid stacked under it.
+    Warped {
+        quad: std::ops::Range<u32>,
+        texture: usize,
+    },
     /// A path's stroke: the pieces that make up the region it covers,
     /// which the stencil takes the union of, and the quad that paints
     /// the union.
@@ -288,6 +296,7 @@ pub struct GpuRenderer {
     stencil: wgpu::RenderPipeline,
     cover: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
+    warped: wgpu::RenderPipeline,
     /// A layer's own surface brought down onto what is under it by a
     /// blend mode, which the fragment works out in full and writes over
     /// what was there.
@@ -588,6 +597,30 @@ impl GpuRenderer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_image"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
+        let warped = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("warped picture"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_warped"),
                 compilation_options: Default::default(),
                 targets: &[Some(target.clone())],
             }),
@@ -1241,6 +1274,7 @@ impl GpuRenderer {
             stencil,
             cover,
             image,
+            warped,
             blend,
             adjust,
             box_blur,
@@ -2372,6 +2406,11 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &textures[*texture], &[]);
                             pass.draw(quad.clone(), 0..1);
                         }
+                        Draw::Warped { quad, texture } => {
+                            pass.set_pipeline(&self.warped);
+                            pass.set_bind_group(1, &textures[*texture], &[]);
+                            pass.draw(quad.clone(), 0..1);
+                        }
                         // The four that cut a pass are drawn as its
                         // opening, above; nothing of them is left here.
                         Draw::Open
@@ -2522,6 +2561,9 @@ struct Scene {
     /// several layers is uploaded once. Ramps are not shared: they are
     /// small, and two layers rarely carry the same one.
     ids: Vec<(String, usize)>,
+    /// For a warped picture's texture, how many levels of its pyramid
+    /// stand under the picture in it.
+    depths: Vec<(usize, u32)>,
     /// The layers above the one being drawn that wear an effect and a
     /// mask, outermost first, with the space each mask is authored in.
     /// Such a layer's mask rides its own drawing (so the silhouette its
@@ -2584,6 +2626,7 @@ impl Default for Scene {
             draws: Vec::new(),
             textures: Vec::new(),
             ids: Vec::new(),
+            depths: Vec::new(),
             worn: Vec::new(),
             placed: Vec::new(),
             surface: (0, 0),
@@ -3442,85 +3485,179 @@ fn one(
                 return none!();
             }
             // A picture with its corners moved is drawn through a
-            // projective map, which the quads here do not carry: the
-            // CPU's.
-            if raster.projective().is_some() {
-                return none!();
-            }
-            // Shrunk, one bilinear tap would read four texels of the many
-            // a pixel covers and the picture would crawl as it moved. The
-            // CPU averages a grid of taps over what a pixel covers, and
-            // the grid is worked out by the same function here and
-            // carried on the quad, so the two average the same taps.
-            //
-            // Shrunk to a quarter or less, both read the level of the
-            // picture's pyramid the CPU reads, and average it over that
-            // level's taps: the same function says which.
-            let Some((k, foot, taps)) = chitrakar_render::picture_level(t, res.width, res.height)
-            else {
-                return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
-            };
-            let level = if k > 0 {
-                chitrakar_render::pyramid::of(&raster.resource_id, res)
+            // projective map, which a quad's two triangles cannot carry
+            // — they interpolate straight lines, and the picture is not
+            // straight across either — so the fragment carries the map
+            // back instead and reads the picture through it a pixel at a
+            // time, as the CPU does (`fs_warped`, after
+            // `draw_raster_warped`): the exact area of each pixel the
+            // quad covers, the footprint read off the map's slope there,
+            // and the level of the picture's pyramid that footprint
+            // wants, mixed with the next. Every level stands under the
+            // picture in one texture, since the level wanted changes
+            // across the picture.
+            if let Some(warp) = raster.projective_of(res.width, res.height) {
+                let whole = warp.then(t);
+                let Some(back) = whole.inverse() else {
+                    return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
+                };
+                let (w, h) = (res.width as f64, res.height as f64);
+                let mut corners = [[0.0f64; 2]; 4];
+                for (c, (u, v)) in corners
+                    .iter_mut()
+                    .zip([(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)])
+                {
+                    let Some((x, y)) = whole.apply(u, v) else {
+                        return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
+                    };
+                    *c = [x, y];
+                }
+                // The map back, scaled so its denominator is one at the
+                // quad's middle: positive over the whole quad, which is
+                // what lets the fragment read each edge as one side of a
+                // line. The middle of a convex quad is inside it.
+                let (cx, cy) = (
+                    corners.iter().map(|c| c[0]).sum::<f64>() / 4.0,
+                    corners.iter().map(|c| c[1]).sum::<f64>() / 4.0,
+                );
+                let den = back.m[6] * cx + back.m[7] * cy + back.m[8];
+                if !den.is_finite() || den.abs() < 1e-12 {
+                    return none!();
+                }
+                let b: Vec<f32> = back.m.iter().map(|m| (m / den) as f32).collect();
+                if b.iter().any(|v| !v.is_finite()) {
+                    return none!();
+                }
+                let key = format!("{}@warped", raster.resource_id);
+                let at = match out.ids.iter().find(|(id, _)| *id == key) {
+                    Some((_, at)) => *at,
+                    None => {
+                        let (image, depth) = warped_atlas(&raster.resource_id, res);
+                        if image.height > out.max_texture {
+                            return none!();
+                        }
+                        let at = out.textures.len();
+                        out.textures.push(image);
+                        out.ids.push((key, at));
+                        out.depths.push((at, depth));
+                        at
+                    }
+                };
+                let depth = out
+                    .depths
+                    .iter()
+                    .find(|(t, _)| *t == at)
+                    .map_or(0, |(_, d)| *d);
+                // The quad: the box round the corners on the device,
+                // grown a pixel each way so every pixel the quad touches
+                // has a fragment to work out its share.
+                let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for c in &corners {
+                    x0 = x0.min(c[0]);
+                    y0 = y0.min(c[1]);
+                    x1 = x1.max(c[0]);
+                    y1 = y1.max(c[1]);
+                }
+                let (x0, y0, x1, y1) = (
+                    (x0.floor() - 1.0) as f32,
+                    (y0.floor() - 1.0) as f32,
+                    (x1.ceil() + 1.0) as f32,
+                    (y1.ceil() + 1.0) as f32,
+                );
+                let place = |x: f32, y: f32| Vertex {
+                    doc: [x, y],
+                    local: [0.0; 2],
+                    params: [b[0], b[1], b[2], b[3]],
+                    color: [res.height as f32, depth as f32, b[8], alpha],
+                    grad: [b[4], b[5], b[6], b[7]],
+                    mask: NO_MASK,
+                };
+                let quad = out.push(vec![
+                    place(x0, y0),
+                    place(x1, y0),
+                    place(x1, y1),
+                    place(x0, y0),
+                    place(x1, y1),
+                    place(x0, y1),
+                ]);
+                out.draws.push(Item::of(Draw::Warped { quad, texture: at }));
             } else {
-                None
-            };
-            let level = level.as_deref().and_then(|p| p.level(k));
-            let (foot, taps) = match level {
-                Some(_) => (foot, taps),
-                None => chitrakar_render::picture_taps(t)?,
-            };
-            let key = match level {
-                Some(_) => format!("{}@{k}", raster.resource_id),
-                None => raster.resource_id.clone(),
-            };
-            let at = match out.ids.iter().find(|(id, _)| *id == key) {
-                Some((_, at)) => *at,
-                None => {
-                    let at = out.textures.len();
-                    out.textures.push(match level {
-                        Some(l) => level_image(l),
-                        None => premultiplied(res),
-                    });
-                    out.ids.push((key, at));
-                    at
+                // Shrunk, one bilinear tap would read four texels of the many
+                // a pixel covers and the picture would crawl as it moved. The
+                // CPU averages a grid of taps over what a pixel covers, and
+                // the grid is worked out by the same function here and
+                // carried on the quad, so the two average the same taps.
+                //
+                // Shrunk to a quarter or less, both read the level of the
+                // picture's pyramid the CPU reads, and average it over that
+                // level's taps: the same function says which.
+                let Some((k, foot, taps)) =
+                    chitrakar_render::picture_level(t, res.width, res.height)
+                else {
+                    return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
+                };
+                let level = if k > 0 {
+                    chitrakar_render::pyramid::of(&raster.resource_id, res)
+                } else {
+                    None
+                };
+                let level = level.as_deref().and_then(|p| p.level(k));
+                let (foot, taps) = match level {
+                    Some(_) => (foot, taps),
+                    None => chitrakar_render::picture_taps(t)?,
+                };
+                let key = match level {
+                    Some(_) => format!("{}@{k}", raster.resource_id),
+                    None => raster.resource_id.clone(),
+                };
+                let at = match out.ids.iter().find(|(id, _)| *id == key) {
+                    Some((_, at)) => *at,
+                    None => {
+                        let at = out.textures.len();
+                        out.textures.push(match level {
+                            Some(l) => level_image(l),
+                            None => premultiplied(res),
+                        });
+                        out.ids.push((key, at));
+                        at
+                    }
+                };
+                let size = [res.width as f32, res.height as f32];
+                // A level's last texel may be only part covered by the
+                // picture — a picture 5 wide has a half 3 wide, the last of
+                // them one texel of it — so the box's 0..1 is not the
+                // level's: the shader scales it by how much of the level the
+                // picture spans. Nothing (read as one) for the picture itself.
+                let span = match level {
+                    Some(l) => {
+                        let step = (1u32 << k) as f32;
+                        [
+                            size[0] / (step * l.width as f32),
+                            size[1] / (step * l.height as f32),
+                        ]
+                    }
+                    None => [0.0, 0.0],
+                };
+                // The quad is the image's own box, grown a device pixel on
+                // every side; its local coordinates are the texture's, so
+                // the vertex shader passes them straight through as texture
+                // coordinates. The grown skirt is what lets the fragment
+                // shader fade the border by the area the box really covers
+                // — outside 0..1 it reads as no coverage at all.
+                let mut verts = quad(
+                    t,
+                    size,
+                    [0.0, 0.0, span[0], span[1]],
+                    [0.0, 0.0, 0.0, alpha],
+                    [foot[0], foot[1], taps[0] as f32, taps[1] as f32],
+                    1.0,
+                );
+                for v in &mut verts {
+                    v.local = [v.local[0] / size[0], v.local[1] / size[1]];
                 }
-            };
-            let size = [res.width as f32, res.height as f32];
-            // A level's last texel may be only part covered by the
-            // picture — a picture 5 wide has a half 3 wide, the last of
-            // them one texel of it — so the box's 0..1 is not the
-            // level's: the shader scales it by how much of the level the
-            // picture spans. Nothing (read as one) for the picture itself.
-            let span = match level {
-                Some(l) => {
-                    let step = (1u32 << k) as f32;
-                    [
-                        size[0] / (step * l.width as f32),
-                        size[1] / (step * l.height as f32),
-                    ]
-                }
-                None => [0.0, 0.0],
-            };
-            // The quad is the image's own box, grown a device pixel on
-            // every side; its local coordinates are the texture's, so
-            // the vertex shader passes them straight through as texture
-            // coordinates. The grown skirt is what lets the fragment
-            // shader fade the border by the area the box really covers
-            // — outside 0..1 it reads as no coverage at all.
-            let mut verts = quad(
-                t,
-                size,
-                [0.0, 0.0, span[0], span[1]],
-                [0.0, 0.0, 0.0, alpha],
-                [foot[0], foot[1], taps[0] as f32, taps[1] as f32],
-                1.0,
-            );
-            for v in &mut verts {
-                v.local = [v.local[0] / size[0], v.local[1] / size[1]];
+                let quad = out.push(verts);
+                out.draws.push(Item::of(Draw::Image { quad, texture: at }));
             }
-            let quad = out.push(verts);
-            out.draws.push(Item::of(Draw::Image { quad, texture: at }));
         }
         NodeKind::Text(spec) => {
             text(doc, spec, t, alpha, out)?;
@@ -5349,6 +5486,39 @@ fn level_image(level: &chitrakar_render::pyramid::Level) -> Image {
         channels: 4,
         texels,
     }
+}
+
+/// A picture with every level of its pyramid stacked under it, each
+/// row padded out to the picture's width, for a picture with its
+/// corners moved — where the level a pixel wants changes across the
+/// picture, so they all have to be in the one texture the fragment
+/// reads. With how many levels there are below the picture.
+fn warped_atlas(id: &str, res: &chitrakar_doc::Resource) -> (Image, u32) {
+    let mut image = premultiplied(res);
+    let mut depth = 0;
+    if let Some(pyramid) = chitrakar_render::pyramid::of(id, res) {
+        for k in 1..=pyramid.depth() {
+            let Some(level) = pyramid.level(k) else {
+                break;
+            };
+            let c = |v: u16| f32_to_f16(v as f32 / 65535.0);
+            for y in 0..level.height {
+                for x in 0..res.width {
+                    if x < level.width {
+                        let p = level.texels[(y * level.width + x) as usize];
+                        image
+                            .texels
+                            .extend_from_slice(&[c(p[0]), c(p[1]), c(p[2]), c(p[3])]);
+                    } else {
+                        image.texels.extend_from_slice(&[0; 4]);
+                    }
+                }
+            }
+            image.height += level.height;
+            depth += 1;
+        }
+    }
+    (image, depth)
 }
 
 /// The parameters an adjustment is stated by, laid out the way the
@@ -16927,6 +17097,186 @@ mod tests {
     /// the random pages found it, and a test here asserted the refusal
     /// until the coverages learned to fold the layer's mask in and be
     /// put back (`Scene::worn`, `Scene::placed`).
+    /// A picture with its corners moved is drawn as the CPU draws it:
+    /// read back through the projective map a pixel at a time, each
+    /// pixel covered by the exact area of it the quad takes, its
+    /// footprint read off the map's slope there, and a shrunk pixel
+    /// read from two levels of the picture's pyramid and mixed. A
+    /// checker over a gradient, with a transparent strip down one side
+    /// so the picture's own alpha is read too: in perspective at about
+    /// its own size, as a road shrinking to a sixth at its far end (two
+    /// levels down, mixed), enlarged three times, turned, and faded
+    /// under a mask. Each to the audit's thresholds, and each told from
+    /// the same picture with its corners put back, so a quad drawn as
+    /// the rectangle cannot pass. That used to go back, and it was the
+    /// first thing the random pages went back for once a layer held to
+    /// an adjustment was drawn.
+    #[test]
+    fn a_picture_with_its_corners_moved_is_drawn_as_the_cpu_draws_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let (pw, ph) = (24u32, 18u32);
+        let mut rgba = Vec::with_capacity((pw * ph * 4) as usize);
+        for y in 0..ph {
+            for x in 0..pw {
+                let check = (x / 3 + y / 3) % 2 == 1;
+                rgba.extend_from_slice(&[
+                    (x * 255 / (pw - 1)) as u8,
+                    if check { 220 } else { 40 },
+                    (y * 255 / (ph - 1)) as u8,
+                    if x < 2 { 0 } else { 255 },
+                ]);
+            }
+        }
+        let page = |corners: Option<[[f32; 2]; 4]>,
+                    at: Transform,
+                    opacity: f32,
+                    masked: bool,
+                    size: (u32, u32)| {
+            let mut doc = Document::new(size.0, size.1, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: size.0 as f32,
+                        height: size.1 as f32,
+                        radius: 0.0,
+                    },
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.9,
+                        b: 0.85,
+                        a: 1.0,
+                    },
+                ),
+                Transform::default(),
+            );
+            let id = doc.add_resource(pw, ph, rgba.clone());
+            let placed = add(
+                &mut doc,
+                Box::new(Node::raster(
+                    "picture",
+                    chitrakar_doc::RasterRef {
+                        resource_id: id,
+                        width: pw,
+                        height: ph,
+                        corners,
+                    },
+                )),
+                at,
+            );
+            if opacity < 1.0 {
+                doc.apply(Command::SetOpacity {
+                    id: placed,
+                    opacity,
+                })
+                .unwrap();
+            }
+            if masked {
+                doc.apply(Command::SetMask {
+                    id: placed,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Ellipse { rx: 14.0, ry: 11.0 },
+                            transform: Transform::translation(12.0, 9.0),
+                        },
+                        invert: false,
+                        feather: 1.0,
+                    })),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let turned = Transform {
+            a: 0.94,
+            b: 0.34,
+            c: -0.34,
+            d: 0.94,
+            e: 22.0,
+            f: 6.0,
+        };
+        let three = Transform {
+            a: 3.0,
+            b: 0.0,
+            c: 0.0,
+            d: 3.0,
+            e: 3.0,
+            f: 2.0,
+        };
+        type Case = (
+            &'static str,
+            [[f32; 2]; 4],
+            Transform,
+            f32,
+            bool,
+            (u32, u32),
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "in perspective at about its own size",
+                [[2.0, 1.0], [22.0, 4.0], [20.0, 17.0], [0.0, 15.0]],
+                Transform::translation(10.0, 8.0),
+                1.0,
+                false,
+                (48, 36),
+            ),
+            (
+                "a road shrinking to a sixth at its far end",
+                [[0.0, 0.0], [24.0, 0.0], [14.0, 5.0], [10.0, 5.0]],
+                three,
+                1.0,
+                false,
+                (80, 24),
+            ),
+            (
+                "enlarged three times",
+                [[1.0, 2.0], [23.0, 0.0], [24.0, 18.0], [0.0, 16.0]],
+                three,
+                1.0,
+                false,
+                (80, 60),
+            ),
+            (
+                "turned",
+                [[2.0, 1.0], [22.0, 4.0], [20.0, 17.0], [0.0, 15.0]],
+                turned,
+                1.0,
+                false,
+                (64, 48),
+            ),
+            (
+                "faded under a mask",
+                [[2.0, 1.0], [22.0, 4.0], [20.0, 17.0], [0.0, 15.0]],
+                Transform::translation(10.0, 8.0),
+                0.6,
+                true,
+                (48, 36),
+            ),
+        ];
+        for (what, corners, at, opacity, masked, size) in cases {
+            let doc = page(Some(corners), at, opacity, masked, size);
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && worst < 0.06 && over == 0 && in_mean < 0.003,
+                "{what}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+            let square = page(None, at, opacity, masked, size);
+            let (apart, _) = difference(&mine, &chitrakar_render::render(&square).unwrap());
+            assert!(
+                apart > 0.01,
+                "{what}: the corners show ({apart:.5} from the picture square)"
+            );
+        }
+    }
+
     /// A layer held to an adjustment or a filter shows whole, the way
     /// the reference draws it: the page confines nothing to one of
     /// them (`confines_nothing`), and the cut this reads is the page's

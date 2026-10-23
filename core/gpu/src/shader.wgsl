@@ -424,6 +424,163 @@ fn fs_image(in: ImageOut) -> @location(0) vec4f {
     return overlaid(sampled, in.params.y, in.extra) * in.alpha * border * mask_cover(in.page, in.mask);
 }
 
+// A picture with its corners moved: carried onto its quad by a
+// projective map, read back here a pixel at a time, which is how the
+// CPU renderer draws one (`draw_raster_warped`) and the only way to —
+// a quad's two triangles interpolate straight lines, and a picture in
+// perspective is not straight across either of them. The map *back*,
+// from the device to the picture's own texels, rides the quad as nine
+// numbers: `params` holds the first four and `grad` the next four,
+// scaled so the ninth is `extra.z` and the denominator is one at the
+// quad's middle, and so positive over all of it. `extra.x` is the
+// picture's height and `extra.y` how many levels of its pyramid stand
+// under it in the one texture; its width is the texture's.
+fn back_at(p: vec4f, g: vec4f, b8: f32, x: f32, y: f32) -> vec2f {
+    let den = g.z * x + g.w * y + b8;
+    return vec2f(p.x * x + p.y * y + p.z, p.w * x + g.x * y + g.y) / den;
+}
+
+// The part of the pixel at (`px`, `py`) the picture's quad covers: the
+// pixel's square clipped to each edge in turn and its area, which is
+// the CPU renderer's `covered` and so the same exact fraction. The
+// quad's edges are the lines the map sends the picture's own edges to
+// — `u = 0`, `u = W`, `v = 0`, `v = H` — each of which, with the
+// denominator positive over the quad, is one side of a line on the
+// device whose numbers are read straight off the map.
+fn warped_cover(p: vec4f, g: vec4f, b8: f32, W: f32, H: f32, px: f32, py: f32) -> f32 {
+    var poly: array<vec2f, 8>;
+    var n = 4u;
+    poly[0] = vec2f(px, py);
+    poly[1] = vec2f(px + 1.0, py);
+    poly[2] = vec2f(px + 1.0, py + 1.0);
+    poly[3] = vec2f(px, py + 1.0);
+    for (var e = 0u; e < 4u; e = e + 1u) {
+        var line: vec3f;
+        switch e {
+            case 0u: { line = vec3f(p.x, p.y, p.z); }
+            case 1u: { line = vec3f(W * g.z - p.x, W * g.w - p.y, W * b8 - p.z); }
+            case 2u: { line = vec3f(p.w, g.x, g.y); }
+            default: { line = vec3f(H * g.z - p.w, H * g.w - g.x, H * b8 - g.y); }
+        }
+        var next: array<vec2f, 8>;
+        var m = 0u;
+        for (var j = 0u; j < n; j = j + 1u) {
+            let a = poly[j];
+            let b = poly[(j + 1u) % n];
+            let sa = dot(line, vec3f(a, 1.0));
+            let sb = dot(line, vec3f(b, 1.0));
+            if sa >= 0.0 {
+                next[m] = a;
+                m = m + 1u;
+            }
+            if (sa >= 0.0) != (sb >= 0.0) {
+                next[m] = a + (b - a) * (sa / (sa - sb));
+                m = m + 1u;
+            }
+        }
+        poly = next;
+        n = m;
+        if n == 0u {
+            return 0.0;
+        }
+    }
+    var area = 0.0;
+    for (var j = 0u; j < n; j = j + 1u) {
+        let a = poly[j];
+        let b = poly[(j + 1u) % n];
+        area = area + a.x * b.y - b.x * a.y;
+    }
+    return min(abs(area) * 0.5, 1.0);
+}
+
+// One bilinear tap at `s`, in the texels of a level `w` by `h` that
+// starts `off` rows down the texture, clamped at the level's edge as
+// the CPU's `warped_sample` clamps its.
+fn warped_bilinear(s: vec2f, w: u32, h: u32, off: u32) -> vec4f {
+    let last = vec2f(f32(w) - 1.0, f32(h) - 1.0);
+    let u = s - vec2f(0.5);
+    let u0 = floor(u);
+    let fr = u - u0;
+    let x0 = i32(clamp(u0.x, 0.0, last.x));
+    let x1 = i32(clamp(u0.x + 1.0, 0.0, last.x));
+    let y0 = i32(clamp(u0.y, 0.0, last.y)) + i32(off);
+    let y1 = i32(clamp(u0.y + 1.0, 0.0, last.y)) + i32(off);
+    let top = mix(textureLoad(image, vec2i(x0, y0), 0), textureLoad(image, vec2i(x1, y0), 0), fr.x);
+    let bottom = mix(textureLoad(image, vec2i(x0, y1), 0), textureLoad(image, vec2i(x1, y1), 0), fr.x);
+    return mix(top, bottom, fr.y);
+}
+
+// The picture read at `here` by a pixel whose footprint there is `foot`
+// of its texels, from level `k` of it: one tap, or a grid of them over
+// the footprint — a texel apart on the picture itself, two on a level,
+// the CPU's `warped_sample` tap for tap. Level `k` is `k` halvings of
+// the picture, each rounded up, stacked under it in the texture.
+fn warped_level(here: vec2f, foot: vec2f, k: i32, W: f32, H: f32) -> vec4f {
+    var w = u32(W);
+    var h = u32(H);
+    var off = 0u;
+    for (var i = 0; i < k; i = i + 1) {
+        off = off + h;
+        w = (w + 1u) / 2u;
+        h = (h + 1u) / 2u;
+    }
+    let step = f32(1u << u32(k));
+    let apart = select(2.0, 1.0, k == 0);
+    let l = here / step;
+    let f = max(foot / step, vec2f(1.0));
+    let taps = clamp(vec2i(ceil(f / apart)), vec2i(1), vec2i(8));
+    if taps.x == 1 && taps.y == 1 {
+        return warped_bilinear(l, w, h, off);
+    }
+    var acc = vec4f(0.0);
+    for (var j = 0; j < taps.y; j = j + 1) {
+        for (var i = 0; i < taps.x; i = i + 1) {
+            let o = (vec2f(f32(i), f32(j)) + vec2f(0.5)) / vec2f(taps) - vec2f(0.5);
+            acc = acc + warped_bilinear(l + o * f, w, h, off);
+        }
+    }
+    return acc / f32(taps.x * taps.y);
+}
+
+@fragment
+fn fs_warped(in: ImageOut) -> @location(0) vec4f {
+    let p = in.params;
+    let g = in.grad;
+    let H = in.extra.x;
+    let depth = i32(in.extra.y);
+    let b8 = in.extra.z;
+    let W = f32(textureDimensions(image).x);
+    let px = floor(in.page);
+    let cover = warped_cover(p, g, b8, W, H, px.x, px.y);
+    if cover <= 0.0 {
+        return vec4f(0.0);
+    }
+    // Where the pixel's centre lands in the picture, and how far a step
+    // of one pixel goes there each way: the map's own slope, read off
+    // its neighbours as the CPU reads it.
+    let c = px + vec2f(0.5);
+    let here = back_at(p, g, b8, c.x, c.y);
+    let sx = back_at(p, g, b8, c.x + 1.0, c.y) - here;
+    let sy = back_at(p, g, b8, c.x, c.y + 1.0) - here;
+    let foot = max(vec2f(abs(sx.x) + abs(sy.x), abs(sx.y) + abs(sy.y)), vec2f(1.0));
+    let least = min(foot.x, foot.y);
+    var sampled: vec4f;
+    // Shrunk at all, the pixel is between two levels and is read from
+    // both, mixed by how far between them it is.
+    if least > 1.0 && depth > 0 {
+        let at = min(log2(least), f32(depth));
+        let k = i32(floor(at));
+        let between = clamp(at - f32(k), 0.0, 1.0);
+        sampled = warped_level(here, foot, k, W, H);
+        if between > 0.0 && k < depth {
+            sampled = mix(sampled, warped_level(here, foot, k + 1, W, H), between);
+        }
+    } else {
+        sampled = warped_level(here, foot, 0, W, H);
+    }
+    return sampled * in.alpha * cover * mask_cover(in.page, in.mask);
+}
+
 // A text layer: the whole block rasterized to coverage at the size it
 // is seen at, which is what the CPU renderer samples too, so the two
 // read the same bitmap the same way. The coordinates are the raster's
