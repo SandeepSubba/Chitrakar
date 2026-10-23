@@ -857,10 +857,19 @@ fn blended(mode: i32, s: vec3f, d: vec3f) -> vec3f {
 
 @fragment
 fn fs_blend(in: ImageOut) -> @location(0) vec4f {
+    let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
+    // Past the last blend mode: a frame drawn where it stands, on a
+    // surface that began as a copy of what is under it so that what it
+    // holds could read the page, mixed back by its fade and its mask —
+    // the CPU renderer's `lerp(under, drawn, a)`. Where the frame drew
+    // nothing the surface is still the copy, and the mix is nothing.
+    if in.mode >= 16.0 {
+        let drawn = textureSampleLevel(image, image_sampler, in.uv, 0.0);
+        return mix(dst, drawn, in.alpha * mask_cover(in.page, in.mask));
+    }
     let src = overlaid(textureSampleLevel(image, image_sampler, in.uv, 0.0), in.params.y, in.extra)
         * in.alpha
         * mask_cover(in.page, in.mask);
-    let dst = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
     let sa = src.a;
     let da = dst.a;
     let b = max(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0));

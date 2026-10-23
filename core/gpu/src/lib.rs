@@ -193,6 +193,17 @@ enum Draw {
         quad: std::ops::Range<u32>,
         texture: usize,
     },
+    /// What is under a surface just opened, copied into it: a quad over
+    /// the whole of it reading the copy of the surface below, so that
+    /// what is drawn on this one can read the page the way a frame
+    /// drawn where it stands does. The first thing drawn after an
+    /// `Open`, before the layer's own drawing begins.
+    Under { quad: std::ops::Range<u32> },
+    /// A surface opened over a copy of what is under it, coming back
+    /// down mixed with that by the quad's fade and mask rather than laid
+    /// over it (`fs_blend` past the last mode) — a frame drawn where it
+    /// stands, holding what reads the page, faded or masked.
+    Mix { quad: std::ops::Range<u32> },
     /// A path's stroke: the pieces that make up the region it covers,
     /// which the stencil takes the union of, and the quad that paints
     /// the union.
@@ -1778,7 +1789,7 @@ impl GpuRenderer {
         // begins.
         let blending = passes
             .iter()
-            .any(|p| p.lay.as_ref().is_some_and(Opening::reads_under));
+            .any(|p| p.lay.as_ref().is_some_and(Opening::reads_under) || p.under_from.is_some());
         let under = blending.then(|| {
             let backdrop = make(
                 "backdrop",
@@ -1894,6 +1905,27 @@ impl GpuRenderer {
             // brought back. Every other pass throws it away, as the one
             // pass a page without groups needs always did.
             let again = passes[n + 1..].iter().any(|p| p.target == step.target);
+            // A pass that begins with a copy of the surface under its
+            // own takes that copy first: the surface it is about to
+            // draw on is bare, and the one below is what a frame drawn
+            // where it stands reads.
+            if let (Some(from), Some((backdrop, _))) = (step.under_from, &under) {
+                encoder.copy_texture_to_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: resolved(from),
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::ImageCopyTexture {
+                        texture: backdrop,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    size,
+                );
+            }
             // Take the copy before the pass starts, for what will read
             // what is already there.
             if let (Some(laid), Some((backdrop, _))) = (&step.lay, &under) {
@@ -2333,6 +2365,14 @@ impl GpuRenderer {
                             }
                             (&at.quad, mask)
                         }
+                        Opening::Mix { from, quad, mask } => {
+                            // Mixed back into the copy rather than laid
+                            // over it: the blend pipeline, past its last
+                            // mode.
+                            pass.set_pipeline(&self.blend);
+                            pass.set_bind_group(1, &surfaces[from - 1].2, &[]);
+                            (quad, mask)
+                        }
                         Opening::Adjust { quad, mask, table } => {
                             pass.set_pipeline(&self.adjust);
                             if let Some(at) = table {
@@ -2411,9 +2451,17 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &textures[*texture], &[]);
                             pass.draw(quad.clone(), 0..1);
                         }
+                        Draw::Under { quad } => {
+                            if let Some((_, read)) = &under {
+                                pass.set_pipeline(&self.image);
+                                pass.set_bind_group(1, read, &[]);
+                                pass.draw(quad.clone(), 0..1);
+                            }
+                        }
                         // The four that cut a pass are drawn as its
                         // opening, above; nothing of them is left here.
                         Draw::Open
+                        | Draw::Mix { .. }
                         | Draw::Close { .. }
                         | Draw::Adjust { .. }
                         | Draw::Blur { .. }
@@ -3105,6 +3153,21 @@ fn one(
             }
         }
     }
+    // An upright frame, faded or masked and brought down by Normal,
+    // holding something that reads the page: the reference draws it
+    // where it stands — on a surface of its own what it holds would have
+    // nothing under it — and mixes it back by its fade and its mask. So
+    // here it goes on a surface that *begins as a copy of what is under
+    // it* (`Draw::Under`), is drawn into that in place as a plain frame
+    // is, and comes down mixed rather than laid (`Draw::Mix`). It used to
+    // go back, in the frame's arm.
+    let mixed_back = matches!(node.kind, NodeKind::Artboard { .. })
+        && turned_frame.is_none()
+        && node.blend == BlendMode::Normal
+        && node.effects.is_empty()
+        && held_to.is_none()
+        && (node.opacity < 1.0 || node.mask.is_some())
+        && chitrakar_render::reads_backdrop(doc, child).ok()?;
     let copy_isolates = match &node.kind {
         NodeKind::Instance { of, .. } if chitrakar_render::takes_stand_ins(doc, *of) => {
             let parts = chitrakar_render::copy_children(doc, child).ok()?;
@@ -3166,7 +3229,8 @@ fn one(
         // is inside it. The reference puts the copy on a surface of its
         // own on exactly those terms (`isolate` in its copy arm), and
         // this used to hand the page back instead.
-        || copy_isolates;
+        || copy_isolates
+        || mixed_back;
     // Except a clone layer, never: what it paints with is what is under
     // it, and a surface of its own would have nothing under it to paint
     // with. Its blend, its opacity and its mask go on each stroke as it
@@ -3191,6 +3255,24 @@ fn one(
     let alone = alone && (worn || !clone);
     if alone {
         out.draws.push(Item::of(Draw::Open));
+        if mixed_back {
+            // Before the layer's own drawing is marked, so neither its
+            // mask nor its cut is ever put on the copy.
+            let whole = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: out.surface.0,
+                y1: out.surface.1,
+            };
+            let quad = out.push(page_quad(
+                (whole, out.surface),
+                1.0,
+                [0.0; 4],
+                [0.0; 4],
+                [0.0; 3],
+            ));
+            out.draws.push(Item::of(Draw::Under { quad }));
+        }
     }
     // A frame above cuts what the layer *lays down*, and not the
     // silhouette its effects grew from: the CPU renderer builds a field
@@ -3861,9 +3943,12 @@ fn one(
             {
                 return none!();
             }
-            // Faded or masked, it is on a surface of its own (above) unless
-            // what it holds reads the page, which the CPU draws in place
-            // and mixes back by the fade and the mask: that goes back.
+            // Faded or masked, it is on a surface of its own (above):
+            // composited whole when what it holds only lays paint, and
+            // drawn where it stands on a copy of the page and mixed back
+            // when something inside reads the page (`mixed_back`). What
+            // is left here is such a frame brought down by a blend of
+            // its own, which the reference draws twice over.
             if upright && (node.opacity < 1.0 || node.mask.is_some()) && !alone {
                 return none!();
             }
@@ -4319,11 +4404,18 @@ fn one(
             [0.0; 4],
             overlay.map_or([0.0; 3], |(c, _)| c),
         ));
-        out.draws.push(Item::of(Draw::Close {
-            quad,
-            blend: node.blend,
-            effects,
-        }));
+        if mixed_back {
+            for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
+                v.params[0] = MIX_BACK;
+            }
+            out.draws.push(Item::of(Draw::Mix { quad }));
+        } else {
+            out.draws.push(Item::of(Draw::Close {
+                quad,
+                blend: node.blend,
+                effects,
+            }));
+        }
     }
     // The mask, once, over everything the layer drew: the CPU
     // renderer rasterizes the coverage and the fragments read it.
@@ -4475,6 +4567,14 @@ fn nothing_drawn(
     out.draws.truncate(mark.1);
     out.placed.truncate(placed_from);
     if alone {
+        // A surface opened over a copy of what is under it: the copy
+        // went in before the layer's drawing was marked, and goes with
+        // the surface.
+        if let Some(Draw::Under { quad }) = out.draws.last().map(|i| &i.draw) {
+            let start = quad.start as usize;
+            out.draws.pop();
+            out.vertices.truncate(start);
+        }
         debug_assert!(matches!(
             out.draws.last().map(|i| &i.draw),
             Some(Draw::Open)
@@ -6418,6 +6518,10 @@ struct Adjusting {
 /// Which arm of the shader's `blended` a mode is. The order is the
 /// shader's; Normal is zero and never reaches it, since a layer that
 /// composites normally is laid down by the plain image pipeline.
+/// Past the last blend mode: what the quad that mixes a surface back
+/// into the copy it began as says where a blend mode would go.
+const MIX_BACK: f32 = 16.0;
+
 fn blend_index(mode: BlendMode) -> u32 {
     match mode {
         BlendMode::Normal => 0,
@@ -6452,6 +6556,9 @@ struct Pass {
     /// is a filter inside a frame (`Item::within`).
     within: Option<chitrakar_render::ClipRect>,
     items: std::ops::Range<usize>,
+    /// The surface whose contents this pass begins with a copy of
+    /// (`Draw::Under`): the one under its own.
+    under_from: Option<usize>,
 }
 
 /// What a pass does before its own items: something that reads the
@@ -6467,6 +6574,13 @@ enum Opening {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
         blend: BlendMode,
+    },
+    /// A surface that began as a copy of what is under it, mixed back
+    /// into that by the quad's fade and mask (`Draw::Mix`).
+    Mix {
+        from: usize,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
     },
     /// An adjustment layer, which reads everything composited below it
     /// and writes the answer back over it — always from the copy — and,
@@ -6546,6 +6660,7 @@ impl Opening {
     fn reads_under(&self) -> bool {
         match self {
             Opening::Lay { blend, .. } => *blend != BlendMode::Normal,
+            Opening::Mix { .. } => true,
             Opening::Adjust { .. }
             | Opening::Blur { .. }
             | Opening::Smear { .. }
@@ -6581,6 +6696,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
         match &item.draw {
             Draw::Open
             | Draw::Close { .. }
+            | Draw::Mix { .. }
             | Draw::Adjust { .. }
             | Draw::Blur { .. }
             | Draw::Smear { .. }
@@ -6595,11 +6711,21 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             lay: lay.take(),
             within: within.take(),
             items: start..i,
+            under_from: under_from(&draws[start..i], &stack),
         });
         match &item.draw {
             Draw::Open => {
                 stack.push(stack.len());
                 clear = true;
+            }
+            Draw::Mix { quad } => {
+                let from = stack.pop().unwrap_or(0);
+                clear = false;
+                lay = Some(Opening::Mix {
+                    from,
+                    quad: quad.clone(),
+                    mask: item.mask,
+                });
             }
             Draw::Close {
                 quad,
@@ -6633,6 +6759,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                             blend: *blend,
                         }),
                         items: i..i,
+                        under_from: None,
                     };
                     for effect in effects.iter().filter(|e| !e.over) {
                         passes.push(painted(effect));
@@ -6648,6 +6775,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                             blend: *blend,
                         }),
                         items: i..i,
+                        under_from: None,
                     });
                     for effect in effects.iter().filter(|e| e.over) {
                         passes.push(painted(effect));
@@ -6719,7 +6847,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     parent: aside.then(|| stack[stack.len().saturating_sub(2)]),
                 });
             }
-            _ => unreachable!("only the six above cut a pass"),
+            _ => unreachable!("only the seven above cut a pass"),
         }
         start = i + 1;
     }
@@ -6729,8 +6857,18 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
         lay,
         within,
         items: start..draws.len(),
+        under_from: under_from(&draws[start..], &stack),
     });
     passes
+}
+
+/// The surface a run of items begins with a copy of, when it begins
+/// with `Draw::Under`: the one under the surface the run draws on.
+fn under_from(items: &[Item], stack: &[usize]) -> Option<usize> {
+    let copies = items
+        .iter()
+        .any(|item| matches!(item.draw, Draw::Under { .. }));
+    (copies && stack.len() >= 2).then(|| stack[stack.len() - 2])
 }
 
 /// The six vertices of a quad over the whole page, reading a texture
@@ -14501,8 +14639,10 @@ mod tests {
     /// whole — on a surface of its own, its fade and its mask taken once
     /// on the way down — which is what the CPU renderer does with one —
     /// and inside a faded group as well. One that holds something reading
-    /// the page is drawn in place and mixed back by the CPU, and goes
-    /// back here.
+    /// the page is drawn where it stands and mixed back by the CPU, and
+    /// here too: on a surface that begins as a copy of the page, mixed
+    /// back by the quad that brings it down (`mixed_back`). It used to
+    /// go back.
     #[test]
     fn a_faded_or_masked_frame_is_composited_whole() {
         let Some(gpu) = gpu_or_skip() else {
@@ -14619,10 +14759,95 @@ mod tests {
                 );
             }
         }
-        let curves = Node::adjustment("invert", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
+        // Holding something that reads the page, the frame is drawn
+        // where it stands and mixed back: an invert inside it inverts
+        // the ellipse under the frame, by the frame's fade, and the
+        // ground beside the frame is untouched.
+        let invert =
+            || Node::adjustment("invert", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
+        for (what, doc) in [
+            (
+                "faded, reading the page",
+                page(0.5, false, false, Some(invert())),
+            ),
+            (
+                "masked, reading the page",
+                page(1.0, true, false, Some(invert())),
+            ),
+            (
+                "faded and masked, reading the page",
+                page(0.7, true, false, Some(invert())),
+            ),
+            (
+                "faded, reading the page, in a faded group",
+                page(0.5, false, true, Some(invert())),
+            ),
+        ] {
+            for (name, view, size) in views {
+                assert!(
+                    GpuRenderer::can_render_view(&doc, view, size),
+                    "{what} at {name} is drawn"
+                );
+                let drawn = gpu.render_view(&doc, view, size).unwrap();
+                let mut surface = Surface::new(size.0, size.1);
+                let clip = surface.full_clip();
+                chitrakar_render::render_region_at(&doc, &mut surface, clip, view).unwrap();
+                let (mean, worst) = difference(&drawn, &surface);
+                let (in_mean, in_worst, over, spot) = interiors(&drawn, &surface);
+                assert!(
+                    mean < 0.002 && worst < 0.15 && over == 0 && in_mean < 0.002,
+                    "{what} at {name}: mean {mean:.5} (worst {worst:.4}), interiors \
+                     {in_mean:.5} (worst {in_worst:.3} at {spot:?}, {over} over)"
+                );
+            }
+            // And it read the page: the same frame on a surface of its
+            // own, with nothing under it to invert, is another picture.
+            let drawn = gpu.render(&doc).unwrap();
+            let mut hollow = doc.clone();
+            let frame = hollow
+                .children_of(hollow.root())
+                .unwrap()
+                .iter()
+                .copied()
+                .find(|&id| matches!(hollow.node(id).unwrap().kind, NodeKind::Artboard { .. }))
+                .or_else(|| {
+                    let g = hollow.children_of(hollow.root()).unwrap()[1];
+                    hollow.children_of(g).unwrap().first().copied()
+                })
+                .unwrap();
+            let kept = hollow.children_of(frame).unwrap().to_vec();
+            hollow.apply(Command::RemoveNode { id: kept[2] }).unwrap();
+            let (apart, _) = difference(&drawn, &chitrakar_render::render(&hollow).unwrap());
+            assert!(
+                apart > 0.005,
+                "{what}: the invert inside read the page ({apart:.5})"
+            );
+        }
+        // And such a frame moved wholly off the page draws nothing, and
+        // takes the surface it opened over a copy of the page with it:
+        // the page after it is the page without it. (The copy went in
+        // before the frame's drawing was marked, and a surface opened
+        // and never closed swallows everything drawn after it.)
+        let mut gone = page(0.5, false, false, Some(invert()));
+        let frame = gone.children_of(gone.root()).unwrap()[1];
+        gone.apply(Command::SetTransform {
+            id: frame,
+            transform: Transform::translation(200.0, 200.0),
+        })
+        .unwrap();
+        add(
+            &mut gone,
+            filled("after", VectorShape::Ellipse { rx: 8.0, ry: 8.0 }, RED),
+            Transform::translation(60.0, 12.0),
+        );
+        assert!(GpuRenderer::can_render(&gone));
+        let (mean, worst) = difference(
+            &gpu.render(&gone).unwrap(),
+            &chitrakar_render::render(&gone).unwrap(),
+        );
         assert!(
-            !GpuRenderer::can_render(&page(0.5, false, false, Some(curves))),
-            "a faded frame holding what works on the page goes back"
+            mean < 0.002 && worst < 0.1,
+            "off the page, nothing of it and everything after it: mean {mean:.5}, worst {worst:.3}"
         );
     }
 
