@@ -150,6 +150,11 @@ impl Surface {
     /// time, and those calls were most of what this cost in a browser —
     /// enough that the runs saved a tenth there where they save
     /// two-thirds natively.
+    ///
+    /// Not by rows: a row the same as the row before it taking that row's
+    /// bytes whole was tried, and in WebAssembly the comparison of two
+    /// rows byte by byte cost more than the pixels it saved — an empty
+    /// page's frame went from 5 ms to 10.
     pub fn encode_srgb8_region(&self, clip: ClipRect, out: &mut [u8]) {
         let srgb8 = chitrakar_color::Srgb8::new();
         let bits = |p: &LinearRgba| [p.r.to_bits(), p.g.to_bits(), p.b.to_bits(), p.a.to_bits()];
@@ -20210,6 +20215,36 @@ mod tests {
         ];
         let row = (4 * w) as usize;
         s.pixels[row..row + strip.len()].copy_from_slice(&strip);
+        // And rows that repeat the row before them whole, as the empty
+        // margins of a page do, with one that repeats it but for its
+        // last pixel, one that repeats it in bytes but not in bits, and
+        // one that repeats it at both ends and not in the middle — which
+        // an encoder reusing a row's bytes would have to tell apart.
+        let wide = w as usize;
+        let (r7, r8, r9, r10) = (7 * wide, 8 * wide, 9 * wide, 10 * wide);
+        let seventh: Vec<LinearRgba> = s.pixels[r7..r8].to_vec();
+        s.pixels[r8..r9].copy_from_slice(&seventh);
+        s.pixels[r9..r10].copy_from_slice(&seventh);
+        s.pixels[r10 - 1] = LinearRgba {
+            r: 0.3,
+            g: 0.3,
+            b: 0.3,
+            a: 1.0,
+        };
+        s.pixels[r10..r10 + wide].copy_from_slice(&seventh);
+        s.pixels[r10 + 2] = LinearRgba {
+            r: seventh[2].r + 1e-7,
+            ..seventh[2]
+        };
+        // And one that repeats it at both ends and not in the middle.
+        let r11 = 11 * wide;
+        s.pixels[r11..r11 + wide].copy_from_slice(&seventh);
+        s.pixels[r11 + wide / 2] = LinearRgba {
+            r: 0.05,
+            g: 0.6,
+            b: 0.1,
+            a: 1.0,
+        };
         let one_by_one: Vec<u8> = s.pixels.iter().flat_map(|p| p.to_srgb8()).collect();
         for clip in [
             s.full_clip(),

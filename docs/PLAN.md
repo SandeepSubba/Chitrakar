@@ -599,7 +599,14 @@ without reading anything else.*
   (exact, since the layer over anything is the layer). On that page the
   shape is about a third of each shadow's window, the rest being halo,
   and the gain was about 2% of a frame, inside the bench's noise — not
-  worth a surface threaded through every effect call.
+  worth a surface threaded through every effect call. And encoding a
+  frame's bytes by rows as well as by runs (a row the same as the row
+  before taking that row's bytes whole, the margins of a page being
+  such rows): exact, and slower in WebAssembly, where comparing two
+  rows byte by byte cost more than the pixels it saved — an empty
+  page's frame went from 5 ms to 10 and the text page's from 22.5 to
+  24.6. The encoder's test keeps the repeated rows it was given, so an
+  encoder that tries this again has them to answer.
 - **Renderer performance:** the transform inverse is solved once per shape
   (`Inverse`), not per coverage sample — a boundary pixel asks for up to
   twenty-one. Groups only paint where their contents can land, and a group
