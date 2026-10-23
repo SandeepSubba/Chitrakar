@@ -1549,6 +1549,28 @@ pub fn frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> Result<b
     Ok(t.b.abs() < 1e-6 && t.c.abs() < 1e-6 && reads_in_place(doc, id, node.blend)?)
 }
 
+/// Whether a layer lets everything held to it through: an adjustment, a
+/// filter, or a copy of one, which rewrites the page exactly as the
+/// layer it copies does. Such a layer has no shape of its own to confine
+/// anything to, so what is held to it shows whole, as if it were not
+/// held at all — and that holds whether or not the layer is itself held
+/// to anything: asked only when it was, a copy of one that something
+/// was held *to* went to a surface of its own to be read as the cut,
+/// drew nothing there, and hid everything held to it, where the
+/// adjustment it copies lets everything through.
+///
+/// Not a clone layer, though it reads what is under it too: what is
+/// held to one is confined to the strokes it laid (`clone_behind`), and
+/// a copy of a clone is the same. The one reading of the question;
+/// `clip_coverage_at` is how it reaches the GPU backend, which reads
+/// the cut this decides rather than deciding it again.
+pub fn confines_nothing(doc: &Document, id: NodeId) -> bool {
+    doc.node(id).is_ok_and(|node| {
+        matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_))
+            || rewrites_what_is_under_it(doc, id)
+    })
+}
+
 pub fn rewrites_what_is_under_it(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
     for _ in 0..chitrakar_doc::MAX_DEPTH {
@@ -2512,17 +2534,9 @@ fn draw_layer(
         // random pages, which is where it was found.
         // A copy of a clone layer among them, whatever holds it or is
         // held to it: drawn anywhere else it has nothing to lift.
-        if matches!(
-            node.kind,
-            NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
-        ) || (!effected && copies_a_clone(doc, child))
-            // A copy of an adjustment or a filter whether or not it is held
-            // to anything: asked only when it was, a copy of one that
-            // something was held *to* went to a surface of its own to be
-            // read as the cut, drew nothing there, and hid everything held
-            // to it — where the adjustment it copies lets everything
-            // through.
-            || rewrites_what_is_under_it(doc, child)
+        if confines_nothing(doc, child)
+            || matches!(node.kind, NodeKind::Clone { .. })
+            || (!effected && copies_a_clone(doc, child))
         {
             if let Some(c) = cover {
                 let region = clip.intersect(c.rect());

@@ -2609,18 +2609,36 @@ impl Scene {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static DECLINED_AT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+macro_rules! none {
+    () => {{
+        DECLINED_AT.with(|c| c.set(line!()));
+        None
+    }};
+}
+#[cfg(not(test))]
+macro_rules! none {
+    () => {
+        None
+    };
+}
+
 /// Everything the page needs drawn onto a surface of `size`, with the
 /// document mapped through `view` on the way — or `None` when some of it
 /// cannot be.
 fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) -> Option<()> {
     if size.0 > out.max_texture || size.1 > out.max_texture {
-        return None;
+        return none!();
     }
     // And the surface comes back through one buffer, its rows padded out
     // to the alignment a copy wants.
     let row = (size.0 as u64 * 8).div_ceil(256) * 256;
     if row * size.1 as u64 > out.max_buffer {
-        return None;
+        return none!();
     }
     // Where the page lands on the surface, rounded outward but no
     // further: a pixel the page's edge partly covers is the page's to
@@ -2630,7 +2648,7 @@ fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) ->
         view,
         [0.0, 0.0, doc.meta.width as f32, doc.meta.height as f32],
     ) else {
-        return None;
+        return none!();
     };
     let page = chitrakar_render::ClipRect {
         x0: x0.floor().max(0.0) as u32,
@@ -2648,7 +2666,7 @@ fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) ->
     if view.b.abs() > 1e-6 || view.c.abs() > 1e-6 {
         let det = view.a * view.d - view.b * view.c;
         if det.abs() < 1e-9 {
-            return None;
+            return none!();
         }
         let (w, h) = (doc.meta.width as f32, doc.meta.height as f32);
         let inside = |x: f32, y: f32| {
@@ -2665,7 +2683,7 @@ fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) ->
             .iter()
             .all(|&(x, y)| inside(x, y))
         {
-            return None;
+            return none!();
         }
     }
     out.surface = size;
@@ -2778,7 +2796,7 @@ fn one(
                 | NodeKind::Instance { .. }
                 | NodeKind::Artboard { .. }
         ) {
-            return None;
+            return none!();
         }
         // A mask inside a masked layer used to send the page back: one
         // coverage slot, and a layer wearing an effect put its own mask
@@ -2802,7 +2820,7 @@ fn one(
         // takes over to bring a picture down by; the two have not been
         // taught to share it, so a blended layer's bevel is the CPU's.
         if node.blend != BlendMode::Normal && shadings.iter().any(|s| s.lit.is_some()) {
-            return None;
+            return none!();
         }
         shadings
     };
@@ -2837,16 +2855,35 @@ fn one(
                 // A base is a layer whose alpha is its *own*: it puts
                 // something down, so "the layer drawn aside" means
                 // something and both sides read the same number for it.
-                // A clone layer, an adjustment and a filter draw by
-                // reading what is under them and have no alpha of their
-                // own to be held to — drawn aside they are nothing, or
-                // nothing like what they are on the page, and the two
-                // renderers come apart by a sixth of full scale. Those
-                // three go back; everything that paints is a base.
-                let draws = !matches!(
-                    b.kind,
-                    NodeKind::Clone { .. } | NodeKind::Adjustment(_) | NodeKind::Filter(_)
-                );
+                // An adjustment and a filter put nothing down, and the
+                // page confines nothing to one of them
+                // (`confines_nothing`): a layer held to an adjustment
+                // shows whole. That used to send the page back — read
+                // as the layer drawn aside, such a base was nothing, and
+                // what was held to it vanished, a sixth of full scale
+                // from the reference — and it was a quarter of
+                // everything the random pages went back for. The
+                // reading is the page's own cut now (`clip_coverage_at`,
+                // below), which for one of these is the page's answer:
+                // everything let through. Being held still means the
+                // rest of what it means here, a frame or a copy on a
+                // surface of its own, which is where the reference puts
+                // one held to anything — a frame held to an adjustment
+                // and drawn in place instead put a Color Burn inside it
+                // against the page rather than against nothing (seed
+                // 5601), so "no base at all" was the wrong lift.
+                //
+                // A clone layer reads what is under it too, but what is
+                // held to one is confined to the strokes it laid, and
+                // drawn aside — on an empty surface, with nothing to
+                // lift — it lays nothing: a halftone held to a masked
+                // clone (seed 1176) was the whole page's halftone
+                // against none of it. A clone base goes back.
+                if matches!(b.kind, NodeKind::Clone { .. })
+                    || chitrakar_render::copies_a_clone(doc, base)
+                {
+                    return none!();
+                }
                 // What the layer above is held to is the base's own
                 // alpha, and that reading comes from the renderer being
                 // matched — `layer_coverage_at`, the base drawn aside —
@@ -2869,9 +2906,8 @@ fn one(
                 // holds works on the page), and a layer held to one came
                 // out a sixtieth apart on a page nobody wrote. Those stay
                 // the CPU's.
-                if !draws || (!b.effects.is_empty() && matches!(b.kind, NodeKind::Artboard { .. }))
-                {
-                    return None;
+                if !b.effects.is_empty() && matches!(b.kind, NodeKind::Artboard { .. }) {
+                    return none!();
                 }
                 Some(base)
             }
@@ -2969,7 +3005,7 @@ fn one(
         && matches!(node.kind, NodeKind::Instance { .. })
         && (node.mask.is_some() || node.opacity < 1.0 || held_to.is_some())
     {
-        return None;
+        return none!();
     }
     // A copy of a clone layer, dressed in anything at all, goes back too.
     // What it copies paints with what is under it, so the reference
@@ -2990,7 +3026,7 @@ fn one(
             || node.blend != BlendMode::Normal
             || !node.effects.is_empty())
     {
-        return None;
+        return none!();
     }
     // A layer wearing an effect and held to a layer that *stands at an
     // angle* goes back, and this one is a difference of degree rather
@@ -3028,7 +3064,7 @@ fn one(
     if !node.effects.is_empty() {
         if let Some(base) = held_to {
             if matches!(doc.node(base).ok()?.kind, NodeKind::Paint { .. }) {
-                return None;
+                return none!();
             }
         }
     }
@@ -3409,13 +3445,13 @@ fn one(
                 return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
             }
             if res.width > out.max_texture || res.height > out.max_texture {
-                return None;
+                return none!();
             }
             // A picture with its corners moved is drawn through a
             // projective map, which the quads here do not carry: the
             // CPU's.
             if raster.projective().is_some() {
-                return None;
+                return none!();
             }
             // Shrunk, one bilinear tap would read four texels of the many
             // a pixel covers and the picture would crawl as it moved. The
@@ -3677,13 +3713,13 @@ fn one(
             if !node.effects.is_empty()
                 && chitrakar_render::frame_in_place(doc, child, parent).ok()?
             {
-                return None;
+                return none!();
             }
             // Faded or masked, it is on a surface of its own (above) unless
             // what it holds reads the page, which the CPU draws in place
             // and mixes back by the fade and the mask: that goes back.
             if upright && (node.opacity < 1.0 || node.mask.is_some()) && !alone {
-                return None;
+                return none!();
             }
             // Turned: on a surface of its own (`turned_frame`), as the CPU
             // draws it — the ground over the frame's whole box and what
@@ -3703,7 +3739,7 @@ fn one(
                 // laid over everything the layer drew, the inner quad
                 // with it, and the cut lost.
                 if held_to.is_some() || (wears && bound.is_some()) {
-                    return None;
+                    return none!();
                 }
                 if wears {
                     out.draws.push(Item::of(Draw::Open));
@@ -3711,12 +3747,12 @@ fn one(
                 if node.blend != BlendMode::Normal
                     && chitrakar_render::works_on_what_is_under(doc, child).ok()?
                 {
-                    return None;
+                    return none!();
                 }
                 let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) =
                     chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height])
                 else {
-                    return None;
+                    return none!();
                 };
                 if let Some(ground) = background {
                     // Past the frame's edge by a pixel all round: the cut
@@ -3805,7 +3841,7 @@ fn one(
             if node.blend != BlendMode::Normal
                 && chitrakar_render::works_on_what_is_under(doc, child).ok()?
             {
-                return None;
+                return none!();
             }
             // Held to the layer under it, the whole frame — its ground and
             // everything in it — is cut to that layer. This arm draws
@@ -3813,11 +3849,11 @@ fn one(
             // other layer takes, so a held frame came out uncut: a frame
             // over an ellipse showed its whole rectangle. It goes back.
             if held_to.is_some() {
-                return None;
+                return none!();
             }
             let box_ = chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height]);
             let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) = box_ else {
-                return None;
+                return none!();
             };
             if !upright {
                 // Drawn above; what is left is the surface's way down.
@@ -3954,7 +3990,7 @@ fn one(
                 // surface of its own; this pass draws straight in, which
                 // is a different picture, so the page goes back.
                 if chitrakar_render::any_reads_backdrop(doc, &stand_ins).ok()? {
-                    return None;
+                    return none!();
                 }
                 for part in stand_ins {
                     one(doc, part, t, inner, within, false, out)?;
@@ -4391,7 +4427,7 @@ fn healing(
     let box_ = stroke.bounds()?;
     let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) = chitrakar_render::transformed_box(t, box_)
     else {
-        return None;
+        return none!();
     };
     let edge = |v: f32, most: u32| (v as i64).clamp(0, most as i64) as u32;
     let mut rect = chitrakar_render::ClipRect {
@@ -4407,7 +4443,7 @@ fn healing(
         rect = rect.intersect(b);
     }
     if rect.is_empty() {
-        return None;
+        return none!();
     }
     let (region, grad) = match stroke.clip.as_deref() {
         Some(region) => {
@@ -4737,7 +4773,7 @@ fn text(
         return Some(());
     }
     if raster.width + 2 > out.max_texture || raster.height + 2 > out.max_texture {
-        return None;
+        return none!();
     }
     // A transparent row and column around the coverage, so that off the
     // edge the sampler reads no ink rather than smearing the border —
@@ -5627,7 +5663,7 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
         }
         F::Median { radius } => match chitrakar_render::median_radius(*radius, scale) {
             0 => Filtering::Nothing,
-            r if r > MEDIAN_MOST => return None,
+            r if r > MEDIAN_MOST => return none!(),
             r => Filtering::Radial {
                 params: [r as f32, 0.0, 0.0, 3.0],
                 linear: [0.0; 4],
@@ -5730,7 +5766,7 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
         // and the page goes back, as a median's does.
         F::OilPaint { radius } => match chitrakar_render::oil_radius(*radius, view.max_scale()) {
             0 => Filtering::Nothing,
-            r if r > MEDIAN_MOST => return None,
+            r if r > MEDIAN_MOST => return none!(),
             r => point([29.0, r as f32, 0.0, 0.0], 0.0),
         },
         // Eight pixels round this one, a document pixel away each way
@@ -5831,7 +5867,7 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             // square.
             let det = view.a * view.d - view.b * view.c;
             if view.b != 0.0 || view.c != 0.0 || det.abs() < 1e-9 {
-                return None;
+                return none!();
             }
             // The same inverse the CPU renderer builds, from the same
             // determinant, so the two agree to the last bit.
@@ -5844,7 +5880,7 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             // handing back rather than growing a loop nobody can bound.
             const REACH: f32 = 128.0;
             if side / ia.abs() > REACH || side / id.abs() > REACH {
-                return None;
+                return none!();
             }
             Filtering::Blocks {
                 across: [ia, view.e, side, 0.0],
@@ -6028,7 +6064,7 @@ fn effect_of(
                 opacity,
             } = effect.carried_through(parent)
             else {
-                return None;
+                return none!();
             };
             let Some(light) = chitrakar_doc::bevel_light(size, depth, [lx, ly], altitude, 1.0)
             else {
@@ -6090,7 +6126,7 @@ fn effect_of(
             // pass should be — the same cap, in taps, that a smear is
             // held to.
             if w + 1.0 > BAND_MOST {
-                return None;
+                return none!();
             }
             // The CPU renderer builds the band inside the layer's box
             // grown by the effect's reach — width + 2 in the layer's
@@ -6099,7 +6135,7 @@ fn effect_of(
             // slack is gone and it cuts the band's outer fringe where
             // this, drawing over the whole surface, would not.
             if scale < 0.5 {
-                return None;
+                return none!();
             }
             Some(Shading {
                 over: false,
@@ -15556,14 +15592,18 @@ mod tests {
     /// alpha comes from the renderer being matched — the base drawn
     /// aside. For a shape, a picture, a block of text, a group, a brush
     /// layer, a copy or a frame that is a number both sides agree on to a
-    /// ten-thousandth. A clone layer, an adjustment and a filter have no
-    /// alpha of their own — what they draw *is* what is under them — and
-    /// drawn aside they are nothing like what they are on the page: held
-    /// to one of those, the two renderers come apart by a sixth of full
-    /// scale. So those three hand the page back and the rest are bases.
+    /// ten-thousandth. An adjustment and a filter have no alpha of their
+    /// own — what they draw *is* what is under them — and the page
+    /// confines nothing to one of them, so a layer held to one shows
+    /// whole, and the cut this reads (`clip_coverage_at`) says so. A
+    /// clone layer is the one that hands the page back: what is held to
+    /// it is confined to the strokes it laid, and drawn aside, with
+    /// nothing to lift, it lays nothing — a sixth of full scale apart.
     ///
     /// The line used to be drawn at shapes, pictures and text, which let
-    /// four kinds that paint perfectly well decline for no reason.
+    /// four kinds that paint perfectly well decline for no reason; and
+    /// then at anything that paints, which let the two that confine
+    /// nothing decline for a reason the reference does not share.
     #[test]
     fn anything_that_paints_can_be_held_to() {
         let Some(gpu) = gpu_or_skip() else {
@@ -15582,9 +15622,9 @@ mod tests {
             ("paint", true),
             ("copy", true),
             ("frame", true),
+            ("adjustment", true),
+            ("filter", true),
             ("clone", false),
-            ("adjustment", false),
-            ("filter", false),
         ] {
             let mut doc = Document::new(60, 40, ColorMode::Rgb);
             add(
@@ -16855,6 +16895,263 @@ mod tests {
     /// the random pages found it, and a test here asserted the refusal
     /// until the coverages learned to fold the layer's mask in and be
     /// put back (`Scene::worn`, `Scene::placed`).
+    /// A layer held to an adjustment or a filter shows whole, the way
+    /// the reference draws it: the page confines nothing to one of
+    /// them (`confines_nothing`), and the cut this reads is the page's
+    /// own (`clip_coverage_at`), so a rectangle held to a brightness
+    /// layer, an ellipse held to a blur and a rectangle held to a copy
+    /// of the brightness layer are each the reference's picture, and
+    /// the reference's picture of the same page with nothing held.
+    /// That used to go back — a quarter of everything the random pages
+    /// were refused for.
+    ///
+    /// Being held still means being held, though: a frame held to an
+    /// adjustment goes on a surface of its own in the reference, where
+    /// a blend inside it meets nothing rather than the page, and here a
+    /// held frame goes back rather than being drawn in place — so one
+    /// holding a Multiply rectangle is refused, and the reference draws
+    /// it differently from the same frame unheld, which is what makes
+    /// "no base at all" the wrong lift (seed 5601 of the random pages
+    /// found it). And a layer held to a clone layer goes back: what is
+    /// held to one is confined to the strokes it laid, which only the
+    /// page has in hand (seed 1176).
+    #[test]
+    fn a_layer_held_to_an_adjustment_shows_whole() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let put = |doc: &mut Document, node: Box<Node>, at: Transform| {
+            let id = add(doc, node, at);
+            doc.apply(Command::SetClipped { id, clipped: true })
+                .unwrap();
+            id
+        };
+        let mut doc = Document::new(72, 48, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled("ground", rect(72.0, 48.0), BLUE),
+            Transform::default(),
+        );
+        let brighter = add(
+            &mut doc,
+            Box::new(Node::adjustment(
+                "brighter",
+                chitrakar_doc::Adjustment::BrightnessContrast {
+                    brightness: 0.2,
+                    contrast: 0.1,
+                },
+            )),
+            Transform::default(),
+        );
+        let mut held = vec![put(
+            &mut doc,
+            filled("to it", rect(30.0, 14.0), RED),
+            Transform::translation(4.0, 4.0),
+        )];
+        add(
+            &mut doc,
+            Box::new(Node::filter(
+                "softer",
+                chitrakar_doc::Filter::GaussianBlur { sigma: 1.5 },
+            )),
+            Transform::default(),
+        );
+        held.push(put(
+            &mut doc,
+            filled(
+                "to that",
+                VectorShape::Ellipse { rx: 12.0, ry: 8.0 },
+                AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.8,
+                    b: 0.3,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(40.0, 22.0),
+        ));
+        add(
+            &mut doc,
+            Box::new(Node::instance("brighter again", brighter)),
+            Transform::default(),
+        );
+        held.push(put(
+            &mut doc,
+            filled(
+                "to the copy",
+                rect(16.0, 16.0),
+                AuthoredColor::Srgb {
+                    r: 0.95,
+                    g: 0.85,
+                    b: 0.1,
+                    a: 1.0,
+                },
+            ),
+            Transform::translation(8.0, 26.0),
+        ));
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "held to what confines nothing"
+        );
+        let mine = gpu.render(&doc).unwrap();
+        let reference = chitrakar_render::render(&doc).unwrap();
+        let (mean, worst) = difference(&mine, &reference);
+        let (in_mean, in_worst, over, at) = interiors(&mine, &reference);
+        assert!(
+            mean < 0.004 && over == 0 && in_mean < 0.002,
+            "the reference's picture: mean {mean:.5} (worst {worst:.3}), interiors \
+             {in_mean:.5} (worst {in_worst:.3} at {at:?}, {over} over)"
+        );
+        // And whole: the same page with nothing held is the same page.
+        let mut unheld = doc.clone();
+        for id in held {
+            unheld
+                .apply(Command::SetClipped { id, clipped: false })
+                .unwrap();
+        }
+        let (apart, _) = difference(&mine, &chitrakar_render::render(&unheld).unwrap());
+        assert!(
+            apart < 0.004,
+            "shows whole: {apart:.5} from the page unheld"
+        );
+        let shown = mine.get(10, 30);
+        assert!(
+            shown.r > 0.8 && shown.b < 0.3,
+            "the rectangle held to the copy is on the page ({shown:?})"
+        );
+
+        // A frame held to an adjustment is still held, and goes back.
+        let mut framed = Document::new(72, 48, ColorMode::Rgb);
+        add(
+            &mut framed,
+            filled("ground", rect(72.0, 48.0), BLUE),
+            Transform::default(),
+        );
+        add(
+            &mut framed,
+            Box::new(Node::adjustment(
+                "brighter",
+                chitrakar_doc::Adjustment::BrightnessContrast {
+                    brightness: 0.2,
+                    contrast: 0.1,
+                },
+            )),
+            Transform::default(),
+        );
+        let frame = add(
+            &mut framed,
+            Box::new(Node::artboard("frame", 40.0, 30.0, None)),
+            Transform::translation(10.0, 8.0),
+        );
+        let mut inside = filled("multiplied", rect(24.0, 18.0), RED);
+        inside.blend = BlendMode::Multiply;
+        framed
+            .apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: inside,
+            })
+            .unwrap();
+        let in_place = chitrakar_render::render(&framed).unwrap();
+        framed
+            .apply(Command::SetClipped {
+                id: frame,
+                clipped: true,
+            })
+            .unwrap();
+        assert!(
+            !GpuRenderer::can_render(&framed),
+            "a frame held to an adjustment is a held frame, and goes back"
+        );
+        let (apart, _) = difference(&chitrakar_render::render(&framed).unwrap(), &in_place);
+        assert!(
+            apart > 0.01,
+            "and there is something at stake: held, the reference draws it on a \
+             surface of its own, {apart:.5} from in place"
+        );
+
+        // A layer held to a clone layer goes back.
+        let mut cloned = Document::new(72, 48, ColorMode::Rgb);
+        add(
+            &mut cloned,
+            filled("ground", rect(72.0, 48.0), BLUE),
+            Transform::default(),
+        );
+        let clone = add(
+            &mut cloned,
+            Box::new(Node::clone_layer("cloned")),
+            Transform::default(),
+        );
+        cloned
+            .apply(Command::AddStroke {
+                id: clone,
+                index: 0,
+                stroke: Box::new(chitrakar_doc::PaintStroke {
+                    points: vec![[30.0, 20.0], [50.0, 30.0]],
+                    radii: vec![6.0],
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    softness: 0.0,
+                    erase: false,
+                    source: [-20.0, -10.0],
+                    heal: false,
+                    clip: None,
+                }),
+                on_mask: false,
+            })
+            .unwrap();
+        put(
+            &mut cloned,
+            filled("to the clone", rect(30.0, 14.0), RED),
+            Transform::translation(20.0, 16.0),
+        );
+        assert!(
+            !GpuRenderer::can_render(&cloned),
+            "held to a clone layer, the page goes back"
+        );
+    }
+
+    /// What the random pages go back for, by the line that refuses
+    /// them. Ignored: it is a reading, not an assertion — run it by
+    /// name with `--ignored --nocapture` to pick the next decline to
+    /// lift by how many pages it costs rather than by what is written
+    /// down. Every `return None` on the gathering road is a `none!()`
+    /// so this can tell them apart; a page refused by a `?` shows as
+    /// line 0. Asked first in October 2026 it put a layer held to an
+    /// adjustment or a filter at 719 of 2893, a quarter of them, and
+    /// that is drawn now.
+    #[test]
+    #[ignore]
+    fn what_the_random_pages_go_back_for() {
+        let mut by: std::collections::BTreeMap<u32, usize> = Default::default();
+        let (mut drawn, mut declined) = (0, 0);
+        for seed in 0..6000u64 {
+            let page = chitrakar_doc::fixture::page(seed);
+            DECLINED_AT.with(|c| c.set(0));
+            if GpuRenderer::can_render(&page) {
+                drawn += 1;
+            } else {
+                declined += 1;
+                *by.entry(DECLINED_AT.with(|c| c.get())).or_default() += 1;
+            }
+        }
+        let mut v: Vec<_> = by.into_iter().collect();
+        v.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+        eprintln!("TALLY drawn {drawn} declined {declined}");
+        for (line, n) in v {
+            eprintln!("TALLY line {line}: {n}");
+        }
+    }
+
     #[test]
     fn a_mask_inside_a_masked_layer_is_drawn() {
         let Some(gpu) = gpu_or_skip() else {
