@@ -4140,7 +4140,7 @@ fn stamp(
             if src.a <= 0.0 {
                 continue;
             }
-            dst.pixels[i] = blend_pixel(src, dst.pixels[i], blend);
+            dst.pixels[i] = blend_or_over(src, dst.pixels[i], blend);
         }
     }
 }
@@ -4277,6 +4277,19 @@ fn lerp(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
 /// it in linear light would put Overlay's pivot at what reads as a light
 /// grey and would make the engine disagree with its own exports, so each
 /// channel crosses into the display encoding for the blend and back.
+/// [`blend_pixel`] with the common case taken where it is called: most
+/// of what is composited is a layer with no blend mode of its own, and a
+/// call per pixel out to the whole table of modes was a tenth of a page
+/// of shadows.
+#[inline(always)]
+fn blend_or_over(src: LinearRgba, dst: LinearRgba, mode: BlendMode) -> LinearRgba {
+    if mode == BlendMode::Normal {
+        src.over(dst)
+    } else {
+        blend_pixel(src, dst, mode)
+    }
+}
+
 fn blend_pixel(src: LinearRgba, dst: LinearRgba, mode: BlendMode) -> LinearRgba {
     match mode {
         BlendMode::Normal => src.over(dst),
@@ -4728,11 +4741,26 @@ fn composite_from(
     mode: BlendMode,
     clip: ClipRect,
 ) {
+    // A clip with no width — inverted or empty, as a region beside the
+    // layer gives — is nothing to composite, and its rows no rows to read.
+    let n = clip.x1.saturating_sub(clip.x0) as usize;
+    if n == 0 {
+        return;
+    }
     for y in clip.y0..clip.y1 {
-        for x in clip.x0..clip.x1 {
-            let s = ((y - origin.1) * src.width + (x - origin.0)) as usize;
-            let i = (y * dst.width + x) as usize;
-            dst.pixels[i] = blend_pixel(scale_alpha(src.pixels[s], opacity), dst.pixels[i], mode);
+        let s0 = ((y - origin.1) * src.width + (clip.x0 - origin.0)) as usize;
+        let d0 = (y * dst.width + clip.x0) as usize;
+        for (s, d) in src.pixels[s0..s0 + n]
+            .iter()
+            .zip(&mut dst.pixels[d0..d0 + n])
+        {
+            // Nothing here — most of a layer's window, round its shape —
+            // leaves what is under it as it was, in every mode: the
+            // compositing is the backdrop's own value plus nothing.
+            if s.a <= 0.0 && s.r == 0.0 && s.g == 0.0 && s.b == 0.0 {
+                continue;
+            }
+            *d = blend_or_over(scale_alpha(*s, opacity), *d, mode);
         }
     }
 }
@@ -19210,6 +19238,137 @@ mod tests {
                         [a.r, a.g, a.b, a.a].map(f32::to_bits)
                             == [b.r, b.g, b.b, b.a].map(f32::to_bits),
                         "{distance} at {degrees}: the part at {x},{y} is {a:?}, the whole {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A layer's surface composited a row at a time, passing over what is
+    /// not there and taking Normal without the table of modes, is that
+    /// surface composited a pixel at a time through `blend_pixel`, to the
+    /// bit: in every mode, at full and part opacity, over a backdrop that
+    /// is opaque in places, part there in others and absent in some, from
+    /// a surface whose window starts off the corner and is a third empty.
+    #[test]
+    fn a_layer_composited_by_rows_is_the_layer_composited_by_pixels() {
+        use BlendMode as M;
+        let modes = [
+            M::Normal,
+            M::Multiply,
+            M::Screen,
+            M::Overlay,
+            M::Darken,
+            M::Lighten,
+            M::ColorDodge,
+            M::ColorBurn,
+            M::HardLight,
+            M::SoftLight,
+            M::Difference,
+            M::Exclusion,
+            M::Hue,
+            M::Saturation,
+            M::Color,
+            M::Luminosity,
+        ];
+        let mut seed = 0x2b7e_1516u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 8) as f32 / (1 << 24) as f32
+        };
+        let mut pixel = |odds: f32| {
+            let roll = next();
+            // Now and then colour with no cover at all, which is light
+            // added rather than nothing, and has to be composited.
+            if roll > 0.95 {
+                return LinearRgba {
+                    r: next(),
+                    g: 0.0,
+                    b: next(),
+                    a: 0.0,
+                };
+            }
+            let a = if roll < odds {
+                0.0
+            } else if roll < odds + 0.3 {
+                1.0
+            } else {
+                next()
+            };
+            LinearRgba {
+                r: next() * a,
+                g: next() * a,
+                b: next() * a,
+                a,
+            }
+        };
+        let mut src = Surface::new(30, 20);
+        for p in src.pixels.iter_mut() {
+            *p = pixel(0.35);
+        }
+        let mut under = Surface::new(50, 40);
+        for p in under.pixels.iter_mut() {
+            *p = pixel(0.2);
+        }
+        let origin = (9u32, 11u32);
+        let clip = ClipRect {
+            x0: origin.0 + 2,
+            y0: origin.1 + 1,
+            x1: origin.0 + 27,
+            y1: origin.1 + 20,
+        };
+        // And clips with no width, empty and inverted, which a region
+        // beside the layer gives and which composite nothing.
+        let nothing = [
+            ClipRect {
+                x0: origin.0 + 5,
+                y0: origin.1 + 1,
+                x1: origin.0 + 5,
+                y1: origin.1 + 9,
+            },
+            ClipRect {
+                x0: 47,
+                y0: origin.1 + 1,
+                x1: 12,
+                y1: origin.1 + 9,
+            },
+            // Its left edge near the end of the page's last row, where a
+            // row of it would start past the end of both surfaces.
+            ClipRect {
+                x0: 49,
+                y0: 39,
+                x1: 12,
+                y1: 40,
+            },
+        ];
+        for blank in nothing {
+            let mut d = under.clone();
+            composite_from(&mut d, &src, origin, 1.0, M::Normal, blank);
+            assert!(d.pixels == under.pixels, "{blank:?} composites nothing");
+        }
+        for mode in modes {
+            for opacity in [1.0, 0.55] {
+                let mut by_rows = under.clone();
+                composite_from(&mut by_rows, &src, origin, opacity, mode, clip);
+                let mut by_pixels = under.clone();
+                for y in clip.y0..clip.y1 {
+                    for x in clip.x0..clip.x1 {
+                        let s = ((y - origin.1) * src.width + (x - origin.0)) as usize;
+                        let i = (y * by_pixels.width + x) as usize;
+                        by_pixels.pixels[i] = blend_pixel(
+                            scale_alpha(src.pixels[s], opacity),
+                            by_pixels.pixels[i],
+                            mode,
+                        );
+                    }
+                }
+                for (i, (p, q)) in by_rows.pixels.iter().zip(&by_pixels.pixels).enumerate() {
+                    assert!(
+                        [p.r, p.g, p.b, p.a].map(f32::to_bits)
+                            == [q.r, q.g, q.b, q.a].map(f32::to_bits),
+                        "{mode:?} at {opacity}: pixel {i} is {p:?} by rows, {q:?} by pixels"
                     );
                 }
             }
