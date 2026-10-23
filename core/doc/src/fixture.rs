@@ -86,6 +86,8 @@ pub struct Fixture {
     pub again: NodeId,
     /// A block tracked and leaded so that the tracking decides its break.
     pub spaced: NodeId,
+    /// A block set as a numbered list, two items.
+    pub listed: NodeId,
     /// The stroke the paint layer was given, so a command can hand it
     /// back changed.
     pub stroke: PaintStroke,
@@ -1712,6 +1714,43 @@ pub fn everything() -> Fixture {
     })
     .unwrap();
 
+    // A block set as a list. A paragraph as an item — its marker set in
+    // the margin, every line indented past the widest of them — was
+    // drawn on pages nobody wrote and in the exporters' own tests, and
+    // never stood here: the paragraph had been a paragraph throughout.
+    // Numbered rather than bulleted, since a number is a glyph the
+    // block's words never contain, so a marker drawn wrongly, or not at
+    // all, cannot hide behind them. Two short items at a small size,
+    // so both land on the page, the second indented by the first's
+    // measure; its edit takes the numbers off and sets it as paragraphs,
+    // which moves every line of it left.
+    doc.apply(Command::AddNode {
+        parent: root,
+        index: doc.children_of(root).unwrap().len(),
+        node: Box::new(Node::text("listed", {
+            let mut spec = TextSpec::new(
+                "one\ntwo",
+                7.0,
+                chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.3,
+                    g: 0.1,
+                    b: 0.05,
+                    a: 1.0,
+                },
+            );
+            spec.width = 26.0;
+            spec.list = crate::TextList::Numbered;
+            spec
+        })),
+    })
+    .unwrap();
+    let listed = *doc.children_of(root).unwrap().last().unwrap();
+    doc.apply(Command::SetTransform {
+        id: listed,
+        transform: Transform::translation(50.0, 42.0),
+    })
+    .unwrap();
+
     // A copy that *wears something*. Four copies have stood in this
     // document since copies were written and every one of them is bare:
     // no mask, no fade, no blend, nothing of its own at all. So the whole
@@ -1967,6 +2006,7 @@ pub fn everything() -> Fixture {
         tilted,
         again,
         spaced,
+        listed,
         stroke,
     }
 }
@@ -3456,6 +3496,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
         tilted,
         again,
         spaced,
+        listed,
         stroke,
         ..
     } = f;
@@ -3726,6 +3767,25 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                     },
                 );
                 spec.width = 60.0;
+                spec
+            })),
+        },
+        // The numbers taken off: paragraphs again, every line of the
+        // block moved left by the measure the markers took.
+        Command::SetKind {
+            id: *listed,
+            kind: Box::new(NodeKind::Text({
+                let mut spec = TextSpec::new(
+                    "one\ntwo",
+                    7.0,
+                    chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.3,
+                        g: 0.1,
+                        b: 0.05,
+                        a: 1.0,
+                    },
+                );
+                spec.width = 26.0;
                 spec
             })),
         },

@@ -15793,6 +15793,72 @@ mod tests {
     /// ground where the copy is put, not where the frame stands, and has
     /// to follow the frame's size when that changes, since what travels
     /// is the picture rather than the placement.
+    /// The shared fixture's list is set as a list: its numbers are on the
+    /// page and its words hang past them. Asked directly, since drawing
+    /// a list as its paragraphs leaves every audit over the fixture
+    /// green but the list's own test — the exporters set type through
+    /// the same layout, so a reader that is not us agrees with whatever
+    /// it says — and the fixture's edit takes the numbers off, so the
+    /// block it is compared with is what every undo run sees.
+    #[test]
+    fn the_fixtures_list_is_numbered_on_the_page() {
+        let f = chitrakar_doc::fixture::everything();
+        let alone = |doc: &Document| {
+            let mut surface = Surface::new(doc.meta.width, doc.meta.height);
+            let clip = surface.full_clip();
+            render_showing_at(
+                doc,
+                &mut surface,
+                clip,
+                Transform::default(),
+                Showing::Alone(f.listed),
+            )
+            .unwrap();
+            let inked: Vec<(u32, u32)> = (0..surface.height)
+                .flat_map(|y| (0..surface.width).map(move |x| (x, y)))
+                .filter(|&(x, y)| surface.get(x, y).a > 0.05)
+                .collect();
+            (surface, inked)
+        };
+        let (numbered, with) = alone(&f.doc);
+        let mut plain = f.doc.clone();
+        let NodeKind::Text(spec) = &f.doc.node(f.listed).unwrap().kind else {
+            panic!("the fixture's list is a text block");
+        };
+        let mut paragraphs = spec.clone();
+        paragraphs.list = chitrakar_doc::TextList::None;
+        plain
+            .apply(Command::SetKind {
+                id: f.listed,
+                kind: Box::new(NodeKind::Text(paragraphs)),
+            })
+            .unwrap();
+        let (as_paragraphs, without) = alone(&plain);
+        assert!(
+            with.len() > 40 && without.len() > 40,
+            "both draw ({} and {})",
+            with.len(),
+            without.len()
+        );
+        let right = |inked: &[(u32, u32)]| inked.iter().map(|p| p.0).max().unwrap();
+        assert!(
+            right(&with) > right(&without) + 2,
+            "the words hang past the numbers ({} against {})",
+            right(&with),
+            right(&without)
+        );
+        let differing = numbered
+            .pixels
+            .iter()
+            .zip(&as_paragraphs.pixels)
+            .filter(|(p, q)| (p.a - q.a).abs() > 0.05)
+            .count();
+        assert!(
+            differing > 40,
+            "and the numbers show ({differing} pixels differ)"
+        );
+    }
+
     #[test]
     fn a_copy_of_a_frame_cuts_and_grounds_where_the_copy_is_put() {
         let f = chitrakar_doc::fixture::everything();
