@@ -307,8 +307,14 @@ fn axis_pass<T: Lane>(
     };
 
     for lane in 0..lanes {
-        for (i, slot) in line.iter_mut().enumerate() {
-            *slot = pixels[index(lane, i as i32)];
+        if horizontal {
+            // A row is in one piece: copied as one.
+            let row = ((clip.y0 + lane) * width + clip.x0) as usize;
+            line.copy_from_slice(&pixels[row..row + len as usize]);
+        } else {
+            for (i, slot) in line.iter_mut().enumerate() {
+                *slot = pixels[index(lane, i as i32)];
+            }
         }
         let at = |i: i32| {
             if beyond == Beyond::Nothing && (i < 0 || i >= len) {
@@ -342,9 +348,29 @@ fn axis_pass<T: Lane>(
         if horizontal {
             let row = ((clip.y0 + lane) * width + clip.x0) as usize;
             let out = &mut pixels[row..row + len as usize];
-            for i in 0..len {
+            // The three runs as three loops rather than one asking at
+            // every pixel which run it is in, and the middle one walking
+            // the line's two ends of the window as slices: the same
+            // additions in the same order.
+            for i in 0..head {
                 out[i as usize] = sum.scale(norm);
-                step(i, &mut sum, i >= head && i < tail);
+                step(i, &mut sum, false);
+            }
+            if tail > head {
+                let (h, t, r) = (head as usize, tail as usize, radius as usize);
+                for ((o, enter), leave) in out[h..t]
+                    .iter_mut()
+                    .zip(&line[h + r + 1..t + r + 1])
+                    .zip(&line[h - r..t - r])
+                {
+                    *o = sum.scale(norm);
+                    sum = sum.add(*enter);
+                    sum = sum.sub(*leave);
+                }
+            }
+            for i in tail..len {
+                out[i as usize] = sum.scale(norm);
+                step(i, &mut sum, false);
             }
         } else {
             for i in 0..len {
