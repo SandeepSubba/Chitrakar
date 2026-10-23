@@ -583,6 +583,18 @@ without reading anything else.*
   so asking for 30000 got 8192 with nothing said, and a big number could
   not be typed at all). Desktop app packages (deb verified locally; CI builds
   Win/macOS/Linux installers on a `v*` tag).
+- **At a phone's speed, October 2026.** The whole editor, Chromium
+  throttled four times over, a run of wheel zooms on the production
+  build (`tools/bench/app/gesture.mjs`, `THROTTLE=4`). A step includes
+  the bench's own round trips — a page with nothing on it takes 98 ms a
+  step — so read the rest against that floor. A page of forty text
+  blocks: 249–286 ms a step before the encode, text and outline work
+  below, 161–170 after. A page of sixty shapes with drop shadows:
+  708–721 before the shadow and compositing work, 294–334 after. Where
+  the engine's own frames went, by the WebAssembly engine alone, is in
+  each entry near the end of this section; the next thing to look at on
+  the shadows page is the coverage blur itself and the window surfaces
+  each shadowed layer allocates.
 - **Renderer performance:** the transform inverse is solved once per shape
   (`Inverse`), not per coverage sample — a boundary pixel asks for up to
   twenty-one. Groups only paint where their contents can land, and a group
