@@ -2372,6 +2372,63 @@ fn draw_layer(
             && !rewrites_what_is_under_it(doc, child)
             && !copies_a_clone(doc, child)
             && !frame_in_place(doc, child, parent)?;
+        // A copy of a blended layer, held to the layer under it and
+        // wearing no blend of its own: what it draws is that layer's
+        // blend meeting the page, and being held is a coverage. Taken to
+        // the surface every held layer goes to below, the copied blend
+        // met a transparent page and was spent — a held copy of a
+        // Multiply text came out in the text's own colour — which is the
+        // hole the copy's own mask and fade were already kept out of
+        // (`render_child`, the copy arm: drawn where it stands and mixed
+        // back by a cover). So being held takes the same road: the cover
+        // it is held by, the copy's own mask and its fade folded into one,
+        // handed to the copied layer drawn where the copy stands. Found
+        // by the GPU backend drawing such a copy with the blend meeting
+        // the page, which was the right picture, against this.
+        if let (Some(c), NodeKind::Instance { of, .. }) = (cover, &node.kind) {
+            if !effected
+                && node.blend == BlendMode::Normal
+                && copies_a_blend(doc, child)
+                && !copies_a_clone(doc, child)
+                && !rewrites_what_is_under_it(doc, child)
+                && !takes_stand_ins(doc, *of)
+            {
+                let region = clip.intersect(c.rect());
+                let Some(back) = invert(doc.node(*of)?.transform) else {
+                    return Ok(capture.map(|_| Cover::nothing()));
+                };
+                if region.is_empty() {
+                    return Ok(capture.map(|_| Cover::nothing()));
+                }
+                let space = parent.compose(node.transform).compose(back);
+                let plane = MaskRef::plane_over(
+                    Some(doc),
+                    node.mask.as_ref(),
+                    parent,
+                    region,
+                    (dst.width, dst.height),
+                );
+                let m = MaskRef::new(node.mask.as_ref(), parent).with_plane(plane.as_ref());
+                let (w, h) = (region.x1 - region.x0, region.y1 - region.y0);
+                let mut alpha = Vec::with_capacity((w * h) as usize);
+                for y in region.y0..region.y1 {
+                    for x in region.x0..region.x1 {
+                        alpha.push(
+                            coverage_at(doc, m, x, y)
+                                * node.opacity
+                                * c.alpha[at_in(c.origin, c.width, x, y)],
+                        );
+                    }
+                }
+                let folded = Cover {
+                    alpha,
+                    origin: (region.x0, region.y0),
+                    width: w,
+                    height: h,
+                };
+                return draw_layer(doc, *of, dst, region, space, Some(&folded), capture, bare);
+            }
+        }
         // Clipping needs the layer as a picture before it goes down —
         // to be cut by what is under it, or to be read as the cut — so
         // either end of it forces the same surface effects ask for.
@@ -31420,6 +31477,132 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A copy of a blended layer held to the layer below keeps the blend
+    /// it copies, meeting the page under it: a held copy of a Multiply
+    /// rectangle is the rectangle multiplied over the ground, inside what
+    /// it is held to and nowhere else, whether or not the copy wears a
+    /// mask as well. It used to take the surface every held layer takes,
+    /// where the copied blend met nothing and was spent, so the copy came
+    /// out in the rectangle's own colour. Found by the GPU backend, which
+    /// drew the blend meeting the page, against this.
+    #[test]
+    fn a_held_copy_of_a_blended_layer_keeps_the_blend() {
+        use chitrakar_doc::Node;
+        let rect = |name: &str, w: f32, h: f32, c: [f32; 3]| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: c[0],
+                    g: c[1],
+                    b: c[2],
+                    a: 1.0,
+                });
+            }
+            Box::new(n)
+        };
+        let ground = [0.3f32, 0.5, 0.8];
+        let ink = [0.9f32, 0.4, 0.2];
+        let page = |held: bool, masked: bool| {
+            let mut doc = Document::new(60, 30, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            let mut index = 0;
+            let mut put = |doc: &mut Document, node: Box<Node>, at: (f32, f32)| {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node,
+                })
+                .unwrap();
+                let id = doc.children_of(root).unwrap()[index];
+                doc.apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(at.0, at.1),
+                })
+                .unwrap();
+                index += 1;
+                id
+            };
+            put(&mut doc, rect("ground", 60.0, 30.0, ground), (0.0, 0.0));
+            let master = put(&mut doc, rect("lit", 16.0, 12.0, ink), (40.0, 2.0));
+            doc.apply(Command::SetBlendMode {
+                id: master,
+                blend: BlendMode::Multiply,
+            })
+            .unwrap();
+            // The shape the copy is held to, directly under it: the left
+            // half of the page.
+            put(&mut doc, rect("base", 30.0, 30.0, ground), (0.0, 0.0));
+            // A copy draws what it copies where the copy is, the
+            // master's own placement undone first.
+            let copy = put(
+                &mut doc,
+                Box::new(Node::instance("a copy", master)),
+                (20.0, 12.0),
+            );
+            doc.apply(Command::SetClipped {
+                id: copy,
+                clipped: held,
+            })
+            .unwrap();
+            if masked {
+                doc.apply(Command::SetMask {
+                    id: copy,
+                    mask: Some(Box::new(Mask {
+                        kind: MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 600.0,
+                                height: 300.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(-300.0, -150.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        // The copy lands at 20..36 across, 14..26 down: half inside the
+        // left half of the page and half beyond it.
+        let lin = |v: f32| chitrakar_color::srgb_to_linear(v);
+        let multiplied = [
+            lin(ground[0]) * lin(ink[0]),
+            lin(ground[1]) * lin(ink[1]),
+            lin(ground[2]) * lin(ink[2]),
+        ];
+        let near = |p: LinearRgba, want: [f32; 3]| {
+            (p.r - want[0]).abs() < 0.01
+                && (p.g - want[1]).abs() < 0.01
+                && (p.b - want[2]).abs() < 0.01
+        };
+        for masked in [false, true] {
+            let drawn = render(&page(true, masked)).unwrap();
+            let inside = drawn.get(24, 20);
+            assert!(
+                near(inside, multiplied),
+                "held (masked {masked}): inside the shape the copy multiplies ({inside:?}, \
+                 wanted {multiplied:?})"
+            );
+            let outside = drawn.get(33, 20);
+            assert!(
+                near(outside, [lin(ground[0]), lin(ground[1]), lin(ground[2])]),
+                "held (masked {masked}): beyond the shape nothing of it ({outside:?})"
+            );
+        }
+        // And unheld, the same multiply everywhere it lands.
+        let free = render(&page(false, false)).unwrap();
+        assert!(near(free.get(24, 20), multiplied) && near(free.get(33, 20), multiplied));
     }
 
     /// A copy of an adjustment held to the layer below works inside it,

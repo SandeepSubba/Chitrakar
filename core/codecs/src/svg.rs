@@ -269,7 +269,24 @@ fn write_node(
         } else {
             common_attrs(node)
         };
-        let mut blend = match node.blend {
+        // A copy of a blended layer, wearing no blend of its own but
+        // wrapped — held, masked, or with effects: the engine draws the
+        // copied layer where the copy stands and mixes it back, so its
+        // blend meets the page (`draw_layer`, the held copy of a blend;
+        // `render_child`, the copy arm). The copied layer's markup
+        // carries that blend inside the wrapper, which isolates it, so a
+        // reader spent it; the wrapper takes the copied blend now, as it
+        // takes the layer's own. Unwrapped, the copy's `<use>` is not
+        // isolated and the blend inside meets the page already.
+        let brought_down = if node.blend == BlendMode::Normal
+            && wrapped
+            && chitrakar_render::copies_a_blend(doc, child)
+        {
+            copied_blend(doc, child)
+        } else {
+            node.blend
+        };
+        let mut blend = match brought_down {
             BlendMode::Normal => String::new(),
             other => format!(r#" style="mix-blend-mode:{}""#, css_blend(other)),
         };
@@ -5396,6 +5413,102 @@ mod tests {
             (0..3).all(|k| o[k].abs_diff(t[k]) <= 3),
             "the engine {o:?}, the reader {t:?}"
         );
+    }
+
+    /// A copy of a blended layer, held to the layer under it or seen
+    /// through a mask, comes down blended in a reader, as the engine
+    /// brings it down: the copied blend goes on the wrapper that isolates
+    /// the copy, where a blend inside would meet nothing. Found by the
+    /// engine learning to keep the blend a held copy copies, and page
+    /// 744 of the blended pages coming apart from its reader.
+    #[test]
+    fn a_held_or_masked_copy_of_a_blend_keeps_its_blend_in_svg() {
+        for held in [true, false] {
+            let mut doc = Document::new(40, 30, ColorMode::Rgb);
+            let _ground = filled(&mut doc, "ground", 40.0, 30.0);
+            let base = filled(&mut doc, "base", 20.0, 30.0);
+            let top = filled(&mut doc, "top", 12.0, 10.0);
+            doc.apply(Command::SetTransform {
+                id: top,
+                transform: Transform::translation(26.0, 2.0),
+            })
+            .unwrap();
+            doc.apply(Command::SetBlendMode {
+                id: top,
+                blend: BlendMode::Difference,
+            })
+            .unwrap();
+            // The base is directly under the copy, so the copy is held
+            // to it; the copy lands at 4..16 across, 12..22 down.
+            doc.apply(Command::MoveNode {
+                id: base,
+                parent: doc.root(),
+                index: 2,
+            })
+            .unwrap();
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 3,
+                node: Box::new(chitrakar_doc::Node::instance("a copy", top)),
+            })
+            .unwrap();
+            let copy = doc.children_of(root).unwrap()[3];
+            doc.apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(4.0, 12.0),
+            })
+            .unwrap();
+            if held {
+                doc.apply(Command::SetClipped {
+                    id: copy,
+                    clipped: true,
+                })
+                .unwrap();
+            } else {
+                doc.apply(Command::SetMask {
+                    id: copy,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 400.0,
+                                height: 300.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(-200.0, -150.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            }
+            let theirs = resvg_pixels(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let o = ours.get(10, 17).to_srgb8();
+            let t = &theirs[(17 * 40 + 10) * 4..(17 * 40 + 10) * 4 + 4];
+            assert!(
+                (0..3).all(|k| o[k].abs_diff(t[k]) <= 3),
+                "held {held}: the engine {o:?}, the reader {t:?}"
+            );
+            // And it is the blend, not the layer's own colour.
+            let mut unblended = doc.clone();
+            unblended
+                .apply(Command::SetBlendMode {
+                    id: top,
+                    blend: BlendMode::Normal,
+                })
+                .unwrap();
+            let plain = chitrakar_render::render(&unblended)
+                .unwrap()
+                .get(10, 17)
+                .to_srgb8();
+            assert!(
+                (0..3).any(|k| o[k].abs_diff(plain[k]) > 20),
+                "held {held}: a difference over the base is not the layer's colour ({o:?} \
+                 against {plain:?})"
+            );
+        }
     }
 
     /// A radial gradient whose rings go through axes of their own leaves

@@ -3115,20 +3115,14 @@ fn one(
     {
         return none!();
     }
-    // Except a copy of a blended layer that is *held* and wears nothing
-    // else. The reference's cover road — the copied layer drawn where it
-    // stands and mixed back — is taken for a mask or a fade on such a
-    // copy, and a copy that is only held goes to a surface of its own
-    // there, where the blend it copies meets nothing and is spent: a
-    // held copy of a Multiply text came out in the text's own colour,
-    // and what this backend drew, the blend meeting the page under it,
-    // was the picture the reference's own rule describes. That is the
-    // reference's to fix; until it is, the page goes back rather than
-    // being drawn right against a reference drawn wrong (pages 886 and
-    // 5564, the first two held copies of blends the random pages hold).
-    if dressed_rewrite && !rewrites && held_to.is_some() {
-        return none!();
-    }
+    // A copy of a blended layer that is held went back for a while
+    // after the rest: the reference took such a copy to a surface of
+    // its own, where the blend it copies met nothing and was spent, and
+    // this backend drew the blend meeting the page under it — the right
+    // picture, against a reference drawn wrong (pages 886 and 5564). The
+    // reference takes its cover road for a held copy now
+    // (`a_held_copy_of_a_blended_layer_keeps_the_blend`), and the two
+    // agree.
     // A copy of a clone layer, dressed in anything at all, goes back too.
     // What it copies paints with what is under it, so the reference
     // renderer draws such a copy where it stands whatever it wears — its
@@ -19828,7 +19822,15 @@ mod tests {
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
-        for (doc, what) in [(&plain, "unmasked"), (&masked, "masked")] {
+        // Held, too — to the ground, with the layer it copies held as
+        // well, which is where the reference once spent the blend.
+        let (mut held, copy) = build(false);
+        let lit = held.children_of(held.root()).unwrap()[1];
+        for id in [lit, copy] {
+            held.apply(Command::SetClipped { id, clipped: true })
+                .unwrap();
+        }
+        for (doc, what) in [(&plain, "unmasked"), (&masked, "masked"), (&held, "held")] {
             assert!(
                 GpuRenderer::can_render(doc),
                 "a copy of a blended layer, {what}, is drawn"
