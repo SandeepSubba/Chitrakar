@@ -4004,6 +4004,21 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
                 kind
             }),
         },
+        // The picture in perspective moved by a step, which is the one
+        // edit that asks the box round its corners and nothing else:
+        // a change of kind repaints more than the box, and so cannot
+        // tell a box four pixels short from a true one.
+        Command::SetTransform {
+            id: *cornered,
+            transform: Transform {
+                a: 1.5,
+                b: 0.0,
+                c: 0.0,
+                d: 1.5,
+                e: 9.0,
+                f: 41.0,
+            },
+        },
         // The corners moved the other way: every pixel of the picture
         // moves, and so does its box.
         Command::SetKind {
