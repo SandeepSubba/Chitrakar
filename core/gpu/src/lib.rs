@@ -4011,12 +4011,17 @@ fn one(
             // one quad, one slot.
             if !upright {
                 let wears = !node.effects.is_empty();
-                // Inside another frame as well, the outer bound would be
-                // laid over everything the layer drew, the inner quad
-                // with it, and the cut lost.
-                if held_to.is_some() || (wears && bound.is_some()) {
-                    return none!();
-                }
+                // Held to the layer under it, or wearing an effect inside
+                // another frame, it used to go back: the one coverage
+                // slot, where the outer bound laid over everything the
+                // layer drew would have taken the inner cut with it. The
+                // coverages put back newest first (`Scene::placed`) keep
+                // each quad's own now, and a surface's way down takes
+                // only the masks above (`Draw::Close::down`); asked after
+                // both, a turned frame held to an ellipse and one casting
+                // a shadow from inside a smaller upright frame are the
+                // reference's picture, cut on both counts
+                // (`a_turned_frame_is_cut_the_way_the_cpu_cuts_it`).
                 if wears {
                     out.draws.push(Item::of(Draw::Open));
                 }
@@ -19073,6 +19078,75 @@ mod tests {
                     .unwrap()
                 }),
             ),
+            // Held to an ellipse under it: cut to the ellipse as well as
+            // to its own edge.
+            (
+                "held to the layer under it",
+                page(&|d, id| {
+                    let root = d.root();
+                    d.apply(Command::AddNode {
+                        parent: root,
+                        index: 1,
+                        node: filled("base", VectorShape::Ellipse { rx: 12.0, ry: 10.0 }, RED),
+                    })
+                    .unwrap();
+                    let base = d.children_of(root).unwrap()[1];
+                    d.apply(Command::SetTransform {
+                        id: base,
+                        transform: Transform::translation(24.0, 18.0),
+                    })
+                    .unwrap();
+                    d.apply(Command::SetClipped { id, clipped: true }).unwrap();
+                }),
+            ),
+            // Casting a shadow from inside an upright frame smaller than
+            // itself: cut to that frame, shadow and all, as well as to
+            // its own edge.
+            (
+                "casting a shadow inside a frame",
+                page(&|d, id| {
+                    let root = d.root();
+                    d.apply(Command::AddNode {
+                        parent: root,
+                        index: 1,
+                        node: Box::new(Node::artboard("outer", 24.0, 24.0, None)),
+                    })
+                    .unwrap();
+                    let outer = d.children_of(root).unwrap()[1];
+                    d.apply(Command::SetTransform {
+                        id: outer,
+                        transform: Transform::translation(20.0, 14.0),
+                    })
+                    .unwrap();
+                    d.apply(Command::MoveNode {
+                        id,
+                        parent: outer,
+                        index: 0,
+                    })
+                    .unwrap();
+                    let mut t = d.node(id).unwrap().transform;
+                    t.e = 4.0;
+                    t.f = -2.0;
+                    d.apply(Command::SetTransform { id, transform: t }).unwrap();
+                    d.apply(Command::SetEffects {
+                        id,
+                        effects: vec![chitrakar_doc::Effect::DropShadow {
+                            dx: 4.0,
+                            dy: 5.0,
+                            blur: 2.0,
+                            color: AuthoredColor::Srgb {
+                                r: 0.0,
+                                g: 0.0,
+                                b: 0.1,
+                                a: 1.0,
+                            },
+                            opacity: 0.8,
+                            spread: 0.0,
+                        }],
+                    })
+                    .unwrap();
+                }),
+            ),
         ] {
             assert!(
                 GpuRenderer::can_render(&doc),
@@ -19081,10 +19155,29 @@ mod tests {
             let mine = gpu.render(&doc).unwrap();
             let reference = chitrakar_render::render(&doc).unwrap();
             let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
             assert!(
-                mean < 0.002 && worst < 0.05,
-                "{name}: mean {mean:.5}, worst {worst:.3}"
+                mean < 0.002 && worst < 0.05 && over == 0 && in_mean < 0.002,
+                "{name}: mean {mean:.5}, worst {worst:.3}, interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
             );
+            // The cut it was given, on this side: inside the turned frame
+            // but outside what cuts it, the ground shows; inside both,
+            // the frame's own ground.
+            let outside = match name {
+                "held to the layer under it" => Some((26, 20)),
+                "casting a shadow inside a frame" => Some((47, 24)),
+                _ => None,
+            };
+            if let Some((x, y)) = outside {
+                let p = mine.get(x, y);
+                assert!(
+                    p.r < 0.15 && p.b > 0.5,
+                    "{name}: cut away at ({x}, {y}), the ground shows ({p:?})"
+                );
+                let q = mine.get(36, 28);
+                assert!(q.r > 0.8, "{name}: inside both, the frame's ground ({q:?})");
+            }
         }
     }
 
