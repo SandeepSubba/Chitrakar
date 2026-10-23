@@ -135,16 +135,35 @@ impl Surface {
     }
 
     /// Encode one clip region into an existing full-size RGBA8 buffer.
+    ///
+    /// A pixel the same as the one before it on the row takes that one's
+    /// bytes rather than being encoded again. Most of a page is a ground,
+    /// a fill or the inside of a picture's flat sky, so most pixels are
+    /// the pixel before them, and four comparisons are cheaper than three
+    /// trips through the curve's table. Compared by bits, so a pixel
+    /// takes another's bytes only when it is that pixel.
     pub fn encode_srgb8_region(&self, clip: ClipRect, out: &mut [u8]) {
         let srgb8 = chitrakar_color::Srgb8::new();
+        let bits = |p: &LinearRgba| [p.r.to_bits(), p.g.to_bits(), p.b.to_bits(), p.a.to_bits()];
         for y in clip.y0..clip.y1 {
             let row = (y * self.width) as usize;
             let (a, b) = (row + clip.x0 as usize, row + clip.x1 as usize);
+            // Seeded with the row's first pixel and its own bytes, so
+            // every comparison is with a pixel that was encoded.
+            let Some(first) = self.pixels[a..b].first() else {
+                continue;
+            };
+            let (mut key, mut bytes) = (bits(first), srgb8.encode(*first));
             for (px, dst) in self.pixels[a..b]
                 .iter()
                 .zip(out[a * 4..b * 4].chunks_exact_mut(4))
             {
-                dst.copy_from_slice(&srgb8.encode(*px));
+                let k = bits(px);
+                if k != key {
+                    key = k;
+                    bytes = srgb8.encode(*px);
+                }
+                dst.copy_from_slice(&bytes);
             }
         }
     }
@@ -19105,6 +19124,213 @@ mod tests {
                         [a.r, a.g, a.b, a.a].map(f32::to_bits)
                             == [b.r, b.g, b.b, b.a].map(f32::to_bits),
                         "{distance} at {degrees}: the part at {x},{y} is {a:?}, the whole {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A frame encoded a region at a time, taking the bytes of the pixel
+    /// before wherever a pixel repeats it, is every pixel encoded on its
+    /// own, to the byte: over runs of one colour and pixels alone between
+    /// them, faint, half there and gone, past white, below nothing and
+    /// not a number, and nought beside nought with its sign flipped —
+    /// the same value in other bits, which is encoded rather than reused
+    /// and comes out the same. In regions starting and ending part way
+    /// along a row, a column wide, and empty; and outside the region the
+    /// buffer is left as it was.
+    #[test]
+    fn a_frame_encoded_by_runs_is_every_pixel_encoded() {
+        let (w, h) = (53u32, 19u32);
+        let mut s = Surface::new(w, h);
+        let odd = [
+            LinearRgba {
+                r: 0.8,
+                g: 0.7,
+                b: 0.6,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.8,
+                g: 0.7,
+                b: 0.6000001,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.2,
+                g: 0.1,
+                b: 0.05,
+                a: 0.5,
+            },
+            LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+            LinearRgba {
+                r: -0.0,
+                g: 0.0,
+                b: -0.0,
+                a: 0.0,
+            },
+            LinearRgba {
+                r: 1.7,
+                g: -0.3,
+                b: 2e-5,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: f32::NAN,
+                g: f32::INFINITY,
+                b: 0.5,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.001,
+                g: 0.002,
+                b: 0.003,
+                a: 0.004,
+            },
+        ];
+        let mut seed = 0x2545_f491u32;
+        let mut at = 0usize;
+        while at < s.pixels.len() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            // A run of one to twenty of one pixel, the pixel picked from
+            // the odd ones or made up.
+            let run = 1 + (seed % 20) as usize;
+            let px = if seed & 0x100 != 0 {
+                odd[(seed >> 9) as usize % odd.len()]
+            } else {
+                let v = |k: u32| ((seed >> k) & 0xff) as f32 / 255.0;
+                LinearRgba {
+                    r: v(3),
+                    g: v(11),
+                    b: v(19),
+                    a: v(24).max(0.3),
+                }
+            };
+            for p in s.pixels.iter_mut().skip(at).take(run) {
+                *p = px;
+            }
+            at += run;
+        }
+        // And side by side on purpose, which the runs leave to chance:
+        // the same colour at another alpha, nought then nought with its
+        // sign flipped, a pixel a bit away from the one before (the same
+        // bytes, other bits), and each channel in turn moved far enough
+        // to change its byte while the others stay.
+        let strip = [
+            LinearRgba {
+                r: 0.2,
+                g: 0.1,
+                b: 0.05,
+                a: 0.5,
+            },
+            LinearRgba {
+                r: 0.2,
+                g: 0.1,
+                b: 0.05,
+                a: 0.25,
+            },
+            LinearRgba {
+                r: 0.2,
+                g: 0.1,
+                b: 0.05,
+                a: 0.25,
+            },
+            LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
+            LinearRgba {
+                r: -0.0,
+                g: 0.0,
+                b: -0.0,
+                a: 0.0,
+            },
+            LinearRgba {
+                r: 0.8,
+                g: 0.7,
+                b: 0.6,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.8,
+                g: 0.7,
+                b: 0.6000001,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.8,
+                g: 0.7,
+                b: 0.3,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.8,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0,
+            },
+            LinearRgba {
+                r: 0.3,
+                g: 0.3,
+                b: 0.3,
+                a: 1.0,
+            },
+        ];
+        let row = (4 * w) as usize;
+        s.pixels[row..row + strip.len()].copy_from_slice(&strip);
+        let one_by_one: Vec<u8> = s.pixels.iter().flat_map(|p| p.to_srgb8()).collect();
+        for clip in [
+            s.full_clip(),
+            ClipRect {
+                x0: 7,
+                y0: 3,
+                x1: 41,
+                y1: 17,
+            },
+            ClipRect {
+                x0: 52,
+                y0: 0,
+                x1: 53,
+                y1: 19,
+            },
+            ClipRect {
+                x0: 10,
+                y0: 5,
+                x1: 10,
+                y1: 9,
+            },
+            ClipRect {
+                x0: 0,
+                y0: 18,
+                x1: 1,
+                y1: 19,
+            },
+        ] {
+            let mut out = vec![7u8; (w * h * 4) as usize];
+            s.encode_srgb8_region(clip, &mut out);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) * 4) as usize;
+                    let inside = x >= clip.x0 && x < clip.x1 && y >= clip.y0 && y < clip.y1;
+                    let want = if inside {
+                        &one_by_one[i..i + 4]
+                    } else {
+                        &[7u8; 4][..]
+                    };
+                    assert_eq!(
+                        &out[i..i + 4],
+                        want,
+                        "at ({x}, {y}) in {clip:?}: {:?}",
+                        s.get(x, y)
                     );
                 }
             }

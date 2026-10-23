@@ -381,34 +381,34 @@ impl Srgb8 {
     }
 
     /// One linear channel: [`linear_to_srgb8`].
-    #[inline]
+    ///
+    /// Read off the value's bits. A positive float's bits are in the
+    /// order its value is, so everything at or past one's bits is one or
+    /// more — white — unless it is past infinity's, which is a NaN; and a
+    /// negative number, nought included, has the sign bit set and so is
+    /// past them too. What is left, past the first step's starting point,
+    /// is one read of the table and one comparison: no two steps fall
+    /// between neighbouring starting points, so the step a slot has
+    /// certainly reached is either the answer or one short of it. Every
+    /// frame is every pixel of it through this three times, which is why
+    /// it is written as straight arithmetic rather than a loop that runs
+    /// once.
+    #[inline(always)]
     pub fn channel(&self, v: f32) -> u8 {
-        if v.is_nan() || v <= 0.0 {
-            return 0;
-        }
-        if v >= 1.0 {
-            return 255;
-        }
         let bits = v.to_bits();
-        if bits < self.steps.first {
+        if bits >= ONE_BITS {
+            return if bits <= INFINITY_BITS { 255 } else { 0 };
+        }
+        let Some(from) = bits.checked_sub(self.steps.first) else {
             return 0;
-        }
-        let Some(&k) = self
-            .steps
-            .start
-            .get(((bits - self.steps.first) >> STEP_SHIFT) as usize)
-        else {
-            return 255;
         };
-        let mut k = k as usize;
-        while k < 255 && v >= self.steps.at[k] {
-            k += 1;
-        }
-        k as u8
+        // In range: below one's bits, so at most the last slot.
+        let k = self.steps.start[(from >> STEP_SHIFT) as usize];
+        k + (v >= self.steps.at[k as usize]) as u8
     }
 
     /// One premultiplied pixel: [`LinearRgba::to_srgb8`].
-    #[inline]
+    #[inline(always)]
     pub fn encode(&self, px: LinearRgba) -> [u8; 4] {
         // Opaque, which is nearly all of a page: a division by one is the
         // number itself, to the bit, and three divisions a pixel are what
@@ -443,9 +443,17 @@ fn srgb8_by_curve(v: f32) -> u8 {
 /// comparison.
 const STEP_SHIFT: u32 = 12;
 
+/// One's bits and infinity's: everything a channel reads from the bits
+/// alone, before the table.
+const ONE_BITS: u32 = 0x3f80_0000;
+const INFINITY_BITS: u32 = 0x7f80_0000;
+
 struct Srgb8Steps {
-    /// The least value giving each of 1 ..= 255.
-    at: [f32; 255],
+    /// The least value giving each of 1 ..= 255, and past them one that
+    /// nothing reaches, so the comparison after the last step is asked of
+    /// something and answers no — and an index that is a `u8` is always
+    /// in the table.
+    at: [f32; 256],
     /// The bits the first starting point stands at: the first step's,
     /// rounded down to a starting point. Anything less is nought.
     first: u32,
@@ -458,8 +466,8 @@ fn srgb8_steps() -> &'static Srgb8Steps {
     static STEPS: std::sync::OnceLock<Srgb8Steps> = std::sync::OnceLock::new();
     STEPS.get_or_init(|| {
         let one = 1.0f32.to_bits();
-        let mut at = [0.0f32; 255];
-        for (k, step) in at.iter_mut().enumerate() {
+        let mut at = [f32::INFINITY; 256];
+        for (k, step) in at.iter_mut().take(255).enumerate() {
             let want = k as u8 + 1;
             // The least bits in (0, one] whose value gives `want` or more.
             let (mut lo, mut hi) = (0u32, one);
@@ -475,6 +483,7 @@ fn srgb8_steps() -> &'static Srgb8Steps {
         }
         let first = at[0].to_bits() >> STEP_SHIFT << STEP_SHIFT;
         let mut reached = 0usize;
+        debug_assert_eq!(one, ONE_BITS);
         let start = (0..=((one - first) >> STEP_SHIFT))
             .map(|b| {
                 let lowest = f32::from_bits(first + (b << STEP_SHIFT));
