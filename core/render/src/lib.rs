@@ -2764,22 +2764,59 @@ fn draw_layer(
         // random pages, which is where it was found.
         // A copy of a clone layer among them, whatever holds it or is
         // held to it: drawn anywhere else it has nothing to lift.
+        // And a copy of a blended layer that wears effects, held: drawn
+        // where it stands — the blend meeting the page, the effects with
+        // it — and mixed back by what holds it, as the same copy faded or
+        // masked is mixed back by that (`spends_an_effected_blend`). On a
+        // surface of its own the blend met nothing and was spent: a held
+        // copy of a Multiply rectangle with a shadow came out in the
+        // rectangle's own colour. Mixing a composite back by a cut is
+        // what laying a surface by it does to alpha, so a blend still
+        // changes nothing a page covers.
+        let held_effected_blend = !effected
+            && node.blend == BlendMode::Normal
+            && match &node.kind {
+                NodeKind::Instance { of, .. } => {
+                    !takes_stand_ins(doc, *of)
+                        && doc
+                            .node(*of)
+                            .map(|t| t.blend != BlendMode::Normal && !t.effects.is_empty())
+                            .unwrap_or(false)
+                }
+                _ => false,
+            };
         if confines_nothing(doc, child)
             || matches!(node.kind, NodeKind::Clone { .. })
             || (!effected && copies_a_clone(doc, child))
+            || (cover.is_some() && held_effected_blend)
         {
             if let Some(c) = cover {
                 let region = clip.intersect(c.rect());
                 if region.is_empty() {
                     return Ok(None);
                 }
-                let before = blur::snapshot(dst, region);
-                let corner = (region.x0, region.y0);
-                let stride = region.x1 - region.x0;
+                // What is drawn may reach past the region: a copy works over
+                // its region grown by its own mask's feather, so its mask
+                // has neighbours to soften against. Past the region the cut
+                // is nothing, so what was there is put back — it was left
+                // as the copy drew it, unheld, a held copy of a Darken text
+                // under a feathered mask showing four pixels past the layer
+                // it was held to.
+                let reach = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32 + 1;
+                let around = grow(region, reach, dst.width, dst.height);
+                let before = blur::snapshot(dst, around);
+                let corner = (around.x0, around.y0);
+                let stride = around.x1 - around.x0;
                 render_child(doc, child, dst, region, parent, node.blend, bare)?;
-                for y in region.y0..region.y1 {
-                    for x in region.x0..region.x1 {
-                        let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                for y in around.y0..around.y1 {
+                    for x in around.x0..around.x1 {
+                        let inside =
+                            x >= region.x0 && x < region.x1 && y >= region.y0 && y < region.y1;
+                        let a = if inside {
+                            c.alpha[at_in(c.origin, c.width, x, y)]
+                        } else {
+                            0.0
+                        };
                         let i = (y * dst.width + x) as usize;
                         dst.pixels[i] = lerp(before[at_in(corner, stride, x, y)], dst.pixels[i], a);
                     }
@@ -32395,6 +32432,85 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A held copy of a blended layer wearing an effect is drawn where it
+    /// stands and mixed back by what holds it: the page without the copy,
+    /// taken toward the page with the copy unheld by the cut of the layer
+    /// it is held to, at every pixel. It went to a surface of its own,
+    /// where the blend it copies met nothing and was spent — a held copy
+    /// of a Multiply rectangle with a shadow came out in the rectangle's
+    /// own colour.
+    #[test]
+    fn a_held_copy_of_a_blended_layer_with_effects_is_mixed_back_by_its_cut() {
+        // `held`: the copy held to the ellipse; otherwise not held, and
+        // `copied` says whether it is there at all.
+        let page = |copied: bool, held: bool| {
+            let mut doc = Document::new(72, 44, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled_rect(
+                    "ground",
+                    72.0,
+                    44.0,
+                    AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.5,
+                        b: 0.2,
+                        a: 1.0,
+                    },
+                ),
+            );
+            let mut shape = filled_rect("shape", 20.0, 14.0, BLUE);
+            shape.blend = BlendMode::Multiply;
+            shape.effects = vec![Effect::DropShadow {
+                dx: 2.5,
+                dy: 2.0,
+                blur: 1.2,
+                color: RED,
+                opacity: 0.8,
+                spread: 0.0,
+            }];
+            shape.transform = Transform::translation(4.0, 4.0);
+            let original = add(&mut doc, shape);
+            let mut base = Node::vector("base", VectorShape::Ellipse { rx: 13.0, ry: 9.0 });
+            if let NodeKind::Vector { fill, .. } = &mut base.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: 0.3,
+                    g: 0.8,
+                    b: 0.4,
+                    a: 1.0,
+                });
+            }
+            base.transform = Transform::translation(34.0, 20.0);
+            let base = add(&mut doc, Box::new(base));
+            if copied {
+                let mut copy = Box::new(Node::instance("copy", original));
+                copy.transform = Transform::translation(32.0, 20.0);
+                copy.clipped = held;
+                add(&mut doc, copy);
+            }
+            (doc, base)
+        };
+        let (held, base) = page(true, true);
+        let drawn = render(&held).unwrap();
+        let without = render(&page(false, false).0).unwrap();
+        let unheld = render(&page(true, false).0).unwrap();
+        let cut = clip_coverage_at(&held, base, Transform::default(), (72, 44)).unwrap();
+        let mut worst = 0.0f32;
+        for (i, p) in drawn.pixels.iter().enumerate() {
+            let want = lerp(without.pixels[i], unheld.pixels[i], cut[i]);
+            let d = (p.r - want.r)
+                .abs()
+                .max((p.g - want.g).abs())
+                .max((p.b - want.b).abs())
+                .max((p.a - want.a).abs());
+            worst = worst.max(d);
+        }
+        assert!(
+            worst < 1e-5,
+            "the held copy is the mix by its cut, to {worst}"
+        );
     }
 
     /// A layer held to the one under it, running off the page and wearing

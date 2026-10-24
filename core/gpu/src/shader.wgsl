@@ -2134,14 +2134,24 @@ fn fs_band(in: ImageOut) -> @location(0) vec4f {
         }
         return vec4f(best);
     }
+    // Outward from this pixel both ways, stopping once the step alone is
+    // as far as the best found: nothing further along the row can come
+    // nearer, so the answer is the one the whole walk would give, and a
+    // pixel near the shape stops near it however wide the band is.
     var best = far * far;
-    for (var k = -n; k <= n; k = k + 1) {
-        let x = here.x + k;
-        if x < 0 || x >= size.x {
-            continue;
+    for (var k = 0; k <= n; k = k + 1) {
+        let step = f32(k) * f32(k);
+        if step >= best {
+            break;
         }
-        let g = textureLoad(image, vec2i(x, here.y), 0).r;
-        best = min(best, f32(k) * f32(k) + g * g);
+        for (var side = -1; side <= 1; side = side + 2) {
+            let x = here.x + k * side;
+            if x < 0 || x >= size.x || (k == 0 && side == 1) {
+                continue;
+            }
+            let g = textureLoad(image, vec2i(x, here.y), 0).r;
+            best = min(best, step + g * g);
+        }
     }
     // The distance counts from pixel centre to pixel centre, and the
     // centre of an edge pixel already sits half a pixel inside the

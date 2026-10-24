@@ -295,6 +295,10 @@ enum Draw {
         /// Laid onto the layer's own surface rather than onto the page,
         /// for a clone layer wearing an effect.
         aside: bool,
+        /// How many surfaces past the one under it a stroke laid aside
+        /// lifts through: a clone wearing effects inside a copy that
+        /// wears its own lifts from under the copy's surface, two down.
+        through: usize,
     },
     /// Everything between this and its `Close` is drawn on a surface of
     /// its own, because the group it belongs to composites as a unit
@@ -2754,6 +2758,11 @@ struct Scene {
     /// surface: its strokes lift from the surface under that one, as a
     /// clone drawn aside lifts from the one under its own (`Draw::Clone`).
     lift: Option<NodeId>,
+    /// The space a layer's effects are measured in when a plain copy of
+    /// it hands that down: the reference grows the effects of what a chain
+    /// of copies of a clone lays in the space the outermost copy is drawn
+    /// in (`clone_behind`).
+    fx_space: Option<(NodeId, Transform)>,
     /// How many layers wearing an outline and holding a needle-sharp path
     /// are being gathered: while any is, such a path is drawn from the CPU
     /// renderer's pixels (`exact_vector`).
@@ -2806,6 +2815,7 @@ impl Default for Scene {
             bare: None,
             clone_blend: None,
             lift: None,
+            fx_space: None,
             exact: 0,
             surface: (0, 0),
             page: chitrakar_render::ClipRect {
@@ -3200,6 +3210,42 @@ fn gathered(
     if lift {
         out.lift = None;
     }
+    let fx_parent = match out.fx_space {
+        Some((id, space)) if id == child => {
+            out.fx_space = None;
+            space
+        }
+        _ => parent,
+    };
+    // A plain copy — no effect, fade, mask or hold of its own, but maybe a
+    // blend — of a copy that wears effects round a clone: the reference
+    // lays the whole chain as one (`clone_behind`), the outermost blend
+    // that is not Normal bringing it down and the effects measured in the
+    // space this copy is drawn in. So this hands both down to the copy it
+    // copies and is drawn where it stands.
+    let hands_down = match &node.kind {
+        NodeKind::Instance { of, .. } if !bare => {
+            node.effects.is_empty()
+                && node.opacity >= 1.0
+                && node.mask.is_none()
+                && !node.clipped
+                && chitrakar_render::copy_children(doc, child).is_ok_and(|p| p.is_empty())
+                && doc.node(*of).is_ok_and(|c| match &c.kind {
+                    NodeKind::Instance { of: k, .. } => {
+                        c.visible
+                            && !c.effects.is_empty()
+                            && chitrakar_render::copy_children(doc, *of).is_ok_and(|p| p.is_empty())
+                            && doc.node(*k).is_ok_and(|k| {
+                                matches!(k.kind, NodeKind::Clone { .. })
+                                    && k.visible
+                                    && k.effects.is_empty()
+                            })
+                    }
+                    _ => false,
+                })
+        }
+        _ => false,
+    };
     // A copy of a clone where one of the two wears effects — the copy or
     // the clone, not both. The reference lays the clone's strokes aside,
     // lifting from the page under the copy, lets the copy's share of that
@@ -3214,7 +3260,7 @@ fn gathered(
         NodeKind::Instance { of, .. } if !bare => doc.node(*of).ok().filter(|k| {
             matches!(k.kind, NodeKind::Clone { .. })
                 && k.visible
-                && (node.effects.is_empty() != k.effects.is_empty())
+                && (node.effects.is_empty() != k.effects.is_empty() || !node.effects.is_empty())
                 && chitrakar_render::copy_children(doc, child).is_ok_and(|p| p.is_empty())
         }),
         _ => None,
@@ -3227,14 +3273,21 @@ fn gathered(
             _ => &node.effects,
         }
     };
+    // Both wearing effects, what holds the copy cuts the whole of it once
+    // the levels are laid — the copy's effects too — rather than what the
+    // clone laid before they grow (`lay_levels`): so it goes on the way
+    // down and on the effects, and not on the drawing.
+    let cut_last = wearing_clone.is_some_and(|k| !k.effects.is_empty()) && !node.effects.is_empty();
     // Whose effects they are, for what they are grown at.
     let worn_opacity = match wearing_clone {
         Some(k) if node.effects.is_empty() => k.opacity,
         _ => node.opacity,
     };
-    // The blend it all comes down by.
-    let lay_blend = match wearing_clone {
-        Some(k) if node.blend == BlendMode::Normal => k.blend,
+    // The blend it all comes down by: for a clone drawn inside such a
+    // copy, the one it was handed (`Scene::clone_blend`).
+    let lay_blend = match (blend_over, wearing_clone) {
+        (Some(b), _) => b,
+        (None, Some(k)) if node.blend == BlendMode::Normal => k.blend,
         _ => node.blend,
     };
     // A layer with live effects goes onto a surface of its own — the
@@ -3300,7 +3353,7 @@ fn gathered(
 
         let shadings: Vec<Shading> = effects_here
             .iter()
-            .map(|e| effect_of(doc, e, parent, worn_opacity))
+            .map(|e| effect_of(doc, e, fx_parent, worn_opacity))
             .collect::<Option<Vec<_>>>()?
             .into_iter()
             .flatten()
@@ -3504,16 +3557,14 @@ fn gathered(
         copies_any_blend && node.blend == BlendMode::Normal && !copied_effects;
     let dressed_rewrite =
         (rewrites || copies_a_dressed_blend) && matches!(node.kind, NodeKind::Instance { .. });
-    // Faded or masked and not held, it is drawn the reference's way: on a
+    // Faded, masked or held, it is drawn the reference's way: on a
     // surface that begins as what is under it, the copied layer drawn
     // into it — its blend meeting the page and its effects with it — and
-    // the whole mixed back by the copy's fade and mask (`mixed_back`, the
-    // reference's `spends_an_effected_blend`). Held, the reference folds
-    // the cut into the copied layer's own drawing instead, and that still
-    // goes back.
+    // the whole mixed back by the copy's fade, mask and hold (`mixed_back`,
+    // the reference's `spends_an_effected_blend` and, held,
+    // `held_effected_blend`).
     let spends_an_effected_blend = node.blend == BlendMode::Normal
-        && held_to.is_none()
-        && (node.mask.is_some() || node.opacity < 1.0)
+        && (node.mask.is_some() || node.opacity < 1.0 || held_to.is_some())
         && match &node.kind {
             NodeKind::Instance { of, .. } => {
                 chitrakar_render::copy_children(doc, child).is_ok_and(|p| p.is_empty())
@@ -3529,6 +3580,12 @@ fn gathered(
         && matches!(node.kind, NodeKind::Instance { .. })
         && (node.mask.is_some() || node.opacity < 1.0 || held_to.is_some())
         && !spends_an_effected_blend
+        // A copy wearing effects of its own is drawn on a surface of its
+        // own by the reference, the copied blend spent there, as it is
+        // here; and a copy of a clone that wears the effects takes the
+        // clone's road (`wearing_clone`).
+        && node.effects.is_empty()
+        && wearing_clone.is_none()
     {
         return none!();
     }
@@ -3583,6 +3640,7 @@ fn gathered(
     if chitrakar_render::copies_a_clone(doc, child)
         && !mixable
         && wearing_clone.is_none()
+        && !hands_down
         && (node.mask.is_some()
             || node.opacity < 1.0
             || held_to.is_some()
@@ -3642,12 +3700,12 @@ fn gathered(
     let mixed_back = (matches!(node.kind, NodeKind::Artboard { .. })
         && turned_frame.is_none()
         && chitrakar_render::reads_backdrop(doc, child).ok()?
-        || copies_a_frame_in_place(doc, child, parent)
-        || spends_an_effected_blend)
+        || copies_a_frame_in_place(doc, child, parent))
         && node.blend == BlendMode::Normal
         && effects_here.is_empty()
         && held_to.is_none()
         && (node.opacity < 1.0 || node.mask.is_some())
+        || spends_an_effected_blend && effects_here.is_empty()
         || copy_in_place && (node.opacity < 1.0 || node.mask.is_some() || held_to.is_some());
     // An upright frame brought down by a blend of its own while holding
     // what works on the page — an adjustment, a filter, a clone. The
@@ -3769,6 +3827,7 @@ fn gathered(
     // A copy of a clone with nothing to mix by — blended only — draws the
     // clone straight where it stands, its strokes taking the blend.
     let alone = alone && (mixed_back || !copy_in_place);
+    let alone = alone && !hands_down;
     if alone {
         out.draws.push(Item::of(Draw::Open));
         out.inside += 1;
@@ -4080,6 +4139,7 @@ fn gathered(
                         quad,
                         heal,
                         aside: alone || lift,
+                        through: usize::from(lift && alone),
                     },
                     mask: at,
                     within: None,
@@ -4813,7 +4873,26 @@ fn gathered(
             let inner = if alone { 1.0 } else { node.opacity * opacity };
             let within = if alone { None } else { bound };
             if stand_ins.is_empty() {
-                if wearing_clone.is_some() {
+                if hands_down {
+                    if node.blend != BlendMode::Normal {
+                        out.clone_blend = Some((*of, node.blend));
+                    }
+                    out.fx_space = Some((*of, parent));
+                }
+                // Both wearing effects: the clone keeps its own and its
+                // own surface inside the copy's, coming down Normal, and
+                // its strokes lift through both (`Draw::Clone::through`) —
+                // the reference's levels, inner to outer (`lay_levels`).
+                let both = wearing_clone.is_some_and(|k| !k.effects.is_empty())
+                    && !node.effects.is_empty();
+                if both {
+                    if alone {
+                        out.clone_blend = Some((*of, BlendMode::Normal));
+                        out.lift = Some(*of);
+                    } else {
+                        out.clone_blend = Some((*of, lay_blend));
+                    }
+                } else if wearing_clone.is_some() {
                     out.bare = Some(*of);
                     if alone {
                         out.clone_blend = Some((*of, BlendMode::Normal));
@@ -4825,9 +4904,12 @@ fn gathered(
                     }
                 }
                 if copy_in_place {
+                    // Handed down to whatever this copies — the clone, or a
+                    // copy of it that hands it on in turn.
+                    let mine = blend_over.unwrap_or(node.blend);
                     let theirs = doc.node(*of).ok()?.blend;
-                    let blend = if node.blend != BlendMode::Normal {
-                        node.blend
+                    let blend = if mine != BlendMode::Normal {
+                        mine
                     } else {
                         theirs
                     };
@@ -4837,6 +4919,7 @@ fn gathered(
                 out.clone_blend = None;
                 out.bare = None;
                 out.lift = None;
+                out.fx_space = None;
             } else {
                 // A copy whose stand-ins read the page is on a surface
                 // of its own by now (`copy_isolates`), so what they read
@@ -4851,11 +4934,12 @@ fn gathered(
         } // No arm left over, and none wanted: every kind of layer is
           // drawn here now, so a new one will not compile until it says
           // how — which is the same bargain `Node::each_color_mut` makes.
-          // What a layer is still handed back for is a thing it holds
-          // rather than the kind it is: a band wider than a pass will
-          // walk. (A healing stroke was the other, an average over the
-          // whole stroke before any of it goes down; it has passes of
-          // its own now — `Healing`.)
+          // What a layer is still handed back for is a matter of cost
+          // rather than of kind: a band wider than a pass will walk
+          // (`BAND_MOST`), a block or a median wider than theirs. (A
+          // healing stroke was another, an average over the whole stroke
+          // before any of it goes down; it has passes of its own now —
+          // `Healing`.)
     }
     if alone {
         out.worn = outer;
@@ -5096,8 +5180,9 @@ fn gathered(
         Some((v, d)) => (mark.0..v, mark.1..d),
         None => (mark.0..out.vertices.len(), mark.1..out.draws.len()),
     };
+    let drawn_held = if cut_last { None } else { held_to };
     if node.mask.is_some()
-        || held_to.is_some()
+        || drawn_held.is_some()
         || coverage.is_some()
         || turned_cut.is_some()
         || (fold && !out.worn.is_empty())
@@ -5107,7 +5192,7 @@ fn gathered(
             child,
             Held {
                 mask: node.mask.as_ref(),
-                to: held_to,
+                to: drawn_held,
                 bound: coverage,
                 parent,
                 turned: turned_cut,
@@ -7016,21 +7101,33 @@ enum Spread {
     Band { width: f32, inside: f32 },
 }
 
-/// A copy of a clone layer that the copy's own fade and mask can be
-/// mixed back over: one copy deep, of a clone wearing no effect and no
-/// colour overlay, which the reference draws where it stands and mixes
-/// back into what was there (its copy arm) — what `Draw::Under` and
-/// `Draw::Mix` do for a frame holding what reads the page.
+/// A copy of a clone layer through any number of copies, none of them
+/// with stand-ins of their own and none on the way wearing an effect, nor
+/// the clone, nor anything hidden: what the reference draws where it
+/// stands, the outermost blend that is not Normal on the clone's strokes
+/// and each copy's fade mixed back (`render_child`'s copy arm, again for
+/// each copy down).
 fn faded_clone_copy(doc: &Document, id: NodeId) -> bool {
-    let Ok(node) = doc.node(id) else {
-        return false;
-    };
-    let NodeKind::Instance { of, .. } = &node.kind else {
-        return false;
-    };
-    doc.node(*of).is_ok_and(|o| {
-        matches!(o.kind, NodeKind::Clone { .. }) && o.effects.is_empty() && o.visible
-    })
+    let mut at = id;
+    for depth in 0..chitrakar_doc::MAX_DEPTH {
+        let Ok(node) = doc.node(at) else {
+            return false;
+        };
+        if depth > 0 && (!node.visible || !node.effects.is_empty()) {
+            return false;
+        }
+        match &node.kind {
+            NodeKind::Instance { of, .. } => {
+                if !chitrakar_render::copy_children(doc, at).is_ok_and(|p| p.is_empty()) {
+                    return false;
+                }
+                at = *of;
+            }
+            NodeKind::Clone { .. } => return depth > 0,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// A copy, with no stand-ins of its own, of a frame the reference draws
@@ -7349,10 +7446,13 @@ fn effect_of(
                     lit: None,
                 }]);
             }
-            // Both passes walk out as far as the band reaches, and a
-            // band wider than this is more of a walk per pixel than a
-            // pass should be — the same cap, in taps, that a smear is
-            // held to.
+            // Both passes walk out no further than the band reaches, and
+            // each stops at the nearest answer it can find (`fs_band`), so
+            // a wide band costs a pixel near the shape little; a pixel far
+            // from it walks the whole width. Past this a band is more of a
+            // walk than a pass should be, as a cost and not as a question
+            // of the answer — the cap was 128, the smear's, until the walk
+            // learned to stop early.
             if w + 1.0 > BAND_MOST {
                 return none!();
             }
@@ -7391,9 +7491,8 @@ fn effect_of(
 /// seventeen by seventeen, read eight times over.
 const MEDIAN_MOST: usize = 8;
 
-/// The widest band, in device pixels, either pass will walk: 129 taps
-/// out from the pixel, which is the count a smear is capped at.
-const BAND_MOST: f32 = 128.0;
+/// The widest band, in device pixels, either pass will walk.
+const BAND_MOST: f32 = 1024.0;
 
 /// The W3C's box size for a Gaussian after three passes each way, read
 /// off the CPU renderer so the two blur by the same amount. Nothing when
@@ -7867,6 +7966,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                 quad,
                 heal,
                 aside,
+                through,
             } => {
                 clear = false;
                 lay = Some(Opening::Clone {
@@ -7874,7 +7974,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                     quad: quad.clone(),
                     mask: item.mask,
                     heal: heal.clone(),
-                    parent: aside.then(|| stack[stack.len().saturating_sub(2)]),
+                    parent: aside.then(|| stack[stack.len().saturating_sub(2 + through)]),
                 });
             }
             _ => unreachable!("only the seven above cut a pass"),
@@ -9782,6 +9882,365 @@ mod tests {
                  the worst by {in_worst:.3} at {at:?}"
             );
         }
+    }
+
+    /// A copy of a clone where both wear effects is drawn as the reference
+    /// draws it, in levels: the clone's effects round its strokes, the
+    /// copy's share of that, the copy's effects round the copy, and the
+    /// whole brought down once by the outermost blend.
+    #[test]
+    fn a_copy_of_a_clone_where_both_wear_effects_is_drawn_in_levels() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Effect as E;
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let shadow = E::DropShadow {
+            dx: 2.0,
+            dy: 2.0,
+            blur: 1.2,
+            color: ink(0.0, 0.0, 0.1),
+            opacity: 0.8,
+            spread: 0.0,
+        };
+        let outline = E::Outline {
+            width: 1.5,
+            color: ink(0.9, 0.1, 0.6),
+            opacity: 1.0,
+        };
+        let inner = E::InnerShadow {
+            dx: 1.5,
+            dy: 1.5,
+            blur: 1.0,
+            color: ink(0.1, 0.1, 0.6),
+            opacity: 0.7,
+            spread: 0.0,
+        };
+        for (what, clone_fx, copy_fx, copy_blend, clone_blend, opacity) in [
+            (
+                "an outline round a shadowed clone",
+                vec![shadow.clone()],
+                vec![outline.clone()],
+                BlendMode::Normal,
+                BlendMode::Normal,
+                1.0,
+            ),
+            (
+                "a shadow round an inner-shadowed clone, faded",
+                vec![inner.clone()],
+                vec![shadow.clone()],
+                BlendMode::Normal,
+                BlendMode::Normal,
+                0.6,
+            ),
+            (
+                "a blended copy, an outline round a shadow",
+                vec![shadow.clone()],
+                vec![outline.clone()],
+                BlendMode::Multiply,
+                BlendMode::Normal,
+                1.0,
+            ),
+            (
+                "a blended clone, a shadow round an outline",
+                vec![outline.clone()],
+                vec![shadow.clone()],
+                BlendMode::Normal,
+                BlendMode::Screen,
+                1.0,
+            ),
+        ] {
+            let mut doc = Document::new(72, 44, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("ground", rect(72.0, 44.0), ink(0.9, 0.5, 0.2)),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled("stripe", rect(10.0, 44.0), ink(0.1, 0.3, 0.8)),
+                Transform::translation(56.0, 0.0),
+            );
+            let mut clone = Node::clone_layer("cloned");
+            clone.blend = clone_blend;
+            clone.effects = clone_fx;
+            if let NodeKind::Clone { strokes } = &mut clone.kind {
+                for (from, to) in [([4.0, 8.0], [22.0, 14.0]), ([6.0, 18.0], [20.0, 6.0])] {
+                    strokes.push(chitrakar_doc::PaintStroke {
+                        points: vec![from, to],
+                        radii: vec![4.0],
+                        color: RED,
+                        softness: 0.2,
+                        erase: false,
+                        source: [26.0, 2.0],
+                        heal: false,
+                        clip: None,
+                    });
+                }
+            }
+            let clone = add(&mut doc, Box::new(clone), Transform::translation(2.0, 2.0));
+            let mut copy = Node::instance("copy", clone);
+            copy.blend = copy_blend;
+            copy.opacity = opacity;
+            copy.effects = copy_fx;
+            add(&mut doc, Box::new(copy), Transform::translation(30.0, 20.0));
+            assert!(GpuRenderer::can_render(&doc), "{what}: drawn");
+            let (mine, theirs) = (
+                gpu.render(&doc).unwrap(),
+                chitrakar_render::render(&doc).unwrap(),
+            );
+            let (mean, worst) = difference(&mine, &theirs);
+            let (_, in_worst, over, at) = interiors(&mine, &theirs);
+            assert!(
+                mean < 0.003 && over == 0,
+                "{what}: mean {mean:.5}, worst {worst:.3}, {over} interior points off, the worst \
+                 by {in_worst:.3} at {at:?}"
+            );
+        }
+    }
+
+    /// A copy of a copy of a clone is drawn where it stands, as the
+    /// reference draws it: the outermost blend that is not Normal on the
+    /// clone's strokes, each copy's fade mixed back on the way.
+    #[test]
+    fn a_copy_of_a_copy_of_a_clone_is_drawn_where_it_stands() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        for (what, outer_blend, inner_blend, inner_opacity) in [
+            (
+                "a blended copy of a faded one",
+                BlendMode::Multiply,
+                BlendMode::Normal,
+                0.6,
+            ),
+            (
+                "a plain copy of a blended, faded one",
+                BlendMode::Normal,
+                BlendMode::Screen,
+                0.7,
+            ),
+            (
+                "a blended copy of a blended one",
+                BlendMode::Difference,
+                BlendMode::Screen,
+                1.0,
+            ),
+        ] {
+            let mut doc = Document::new(72, 44, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("ground", rect(72.0, 44.0), ink(0.9, 0.5, 0.2)),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled("stripe", rect(10.0, 44.0), ink(0.1, 0.3, 0.8)),
+                Transform::translation(56.0, 0.0),
+            );
+            let mut clone = Node::clone_layer("cloned");
+            if let NodeKind::Clone { strokes } = &mut clone.kind {
+                strokes.push(chitrakar_doc::PaintStroke {
+                    points: vec![[4.0, 8.0], [22.0, 14.0]],
+                    radii: vec![4.0],
+                    color: RED,
+                    softness: 0.2,
+                    erase: false,
+                    source: [26.0, 2.0],
+                    heal: false,
+                    clip: None,
+                });
+            }
+            let clone = add(&mut doc, Box::new(clone), Transform::translation(2.0, 2.0));
+            let mut inner = Node::instance("inner", clone);
+            inner.blend = inner_blend;
+            inner.opacity = inner_opacity;
+            let inner = add(&mut doc, Box::new(inner), Transform::translation(0.0, 16.0));
+            let mut outer = Node::instance("outer", inner);
+            outer.blend = outer_blend;
+            add(&mut doc, Box::new(outer), Transform::translation(30.0, 4.0));
+            assert!(GpuRenderer::can_render(&doc), "{what}: drawn");
+            let (mine, theirs) = (
+                gpu.render(&doc).unwrap(),
+                chitrakar_render::render(&doc).unwrap(),
+            );
+            let (mean, worst) = difference(&mine, &theirs);
+            let (_, in_worst, over, at) = interiors(&mine, &theirs);
+            assert!(
+                mean < 0.003 && over == 0,
+                "{what}: mean {mean:.5}, worst {worst:.3}, {over} interior points off, the worst \
+                 by {in_worst:.3} at {at:?}"
+            );
+        }
+    }
+
+    /// A held copy of a blended layer wearing effects is drawn as the
+    /// reference draws it: where it stands, the copied blend meeting the
+    /// page and its effects with it, and the whole mixed back by what
+    /// holds the copy — the layer it is held to, its mask, its fade — as
+    /// the same copy faded or masked and not held is.
+    #[test]
+    fn a_held_copy_of_a_blended_layer_with_effects_is_mixed_back() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Effect as E;
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        for (what, effect, opacity, masked) in [
+            (
+                "a shadow",
+                E::DropShadow {
+                    dx: 2.5,
+                    dy: 2.0,
+                    blur: 1.2,
+                    color: ink(0.0, 0.0, 0.1),
+                    opacity: 0.8,
+                    spread: 0.0,
+                },
+                1.0,
+                false,
+            ),
+            (
+                "an outline, faded",
+                E::Outline {
+                    width: 2.0,
+                    color: ink(0.9, 0.1, 0.6),
+                    opacity: 1.0,
+                },
+                0.6,
+                false,
+            ),
+            (
+                "an inner shadow, masked",
+                E::InnerShadow {
+                    dx: 2.0,
+                    dy: 2.0,
+                    blur: 1.0,
+                    color: ink(0.1, 0.1, 0.6),
+                    opacity: 0.8,
+                    spread: 0.0,
+                },
+                1.0,
+                true,
+            ),
+        ] {
+            let mut doc = Document::new(72, 44, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("ground", rect(72.0, 44.0), ink(0.9, 0.5, 0.2)),
+                Transform::default(),
+            );
+            let mut shape = filled("shape", rect(20.0, 14.0), ink(0.2, 0.6, 0.9));
+            shape.blend = BlendMode::Multiply;
+            shape.effects = vec![effect];
+            let shape = add(&mut doc, shape, Transform::translation(4.0, 4.0));
+            add(
+                &mut doc,
+                filled(
+                    "base",
+                    VectorShape::Ellipse { rx: 13.0, ry: 9.0 },
+                    ink(0.3, 0.8, 0.4),
+                ),
+                Transform::translation(34.0, 20.0),
+            );
+            let mut copy = Node::instance("copy", shape);
+            copy.clipped = true;
+            copy.opacity = opacity;
+            if masked {
+                copy.mask = Some(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 9.0, ry: 6.0 },
+                        transform: Transform::translation(2.0, 2.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                });
+            }
+            add(&mut doc, Box::new(copy), Transform::translation(32.0, 20.0));
+            assert!(GpuRenderer::can_render(&doc), "{what}: drawn");
+            let (mine, theirs) = (
+                gpu.render(&doc).unwrap(),
+                chitrakar_render::render(&doc).unwrap(),
+            );
+            let (mean, worst) = difference(&mine, &theirs);
+            let (_, in_worst, over, at) = interiors(&mine, &theirs);
+            assert!(
+                mean < 0.003 && over == 0,
+                "{what}: mean {mean:.5}, worst {worst:.3}, {over} interior points off, the worst \
+                 by {in_worst:.3} at {at:?}"
+            );
+        }
+    }
+
+    /// An outline wider than the walk used to be allowed — past 128
+    /// device pixels — is drawn, and is the band the reference measures.
+    #[test]
+    fn a_wide_outline_is_the_band_the_cpu_measures() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let mut doc = Document::new(400, 340, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled(
+                "ground",
+                VectorShape::Rect {
+                    width: 400.0,
+                    height: 340.0,
+                    radius: 0.0,
+                },
+                AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.85,
+                    b: 0.7,
+                    a: 1.0,
+                },
+            ),
+            Transform::default(),
+        );
+        let mut disc = filled("disc", VectorShape::Ellipse { rx: 20.0, ry: 14.0 }, RED);
+        disc.effects = vec![chitrakar_doc::Effect::Outline {
+            width: 150.0,
+            color: BLUE,
+            opacity: 0.9,
+        }];
+        add(&mut doc, disc, Transform::translation(180.0, 156.0));
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "a 150-pixel outline is drawn"
+        );
+        let (mine, theirs) = (
+            gpu.render(&doc).unwrap(),
+            chitrakar_render::render(&doc).unwrap(),
+        );
+        let (mean, worst) = difference(&mine, &theirs);
+        let (_, in_worst, over, at) = interiors(&mine, &theirs);
+        assert!(
+            mean < 0.002 && over == 0,
+            "mean {mean:.5}, worst {worst:.3}, {over} interior points off by up to {in_worst:.3} \
+             at {at:?}"
+        );
+        // And it reaches as far as it says: blue a hundred and forty
+        // pixels out from the disc's edge, the ground past a hundred and
+        // sixty.
+        assert!(theirs.get(200, 30).b > 0.5 && mine.get(200, 30).b > 0.5);
+        assert!(theirs.get(200, 2).b < 0.6 && mine.get(200, 2).b < 0.6);
     }
 
     #[test]
@@ -21614,9 +22073,10 @@ mod tests {
             doc
         };
         assert!(GpuRenderer::can_render(&outlined(2.0)));
-        // Wider than either of the band's passes will walk, which is the
-        // cap a smear is held to said in the same taps.
-        assert!(!GpuRenderer::can_render(&outlined(400.0)));
+        // Wider than the old cap of the band's walk, and drawn; wider than
+        // the cap it has now (`BAND_MOST`), handed back.
+        assert!(GpuRenderer::can_render(&outlined(400.0)));
+        assert!(!GpuRenderer::can_render(&outlined(2000.0)));
 
         // A layer held to the one under it is drawn, since that layer's
         // own alpha is a coverage like a mask's — and that reading comes
