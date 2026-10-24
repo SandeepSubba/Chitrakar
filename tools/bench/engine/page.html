@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><title>Chitrakar engine bench</title><script type="module">
+// A 12-megapixel photograph fitted to a 1170x878 window, then each
+// layer of `layers.json` added over it in turn, timing the frame: the
+// least of eight frames, less the photograph alone. The frame is
+// invalidated before it is timed, since a view moved by whole pixels at
+// the same scale is a pan, which the engine draws from the frame before.
+const q = new URLSearchParams(location.search);
+const mod = await import(`./${q.get("pkg") || "pkg"}/chitrakar_engine.js`);
+await mod.default();
+const list = await (await fetch(`./${q.get("list") || "layers.json"}`)).json();
+const W = 4032, H = 3024;
+const c = new OffscreenCanvas(W, H); const g = c.getContext("2d");
+const grad = g.createLinearGradient(0, 0, W, H); grad.addColorStop(0, "#203050"); grad.addColorStop(0.5, "#e0a040"); grad.addColorStop(1, "#40a0c0");
+g.fillStyle = grad; g.fillRect(0, 0, W, H);
+for (let i = 0; i < 400; i++) { g.fillStyle = `hsl(${i * 37 % 360},60%,50%)`; g.fillRect((i * 97) % W, (i * 61) % H, 80, 50); }
+const png = new Uint8Array(await (await c.convertToBlob({ type: "image/png" })).arrayBuffer());
+const s = new mod.WasmSession(W, H, false);
+s.place_image(png, "photo");
+const scale = 1170 / W;
+const frames = (n) => { const ts = []; for (let i = 0; i < n; i++) { s.set_viewport(scale * 1.2, (i % 7) * 30, 0, 1170, 878); s.invalidate(); const t0 = performance.now(); s.render_frame(); ts.push(performance.now() - t0); } ts.sort((a, b) => a - b); return ts[0]; };
+frames(30);
+const base = frames(10);
+const out = [["photo alone", base.toFixed(1)]];
+const only = q.get("only");
+for (const [name, cmd] of list) {
+  if (only && !name.includes(only)) continue;
+  s.apply(cmd); frames(3);
+  const t = frames(8);
+  out.push([name, (t - base).toFixed(1)]);
+  s.undo();
+}
+window.result = out;
+</script>
