@@ -3353,12 +3353,27 @@ fn one(
     // and fade mixed back in afterwards — and never on a surface of its
     // own, which is where this backend sends a copy that is masked,
     // faded, held, blended or given an effect. A plain copy it draws.
-    // And a copy of anything *holding* a clone layer — a frame or a
-    // group with one among its layers — dressed in anything, for the
-    // same reason: on a surface of its own the clone has nothing under
-    // it to paint with.
+    // And a copy of a frame holding a clone layer, dressed in anything,
+    // for the same reason: on a surface of its own the clone has nothing
+    // under it to paint with.
+    //
+    // Two are drawn. A copy of a clone faded or masked and nothing else
+    // goes on a surface that begins as a copy of what is under it and
+    // comes down mixed back by its fade and its mask (`mixed_back`), the
+    // reference's own picture of it: drawn where it stands, then mixed
+    // back into what was there. And a copy of a *group* holding a clone,
+    // dressed in anything: a group holding a clone is isolated on both
+    // sides (`reads_backdrop`), so the clone lifts from the group's own
+    // earlier layers and never from the page, and the copy's surface
+    // takes nothing from it that it had. That was 156 of the 6000 random
+    // pages, and all of them draw as the reference does.
+    let mixable = faded_clone_copy(doc, child)
+        && node.blend == BlendMode::Normal
+        && node.effects.is_empty()
+        && held_to.is_none();
     if (chitrakar_render::copies_a_clone(doc, child)
-        || chitrakar_render::copies_a_clone_within(doc, child))
+        || (chitrakar_render::copies_a_clone_within(doc, child) && !copies_a_group(doc, child)))
+        && !mixable
         && (node.mask.is_some()
             || node.opacity < 1.0
             || held_to.is_some()
@@ -3415,13 +3430,14 @@ fn one(
     // it* (`Draw::Under`), is drawn into that in place as a plain frame
     // is, and comes down mixed rather than laid (`Draw::Mix`). It used to
     // go back, in the frame's arm.
-    let mixed_back = matches!(node.kind, NodeKind::Artboard { .. })
+    let mixed_back = (matches!(node.kind, NodeKind::Artboard { .. })
         && turned_frame.is_none()
+        && chitrakar_render::reads_backdrop(doc, child).ok()?
+        || faded_clone_copy(doc, child))
         && node.blend == BlendMode::Normal
         && node.effects.is_empty()
         && held_to.is_none()
-        && (node.opacity < 1.0 || node.mask.is_some())
-        && chitrakar_render::reads_backdrop(doc, child).ok()?;
+        && (node.opacity < 1.0 || node.mask.is_some());
     let copy_isolates = match &node.kind {
         NodeKind::Instance { of, .. } if chitrakar_render::takes_stand_ins(doc, *of) => {
             let parts = chitrakar_render::copy_children(doc, child).ok()?;
@@ -6615,6 +6631,36 @@ enum Spread {
     Band { width: f32, inside: f32 },
 }
 
+/// A copy of a clone layer that the copy's own fade and mask can be
+/// mixed back over: one copy deep, of a clone wearing no effect and no
+/// colour overlay, which the reference draws where it stands and mixes
+/// back into what was there (its copy arm) — what `Draw::Under` and
+/// `Draw::Mix` do for a frame holding what reads the page.
+fn faded_clone_copy(doc: &Document, id: NodeId) -> bool {
+    let Ok(node) = doc.node(id) else {
+        return false;
+    };
+    let NodeKind::Instance { of, .. } = &node.kind else {
+        return false;
+    };
+    doc.node(*of).is_ok_and(|o| {
+        matches!(o.kind, NodeKind::Clone { .. }) && o.effects.is_empty() && o.visible
+    })
+}
+
+/// Whether a copy, followed through copies of copies, copies a group.
+fn copies_a_group(doc: &Document, id: NodeId) -> bool {
+    let mut at = id;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        match doc.node(at).map(|n| &n.kind) {
+            Ok(NodeKind::Instance { of, .. }) => at = *of,
+            Ok(NodeKind::Group) => return at != id,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Whether a layer, or anything it holds or copies, is a path with a
 /// corner sharper than five degrees — measured after its own
 /// transform, which may skew it. See where an outline asks.
@@ -8063,6 +8109,181 @@ mod tests {
                 mean < 0.004,
                 "({shadowed}, {clone_shadowed}): mean {mean:.5}, worst {worst:.3}"
             );
+        }
+    }
+
+    /// A copy of a clone faded or masked, and a copy of a group holding a
+    /// clone dressed in anything, are drawn, as the reference draws them.
+    /// The first goes on a surface that begins as what is under it and is
+    /// mixed back by its fade and mask, which is the reference drawing it
+    /// where it stands and mixing it back; the second is a copy of an
+    /// isolated group, whose clone lifts from the group's own layers.
+    #[test]
+    fn a_dressed_copy_of_a_clone_or_of_a_group_holding_one_is_drawn() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let stroke = || chitrakar_doc::PaintStroke {
+            points: vec![[6.0, 8.0], [16.0, 14.0]],
+            radii: vec![4.0],
+            color: RED,
+            softness: 0.0,
+            erase: false,
+            source: [10.0, 4.0],
+            heal: false,
+            clip: None,
+        };
+        let cloner = || {
+            let mut c = Node::clone_layer("cloned");
+            if let NodeKind::Clone { strokes } = &mut c.kind {
+                strokes.push(stroke());
+            }
+            Box::new(c)
+        };
+        // How the copy is dressed: faded, masked, blended, or shadowed.
+        type Dress = fn(&mut Node);
+        let dresses: [(&str, Dress); 4] = [
+            ("faded", |n| n.opacity = 0.55),
+            ("masked", |n| {
+                n.mask = Some(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 9.0, ry: 6.0 },
+                        transform: Transform::translation(3.0, 4.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })
+            }),
+            ("blended", |n| n.blend = BlendMode::Multiply),
+            ("shadowed", |n| {
+                n.effects = vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 2.0,
+                    dy: 2.0,
+                    blur: 1.0,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.7,
+                    spread: 0.0,
+                }]
+            }),
+        ];
+        for of_group in [false, true] {
+            for (what, dress) in dresses {
+                // A copy of a bare clone is drawn faded or masked; dressed
+                // otherwise it still goes back.
+                let drawn = of_group || matches!(what, "faded" | "masked");
+                let page = |dressed: bool| {
+                    let mut doc = Document::new(64, 40, ColorMode::Rgb);
+                    add(
+                        &mut doc,
+                        filled("ground", rect(64.0, 40.0), BLUE),
+                        Transform::default(),
+                    );
+                    add(
+                        &mut doc,
+                        filled(
+                            "band",
+                            rect(14.0, 40.0),
+                            AuthoredColor::Srgb {
+                                r: 0.9,
+                                g: 0.8,
+                                b: 0.1,
+                                a: 1.0,
+                            },
+                        ),
+                        Transform::translation(12.0, 0.0),
+                    );
+                    // And one where the copy lifts from.
+                    add(
+                        &mut doc,
+                        filled(
+                            "far band",
+                            rect(8.0, 40.0),
+                            AuthoredColor::Srgb {
+                                r: 0.1,
+                                g: 0.9,
+                                b: 0.3,
+                                a: 1.0,
+                            },
+                        ),
+                        Transform::translation(50.0, 0.0),
+                    );
+                    let original = if of_group {
+                        let group = add(
+                            &mut doc,
+                            Box::new(Node::group("held")),
+                            Transform::translation(2.0, 2.0),
+                        );
+                        for (i, node) in [filled("inside", rect(14.0, 20.0), RED), cloner()]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            doc.apply(Command::AddNode {
+                                parent: group,
+                                index: i,
+                                node,
+                            })
+                            .unwrap();
+                        }
+                        let inside = doc.children_of(group).unwrap()[0];
+                        doc.apply(Command::SetTransform {
+                            id: inside,
+                            transform: Transform::translation(14.0, 4.0),
+                        })
+                        .unwrap();
+                        group
+                    } else {
+                        add(&mut doc, cloner(), Transform::translation(2.0, 2.0))
+                    };
+                    let mut copy = Node::instance("copy", original);
+                    if dressed {
+                        dress(&mut copy);
+                    }
+                    add(&mut doc, Box::new(copy), Transform::translation(30.0, 14.0));
+                    doc
+                };
+                let doc = page(true);
+                assert_eq!(
+                    GpuRenderer::can_render(&doc),
+                    drawn,
+                    "a {what} copy of a {}: drawn should be {drawn}",
+                    if of_group {
+                        "group holding a clone"
+                    } else {
+                        "clone"
+                    }
+                );
+                if !drawn {
+                    continue;
+                }
+                let (mine, theirs) = (
+                    gpu.render(&doc).unwrap(),
+                    chitrakar_render::render(&doc).unwrap(),
+                );
+                let (mean, worst) = difference(&mine, &theirs);
+                let (_, in_worst, over, at) = interiors(&mine, &theirs);
+                assert!(
+                    mean < 0.004 && over == 0,
+                    "a {what} copy (of a group: {of_group}): mean {mean:.5}, worst {worst:.3}, \
+                     {over} interior points off, the worst by {in_worst:.3} at {at:?}"
+                );
+                // And there is something at stake: the dressing shows.
+                let (apart, _) =
+                    difference(&theirs, &chitrakar_render::render(&page(false)).unwrap());
+                assert!(
+                    apart > 0.002,
+                    "a {what} copy: dressed is {apart:.5} from bare"
+                );
+            }
         }
     }
 
