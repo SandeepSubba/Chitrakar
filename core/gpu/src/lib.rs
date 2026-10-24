@@ -4408,11 +4408,12 @@ fn one(
                     out.draws.push(Item::of(Draw::Open));
                     out.inside += 1;
                 }
-                if node.blend != BlendMode::Normal
-                    && chitrakar_render::works_on_what_is_under(doc, child).ok()?
-                {
-                    return none!();
-                }
+                // Blended while holding what works on the page, it is
+                // drawn here as any turned frame is: the reference draws a
+                // turned frame on a surface of its own whatever it holds
+                // (never `frame_in_place`), so what works on the page
+                // inside it works on that surface on both sides. It used
+                // to go back with the upright one.
                 let chitrakar_render::Bounds::Rect(fx0, fy0, fx1, fy1) =
                     chitrakar_render::transformed_box(t, [0.0, 0.0, *width, *height])
                 else {
@@ -4505,6 +4506,7 @@ fn one(
             // in a frame set to Exclusion left the page as it was. Found
             // once a frame between pixels stopped being handed back.)
             if node.blend != BlendMode::Normal
+                && upright
                 && !twice
                 && !aside
                 && chitrakar_render::works_on_what_is_under(doc, child).ok()?
@@ -8945,6 +8947,84 @@ mod tests {
                 "a {what} copy: mean {mean:.5}, worst {worst:.3}, {over} interior points off, \
                  the worst by {in_worst:.3} at {at:?}"
             );
+        }
+    }
+
+    /// A turned frame brought down by a blend while holding what works on
+    /// the page is drawn, on a surface of its own as the reference draws
+    /// every turned frame: what is inside it works on that surface.
+    #[test]
+    fn a_turned_blended_frame_holding_an_adjustment_is_drawn() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        for ground in [None, Some(ink(0.2, 0.6, 0.4))] {
+            let page = |blend: BlendMode| {
+                let mut doc = Document::new(64, 48, ColorMode::Rgb);
+                add(
+                    &mut doc,
+                    filled("ground", rect(64.0, 48.0), ink(0.9, 0.5, 0.2)),
+                    Transform::default(),
+                );
+                let mut frame = Node::artboard("frame", 30.0, 20.0, ground.clone());
+                frame.blend = blend;
+                let turned = Transform {
+                    a: 0.866,
+                    b: 0.5,
+                    c: -0.5,
+                    d: 0.866,
+                    e: 26.0,
+                    f: 6.0,
+                };
+                let frame = add(&mut doc, Box::new(frame), turned);
+                for (i, node) in [
+                    filled("in", rect(14.0, 10.0), ink(0.95, 0.9, 0.1)),
+                    Box::new(Node::adjustment(
+                        "invert",
+                        chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+                    )),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    doc.apply(Command::AddNode {
+                        parent: frame,
+                        index: i,
+                        node,
+                    })
+                    .unwrap();
+                }
+                doc
+            };
+            let doc = page(BlendMode::Multiply);
+            let said = if ground.is_some() {
+                "with a ground"
+            } else {
+                "without"
+            };
+            assert!(GpuRenderer::can_render(&doc), "{said}: drawn");
+            let (mine, theirs) = (
+                gpu.render(&doc).unwrap(),
+                chitrakar_render::render(&doc).unwrap(),
+            );
+            let (mean, worst) = difference(&mine, &theirs);
+            let (_, in_worst, over, at) = interiors(&mine, &theirs);
+            assert!(
+                mean < 0.003 && over == 0,
+                "{said}: mean {mean:.5}, worst {worst:.3}, {over} interior points off, the \
+                 worst by {in_worst:.3} at {at:?}"
+            );
+            let (apart, _) = difference(
+                &theirs,
+                &chitrakar_render::render(&page(BlendMode::Normal)).unwrap(),
+            );
+            assert!(apart > 0.003, "{said}: the blend shows ({apart:.5})");
         }
     }
 
