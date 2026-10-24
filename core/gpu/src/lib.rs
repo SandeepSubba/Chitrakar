@@ -1357,7 +1357,7 @@ impl GpuRenderer {
             max_buffer: self.max_buffer,
             ..Scene::default()
         };
-        let (view, wide) = with_room(doc, view, size);
+        let (view, wide) = with_room(doc, view, size)?;
         gather(doc, view, wide, &mut scene)?;
         let heals = scene
             .draws
@@ -1391,7 +1391,9 @@ impl GpuRenderer {
     /// with the textures every adapter guarantees. A renderer in hand
     /// may draw more ([`draws_view`](Self::draws_view)).
     pub fn can_render_view(doc: &Document, view: Transform, size: (u32, u32)) -> bool {
-        let (view, size) = with_room(doc, view, size);
+        let Some((view, size)) = with_room(doc, view, size) else {
+            return false;
+        };
         gather(doc, view, size, &mut Scene::default()).is_some()
     }
 
@@ -1403,7 +1405,9 @@ impl GpuRenderer {
             max_buffer: self.max_buffer,
             ..Scene::default()
         };
-        let (view, size) = with_room(doc, view, size);
+        let Some((view, size)) = with_room(doc, view, size) else {
+            return false;
+        };
         gather(doc, view, size, &mut scene).is_some()
     }
 
@@ -2777,35 +2781,36 @@ macro_rules! none {
 /// The same reading of the extent as there: the layer's box grown by the
 /// reach, and a layer that reaches everywhere taken to run past. Capped
 /// at the surface's own size, as there.
-fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> (Transform, (u32, u32)) {
-    let mut room = 0u32;
-    for (id, node) in doc.nodes() {
-        if !node.visible || node.opacity <= 0.0 || node.effects.is_empty() {
-            continue;
+fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> Option<(Transform, (u32, u32))> {
+    // Walked as the page is drawn, so a layer drawn again by a copy is
+    // asked where the copy puts it: a copy of a group whose layer wears
+    // an outline, standing near the page's edge, had the reference give
+    // that outline room and this not (seed 714).
+    fn walk(
+        doc: &Document,
+        id: NodeId,
+        space: Transform,
+        size: (u32, u32),
+        room: &mut u32,
+        clone_worn: &mut bool,
+        depth: usize,
+    ) {
+        if depth >= chitrakar_doc::MAX_DEPTH {
+            return;
+        }
+        let Ok(node) = doc.node(id) else {
+            return;
+        };
+        if !node.visible || node.opacity <= 0.0 {
+            return;
         }
         // Nor a clone layer, or a copy of one: those paint with what is
         // under them and never go onto a surface of their own there, so
         // their effects are grown from the strokes they lay, cut at the
         // page as ever.
-        if matches!(
-            node.kind,
-            NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
-        ) || chitrakar_render::rewrites_what_is_under_it(doc, *id)
-            || chitrakar_render::copies_a_clone(doc, *id)
-        {
-            continue;
-        }
-        let drawn = node
-            .effects
-            .iter()
-            .filter(|e| e.draws())
-            .map(chitrakar_doc::Effect::reach)
-            .fold(0.0f32, f32::max);
-        if drawn <= 0.0 {
-            continue;
-        }
-        let space = view.compose(chitrakar_render::ancestor_space(doc, *id));
-        let past = match chitrakar_render::bounds_in_parent_space(doc, *id) {
+        let clone_like = matches!(node.kind, NodeKind::Clone { .. })
+            || chitrakar_render::copies_a_clone(doc, id);
+        let past = || match chitrakar_render::bounds_in_parent_space(doc, id) {
             Ok(chitrakar_render::Bounds::Rect(x0, y0, x1, y1)) => {
                 match chitrakar_render::transformed_box(space, [x0, y0, x1, y1]) {
                     chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => {
@@ -2818,20 +2823,97 @@ fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> (Transform, (
             Ok(chitrakar_render::Bounds::Everything) => true,
             _ => false,
         };
-        if past {
-            let m = (drawn * space.max_scale()).ceil();
-            if m.is_finite() && m > 0.0 {
-                room = room.max((m as u32).min(size.0.max(size.1)));
+        let casts_inside = node
+            .effects
+            .iter()
+            .any(|e| e.draws() && matches!(e, chitrakar_doc::Effect::InnerShadow { .. }));
+        if clone_like && casts_inside && past() {
+            *clone_worn = true;
+        }
+        let drawn = if node.effects.is_empty()
+            || matches!(
+                node.kind,
+                NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
+            )
+            || chitrakar_render::rewrites_what_is_under_it(doc, id)
+            || clone_like
+        {
+            0.0
+        } else {
+            node.effects
+                .iter()
+                .filter(|e| e.draws())
+                .map(chitrakar_doc::Effect::reach)
+                .fold(0.0f32, f32::max)
+        };
+        if drawn > 0.0 {
+            if past() {
+                let m = (drawn * space.max_scale()).ceil();
+                if m.is_finite() && m > 0.0 {
+                    *room = (*room).max((m as u32).min(size.0.max(size.1)));
+                }
+            }
+        }
+        let inner = space.compose(node.transform);
+        match &node.kind {
+            NodeKind::Instance { of, .. } => {
+                let stand_ins = if chitrakar_render::takes_stand_ins(doc, *of) {
+                    chitrakar_render::copy_children(doc, id).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                if stand_ins.is_empty() {
+                    if let Some(back) = doc
+                        .node(*of)
+                        .ok()
+                        .and_then(|o| chitrakar_render::invert(o.transform))
+                    {
+                        walk(
+                            doc,
+                            *of,
+                            inner.compose(back),
+                            size,
+                            room,
+                            clone_worn,
+                            depth + 1,
+                        );
+                    }
+                } else {
+                    for part in stand_ins {
+                        walk(doc, part, inner, size, room, clone_worn, depth + 1);
+                    }
+                }
+            }
+            _ => {
+                for &child in doc.children_of(id).unwrap_or(&[]) {
+                    walk(doc, child, inner, size, room, clone_worn, depth + 1);
+                }
             }
         }
     }
-    if room == 0 {
-        return (view, size);
+    let (mut room, mut clone_worn) = (0u32, false);
+    for &child in doc.children_of(doc.root()).unwrap_or(&[]) {
+        walk(doc, child, view, size, &mut room, &mut clone_worn, 0);
     }
-    (
+    if room == 0 {
+        return Some((view, size));
+    }
+    // A clone casting an inner shadow and reaching the page's edge, on a
+    // page drawn wider for some other layer, goes back. The reference
+    // grows a clone's effects on a surface cut to the page, with no room
+    // of its own, and drawn wider here the shadow came out with a band
+    // along the page's edge inside the page where the reference has none
+    // (seed 4970, four rows of it at four-fifths of full scale). Its other
+    // effects drawn wider agree with the reference, and either alone is
+    // drawn: this costs 85 of 6000 random pages, where every clone
+    // wearing anything over the edge cost 232.
+    if clone_worn {
+        return none!();
+    }
+    Some((
         Transform::translation(room as f32, room as f32).compose(view),
         (size.0 + 2 * room, size.1 + 2 * room),
-    )
+    ))
 }
 
 fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) -> Option<()> {
@@ -2921,9 +3003,25 @@ fn collect(
     out: &mut Scene,
 ) -> Option<()> {
     for &child in doc.children_of(group).ok()? {
-        one(doc, child, parent, opacity, bound, true, out)?;
+        one(doc, child, parent, opacity, bound, Run::Siblings, out)?;
     }
     Some(())
+}
+
+/// Which run of layers a layer is drawn in, which decides what it is held
+/// to when it is held to the one below it.
+#[derive(Clone, Copy)]
+enum Run {
+    /// As what a copy draws of the layer it copies: the layer, not its
+    /// place in a run of clipped ones, so the renderer being matched draws
+    /// it whole there — it reaches it through `render_layer`, and a run is
+    /// the parent group's business.
+    Alone,
+    /// In its own place among its siblings.
+    Siblings,
+    /// Among what a copy draws where it stands in for some of the
+    /// original's layers, held to the one under it in that list.
+    StandIns(NodeId),
 }
 
 /// One layer, where its parent puts it, turned into quads.
@@ -2939,13 +3037,9 @@ fn one(
     parent: Transform,
     opacity: f32,
     bound: Option<chitrakar_render::ClipRect>,
-    // Whether this layer is being drawn in its own place among its
-    // siblings, where being held to the one below it means something, or
-    // as what a *copy* draws — where it does not. A copy draws the layer,
-    // not the layer's place in a run of clipped ones, so the renderer
-    // being matched draws the layer whole there: it reaches it through
-    // `render_layer`, and a clip run is the parent group's business.
-    in_a_run: bool,
+    // Which run of layers this one is drawn in, if any, and so what being
+    // held to the one below it means (`Run`).
+    in_a_run: Run,
     out: &mut Scene,
 ) -> Option<()> {
     let node = doc.node(child).ok()?;
@@ -3012,6 +3106,25 @@ fn one(
         // and casting a shadow is the reference's picture of it
         // (`a_mask_inside_a_masked_layer_is_drawn`), and the random
         // pages went from 3081 drawn to 3107 with none apart.
+        // An outline round a layer holding a needle — a corner of a path
+        // sharper than five degrees — goes back. Near such a
+        // tip the path is thinner than a pixel for pixels on end, and
+        // this backend fills a path four samples a pixel: a quarter
+        // where the true coverage is a hundredth. That is nothing to
+        // the picture, and everything to an outline, whose thin-line
+        // rule (`ridge`) counts a fifth covered as inside — so the band
+        // ran on down the needle here and stopped short of it in the
+        // reference (seed 714, three pixels of band a third of full
+        // scale apart). Anything drawn from a coverage rather than a
+        // yes or a no — a shadow, a glow — averages the samples' error
+        // away and is drawn.
+        let banded = node.effects.iter().any(|e| {
+            matches!(e, chitrakar_doc::Effect::Outline { width, opacity, .. }
+                if *width > 0.0 && *opacity > 0.0)
+        });
+        if banded && holds_a_needle(doc, child, 0) {
+            return none!();
+        }
         let shadings: Vec<Shading> = node
             .effects
             .iter()
@@ -3043,71 +3156,72 @@ fn one(
     // has an alpha that depends on how it was composited, and this
     // reading is of the layer alone. Any of those and the page goes
     // back to the CPU, which is always a safe answer.
-    let held_to = if node.clipped && in_a_run {
-        match chitrakar_render::clip_base(doc, child).ok()? {
-            // Nothing under it to be held to — the first of a run
-            // is what the rest are held to — so it draws whole.
-            None => None,
-            Some(base) => {
-                let b = doc.node(base).ok()?;
-                // A base is a layer whose alpha is its *own*: it puts
-                // something down, so "the layer drawn aside" means
-                // something and both sides read the same number for it.
-                // An adjustment and a filter put nothing down, and the
-                // page confines nothing to one of them
-                // (`confines_nothing`): a layer held to an adjustment
-                // shows whole. That used to send the page back — read
-                // as the layer drawn aside, such a base was nothing, and
-                // what was held to it vanished, a sixth of full scale
-                // from the reference — and it was a quarter of
-                // everything the random pages went back for. The
-                // reading is the page's own cut now (`clip_coverage_at`,
-                // below), which for one of these is the page's answer:
-                // everything let through. Being held still means the
-                // rest of what it means here, a frame or a copy on a
-                // surface of its own, which is where the reference puts
-                // one held to anything — a frame held to an adjustment
-                // and drawn in place instead put a Color Burn inside it
-                // against the page rather than against nothing (seed
-                // 5601), so "no base at all" was the wrong lift.
-                //
-                // A clone layer reads what is under it too, but what is
-                // held to one is confined to the strokes it laid, and
-                // drawn aside — on an empty surface, with nothing to
-                // lift — it lays nothing: a halftone held to a masked
-                // clone (seed 1176) was the whole page's halftone
-                // against none of it. A clone base goes back.
-                if matches!(b.kind, NodeKind::Clone { .. })
-                    || chitrakar_render::copies_a_clone(doc, base)
-                {
-                    return none!();
-                }
-                // What the layer above is held to is the base's own
-                // alpha, and that reading comes from the renderer being
-                // matched — `layer_coverage_at`, the base drawn aside —
-                // so its opacity, its mask and its blend are already in
-                // the number both sides read and none of the three is a
-                // reason to hand the page back. Asked directly, a base
-                // faded, masked or blended lands within a thousandth of
-                // the reference, which is where a plain one lands.
-                //
-                // An *effect* on the base used to be: the base drawn
-                // aside took its shadow with it, and what the page holds
-                // the layer above to does not, so the two came apart by
-                // a fiftieth and the page went back. The reading is the
-                // page's own cut now (`clip_coverage_at`), effects left
-                // out exactly where the page leaves them out, so a base
-                // wearing one is a base like any other — a frame wearing
-                // effects included, which stayed the CPU's a while longer
-                // on a sixtieth of drift on a page nobody wrote, measured
-                // while a surface's way down was still taking the cut
-                // twice (`Draw::Close::down`); asked again after, a layer
-                // held to a frame casting a shadow is the reference's
-                // picture (`a_layer_held_to_a_base_with_a_shadow_is_held_
-                // to_the_base`) and so are the random pages that hold one.
-                Some(base)
-            }
-        }
+    let base = match in_a_run {
+        Run::Alone => None,
+        Run::Siblings => Some(chitrakar_render::clip_base(doc, child).ok()?),
+        Run::StandIns(copy) => Some(chitrakar_render::stand_in_base(doc, copy, child).ok()?),
+    };
+    let held_to = if let (true, Some(base)) = (node.clipped, base) {
+        // Nothing under it to be held to — the first of a run is what
+        // the rest are held to — so it draws whole.
+        //
+        // A base is a layer whose alpha is its *own*: it puts
+        // something down, so "the layer drawn aside" means
+        // something and both sides read the same number for it.
+        // An adjustment and a filter put nothing down, and the
+        // page confines nothing to one of them
+        // (`confines_nothing`): a layer held to an adjustment
+        // shows whole. That used to send the page back — read
+        // as the layer drawn aside, such a base was nothing, and
+        // what was held to it vanished, a sixth of full scale
+        // from the reference — and it was a quarter of
+        // everything the random pages went back for. The
+        // reading is the page's own cut now (`clip_coverage_at`,
+        // below), which for one of these is the page's answer:
+        // everything let through. Being held still means the
+        // rest of what it means here, a frame or a copy on a
+        // surface of its own, which is where the reference puts
+        // one held to anything — a frame held to an adjustment
+        // and drawn in place instead put a Color Burn inside it
+        // against the page rather than against nothing (seed
+        // 5601), so "no base at all" was the wrong lift.
+        //
+        // A clone layer reads what is under it too, and what is
+        // held to one is confined to the strokes it laid. Drawn
+        // aside on an empty surface it lifted nothing, so what
+        // was held to it was held to nothing — a halftone held
+        // to a masked clone (seed 1176) was the whole page's
+        // halftone against none of it — and a clone base went
+        // back, the most of anything the random pages did. The
+        // page's cut of one is drawn aside with what is under it
+        // now (`clip_coverage_at`, through `clone_alone`), the
+        // reading an exporter's clip already took, so it is
+        // drawn.
+        //
+        // What the layer above is held to is the base's own
+        // alpha, and that reading comes from the renderer being
+        // matched — `layer_coverage_at`, the base drawn aside —
+        // so its opacity, its mask and its blend are already in
+        // the number both sides read and none of the three is a
+        // reason to hand the page back. Asked directly, a base
+        // faded, masked or blended lands within a thousandth of
+        // the reference, which is where a plain one lands.
+        //
+        // An *effect* on the base used to be: the base drawn
+        // aside took its shadow with it, and what the page holds
+        // the layer above to does not, so the two came apart by
+        // a fiftieth and the page went back. The reading is the
+        // page's own cut now (`clip_coverage_at`), effects left
+        // out exactly where the page leaves them out, so a base
+        // wearing one is a base like any other — a frame wearing
+        // effects included, which stayed the CPU's a while longer
+        // on a sixtieth of drift on a page nobody wrote, measured
+        // while a surface's way down was still taking the cut
+        // twice (`Draw::Close::down`); asked again after, a layer
+        // held to a frame casting a shadow is the reference's
+        // picture (`a_layer_held_to_a_base_with_a_shadow_is_held_
+        // to_the_base`) and so are the random pages that hold one.
+        base
     } else {
         None
     };
@@ -4256,9 +4370,18 @@ fn one(
                     x1: (fx1.round().max(0.0) as u32).min(pw),
                     y1: (fy1.round().max(0.0) as u32).min(ph),
                 };
+                // On a surface of its own the frame is cut to its own box
+                // alone, as the reference draws it there: what is above
+                // it — the page's edge, a frame it is in — cuts what the
+                // surface lays down, on the way down (`framed`, or the
+                // coverage that quad wears), not the silhouette its effects
+                // grow from. Cut here too, a frame running off the page
+                // cast an inner shadow along the page's edge, where with
+                // room past the page (`with_room`) the reference has the
+                // frame carry on (seed 520).
                 let inside = match bound {
-                    Some(outer) => outer.intersect(board),
-                    None => board,
+                    Some(outer) if !alone => outer.intersect(board),
+                    _ => board,
                 };
                 if inside.is_empty() {
                     return nothing_drawn(alone, wearing, outer, mark, placed_from, out);
@@ -4374,24 +4497,16 @@ fn one(
             let inner = if alone { 1.0 } else { node.opacity * opacity };
             let within = if alone { None } else { bound };
             if stand_ins.is_empty() {
-                one(doc, *of, t.compose(back), inner, within, false, out)?;
+                one(doc, *of, t.compose(back), inner, within, Run::Alone, out)?;
             } else {
                 // A copy whose stand-ins read the page is on a surface
                 // of its own by now (`copy_isolates`), so what they read
                 // is the copy's own surface, as it is on the reference.
                 // Stand-ins are drawn there as a group's children are, a
-                // layer held to the one under it drawn as part of the run
-                // (`render_siblings`); one at a time here, a held one would
-                // be drawn whole, so such a copy goes back.
-                if stand_ins
-                    .iter()
-                    .skip(1)
-                    .any(|k| doc.node(*k).is_ok_and(|n| n.clipped))
-                {
-                    return none!();
-                }
+                // layer held to the one under it in the copy's list held
+                // to that one (`render_siblings`, `stand_in_base`).
                 for part in stand_ins {
-                    one(doc, part, t, inner, within, false, out)?;
+                    one(doc, part, t, inner, within, Run::StandIns(child), out)?;
                 }
             }
         } // No arm left over, and none wanted: every kind of layer is
@@ -6502,6 +6617,53 @@ enum Spread {
     Band { width: f32, inside: f32 },
 }
 
+/// Whether a layer, or anything it holds or copies, is a path with a
+/// corner sharper than five degrees — measured after its own
+/// transform, which may skew it. See where an outline asks.
+fn holds_a_needle(doc: &Document, id: NodeId, depth: usize) -> bool {
+    if depth > 32 {
+        return true;
+    }
+    let Ok(node) = doc.node(id) else {
+        return false;
+    };
+    if !node.visible {
+        return false;
+    }
+    let t = node.transform;
+    let sharp = |ring: &[[f32; 2]]| {
+        let n = ring.len();
+        n >= 3
+            && (0..n).any(|i| {
+                let [p, q, r] = [ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]];
+                let carry = |[x, y]: [f32; 2]| [t.a * x + t.c * y, t.b * x + t.d * y];
+                let (u, v) = (
+                    carry([p[0] - q[0], p[1] - q[1]]),
+                    carry([r[0] - q[0], r[1] - q[1]]),
+                );
+                let (lu, lv) = (u[0].hypot(u[1]), v[0].hypot(v[1]));
+                if lu < 1e-6 || lv < 1e-6 {
+                    return false;
+                }
+                let cos = (u[0] * v[0] + u[1] * v[1]) / (lu * lv);
+                cos > (std::f32::consts::TAU / 72.0).cos()
+            })
+    };
+    match &node.kind {
+        NodeKind::Vector {
+            shape: VectorShape::Path {
+                points, subpaths, ..
+            },
+            ..
+        } => sharp(points) || subpaths.iter().any(|ring| sharp(ring)),
+        NodeKind::Instance { of, .. } => holds_a_needle(doc, *of, depth + 1),
+        _ => doc
+            .children_of(id)
+            .map(|kids| kids.iter().any(|k| holds_a_needle(doc, *k, depth + 1)))
+            .unwrap_or(false),
+    }
+}
+
 /// What a live effect turns into here, or `None` when it stays the
 /// CPU's.
 fn effect_of(
@@ -7644,6 +7806,268 @@ mod tests {
     /// own alpha, which has to be that layer drawn aside. Two coverages
     /// a layer is held back by — its own mask and what it is clipped to
     /// — are one coverage by the time a fragment reads it.
+    /// A copy standing in for a layer of what it copies holds the layers
+    /// above it to its stand-in, as the reference does (`render_siblings`)
+    /// — each held to the one under it in the copy's list (`Run`). It was
+    /// handed back while the reference learnt to hold them, which was a
+    /// copy with stand-ins on 24 of the random pages.
+    #[test]
+    fn a_copys_stand_ins_hold_the_layers_above_them_here_too() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let mut doc = Document::new(80, 30, ColorMode::Rgb);
+        add(
+            &mut doc,
+            filled("ground", rect(80.0, 30.0), ink(0.9, 0.9, 0.85)),
+            Transform::default(),
+        );
+        let group = add(
+            &mut doc,
+            Box::new(Node::group("pair")),
+            Transform::default(),
+        );
+        let put = |doc: &mut Document, parent: NodeId, node: Box<Node>, at: Transform| {
+            let index = doc.children_of(parent).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent,
+                index,
+                node,
+            })
+            .unwrap();
+            let id = doc.children_of(parent).unwrap()[index];
+            doc.apply(Command::SetTransform { id, transform: at })
+                .unwrap();
+            id
+        };
+        let base = put(
+            &mut doc,
+            group,
+            filled("base", rect(10.0, 10.0), ink(0.9, 0.1, 0.1)),
+            Transform::translation(5.0, 10.0),
+        );
+        let mut held = filled("held", rect(30.0, 30.0), ink(0.1, 0.2, 0.9));
+        held.clipped = true;
+        put(&mut doc, group, held, Transform::default());
+        let mut copy = Node::instance("copy", group);
+        copy.kind = NodeKind::Instance {
+            of: group,
+            replaces: vec![base],
+        };
+        let copy = add(&mut doc, Box::new(copy), Transform::translation(40.0, 0.0));
+        put(
+            &mut doc,
+            copy,
+            filled("own base", rect(10.0, 10.0), ink(0.9, 0.1, 0.1)),
+            Transform::translation(15.0, 10.0),
+        );
+        assert!(
+            GpuRenderer::can_render(&doc),
+            "drawn rather than handed back"
+        );
+        let (mine, theirs) = (
+            gpu.render(&doc).unwrap(),
+            chitrakar_render::render(&doc).unwrap(),
+        );
+        let (mean, worst) = difference(&mine, &theirs);
+        // Past the stand-in, the ground, not the held blue.
+        assert!(
+            theirs.get(45, 14).r > 0.5,
+            "the reference holds the copy's held layer"
+        );
+        assert!(
+            mean < 0.001 && worst < 0.02,
+            "mean {mean:.5}, worst {worst:.4}"
+        );
+    }
+
+    /// An outline round a needle goes back; round the same path with its
+    /// corners opened out it is drawn, and as the reference draws it.
+    /// Near a needle's tip the path is thinner than a pixel for pixels
+    /// on end, and four samples a pixel make a quarter of what is truly
+    /// a hundredth — enough for the band's thin-line rule to run the
+    /// outline on down the needle (seed 714).
+    #[test]
+    fn an_outline_round_a_needle_goes_back() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let path = |points: Vec<[f32; 2]>| VectorShape::Path {
+            points,
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let page = |shape: VectorShape, in_a_group: bool| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    ink(0.9, 0.9, 0.85),
+                ),
+                Transform::default(),
+            );
+            let outline = chitrakar_doc::Effect::Outline {
+                width: 2.5,
+                color: ink(0.1, 0.5, 0.8),
+                opacity: 0.9,
+            };
+            let mut layer = filled("shape", shape, ink(0.9, 0.3, 0.3));
+            if in_a_group {
+                let group = add(
+                    &mut doc,
+                    Box::new(Node::group("held")),
+                    Transform::default(),
+                );
+                doc.apply(Command::AddNode {
+                    parent: group,
+                    index: 0,
+                    node: layer,
+                })
+                .unwrap();
+                doc.apply(Command::SetEffects {
+                    id: group,
+                    effects: vec![outline],
+                })
+                .unwrap();
+            } else {
+                layer.effects = vec![outline];
+                add(&mut doc, layer, Transform::default());
+            }
+            doc
+        };
+        // Two points three degrees apart seen from the third: a needle.
+        let needle = path(vec![[30.0, 5.0], [31.5, 5.4], [30.4, 36.0]]);
+        for in_a_group in [false, true] {
+            assert!(
+                !GpuRenderer::can_render(&page(needle.clone(), in_a_group)),
+                "a needle under an outline goes back (in a group: {in_a_group})"
+            );
+        }
+        let plain = path(vec![[20.0, 8.0], [42.0, 12.0], [30.0, 32.0]]);
+        for in_a_group in [false, true] {
+            let doc = page(plain.clone(), in_a_group);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "a plain triangle under an outline is drawn (in a group: {in_a_group})"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.003 && worst < 0.5,
+                "in a group: {in_a_group}: mean {mean:.5}, worst {worst:.4}"
+            );
+        }
+    }
+
+    /// A clone casting an inner shadow over the page's edge, on a page
+    /// drawn wider for another layer whose effects run past the page,
+    /// goes back; either alone is drawn, as the reference draws it. The
+    /// reference grows a clone's effects on a surface cut to the page,
+    /// and drawn wider here the shadow came out with a band along the
+    /// page's edge (seed 4970; 0.74 apart here with the decline lifted).
+    #[test]
+    fn a_clone_casting_an_inner_shadow_takes_no_room_from_another_layer() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let page = |shadowed: bool, clone_shadowed: bool| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("ground", rect(60.0, 40.0), BLUE),
+                Transform::default(),
+            );
+            let mut off = filled("off the page", rect(20.0, 10.0), RED);
+            if shadowed {
+                off.effects = vec![chitrakar_doc::Effect::DropShadow {
+                    dx: -2.0,
+                    dy: 1.0,
+                    blur: 1.5,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.8,
+                    spread: 0.0,
+                }];
+            }
+            add(&mut doc, off, Transform::translation(48.0, 4.0));
+            let mut clone = Node::clone_layer("cloned");
+            if let NodeKind::Clone { strokes } = &mut clone.kind {
+                strokes.push(chitrakar_doc::PaintStroke {
+                    points: vec![[10.0, 30.0], [40.0, 38.0]],
+                    radii: vec![5.0],
+                    color: RED,
+                    softness: 0.0,
+                    erase: false,
+                    source: [6.0, -20.0],
+                    heal: false,
+                    clip: None,
+                });
+            }
+            if clone_shadowed {
+                clone.effects = vec![chitrakar_doc::Effect::InnerShadow {
+                    dx: -0.6,
+                    dy: -1.5,
+                    blur: 1.7,
+                    color: AuthoredColor::Srgb {
+                        r: 0.1,
+                        g: 0.9,
+                        b: 0.1,
+                        a: 1.0,
+                    },
+                    opacity: 0.95,
+                    spread: 0.6,
+                }];
+            }
+            add(&mut doc, Box::new(clone), Transform::default());
+            doc
+        };
+        assert!(
+            !GpuRenderer::can_render(&page(true, true)),
+            "both at once go back"
+        );
+        for (shadowed, clone_shadowed) in [(true, false), (false, true)] {
+            let doc = page(shadowed, clone_shadowed);
+            assert!(
+                GpuRenderer::can_render(&doc),
+                "alone is drawn ({shadowed}, {clone_shadowed})"
+            );
+            let (mean, worst) = difference(
+                &gpu.render(&doc).unwrap(),
+                &chitrakar_render::render(&doc).unwrap(),
+            );
+            assert!(
+                mean < 0.004,
+                "({shadowed}, {clone_shadowed}): mean {mean:.5}, worst {worst:.3}"
+            );
+        }
+    }
+
     #[test]
     fn a_layer_held_to_the_one_under_it_stops_where_that_layer_does() {
         let Some(gpu) = gpu_or_skip() else {
@@ -16331,9 +16755,11 @@ mod tests {
     /// own — what they draw *is* what is under them — and the page
     /// confines nothing to one of them, so a layer held to one shows
     /// whole, and the cut this reads (`clip_coverage_at`) says so. A
-    /// clone layer is the one that hands the page back: what is held to
-    /// it is confined to the strokes it laid, and drawn aside, with
-    /// nothing to lift, it lays nothing — a sixth of full scale apart.
+    /// clone layer was the one that handed the page back: what is held
+    /// to it is confined to the strokes it laid, and drawn aside, with
+    /// nothing to lift, it laid nothing — a sixth of full scale apart.
+    /// The cut draws a clone aside with what is under it now
+    /// (`clone_alone`), and a layer held to one is drawn.
     ///
     /// The line used to be drawn at shapes, pictures and text, which let
     /// four kinds that paint perfectly well decline for no reason; and
@@ -16359,7 +16785,7 @@ mod tests {
             ("frame", true),
             ("adjustment", true),
             ("filter", true),
-            ("clone", false),
+            ("clone", true),
         ] {
             let mut doc = Document::new(60, 40, ColorMode::Rgb);
             add(
@@ -17859,9 +18285,10 @@ mod tests {
     /// holding a Multiply rectangle is refused, and the reference draws
     /// it differently from the same frame unheld, which is what makes
     /// "no base at all" the wrong lift (seed 5601 of the random pages
-    /// found it). And a layer held to a clone layer goes back: what is
-    /// held to one is confined to the strokes it laid, which only the
-    /// page has in hand (seed 1176).
+    /// found it). And a layer held to a clone layer is confined to the
+    /// strokes it laid, which only the page had in hand (seed 1176), so
+    /// it went back; the cut reads a clone with what is under it now,
+    /// and it is drawn, as the reference draws it.
     #[test]
     fn a_layer_held_to_an_adjustment_shows_whole() {
         let Some(gpu) = gpu_or_skip() else {
@@ -18028,7 +18455,7 @@ mod tests {
              surface of its own, {apart:.5} from in place"
         );
 
-        // A layer held to a clone layer goes back.
+        // A layer held to a clone layer is held to the strokes it laid.
         let mut cloned = Document::new(72, 48, ColorMode::Rgb);
         add(
             &mut cloned,
@@ -18068,8 +18495,19 @@ mod tests {
             Transform::translation(20.0, 16.0),
         );
         assert!(
-            !GpuRenderer::can_render(&cloned),
-            "held to a clone layer, the page goes back"
+            GpuRenderer::can_render(&cloned),
+            "held to a clone layer, the page is drawn"
+        );
+        let (mine, theirs) = (
+            gpu.render(&cloned).unwrap(),
+            chitrakar_render::render(&cloned).unwrap(),
+        );
+        // Red on the stroke, and none of the rectangle off it.
+        assert!(theirs.get(40, 25).r > 0.5 && theirs.get(22, 17).r < 0.2);
+        let (mean, worst) = difference(&mine, &theirs);
+        assert!(
+            mean < 0.004,
+            "held to a clone layer: mean {mean:.5}, worst {worst:.3}"
         );
     }
 

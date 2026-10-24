@@ -1396,7 +1396,11 @@ fn render_siblings(
                 .fold(0.0f32, f32::max);
             (reach * max_scale(parent)).max(soft).ceil() as u32
         });
-        let cover = draw_layer(doc, children[i], dst, clip, parent, None, capture, bare)?;
+        let cover =
+            draw_layer(doc, children[i], dst, clip, parent, None, capture, bare)?.map(|c| Cover {
+                base: Some(children[i]),
+                ..c
+            });
         for &above in &children[i + 1..end] {
             draw_layer(doc, above, dst, clip, parent, cover.as_ref(), None, bare)?;
         }
@@ -1413,6 +1417,11 @@ struct Cover {
     origin: (u32, u32),
     width: u32,
     height: u32,
+    /// The layer this is the cut of, when it is a run's base: a layer
+    /// held to it and drawn on a widened page (`draw_with_room`) reads
+    /// the cut again over the wider page, since this one ends at the
+    /// page's edge.
+    base: Option<NodeId>,
 }
 
 impl Cover {
@@ -1426,6 +1435,7 @@ impl Cover {
             origin: (0, 0),
             width: 0,
             height: 0,
+            base: None,
         }
     }
 
@@ -1437,6 +1447,7 @@ impl Cover {
             origin: (rect.x0, rect.y0),
             width,
             height,
+            base: None,
         }
     }
 
@@ -2584,6 +2595,7 @@ fn draw_layer(
                     origin: (region.x0, region.y0),
                     width: w,
                     height: h,
+                    base: None,
                 };
                 return draw_layer(doc, *of, dst, region, space, Some(&folded), capture, bare);
             }
@@ -2628,6 +2640,7 @@ fn draw_layer(
                     origin: (0, 0),
                     width: aside.width,
                     height: aside.height,
+                    base: None,
                 }));
             }
         }
@@ -2729,6 +2742,7 @@ fn draw_layer(
                     origin: (0, 0),
                     width: laid.width,
                     height: laid.height,
+                    base: None,
                 }));
             }
         }
@@ -2816,13 +2830,33 @@ fn draw_with_room(
         wide.pixels[to..to + dw].copy_from_slice(&dst.pixels[from..from + dw]);
     }
     wide.wanted = dst.wanted.map(shift);
-    let moved = cover.map(|c| Cover {
-        alpha: c.alpha.clone(),
-        origin: (c.origin.0 + m, c.origin.1 + m),
-        width: c.width,
-        height: c.height,
-    });
     let out = Transform::translation(m as f32, m as f32).compose(parent);
+    // What the layer is held to, over the wider page. The cut the run
+    // took was taken on the page, and ends at its edge: a layer held to
+    // a base running off the page — or to an adjustment, which confines
+    // nothing anywhere — was cut there, and its effects grown from a
+    // silhouette with an edge the page's edge put in it, the cliff the
+    // room is for (seed 2106 of the GPU audit: a copy wearing a bevel,
+    // held to a curves layer, lit a band down the page's right edge that
+    // the same page drawn with a margin does not have). A base this
+    // knows the name of is read again where the layer is drawn now; any
+    // other cut is moved with the page.
+    let moved = match cover.and_then(|c| c.base) {
+        Some(base) => Some(Cover {
+            alpha: clip_coverage_at(doc, base, out, (wide.width, wide.height))?,
+            origin: (0, 0),
+            width: wide.width,
+            height: wide.height,
+            base: Some(base),
+        }),
+        None => cover.map(|c| Cover {
+            alpha: c.alpha.clone(),
+            origin: (c.origin.0 + m, c.origin.1 + m),
+            width: c.width,
+            height: c.height,
+            base: None,
+        }),
+    };
     let taken = draw_effected(
         doc,
         child,
@@ -2864,6 +2898,7 @@ fn draw_with_room(
             origin: (rect.x0 - m, rect.y0 - m),
             width,
             height,
+            base: None,
         }
     }))
 }
@@ -3079,6 +3114,7 @@ fn draw_effected(
             origin,
             width: layer.width,
             height: layer.height,
+            base: None,
         });
         // The layer in its overlay's colour before anything meets the
         // page: the effects are grown from its cover, which this keeps.
@@ -3422,6 +3458,7 @@ fn render_child(
                         origin: (sub_clip.x0, sub_clip.y0),
                         width: w,
                         height: h,
+                        base: None,
                     };
                     return draw_layer(doc, *of, dst, sub_clip, space, Some(&cover), None, bare)
                         .map(|_| ());
@@ -11797,6 +11834,16 @@ pub fn clip_coverage_at(
 ) -> Result<Vec<f32>, DocError> {
     let mut surface = Surface::new(size.0, size.1);
     let clip = surface.full_clip();
+    // A clone layer, or a copy of one, lays what it lifts from under it,
+    // and on an empty surface it lifts nothing: what is held to one was
+    // read as held to nothing. It is drawn aside with what is under it,
+    // as the page has it (`clone_alone`), the way an exporter's clip of
+    // one is (`clip_pixels`) — the cut the page itself takes of what it
+    // laid. This was what the GPU backend handed a layer held to a clone
+    // back for, the most of anything on the random pages.
+    if clone_alone(doc, id, &mut surface, clip, parent)? {
+        return Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect());
+    }
     let cover = draw_layer(doc, id, &mut surface, clip, parent, None, Some(0), false)?;
     let Some(c) = cover else {
         // Nothing captured is a layer drawn the plain way: its own alpha
@@ -20536,6 +20583,7 @@ mod tests {
             origin: (0, 0),
             width: 64,
             height: 50,
+            base: None,
         };
         let tint = LinearRgba {
             r: 0.1,
@@ -32346,6 +32394,109 @@ mod tests {
                      was grown from the layer cut at the page's edge"
                 );
             }
+        }
+    }
+
+    /// A layer held to the one under it, running off the page and wearing
+    /// an effect, is held past the page's edge as it is held on the page:
+    /// the page and the same page with a margin round it agree. The cut a
+    /// run takes of its base is taken on the page and ends at its edge,
+    /// and a held layer given room for its effects was cut there anyway —
+    /// a bevel lit a band down the page's edge, and a shadow pulled back
+    /// over the edge stopped short of it (seed 2106 of the GPU audit: a
+    /// copy wearing a bevel, held to a curves layer).
+    #[test]
+    fn a_held_layer_running_off_the_page_is_held_past_its_edge_too() {
+        let bevel = Effect::Bevel {
+            size: 3.0,
+            depth: 1.0,
+            lx: -1.0,
+            ly: -1.0,
+            altitude: 30.0,
+            highlight: WHITE,
+            shadow: BLACK,
+            opacity: 1.0,
+        };
+        let shadow = Effect::DropShadow {
+            dx: -2.6,
+            dy: 1.2,
+            blur: 1.4,
+            color: BLUE,
+            opacity: 0.9,
+            spread: 0.0,
+        };
+        let adjustment = || {
+            Box::new(Node::adjustment(
+                "brighter",
+                Adjustment::Exposure { stops: 0.4 },
+            ))
+        };
+        let shape = || {
+            let mut base = filled_rect(
+                "base",
+                30.0,
+                20.0,
+                AuthoredColor::Srgb {
+                    r: 0.2,
+                    g: 0.7,
+                    b: 0.3,
+                    a: 1.0,
+                },
+            );
+            base.transform = Transform::translation(30.0, 8.0);
+            base
+        };
+        for (what, base, effect) in [
+            ("a bevel held to an adjustment", adjustment(), &bevel),
+            ("a shadow held to an adjustment", adjustment(), &shadow),
+            ("a bevel held to a shape off the page", shape(), &bevel),
+            ("a shadow held to a shape off the page", shape(), &shadow),
+        ] {
+            let page = |margin: f32| {
+                let m = margin as u32;
+                let mut doc = Document::new(48 + 2 * m, 36 + 2 * m, ColorMode::Rgb);
+                let mut ground = filled_rect(
+                    "ground",
+                    48.0,
+                    36.0,
+                    AuthoredColor::Srgb {
+                        r: 0.5,
+                        g: 0.5,
+                        b: 0.5,
+                        a: 1.0,
+                    },
+                );
+                ground.transform = Transform::translation(margin, margin);
+                add(&mut doc, ground);
+                let mut base = base.clone();
+                base.transform = Transform::translation(margin, margin).compose(base.transform);
+                add(&mut doc, base);
+                let mut held = filled_rect("held", 26.0, 14.0, RED);
+                held.transform = Transform::translation(33.7 + margin, 11.4 + margin);
+                held.effects = vec![effect.clone()];
+                held.clipped = true;
+                add(&mut doc, held);
+                render(&doc).unwrap()
+            };
+            let (tight, roomy) = (page(0.0), page(12.0));
+            let (mut n, mut worst) = (0usize, 0.0f32);
+            for y in 0..36u32 {
+                for x in 0..48u32 {
+                    let (a, b) = (tight.get(x, y), roomy.get(x + 12, y + 12));
+                    let d = (a.r - b.r)
+                        .abs()
+                        .max((a.g - b.g).abs())
+                        .max((a.b - b.b).abs())
+                        .max((a.a - b.a).abs());
+                    n += (d > 1e-3) as usize;
+                    worst = worst.max(d);
+                }
+            }
+            assert!(
+                n == 0,
+                "{what}: {n} pixels differ between the page and the same page with room \
+                 round it, the worst by {worst:.3}"
+            );
         }
     }
 
