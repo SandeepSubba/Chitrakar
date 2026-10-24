@@ -2846,12 +2846,10 @@ fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> Option<(Trans
                 .map(chitrakar_doc::Effect::reach)
                 .fold(0.0f32, f32::max)
         };
-        if drawn > 0.0 {
-            if past() {
-                let m = (drawn * space.max_scale()).ceil();
-                if m.is_finite() && m > 0.0 {
-                    *room = (*room).max((m as u32).min(size.0.max(size.1)));
-                }
+        if drawn > 0.0 && past() {
+            let m = (drawn * space.max_scale()).ceil();
+            if m.is_finite() && m > 0.0 {
+                *room = (*room).max((m as u32).min(size.0.max(size.1)));
             }
         }
         let inner = space.compose(node.transform);
