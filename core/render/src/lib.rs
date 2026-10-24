@@ -1338,6 +1338,25 @@ fn render_group(
 ) -> Result<(), DocError> {
     // Children are stored bottom-to-top (painter's order).
     let children = doc.children_of(group)?;
+    render_siblings(doc, children, dst, clip, parent, bare)
+}
+
+/// Layers that stand side by side, drawn bottom first, each run of layers
+/// held to the one under them drawn as a run: a group's children, or what
+/// a copy draws in their place where it stands in for some of them
+/// (`copy_children`). Those were drawn one at a time, so a layer held to
+/// the one under it in a copy with stand-ins was drawn whole — where the
+/// same copy with none held it, and where ghostscript, reading the PDF
+/// that draws them as a run, held it (page 369 of the shifted pages, a
+/// path held to a hidden adjustment in a copy standing in for it).
+fn render_siblings(
+    doc: &Document,
+    children: &[NodeId],
+    dst: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+    bare: bool,
+) -> Result<(), DocError> {
     let mut i = 0;
     while i < children.len() {
         // A run of layers clipped to the one below them: the first is what
@@ -1519,6 +1538,146 @@ pub fn copies_a_clone_within(doc: &Document, id: NodeId) -> bool {
         Ok(NodeKind::Instance { of, .. }) => holds_a_clone(doc, *of, 0),
         _ => false,
     }
+}
+
+/// A copy stood up as layers of its own: the document with the copy
+/// replaced, in its place among its siblings, by a group carrying the
+/// copy's own attributes and placement — the original's placement undone,
+/// as the copy draws it — and inside that a fresh copy of the original,
+/// layer for layer. And which of the new layers stands for which of the
+/// original's.
+///
+/// For a question about what a copy draws that the document can only ask
+/// of the original: what a clone layer lifts, which depends on what is
+/// under it where it stands. Inside a copy that is somewhere else, and an
+/// exporter writing the original's picture of what it lifted again in the
+/// copy's place put a patch of the wrong part of the page there (page
+/// 1591 of the shifted blends: a frame holding a clone, and a copy of it).
+/// `None` for anything but a copy whose original is there to copy.
+pub fn stood_up(doc: &Document, copy: NodeId) -> Option<(Document, Vec<(NodeId, NodeId)>)> {
+    use chitrakar_doc::Command as C;
+    let node = doc.node(copy).ok()?;
+    let NodeKind::Instance { of, .. } = &node.kind else {
+        return None;
+    };
+    // A copy of a clone layer itself has a road of its own, here and in
+    // an exporter (`clone_pixels`), which lifts where the copy stands and
+    // brings what it lays down by the copy's own mask, opacity and blend
+    // on the way down to the clone (`clone_behind`).
+    if copies_a_clone(doc, copy) {
+        return None;
+    }
+    // A copy wearing nothing of its own draws the original straight in,
+    // where it stands: so does the copy stood up, with the copy's
+    // placement composed into the original's. Not a group round it, which
+    // would isolate what the copy does not — a group holding a clone
+    // layer is drawn on a surface of its own, where the clone lifts only
+    // what is inside it. A copy wearing something of its own — opacity, a
+    // blend, a mask, effects, a hold on the layer under it — is drawn by
+    // readings of its own (the original's blend brought down on the
+    // copy's surface, its effects grown from what it draws, …), each of
+    // which a stood-up copy would have to reproduce; those are declined.
+    let bare = node.opacity >= 1.0
+        && node.blend == BlendMode::Normal
+        && node.mask.is_none()
+        && node.effects.is_empty()
+        && !node.clipped;
+    if !bare {
+        return None;
+    }
+    let original = doc.node(*of).ok()?;
+    let back = invert(original.transform)?;
+    // The space the original is drawn in inside the copy: the copy's
+    // placement with the original's own undone. What the original wears
+    // in the space it is placed in — its mask, its effects — is carried
+    // through it, as anything moving a layer between spaces carries them.
+    let space = node.transform.compose(back);
+    // What the copy draws inside: the original's children, with the
+    // copy's own layers standing in for some of them where it has any
+    // (`copy_children`).
+    let stand_ins = if takes_stand_ins(doc, *of) {
+        copy_children(doc, copy).ok()?
+    } else {
+        Vec::new()
+    };
+    let kids = if stand_ins.is_empty() {
+        doc.children_of(*of).ok()?.to_vec()
+    } else {
+        stand_ins
+    };
+    let mut out = doc.clone();
+    // The copy's own node becomes the original, so a copy *of the copy*
+    // still finds what it copies; its own layers go, and come back as
+    // fresh ones among the original's below when they stand in for any.
+    for own in doc.children_of(copy).ok()?.to_vec() {
+        out.apply(C::RemoveNode { id: own }).ok()?;
+    }
+    for c in [
+        C::SetKind {
+            id: copy,
+            kind: Box::new(original.kind.clone()),
+        },
+        C::SetTransform {
+            id: copy,
+            transform: space.compose(original.transform),
+        },
+        C::SetOpacity {
+            id: copy,
+            opacity: original.opacity,
+        },
+        C::SetBlendMode {
+            id: copy,
+            blend: original.blend,
+        },
+        C::SetMask {
+            id: copy,
+            mask: original
+                .mask
+                .as_ref()
+                .map(|m| Box::new(m.carried_through(space))),
+        },
+        C::SetEffects {
+            id: copy,
+            effects: original
+                .effects
+                .iter()
+                .map(|e| e.carried_through(space))
+                .collect(),
+        },
+    ] {
+        out.apply(c).ok()?;
+    }
+    let mut map = vec![(*of, copy)];
+    fn graft(
+        doc: &Document,
+        out: &mut Document,
+        from: NodeId,
+        into: NodeId,
+        map: &mut Vec<(NodeId, NodeId)>,
+        depth: usize,
+    ) -> Option<()> {
+        if depth >= chitrakar_doc::MAX_DEPTH {
+            return None;
+        }
+        let node = doc.node(from).ok()?.clone();
+        let index = out.children_of(into).ok()?.len();
+        out.apply(chitrakar_doc::Command::AddNode {
+            parent: into,
+            index,
+            node: Box::new(node),
+        })
+        .ok()?;
+        let made = out.children_of(into).ok()?[index];
+        map.push((from, made));
+        for child in doc.children_of(from).ok()?.to_vec() {
+            graft(doc, out, child, made, map, depth + 1)?;
+        }
+        Some(())
+    }
+    for child in kids {
+        graft(doc, &mut out, child, copy, &mut map, 0)?;
+    }
+    Some((out, map))
 }
 
 pub fn copies_a_clone(doc: &Document, id: NodeId) -> bool {
@@ -2845,9 +3004,19 @@ fn draw_effected(
             other => other,
         };
         // A clipped layer cannot show outside what it is clipped to, so
-        // its surface need never be bigger than that layer's window.
+        // its surface need never be bigger than that layer's window —
+        // and as far past it as the layer's effects read. Past the base's
+        // window the layer is cut to nothing, which is what an inner
+        // shadow casts its hole from; cut at the window itself, the field
+        // read nothing past it, which in the hole an inner shadow is cast
+        // from is silhouette rather than hole, and the shadow along that
+        // side went missing. Which window that is depends on the road the
+        // base took — its own box, or its box grown by effects of its own
+        // — so a frame held to a rect lost or kept its inner shadow by
+        // whether the rect wore a drop shadow at no opacity at all (page
+        // 160 of the shifted seeds).
         let confined = match cover {
-            Some(c) => grown.intersect(c.rect()),
+            Some(c) => grown.intersect(grow(c.rect(), pad, dst.width, dst.height)),
             None => grown,
         };
         let layer_clip = match extent.to_clip(dst.width, dst.height) {
@@ -2899,7 +3068,7 @@ fn draw_effected(
         if let Some(c) = cover {
             for y in layer_clip.y0..layer_clip.y1 {
                 for x in layer_clip.x0..layer_clip.x1 {
-                    let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                    let a = c.alpha_at(x, y);
                     let i = at_in(origin, layer.width, x, y);
                     layer.pixels[i] = scale_alpha(layer.pixels[i], a);
                 }
@@ -3281,10 +3450,7 @@ fn render_child(
                     if stand_ins.is_empty() {
                         return render_layer(doc, *of, dst, sub_clip, space, bare);
                     }
-                    for &part in &stand_ins {
-                        render_layer(doc, part, dst, sub_clip, t, bare)?;
-                    }
-                    return Ok(());
+                    return render_siblings(doc, &stand_ins, dst, sub_clip, t, bare);
                 }
                 let (ox, oy) = (draw_clip.x0, draw_clip.y0);
                 let window = Transform::translation(-(ox as f32), -(oy as f32));
@@ -3298,9 +3464,7 @@ fn render_child(
                 if stand_ins.is_empty() {
                     render_layer(doc, *of, &mut sub, inner, window.compose(space), bare)?;
                 } else {
-                    for &part in &stand_ins {
-                        render_layer(doc, part, &mut sub, inner, window.compose(t), bare)?;
-                    }
+                    render_siblings(doc, &stand_ins, &mut sub, inner, window.compose(t), bare)?;
                 }
                 if node.mask.is_some() {
                     let shifted = window.compose(parent);
@@ -5108,7 +5272,7 @@ fn max_scale(t: Transform) -> f32 {
 
 /// Samples per curve segment when flattening. Shared so per-anchor data
 /// can be resampled to match the polyline exactly.
-const FLATTEN_STEPS: usize = 12;
+pub const FLATTEN_STEPS: usize = 12;
 
 /// The Bezier handles a `smooth` path's curve is made of.
 ///
@@ -11319,6 +11483,54 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
     let Some(base) = clip_base(doc, id)? else {
         return Ok(None);
     };
+    clip_pixels_over(doc, base, ancestor_space(doc, id))
+}
+
+/// [`clip_base`] among what a copy draws where it stands in for some of
+/// the original's layers (`copy_children`): the nearest layer under it in
+/// that list that is not held itself, which is what the copy holds it to
+/// (`render_siblings`). `None` when the layer is not held, or nothing in
+/// the list is under it.
+pub fn stand_in_base(doc: &Document, copy: NodeId, id: NodeId) -> Result<Option<NodeId>, DocError> {
+    if !doc.node(id)?.clipped {
+        return Ok(None);
+    }
+    let parts = copy_children(doc, copy)?;
+    let Some(mut at) = parts.iter().position(|&s| s == id) else {
+        return Ok(None);
+    };
+    while at > 0 {
+        at -= 1;
+        if !doc.node(parts[at])?.clipped {
+            return Ok(Some(parts[at]));
+        }
+    }
+    Ok(None)
+}
+
+/// [`clip_pixels`] for a layer among a copy's stand-ins, held to the one
+/// under it in the copy's list rather than among its own siblings.
+pub fn stand_in_clip_pixels(
+    doc: &Document,
+    copy: NodeId,
+    id: NodeId,
+) -> Result<Option<PaintedPixels>, DocError> {
+    let Some(base) = stand_in_base(doc, copy, id)? else {
+        return Ok(None);
+    };
+    // In the space the copy draws its stand-ins in: its own, where they
+    // land, rather than wherever the original's own ones stand.
+    let placed = ancestor_space(doc, copy).compose(doc.node(copy)?.transform);
+    clip_pixels_over(doc, base, placed)
+}
+
+/// What a layer held to `base` is let through by: [`clip_pixels`] once
+/// the base is known, with how the space the two share reaches the page.
+fn clip_pixels_over(
+    doc: &Document,
+    base: NodeId,
+    to_page: Transform,
+) -> Result<Option<PaintedPixels>, DocError> {
     // A base that is not drawn shows nothing of what is held to it, as on
     // the page — whatever kind of layer it is. An adjustment or a filter
     // hidden was still read as letting everything through.
@@ -11351,7 +11563,7 @@ pub fn clip_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>, 
         // the page and whole in an SVG.
         Bounds::None => return Ok(Some(nothing())),
     };
-    let (x0, y0, x1, y1) = on_the_grid(ancestor_space(doc, id), (x0, y0, x1, y1));
+    let (x0, y0, x1, y1) = on_the_grid(to_page, (x0, y0, x1, y1));
     let (w, h) = (
         (x1 - x0).ceil().max(1.0) as u32,
         (y1 - y0).ceil().max(1.0) as u32,
@@ -11843,6 +12055,122 @@ pub fn clone_pixels(doc: &Document, id: NodeId) -> Result<Option<PaintedPixels>,
         origin: [x0, y0],
         rgba8,
     }))
+}
+
+/// [`clone_pixels`], and where the picture goes in the layer's own space:
+/// the transform an exporter writes on the image inside the layer's
+/// transform.
+///
+/// Where the layer reaches the page by a plain move that is the picture's
+/// corner, and the picture is [`clone_pixels`]'. Turned or scaled, a
+/// picture in the layer's own space is a grid the page does not share:
+/// each stroke lifts a fixed distance away, rounded to a pixel, and
+/// rounded on the layer's grid it lifted from neighbours the page does
+/// not — near the page's edge, a partly covered pixel the page never
+/// lifts from at all, which a healing stroke then coloured; and a reader
+/// resampled the whole picture on top of that. A Difference heal turned a
+/// tenth of a turn, its source off the top of the page, came out of an
+/// SVG with a patch the page did not have (page 831 of the shifted
+/// blends). So such a picture is made on the page's own grid — the clone
+/// lifting exactly as it does on the page — and placed with the layer's
+/// placement undone, which lays its pixels back on the page's.
+#[allow(clippy::type_complexity)]
+pub fn clone_pixels_placed(
+    doc: &Document,
+    id: NodeId,
+) -> Result<Option<(PaintedPixels, Transform)>, DocError> {
+    let node = doc.node(id)?;
+    let above = ancestor_space(doc, id);
+    let to_page = above.compose(node.transform);
+    let plain = (to_page.a - 1.0).abs() < 1e-6
+        && (to_page.d - 1.0).abs() < 1e-6
+        && to_page.b.abs() < 1e-6
+        && to_page.c.abs() < 1e-6;
+    if plain {
+        return Ok(clone_pixels(doc, id)?.map(|p| {
+            let at = Transform::translation(p.origin[0], p.origin[1]);
+            (p, at)
+        }));
+    }
+    let mut at = id;
+    let mut found = None;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        match &doc.node(at)?.kind {
+            NodeKind::Clone { strokes } => {
+                found = Some(strokes);
+                break;
+            }
+            NodeKind::Instance { of, .. } => at = *of,
+            _ => return Ok(None),
+        }
+    }
+    let Some(strokes) = found else {
+        return Ok(None);
+    };
+    let Some([x0, y0, x1, y1]) = painted_bounds(strokes) else {
+        return Ok(None);
+    };
+    let Bounds::Rect(px0, py0, px1, py1) = transformed_box(to_page, [x0, y0, x1, y1]) else {
+        return Ok(None);
+    };
+    // Whole pixels of the page, and no more of it than the page has: a
+    // stroke laid past the page's edge lays nothing there.
+    let (px0, py0) = (px0.floor().max(0.0), py0.floor().max(0.0));
+    let (px1, py1) = (
+        px1.ceil().min(doc.meta.width as f32),
+        py1.ceil().min(doc.meta.height as f32),
+    );
+    if !(px1 > px0 && py1 > py0) {
+        return Ok(None);
+    }
+    let (w, h) = ((px1 - px0) as u32, (py1 - py0) as u32);
+    if w > 16384 || h > 16384 {
+        return Ok(None);
+    }
+    let Some(undo) = invert(to_page) else {
+        return Ok(None);
+    };
+    let mut bare = doc.clone();
+    for c in [
+        chitrakar_doc::Command::SetOpacity { id, opacity: 1.0 },
+        chitrakar_doc::Command::SetMask { id, mask: None },
+        chitrakar_doc::Command::SetEffects {
+            id,
+            effects: Vec::new(),
+        },
+        chitrakar_doc::Command::SetBlendMode {
+            id,
+            blend: BlendMode::Normal,
+        },
+    ] {
+        bare.apply(c)?;
+    }
+    let mut surface = Surface::new(w, h);
+    let clip = ClipRect {
+        x0: 0,
+        y0: 0,
+        x1: w,
+        y1: h,
+    };
+    // The parent's space as the page has it, moved so the picture's
+    // corner is the page pixel it starts at.
+    let space = Transform::translation(-px0, -py0).compose(above);
+    if !clone_alone(&bare, id, &mut surface, clip, space)? {
+        return Ok(None);
+    }
+    let mut rgba8 = Vec::with_capacity((w * h) as usize * 4);
+    for px in &surface.pixels {
+        rgba8.extend_from_slice(&px.to_srgb8());
+    }
+    Ok(Some((
+        PaintedPixels {
+            width: w,
+            height: h,
+            origin: [px0, py0],
+            rgba8,
+        },
+        undo.compose(Transform::translation(px0, py0)),
+    )))
 }
 
 /// A layer's effects on their own, for an exporter that draws the layer
@@ -32021,6 +32349,241 @@ mod tests {
         }
     }
 
+    /// A layer held to a smaller one under it, wearing an inner shadow,
+    /// casts it from the edge of what it is held to — and the same shadow
+    /// whatever road the base took to be drawn.
+    ///
+    /// A held layer's surface was cut to the base's window, and an inner
+    /// shadow's field reads nothing past its window: in the hole a shadow
+    /// is cast from, nothing is silhouette rather than hole, so along the
+    /// base's edge the shadow went missing as far in as it reaches. And
+    /// the base's window is its own box, or that box grown by effects of
+    /// its own, so putting a drop shadow at no opacity on the base — no
+    /// effect at all — widened the window and gave the held layer its
+    /// shadow back (page 160 of the shifted seeds). The surface reaches
+    /// past the base's window as far as the effects read now, cut to
+    /// nothing there.
+    #[test]
+    fn a_held_layers_inner_shadow_is_cast_from_the_edge_it_is_held_to() {
+        let page = |dress_the_base: bool| {
+            let mut doc = Document::new(60, 50, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled_rect(
+                    "ground",
+                    60.0,
+                    50.0,
+                    AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                ),
+            );
+            let mut base = filled_rect("base", 24.0, 20.0, RED);
+            base.transform = Transform::translation(18.0, 15.0);
+            if dress_the_base {
+                base.effects = vec![Effect::DropShadow {
+                    dx: 4.0,
+                    dy: 4.0,
+                    blur: 2.0,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.0,
+                    spread: 0.0,
+                }];
+            }
+            add(&mut doc, base);
+            let mut held = filled_rect("held", 60.0, 50.0, BLUE);
+            held.clipped = true;
+            held.effects = vec![Effect::InnerShadow {
+                dx: 0.0,
+                dy: 0.0,
+                blur: 2.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 1.0,
+                spread: 0.0,
+            }];
+            add(&mut doc, held);
+            render(&doc).unwrap()
+        };
+        let (bare, dressed) = (page(false), page(true));
+        let worst = bare
+            .pixels
+            .iter()
+            .zip(&dressed.pixels)
+            .map(|(a, b)| {
+                (a.r - b.r)
+                    .abs()
+                    .max((a.g - b.g).abs())
+                    .max((a.b - b.b).abs())
+                    .max((a.a - b.a).abs())
+            })
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-4,
+            "a drop shadow at no opacity on the base moved the held layer by {worst:.4}"
+        );
+        // Along the inside of the base's left edge, darker than in the
+        // middle of it: the shadow is cast from that edge.
+        let (edge, middle) = (bare.get(19, 25), bare.get(30, 25));
+        assert!(
+            edge.b < middle.b - 0.2,
+            "the inner shadow along the base's edge: {edge:?} against the middle {middle:?}"
+        );
+    }
+
+    /// A copy standing in for a layer of what it copies holds the layers
+    /// above it to it, as the original holds them to its own.
+    ///
+    /// A copy's stand-ins were drawn one layer at a time, so a layer held
+    /// to the one under it was drawn whole in a copy that stands in for
+    /// anything — where the same copy with none holds it, and where the
+    /// PDF, which draws them as a group's children, holds it (page 369 of
+    /// the shifted pages: a path held to a hidden adjustment came out
+    /// whole on the page, and as nothing in ghostscript). They are drawn
+    /// as a run now (`render_siblings`).
+    #[test]
+    fn a_copys_stand_ins_hold_the_layers_above_them() {
+        let mut doc = Document::new(80, 30, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("pair")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        let mut base = filled_rect("base", 10.0, 10.0, RED);
+        base.transform = Transform::translation(5.0, 10.0);
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: base,
+        })
+        .unwrap();
+        let base = doc.children_of(group).unwrap()[0];
+        let mut held = filled_rect("held", 30.0, 30.0, BLUE);
+        held.clipped = true;
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 1,
+            node: held,
+        })
+        .unwrap();
+        // A copy forty along, standing in for the base with one further
+        // right in the copy's own space.
+        let mut copy = Node::instance("copy", group);
+        copy.kind = NodeKind::Instance {
+            of: group,
+            replaces: vec![base],
+        };
+        copy.transform = Transform::translation(40.0, 0.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(copy),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        let mut own = filled_rect("own base", 10.0, 10.0, RED);
+        own.transform = Transform::translation(15.0, 10.0);
+        doc.apply(Command::AddNode {
+            parent: copy,
+            index: 0,
+            node: own,
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        // The original: blue only over its base.
+        assert!(
+            page.get(8, 14).b > 0.9,
+            "the original holds blue over its base"
+        );
+        assert!(page.get(25, 14).a < 0.01, "and none of it past the base");
+        // The copy: blue only over the copy's own base, at 55..65.
+        assert!(
+            page.get(58, 14).b > 0.9,
+            "the copy holds blue over its stand-in: {:?}",
+            page.get(58, 14)
+        );
+        assert!(
+            page.get(45, 14).a < 0.01 && page.get(68, 14).a < 0.01,
+            "and none of it past the stand-in: {:?} {:?}",
+            page.get(45, 14),
+            page.get(68, 14)
+        );
+    }
+
+    /// A copy stood up as layers of its own draws the page it stood in:
+    /// every copy on the pages nobody wrote, each in turn.
+    ///
+    /// `stood_up` is how an exporter asks what a clone layer inside a copy
+    /// lifts, so it is only as good as it is faithful, and it was not at
+    /// first: it put the copy's placement on a group round the original,
+    /// and a group holding a clone is drawn on a surface of its own, where
+    /// the clone lifts only what is inside it — a copy the reference
+    /// draws in place came out isolated, half a channel off on page 1591.
+    /// A copy wearing nothing of its own stands the original up directly
+    /// in its place now.
+    #[test]
+    fn a_copy_stood_up_draws_the_page_it_stood_in() {
+        let (mut copies, mut stood, mut cloning) = (0usize, 0usize, 0usize);
+        for seed in 0..600u64 {
+            let doc = chitrakar_doc::fixture::page(seed);
+            let Ok(want) = render(&doc) else { continue };
+            let mut ids: Vec<NodeId> = doc
+                .nodes()
+                .filter(|(_, n)| matches!(n.kind, NodeKind::Instance { .. }))
+                .map(|(i, _)| *i)
+                .collect();
+            ids.sort_by_key(|i| i.0);
+            for id in ids {
+                copies += 1;
+                let Some((up, _)) = stood_up(&doc, id) else {
+                    continue;
+                };
+                stood += 1;
+                cloning += copies_a_clone_within(&doc, id) as usize;
+                let got = render(&up).unwrap();
+                let worst = got
+                    .pixels
+                    .iter()
+                    .zip(&want.pixels)
+                    .map(|(a, b)| {
+                        (a.r - b.r)
+                            .abs()
+                            .max((a.g - b.g).abs())
+                            .max((a.b - b.b).abs())
+                            .max((a.a - b.a).abs())
+                    })
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst < 1e-3,
+                    "seed {seed}: {id:?} ({:?}) stood up draws the page {worst:.4} otherwise",
+                    doc.node(id).unwrap().name
+                );
+            }
+        }
+        // Most copies on these pages wear something of their own and are
+        // declined; a fifth are bare, and among those the ones holding a
+        // clone, which is what an exporter asks this for.
+        assert!(
+            copies > 300 && stood > 60 && cloning > 5,
+            "asked of enough copies ({stood} of {copies}, {cloning} holding a clone)"
+        );
+    }
+
     #[test]
     fn a_mask_that_hides_nothing_is_no_mask() {
         const SEEDS: u64 = 600;
@@ -32180,15 +32743,35 @@ mod tests {
     /// whose softening was worked out over a plane cut to the layer's own
     /// surface and so came up short at exactly the layer's edge. Seventeen
     /// of these two thousand pages failed before those two; none does now.
+    ///
+    /// A surface blur is hidden too, and a copy of one, because it is the
+    /// one thing on a page whose alpha *does* read colour: it averages a
+    /// pixel's neighbours by how alike their colours are, alpha with the
+    /// rest, so a blend under it changes which neighbours count and so
+    /// what it covers. That is the filter, not a layer losing part of
+    /// itself — page 2302 of the next two thousand, a Colour Dodge group
+    /// of text under one, changed five pixels by a twentieth, and none
+    /// with the surface blur hidden. A median votes channel by channel,
+    /// alpha on its own, and stays.
     #[test]
     fn a_blend_never_changes_what_a_page_covers() {
         const SEEDS: u64 = 2000;
         let (mut with_blends, mut inked, mut worst_page) = (0usize, 0usize, (0.0f32, 0u64, 0usize));
         for seed in 0..SEEDS {
             let mut doc = chitrakar_doc::fixture::page(seed);
+            let reads_colour = |doc: &Document, mut id: NodeId| {
+                for _ in 0..chitrakar_doc::MAX_DEPTH {
+                    match doc.node(id).map(|nd| &nd.kind) {
+                        Ok(NodeKind::Filter(Filter::SurfaceBlur { .. })) => return true,
+                        Ok(NodeKind::Instance { of, .. }) => id = *of,
+                        _ => return false,
+                    }
+                }
+                false
+            };
             let ground: Vec<NodeId> = doc
                 .nodes()
-                .filter(|(_, nd)| nd.name == "ground")
+                .filter(|(i, nd)| nd.name == "ground" || reads_colour(&doc, **i))
                 .map(|(i, _)| *i)
                 .collect();
             for id in ground {

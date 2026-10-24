@@ -1479,6 +1479,33 @@ fn walk(
             // A group kept for its fade alone is still cut to its region, by
             // the region on each layer under it, which distributes.
             let clip = if soft_here.is_some() { None } else { clip };
+            // But not over what effects grow: a reader cuts a group after
+            // its filter, so an outline or a shadow ends at the region the
+            // group is seen through, and on each layer the region cut only
+            // the shapes the outline grew from, which it then reached past
+            // — every outline in a frame went a width past the frame's edge
+            // (page 667 of the round trips). So a group kept for effects
+            // under a region is cut by a group of its own round it, which
+            // takes the blend too: with nothing else in it, bringing that
+            // down by the blend is bringing the group down by it.
+            let (clip, within, carried) = match (effected, clip) {
+                (true, Some(region)) => {
+                    got.groups.push(ImportedGroup {
+                        name: "Cut".to_string(),
+                        mask: Some(mask_of(&region)),
+                        opacity: 1.0,
+                        blend: if mine != chitrakar_doc::BlendMode::Normal {
+                            mine
+                        } else {
+                            place.blend
+                        },
+                        effects: Vec::new(),
+                        within,
+                    });
+                    (None, Some(got.groups.len() - 1), true)
+                }
+                (_, clip) => (clip, within, false),
+            };
             got.groups.push(ImportedGroup {
                 name: if !group.id().is_empty() {
                     group.id().to_string()
@@ -1502,7 +1529,9 @@ fn walk(
                 } else {
                     opacity
                 } * lifted.unwrap_or(1.0),
-                blend: if mine != chitrakar_doc::BlendMode::Normal {
+                blend: if carried {
+                    chitrakar_doc::BlendMode::Normal
+                } else if mine != chitrakar_doc::BlendMode::Normal {
                     mine
                 } else {
                     place.blend
@@ -2157,7 +2186,14 @@ impl Ring {
         if !self.curved() {
             return self.points.clone();
         }
-        const STEPS: usize = 8;
+        // As finely as the renderer flattens the same curve, which is the
+        // curve that is drawn: what is decided about the outline here —
+        // whether it winds round anywhere twice — is decided of that. At
+        // eight steps a loop the drawn curve makes was not in this one,
+        // and a file filling it by winding came in with a hole there
+        // (file 502 of the files written elsewhere, over the next four
+        // hundred).
+        const STEPS: usize = chitrakar_render::FLATTEN_STEPS;
         let n = self.points.len();
         let segments = if self.closed { n } else { n.saturating_sub(1) };
         let mut out = Vec::with_capacity(segments * STEPS + 1);
@@ -3784,6 +3820,95 @@ mod tests {
     /// in, hidden on the page, came back whole on top of its neighbour,
     /// because two clips that do not meet were read as two clips that
     /// could not be combined (`walk`, `boolean::combine_or_nudge`).
+    /// How differently a reader and the engine cover a file brought in:
+    /// the pixels covered by more than half on one side and not the other.
+    fn covered_otherwise(svg: &str, width: u32, height: u32) -> usize {
+        let doc = brought_in(svg, width, height);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let tree = usvg::Tree::from_data(svg.as_bytes(), &usvg::Options::default()).unwrap();
+        let mut drawn = resvg::tiny_skia::Pixmap::new(width, height).unwrap();
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut drawn.as_mut(),
+        );
+        ours.pixels
+            .iter()
+            .zip(drawn.data().chunks(4))
+            .filter(|(p, t)| (p.a - t[3] as f32 / 255.0).abs() > 0.5)
+            .count()
+    }
+
+    /// An outline that winds round a small loop twice is filled there, as
+    /// the nonzero rule fills it, however small the loop.
+    ///
+    /// Whether an outline winds anywhere twice was asked of the outline
+    /// flattened eight steps a curve, and the engine draws it at twelve:
+    /// a loop the drawn curve makes was not in the one asked about, so the
+    /// conversion to the engine's even-odd rule thought there was nothing
+    /// to convert, and the loop came in a hole (file 502 of the next four
+    /// hundred files written elsewhere). It is asked of the curve as the
+    /// engine flattens it now. The tracing's reach past a sliver's tip
+    /// (`an_outline_with_a_spike_comes_in_by_winding`) closes this one as
+    /// well; with both taken back it comes in four pixels short.
+    #[test]
+    fn a_small_loop_wound_twice_comes_in_filled() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48" viewBox="0 0 64 48"><g transform="translate(-4.43 2.69)"><path d="M15.14 9.10 C8.61 30.47 37.25 31.32 34.67 13.38 h-4.99 v0.89 C63.87 5.23 10.05 19.58 34.44 26.98" fill="#ab5650" transform="scale(1.18 0.98)"/></g></svg>"##;
+        let off = covered_otherwise(svg, 64, 48);
+        assert!(
+            off == 0,
+            "{off} pixels covered otherwise than a reader covers them"
+        );
+    }
+
+    /// An outline with a spike in it — a line out and a curve back along
+    /// very nearly the same way — still comes in by the nonzero rule.
+    ///
+    /// Near the spike's point the sliver between the two is thinner than
+    /// the offset each edge is read inside or out at, so the last edges up
+    /// to the point were dropped and the outline could not be closed; the
+    /// whole path came in even-odd, with a hole wherever it wound twice
+    /// (file 701, 51 pixels). The tracing takes the edge going back down
+    /// the sliver's other side now, where nothing nearer closes it.
+    #[test]
+    fn an_outline_with_a_spike_comes_in_by_winding() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48" viewBox="0 0 64 48"><path d="M10.19 8.34 h-2.04 v11.90 C44.38 3.81 11.48 44.40 19.07 8.38 A6.82 15.06 75.1 0 0 54.56 31.82 l11.70 12.86 q-6.85 -7.69 11.26 14.72" fill="#fee374" transform="matrix(1.14 0.18 -0.14 0.81 -4.7 -4.5)"/></svg>"##;
+        let off = covered_otherwise(svg, 64, 48);
+        assert!(
+            off <= 2,
+            "{off} pixels covered otherwise than a reader covers them"
+        );
+    }
+
+    /// A group wearing effects, seen through a region, is cut after its
+    /// effects, as a reader cuts it.
+    ///
+    /// A region distributes over a group's layers — each cut by it is the
+    /// group cut by it — until the group wears an outline or a shadow: a
+    /// reader cuts after the filter, so the outline ends at the region,
+    /// and on each layer the region cut only what the outline grew from,
+    /// which it then reached past. Every outline in a frame came back a
+    /// width past the frame's edge (page 667 of the round trips). Such a
+    /// group comes in inside a group of its own carrying the region.
+    #[test]
+    fn a_group_wearing_effects_in_a_frame_is_cut_after_its_effects() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40" viewBox="0 0 60 40"><defs><clipPath id="f"><rect x="10" y="10" width="20" height="20"/></clipPath><filter id="o" filterUnits="userSpaceOnUse" x="0" y="0" width="60" height="40"><feComponentTransfer in="SourceAlpha" result="i"><feFuncA type="linear" slope="1000" intercept="-499.5"/></feComponentTransfer><feMorphology in="i" operator="dilate" radius="3" result="g"/><feFlood flood-color="#0000ff" flood-opacity="1"/><feComposite in2="g" operator="in" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g clip-path="url(#f)"><g filter="url(#o)"><rect x="14" y="14" width="6" height="6" fill="#ff0000"/><rect x="22" y="14" width="6" height="6" fill="#ff0000"/></g></g></svg>"##;
+        let doc = brought_in(svg, 60, 40);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        // Inside the frame, the outline round the right-hand square.
+        assert!(
+            ours.get(29, 17).b > 0.5,
+            "the outline inside the frame: {:?}",
+            ours.get(29, 17)
+        );
+        // Past its edge, nothing: the outline would reach to 31.
+        assert!(
+            ours.get(30, 17).a < 0.05,
+            "and none of it past the frame's edge: {:?}",
+            ours.get(30, 17)
+        );
+    }
+
     #[test]
     fn a_page_exported_and_brought_back_is_the_colour_it_was() {
         for seed in 0..400u64 {

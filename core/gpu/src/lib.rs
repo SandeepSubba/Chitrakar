@@ -4379,6 +4379,17 @@ fn one(
                 // A copy whose stand-ins read the page is on a surface
                 // of its own by now (`copy_isolates`), so what they read
                 // is the copy's own surface, as it is on the reference.
+                // Stand-ins are drawn there as a group's children are, a
+                // layer held to the one under it drawn as part of the run
+                // (`render_siblings`); one at a time here, a held one would
+                // be drawn whole, so such a copy goes back.
+                if stand_ins
+                    .iter()
+                    .skip(1)
+                    .any(|k| doc.node(*k).is_ok_and(|n| n.clipped))
+                {
+                    return none!();
+                }
                 for part in stand_ins {
                     one(doc, part, t, inner, within, false, out)?;
                 }

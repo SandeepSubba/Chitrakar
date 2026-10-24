@@ -377,15 +377,15 @@ fn write_node(
             // it lays where it stands (`clone_pixels`); where that cannot
             // be drawn aside it is left out, as it always was.
             NodeKind::Instance { .. } if chitrakar_render::copies_a_clone(doc, child) => {
-                match chitrakar_render::clone_pixels(doc, child) {
-                    Ok(Some(laid)) => {
+                match clone_picture(doc, child) {
+                    Ok(Some((laid, at))) => {
                         let (w, h) = (laid.width, laid.height);
-                        let [x, y] = laid.origin;
                         if let Ok(png) = crate::encode_png(w, h, &laid.rgba8) {
                             let _ = writeln!(out, "{pad}<g{common}>");
                             let _ = writeln!(
                                 out,
-                                r#"{pad}  <image width="{w}" height="{h}" transform="translate({x} {y})" href="data:image/png;base64,{}"/>"#,
+                                r#"{pad}  <image width="{w}" height="{h}"{} href="data:image/png;base64,{}"/>"#,
+                                placement(at),
                                 base64(&png)
                             );
                             let _ = writeln!(out, "{pad}</g>");
@@ -415,18 +415,29 @@ fn write_node(
                 };
                 if !stand_ins.is_empty() {
                     let _ = writeln!(out, "{pad}<g{common}>");
+                    // Drawn as a group's children are, a layer held to the
+                    // one under it held as part of the run — to the one
+                    // under it in the copy's list (`stand_in_clip_pixels`),
+                    // which `clip_attrs` is told about here.
+                    STANDING.with(|s| s.borrow_mut().push(child));
+                    let mut written = Ok(());
                     for part in stand_ins {
-                        write_node(
+                        written = write_node(
                             doc,
                             part,
                             out,
                             depth + 1,
                             defs,
-                            false,
+                            true,
                             "",
                             space.compose(node.transform),
-                        )?;
+                        );
+                        if written.is_err() {
+                            break;
+                        }
                     }
+                    STANDING.with(|s| s.borrow_mut().pop());
+                    written?;
                     let _ = writeln!(out, "{pad}</g>");
                 } else {
                     // Otherwise a copy is the original's markup again,
@@ -453,7 +464,33 @@ fn write_node(
                         );
                         let _ = writeln!(out, "{pad}<g{common}>");
                         let _ = writeln!(out, "{pad}  <g{undo}>");
-                        write_node(
+                        // A clone inside lifts where the copy puts it, so
+                        // while the original's markup is written again
+                        // here, its pictures are asked of the copy stood
+                        // up as layers of its own (`clone_picture`).
+                        let standing = chitrakar_render::copies_a_clone_within(doc, child)
+                            && STOOD.with(|stood| {
+                                let mut stood = stood.borrow_mut();
+                                let made = match stood.last() {
+                                    Some((there, map)) => {
+                                        match map.iter().find(|(from, _)| *from == child) {
+                                            Some((_, here)) => {
+                                                chitrakar_render::stood_up(there, *here)
+                                            }
+                                            None => chitrakar_render::stood_up(doc, child),
+                                        }
+                                    }
+                                    None => chitrakar_render::stood_up(doc, child),
+                                };
+                                match made {
+                                    Some(made) => {
+                                        stood.push(made);
+                                        true
+                                    }
+                                    None => false,
+                                }
+                            });
+                        let written = write_node(
                             doc,
                             *of,
                             out,
@@ -462,7 +499,11 @@ fn write_node(
                             false,
                             "",
                             space.compose(node.transform).compose(back),
-                        )?;
+                        );
+                        if standing {
+                            STOOD.with(|stood| stood.borrow_mut().pop());
+                        }
+                        written?;
                         let _ = writeln!(out, "{pad}  </g>");
                         let _ = writeln!(out, "{pad}</g>");
                     }
@@ -515,9 +556,28 @@ fn write_node(
                     // Over the box the frame is cut to, which is what the
                     // engine fills: the ground's own box, where that was
                     // rounded outward, left a half-covered row at the edge.
+                    // And a turned frame's ground reaches a little past
+                    // its cut, so the cut alone is its edge. Upright, the
+                    // two lie on whole pixels and neither is antialiased;
+                    // turned, both are, and a reader took the edge's
+                    // coverage twice — the ground's own and the cut's —
+                    // so a pixel half covered came out a quarter covered,
+                    // along every edge of every turned frame with a ground
+                    // (page 1591 of the shifted blends).
+                    let to_page = space.compose(node.transform);
+                    let turned = to_page.b.abs() >= 1e-6 || to_page.c.abs() >= 1e-6;
+                    let past = if turned {
+                        2.0 / to_page.max_scale().max(1e-6)
+                    } else {
+                        0.0
+                    };
                     let _ = writeln!(
                         out,
-                        r#"{pad}  <rect x="{bx}" y="{by}" width="{bw}" height="{bh}"{ground}/>"#
+                        r#"{pad}  <rect x="{}" y="{}" width="{}" height="{}"{ground}/>"#,
+                        bx - past,
+                        by - past,
+                        bw + 2.0 * past,
+                        bh + 2.0 * past
                     );
                 }
                 write_children(
@@ -1067,17 +1127,15 @@ fn write_node(
             // they lift, placed the way a brush layer's is. It used to be
             // left out, so an SVG of a retouched page had none of the
             // retouching in it.
-            NodeKind::Clone { .. }
-                if matches!(chitrakar_render::clone_pixels(doc, child), Ok(Some(_))) =>
-            {
-                if let Ok(Some(laid)) = chitrakar_render::clone_pixels(doc, child) {
+            NodeKind::Clone { .. } if matches!(clone_picture(doc, child), Ok(Some(_))) => {
+                if let Ok(Some((laid, at))) = clone_picture(doc, child) {
                     let (w, h) = (laid.width, laid.height);
-                    let [x, y] = laid.origin;
                     if let Ok(png) = crate::encode_png(w, h, &laid.rgba8) {
                         let _ = writeln!(out, "{pad}<g{common}>");
                         let _ = writeln!(
                             out,
-                            r#"{pad}  <image width="{w}" height="{h}" transform="translate({x} {y})" href="data:image/png;base64,{}"/>"#,
+                            r#"{pad}  <image width="{w}" height="{h}"{} href="data:image/png;base64,{}"/>"#,
+                            placement(at),
                             base64(&png)
                         );
                         let _ = writeln!(out, "{pad}</g>");
@@ -1452,7 +1510,18 @@ fn mask_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
 /// The same for a clipped layer, whose mask is the picture the layer
 /// below it makes. Empty when the layer is not clipped to anything.
 fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
-    let Ok(Some(m)) = chitrakar_render::clip_pixels(doc, id) else {
+    // A layer among a copy's stand-ins is held to the one under it in the
+    // copy's list, not among its own siblings.
+    let standing = STANDING
+        .with(|s| s.borrow().last().copied())
+        .filter(|copy| {
+            chitrakar_render::copy_children(doc, *copy).is_ok_and(|parts| parts.contains(&id))
+        });
+    let found = match standing {
+        Some(copy) => chitrakar_render::stand_in_clip_pixels(doc, copy, id),
+        None => chitrakar_render::clip_pixels(doc, id),
+    };
+    let Ok(Some(m)) = found else {
         return String::new();
     };
     let Ok(png) = crate::encode_png(m.width, m.height, &m.rgba8) else {
@@ -1460,7 +1529,14 @@ fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
     };
     let (w, h) = (m.width, m.height);
     let [x, y] = m.origin;
-    let name = format!("clip{}", id.0);
+    // Named for this writing of it: a layer of an original that a copy
+    // stands in for some of is written again there, held to another.
+    let mut name = format!("clip{}", id.0);
+    let mut k = 0;
+    while defs.contains(&format!(r#"id="{name}""#)) {
+        k += 1;
+        name = format!("clip{}_{k}", id.0);
+    }
     let _ = writeln!(
         defs,
         r#"<mask id="{name}" maskUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}"><image x="{x}" y="{y}" width="{w}" height="{h}" href="data:image/png;base64,{}"/></mask>"#,
@@ -1696,6 +1772,65 @@ fn paint_attrs(
         alpha(&mut s, "stroke", fade * stroke.color.alpha());
     }
     s
+}
+
+thread_local! {
+    /// The copies whose stand-ins are being written, innermost last.
+    static STANDING: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A copy stood up as layers of its own (`chitrakar_render::stood_up`),
+/// with which of its layers stands for which of the document's.
+type Stood = (Document, Vec<(NodeId, NodeId)>);
+
+thread_local! {
+    /// The copies being written, innermost last, each stood up.
+    static STOOD: std::cell::RefCell<Vec<Stood>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What a clone layer, or a copy of one, lays where it is being written:
+/// where the document puts it, or — written inside a copy of something
+/// holding it — where that copy does, over what is under the copy.
+#[allow(clippy::type_complexity)]
+fn clone_picture(
+    doc: &Document,
+    id: NodeId,
+) -> Result<Option<(chitrakar_render::PaintedPixels, Transform)>, chitrakar_doc::DocError> {
+    let stood = STOOD.with(|stood| {
+        stood.borrow().last().and_then(|(there, map)| {
+            map.iter()
+                .find(|(from, _)| *from == id)
+                .map(|(_, here)| chitrakar_render::clone_pixels_placed(there, *here))
+        })
+    });
+    match stood {
+        Some(found) => found,
+        None => chitrakar_render::clone_pixels_placed(doc, id),
+    }
+}
+
+/// Where a picture goes, as the attribute that places it: a plain move
+/// as the `translate` every picture here has always been written with,
+/// and anything else as the whole matrix.
+fn placement(at: Transform) -> String {
+    let plain = (at.a - 1.0).abs() < 1e-6
+        && (at.d - 1.0).abs() < 1e-6
+        && at.b.abs() < 1e-6
+        && at.c.abs() < 1e-6;
+    let z = |v: f32| v + 0.0;
+    if plain {
+        format!(r#" transform="translate({} {})""#, z(at.e), z(at.f))
+    } else {
+        format!(
+            r#" transform="matrix({} {} {} {} {} {})""#,
+            z(at.a),
+            z(at.b),
+            z(at.c),
+            z(at.d),
+            z(at.e),
+            z(at.f)
+        )
+    }
 }
 
 /// What a stroke says about itself beyond its colour and width: the dash
@@ -2670,6 +2805,369 @@ mod tests {
             svg.contains("matrix(1 0 0 1 -10 -10)"),
             "with the original's own placement undone: {svg}"
         );
+    }
+
+    /// A turned clone layer lifts in an SVG what it lifts on the page.
+    ///
+    /// The picture of what a clone lays was made in the layer's own space,
+    /// and each stroke lifts a fixed distance away rounded to a pixel — of
+    /// that space, a grid the page does not share once the layer is turned
+    /// or scaled — so over anything with detail it lifted the neighbours
+    /// the page does not, and a reader resampled the picture on top of
+    /// that. A turned clone's picture is made on the page's grid now and
+    /// placed with the layer's placement undone (`clone_pixels_placed`).
+    /// Over stripes a pixel and a half wide, every pixel the clone lays is
+    /// compared, edges and all, colour for colour.
+    #[test]
+    fn a_turned_clone_lifts_in_svg_what_it_lifts_on_the_page() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        let root = doc.root();
+        let put = |doc: &mut Document, mut node: Node, at: Transform| {
+            node.transform = at;
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc.children_of(root).unwrap()[index]
+        };
+        let ink = |r: f32, g: f32, b: f32| chitrakar_color::AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        for k in 0..32 {
+            let mut stripe = Node::vector(
+                "stripe",
+                VectorShape::Rect {
+                    width: 1.5,
+                    height: 36.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut stripe.kind {
+                *fill = Some(if k % 2 == 0 {
+                    ink(0.9, 0.2, 0.1)
+                } else {
+                    ink(0.1, 0.3, 0.9)
+                });
+            }
+            put(
+                &mut doc,
+                stripe,
+                Transform::translation(k as f32 * 1.5, 0.0),
+            );
+        }
+        let mut clone = Node::clone_layer("lift");
+        if let NodeKind::Clone { strokes } = &mut clone.kind {
+            strokes.push(chitrakar_doc::PaintStroke {
+                points: vec![[6.0, 6.0], [16.0, 9.0]],
+                radii: vec![4.0],
+                color: RED,
+                softness: 0.0,
+                erase: false,
+                source: [3.3, 5.1],
+                heal: false,
+                clip: None,
+            });
+        }
+        let (c, sn) = (0.4f32.cos(), 0.4f32.sin());
+        put(
+            &mut doc,
+            clone,
+            Transform::translation(14.3, 6.2).compose(Transform {
+                a: 1.25 * c,
+                b: 1.25 * sn,
+                c: -1.25 * sn,
+                d: 1.25 * c,
+                e: 0.0,
+                f: 0.0,
+            }),
+        );
+        let theirs = resvg_pixels(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let mut bare = doc.clone();
+        let lift = *doc.children_of(root).unwrap().last().unwrap();
+        bare.apply(Command::SetVisible {
+            id: lift,
+            visible: false,
+        })
+        .unwrap();
+        let under = chitrakar_render::render(&bare).unwrap();
+        let w = doc.meta.width as usize;
+        let (h, laid_at) = (doc.meta.height as usize, |x: usize, y: usize| {
+            let (o, u) = (
+                ours.get(x as u32, y as u32).to_srgb8(),
+                under.get(x as u32, y as u32).to_srgb8(),
+            );
+            (0..3).any(|q| o[q] != u[q])
+        });
+        // Only where the stroke lays a pixel whole — every neighbour laid
+        // too. Where its edge half covers a pixel the reader composites in
+        // the encoding a screen shows and the engine in linear light, which
+        // between a red and a blue is a colour apart and nothing to do with
+        // what was lifted.
+        let (mut laid, mut off) = (0, 0);
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                if !(-1..=1).all(|j: i32| {
+                    (-1..=1).all(|i: i32| laid_at((x as i32 + i) as usize, (y as i32 + j) as usize))
+                }) {
+                    continue;
+                }
+                laid += 1;
+                let o = ours.get(x as u32, y as u32).to_srgb8();
+                let k = (y * w + x) * 4;
+                if (0..3).any(|q| o[q].abs_diff(theirs[k + q]) > 40) {
+                    off += 1;
+                }
+            }
+        }
+        assert!(laid > 60, "the clone lays something whole ({laid})");
+        assert!(
+            off <= 2,
+            "{off} of the {laid} pixels the clone lays whole come out of an SVG another colour"
+        );
+    }
+
+    /// A turned frame's ground meets its edge as the page draws it.
+    ///
+    /// The ground was written exactly on the box the frame is cut to, so a
+    /// reader antialiased that edge twice, once for the ground and once for
+    /// the cut: a pixel half covered came out a quarter covered, along
+    /// every edge of a turned frame with a ground (page 1591 of the shifted
+    /// blends). The ground reaches past the cut now, and the cut alone is
+    /// the edge.
+    #[test]
+    fn a_turned_frames_ground_meets_its_edge_as_the_page_draws_it() {
+        let mut doc = Document::new(60, 50, ColorMode::Rgb);
+        let root = doc.root();
+        let mut board = Node::artboard(
+            "frame",
+            30.0,
+            22.0,
+            Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.95,
+                g: 0.9,
+                b: 0.1,
+                a: 1.0,
+            }),
+        );
+        let (c, sn) = (0.3f32.cos(), 0.3f32.sin());
+        board.transform = Transform::translation(16.0, 8.0).compose(Transform {
+            a: c,
+            b: sn,
+            c: -sn,
+            d: c,
+            e: 0.0,
+            f: 0.0,
+        });
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(board),
+        })
+        .unwrap();
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let (mut edge, mut worst) = (0, 0.0f32);
+        for (p, t) in ours.pixels.iter().zip(&theirs) {
+            if p.a > 0.02 && p.a < 0.98 {
+                edge += 1;
+                worst = worst.max((p.a - t).abs());
+            }
+        }
+        assert!(edge > 60, "the frame has an edge to look at ({edge})");
+        assert!(
+            worst < 0.15,
+            "a reader covers the frame's edge {worst:.3} otherwise — its ground's edge and its cut both antialiased"
+        );
+    }
+
+    /// A copy of a frame holding a clone lifts where the copy stands.
+    ///
+    /// A copy is the original's markup written again in the copy's place,
+    /// and that markup held the original's picture of what its clone
+    /// lifted — a patch of the wrong part of the page wherever the copy is
+    /// over something else (page 1591 of the shifted blends). Inside a
+    /// copy, a clone's picture is asked of the copy stood up as layers of
+    /// its own (`stood_up`).
+    #[test]
+    fn a_copy_of_a_frame_holding_a_clone_lifts_where_the_copy_stands() {
+        let mut doc = Document::new(80, 40, ColorMode::Rgb);
+        let root = doc.root();
+        let ink = |r: f32, g: f32, b: f32| chitrakar_color::AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        // Bands ten wide: red, green, blue, yellow, and again.
+        let bands = [
+            ink(0.9, 0.1, 0.1),
+            ink(0.1, 0.8, 0.2),
+            ink(0.1, 0.2, 0.9),
+            ink(0.95, 0.9, 0.1),
+        ];
+        for k in 0..8 {
+            let mut band = Node::vector(
+                "band",
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut band.kind {
+                *fill = Some(bands[k % 4].clone());
+            }
+            band.transform = Transform::translation(k as f32 * 10.0, 0.0);
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(band),
+            })
+            .unwrap();
+        }
+        // A frame with no ground, holding a clone that lifts from ten to
+        // its right: laid at 22 it lifts the yellow at 32.
+        let mut board = Node::artboard("frame", 24.0, 24.0, None);
+        board.transform = Transform::translation(8.0, 8.0);
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(board),
+        })
+        .unwrap();
+        let frame = doc.children_of(root).unwrap()[index];
+        let mut clone = Node::clone_layer("lift");
+        if let NodeKind::Clone { strokes } = &mut clone.kind {
+            strokes.push(chitrakar_doc::PaintStroke {
+                points: vec![[11.0, 12.0], [17.0, 12.0]],
+                radii: vec![3.0],
+                color: RED,
+                softness: 0.0,
+                erase: false,
+                source: [10.0, 0.0],
+                heal: false,
+                clip: None,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: frame,
+            index: 0,
+            node: Box::new(clone),
+        })
+        .unwrap();
+        // And a copy of it thirty-five along: laid at 57, on green, it
+        // lifts the blue at 67.
+        let mut copy = Node::instance("copy", frame);
+        copy.transform = Transform::translation(43.0, 8.0);
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(copy),
+        })
+        .unwrap();
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let theirs = resvg_pixels(&doc);
+        let at = |x: usize, y: usize| {
+            let o = ours.get(x as u32, y as u32).to_srgb8();
+            let k = (y * 80 + x) * 4;
+            (o, [theirs[k], theirs[k + 1], theirs[k + 2]])
+        };
+        let (o, t) = at(22, 20);
+        assert!(
+            o[0] > 200 && o[1] > 200 && o[2] < 80,
+            "the original lifts yellow ({o:?})"
+        );
+        assert!(
+            (0..3).all(|q| o[q].abs_diff(t[q]) <= 20),
+            "in an SVG too ({t:?})"
+        );
+        let (o, t) = at(57, 20);
+        assert!(
+            o[2] > 200 && o[0] < 80,
+            "on the page the copy lifts blue ({o:?})"
+        );
+        assert!(
+            (0..3).all(|q| o[q].abs_diff(t[q]) <= 20),
+            "and in an SVG it lifts what the page does, not the original's yellow nor the green it lies on: {o:?} against {t:?}"
+        );
+    }
+
+    /// A copy standing in for a layer of what it copies holds the layers
+    /// above it to it in an SVG too: each held stand-in is cut by the one
+    /// under it in the copy's list (`stand_in_clip_pixels`), where it was
+    /// written whole.
+    #[test]
+    fn a_copys_stand_ins_hold_the_layers_above_them_in_svg() {
+        let mut doc = Document::new(80, 30, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("pair")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[0];
+        let rect = |name: &str, w: f32, h: f32, at: (f32, f32), held: bool| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(RED);
+            }
+            n.transform = Transform::translation(at.0, at.1);
+            n.clipped = held;
+            Box::new(n)
+        };
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: rect("base", 10.0, 10.0, (5.0, 10.0), false),
+        })
+        .unwrap();
+        let base = doc.children_of(group).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 1,
+            node: rect("held", 30.0, 30.0, (0.0, 0.0), true),
+        })
+        .unwrap();
+        let mut copy = Node::instance("copy", group);
+        copy.kind = NodeKind::Instance {
+            of: group,
+            replaces: vec![base],
+        };
+        copy.transform = Transform::translation(40.0, 0.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(copy),
+        })
+        .unwrap();
+        let copy = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::AddNode {
+            parent: copy,
+            index: 0,
+            node: rect("own base", 10.0, 10.0, (15.0, 10.0), false),
+        })
+        .unwrap();
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let off = ours
+            .pixels
+            .iter()
+            .zip(&theirs)
+            .filter(|(p, t)| (p.a - *t).abs() > 0.5)
+            .count();
+        assert!(
+            ours.get(45, 14).a < 0.01,
+            "the page holds the copy's held layer"
+        );
+        assert!(off == 0, "{off} pixels a reader covers otherwise");
     }
 
     /// A frame wearing an effect is filtered over the whole of its cut.

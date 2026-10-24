@@ -51,6 +51,10 @@ type Ring = Vec<Point>;
 /// intersection arithmetic.
 const WELD: f32 = 1e-3;
 
+/// How far `chain` reaches, past a weld, for the edge going back down the
+/// other side of a sliver's tip (see there).
+const TIP: f32 = 0.5;
+
 /// Even-odd containment against a set of rings.
 fn covers(rings: &[Ring], p: Point) -> bool {
     let mut inside = false;
@@ -175,7 +179,31 @@ fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
                 break;
             }
             ring.push(end);
-            let next = following(end, &used)?;
+            // Where no start is within a weld, the outline has run into
+            // the tip of a sliver — a line out and a curve back along very
+            // nearly the same way, thinner near its point than the offset
+            // `nonzero_as_even_odd` reads either side of an edge at, so the
+            // last few edges up to the point could not be told inside from
+            // out and were dropped. The edge going back the other side
+            // starts a little way down. Taken as the next one only where it
+            // is the nearest start of all and within half a unit — a tip,
+            // not a gap in the outline — and only when nothing else would
+            // close it.
+            let next = match following(end, &used) {
+                Some(next) => next,
+                None => {
+                    let (d, i) = fragments
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !used[*i])
+                        .map(|(i, f)| ((f.0[0] - end[0]).hypot(f.0[1] - end[1]), i))
+                        .fold((f32::MAX, usize::MAX), |b, c| if c.0 < b.0 { c } else { b });
+                    if i == usize::MAX || d > TIP {
+                        return None;
+                    }
+                    i
+                }
+            };
             used[next] = true;
             at = next;
             // A ring longer than the whole fragment set is a cycle that is

@@ -1704,7 +1704,15 @@ impl Page {
                 }
                 (_, mask) => (name, mask),
             };
-            if let Some(gs) = self.gstate_masked(alpha, alpha, node.blend, mask) {
+            // By the blend it copies, for a copy with none of its own: the
+            // group is isolated, so the original's blend inside it meets
+            // nothing, and the engine brings a held or masked copy of a
+            // blended layer down by that blend where it stands (the held
+            // copy of a blend in `draw_layer`). Landing Normal, a copy of
+            // a Color brush held to the brush came out its own colours
+            // (page 341 of the shifted blends).
+            let land = landing_blend(&self.doc, id, &node);
+            if let Some(gs) = self.gstate_masked(alpha, alpha, land, mask) {
                 let _ = writeln!(self.content, "/{gs} gs");
             }
             let _ = writeln!(self.content, "/{name} Do");
@@ -6472,6 +6480,71 @@ mod tests {
     /// transparent pixels' colour was black (`bleed`). Two pixels a page
     /// are allowed for marks thinner than a pixel, which ghostscript
     /// paints every pixel of and the engine covers in part.
+    /// A copy of a blended layer, held to the layer under it, lands by the
+    /// blend it copies. The hold puts it in a group of its own, isolated,
+    /// where the original's blend meets nothing; the group landed by the
+    /// copy's own blend, which is Normal, so a copy of a Multiply layer
+    /// held to that layer came out of ghostscript its own colours where
+    /// the engine multiplies (page 341 of the shifted blends, in Color).
+    #[test]
+    fn a_held_copy_of_a_blended_layer_lands_by_its_blend() {
+        let mut doc = Document::new(40, 30, chitrakar_color::ColorMode::Rgb);
+        let root = doc.root();
+        let rect = |name: &str, w: f32, h: f32, at: (f32, f32), colour: [f32; 3]| {
+            let mut n = chitrakar_doc::Node::vector(
+                name,
+                chitrakar_doc::VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(AuthoredColor::Srgb {
+                    r: colour[0],
+                    g: colour[1],
+                    b: colour[2],
+                    a: 1.0,
+                });
+            }
+            n.transform = Transform::translation(at.0, at.1);
+            n
+        };
+        let put = |doc: &mut Document, node: chitrakar_doc::Node| {
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(chitrakar_doc::Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+            doc.children_of(root).unwrap()[index]
+        };
+        put(
+            &mut doc,
+            rect("ground", 40.0, 30.0, (0.0, 0.0), [0.9, 0.8, 0.3]),
+        );
+        let mut over = rect("over", 20.0, 16.0, (5.0, 5.0), [0.3, 0.6, 0.9]);
+        over.blend = BlendMode::Multiply;
+        let over = put(&mut doc, over);
+        let mut copy = chitrakar_doc::Node::instance("copy", over);
+        copy.transform = Transform::translation(8.0, 6.0);
+        copy.clipped = true;
+        put(&mut doc, copy);
+        let Some(theirs) = ghostscript_rgba(&doc) else {
+            eprintln!("skipped: no ghostscript");
+            return;
+        };
+        let ours = chitrakar_render::render(&doc).unwrap();
+        // Where the copy is held over the layer: multiplied twice.
+        let (x, y) = (20u32, 15u32);
+        let (o, t) = (ours.get(x, y).to_srgb8(), theirs[(y * 40 + x) as usize]);
+        assert!(
+            (0..3).all(|q| o[q].abs_diff(t[q]) <= 6),
+            "the engine {o:?}, ghostscript {t:?}"
+        );
+    }
+
     #[test]
     fn ghostscript_colours_an_opaque_page_as_the_engine_does() {
         for seed in 0..300u64 {
