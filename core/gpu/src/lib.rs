@@ -204,6 +204,11 @@ enum Draw {
     /// over it (`fs_blend` past the last mode) — a frame drawn where it
     /// stands, holding what reads the page, faded or masked.
     Mix { quad: std::ops::Range<u32> },
+    /// Two surfaces opened one inside the other — a frame drawn where it
+    /// stands on a copy of what is under it, then drawn again on nothing
+    /// — coming back down together by the frame's blend, fade and mask
+    /// (`fs_twice`).
+    Twice { quad: std::ops::Range<u32> },
     /// A path's stroke: the pieces that make up the region it covers,
     /// which the stencil takes the union of, and the quad that paints
     /// the union.
@@ -350,6 +355,7 @@ pub struct GpuRenderer {
     /// A clone layer's strokes onto a surface of its own, for a clone
     /// layer wearing an effect; and a heal's terms read the same way.
     clone_aside: wgpu::RenderPipeline,
+    twice: wgpu::RenderPipeline,
     heal_terms_aside: wgpu::RenderPipeline,
     pair_layout: wgpu::BindGroupLayout,
     /// Whether this adapter can draw into the textures those sums are
@@ -1277,6 +1283,36 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // A frame drawn twice over (`fs_twice`): in place, which is the
+        // surface it reads as its picture, alone, which it reads where a
+        // clone aside reads its parent, and what is under both.
+        let twice = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("frame twice"),
+            layout: Some(&aside_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_image"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_twice"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    ..target.clone()
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(stencil_state(
+                wgpu::StencilOperation::Keep,
+                wgpu::CompareFunction::Always,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         let heal_terms_aside = summing("heal terms aside", "fs_heal_terms_aside", &aside_layout);
         // Not every adapter draws into a full-precision texture. One that
         // does not hands a healing stroke back, as every one used to.
@@ -1309,6 +1345,7 @@ impl GpuRenderer {
             heal_sum,
             heal_spread,
             clone_aside,
+            twice,
             heal_terms_aside,
             pair_layout,
             sums,
@@ -2398,6 +2435,17 @@ impl GpuRenderer {
                             pass.set_bind_group(1, &surfaces[from - 1].2, &[]);
                             (quad, mask)
                         }
+                        Opening::Twice {
+                            drawn,
+                            paint,
+                            quad,
+                            mask,
+                        } => {
+                            pass.set_pipeline(&self.twice);
+                            pass.set_bind_group(1, &surfaces[drawn - 1].2, &[]);
+                            pass.set_bind_group(3, &pair(*paint), &[]);
+                            (quad, mask)
+                        }
                         Opening::Adjust { quad, mask, table } => {
                             pass.set_pipeline(&self.adjust);
                             if let Some(at) = table {
@@ -2410,6 +2458,16 @@ impl GpuRenderer {
                     pass.set_bind_group(0, edged, &[]);
                     pass.draw(quad.clone(), 0..1);
                     pass.set_bind_group(0, &bind, &[]);
+                    // What the rest of the pass reads in the fourth slot
+                    // is what it read before the opening: an opening that
+                    // put two textures there (a frame drawn twice over)
+                    // would otherwise leave a pipeline that takes one.
+                    if matches!(laid, Opening::Twice { .. }) {
+                        match &under {
+                            Some((_, backdrop)) => pass.set_bind_group(3, backdrop, &[]),
+                            None => pass.set_bind_group(3, &self.open, &[]),
+                        }
+                    }
                 }
                 for item in &scene.draws[step.items.clone()] {
                     // A masked layer holds its fragments to the coverage
@@ -2487,6 +2545,7 @@ impl GpuRenderer {
                         // opening, above; nothing of them is left here.
                         Draw::Open
                         | Draw::Mix { .. }
+                        | Draw::Twice { .. }
                         | Draw::Close { .. }
                         | Draw::Adjust { .. }
                         | Draw::Blur { .. }
@@ -3438,6 +3497,25 @@ fn one(
         && node.effects.is_empty()
         && held_to.is_none()
         && (node.opacity < 1.0 || node.mask.is_some());
+    // An upright frame brought down by a blend of its own while holding
+    // what works on the page — an adjustment, a filter, a clone. The
+    // reference draws it twice: where it stands, so what it holds has the
+    // page to work on, and on a surface of its own, where what it paints
+    // is all there is; the paint is brought down by the blend and what
+    // the contents made of the page is added as it was, the whole mixed
+    // back by the frame's fade and mask. Here that is a surface that
+    // begins as what is under it (`Draw::Under`), the frame drawn into
+    // it, a second surface inside that with the frame drawn again on
+    // nothing, and the two brought down together (`Draw::Twice`). It
+    // used to go back, in the frame's arm: a blended frame was a surface,
+    // and a curves layer in a frame set to Exclusion had nothing to work
+    // on.
+    let twice = matches!(node.kind, NodeKind::Artboard { .. })
+        && turned_frame.is_none()
+        && node.blend != BlendMode::Normal
+        && node.effects.is_empty()
+        && held_to.is_none()
+        && chitrakar_render::works_on_what_is_under(doc, child).ok()?;
     let copy_isolates = match &node.kind {
         NodeKind::Instance { of, .. } if chitrakar_render::takes_stand_ins(doc, *of) => {
             let parts = chitrakar_render::copy_children(doc, child).ok()?;
@@ -3510,7 +3588,8 @@ fn one(
         // own on exactly those terms (`isolate` in its copy arm), and
         // this used to hand the page back instead.
         || copy_isolates
-        || mixed_back;
+        || mixed_back
+        || twice;
     // Except a clone layer, never: what it paints with is what is under
     // it, and a surface of its own would have nothing under it to paint
     // with. Its blend, its opacity and its mask go on each stroke as it
@@ -3536,7 +3615,7 @@ fn one(
     if alone {
         out.draws.push(Item::of(Draw::Open));
         out.inside += 1;
-        if mixed_back {
+        if mixed_back || twice {
             // Before the layer's own drawing is marked, so neither its
             // mask nor its cut is ever put on the copy.
             let whole = chitrakar_render::ClipRect {
@@ -4353,12 +4432,13 @@ fn one(
             // that works on the page — an adjustment, a filter, a clone —
             // the CPU draws the frame where it stands as well as on a
             // surface of its own, and lays only what it paints by the
-            // blend. Here a blended frame is a surface, where what works
-            // on the page has nothing under it: a curves layer in a frame
-            // set to Exclusion left the page as it was. It goes back.
-            // (Found once a frame between pixels stopped being handed
-            // back, which is how one first reached a page drawn here.)
+            // blend. So is it here (`twice`), unless it is held as well,
+            // which still goes back. (A blended frame was a surface, where
+            // what works on the page had nothing under it: a curves layer
+            // in a frame set to Exclusion left the page as it was. Found
+            // once a frame between pixels stopped being handed back.)
             if node.blend != BlendMode::Normal
+                && !twice
                 && chitrakar_render::works_on_what_is_under(doc, child).ok()?
             {
                 return none!();
@@ -4458,6 +4538,59 @@ fn one(
                 // either way; this says so rather than leaning on it.)
                 let inner = if alone { 1.0 } else { opacity };
                 collect(doc, child, t, inner, Some(inside), out)?;
+                // Drawn twice over (`twice`): again, on a surface of its
+                // own inside the first, from nothing — the ground, cut to
+                // the frame as above, and what it holds.
+                if twice {
+                    out.draws.push(Item::of(Draw::Open));
+                    out.inside += 1;
+                    let again = (out.vertices.len(), out.draws.len());
+                    if let Some(ground) = background {
+                        let (rx0, ry0) = (fx0.round(), fy0.round());
+                        vector(
+                            doc,
+                            child,
+                            &VectorShape::Rect {
+                                width: fx1.round() - rx0,
+                                height: fy1.round() - ry0,
+                                radius: 0.0,
+                            },
+                            Some(ground.clone()),
+                            None,
+                            None,
+                            Transform::translation(rx0, ry0),
+                            1.0,
+                            out,
+                        )?;
+                        let (at, quad) = mask_texture(
+                            doc,
+                            child,
+                            Held {
+                                mask: None,
+                                to: None,
+                                bound: Some(inside),
+                                parent,
+                                turned: None,
+                            },
+                            true,
+                            out,
+                        )?;
+                        for v in &mut out.vertices[again.0..] {
+                            v.mask = quad;
+                        }
+                        for item in &mut out.draws[again.1..] {
+                            item.mask = at;
+                        }
+                        out.placed.push(Settled {
+                            vertices: again.0..out.vertices.len(),
+                            draws: again.1..out.draws.len(),
+                            texture: at,
+                            quad,
+                        });
+                    }
+                    collect(doc, child, t, 1.0, Some(inside), out)?;
+                    out.inside -= 1;
+                }
                 // Everything inside took the bound as it was collected,
                 // and the frame itself has no mask — it was declined
                 // above if it had one — so there is nothing left to put
@@ -4718,6 +4851,8 @@ fn one(
                 v.params[0] = MIX_BACK;
             }
             out.draws.push(Item::of(Draw::Mix { quad }));
+        } else if twice {
+            out.draws.push(Item::of(Draw::Twice { quad }));
         } else {
             lay_quad = Some(quad.clone());
             out.draws.push(Item::of(Draw::Close {
@@ -7014,6 +7149,14 @@ enum Opening {
         quad: std::ops::Range<u32>,
         mask: Option<usize>,
     },
+    /// A frame drawn twice over (`Draw::Twice`): `drawn` is the surface
+    /// it was drawn on in place, `paint` the one it was drawn on alone.
+    Twice {
+        drawn: usize,
+        paint: usize,
+        quad: std::ops::Range<u32>,
+        mask: Option<usize>,
+    },
     /// An adjustment layer, which reads everything composited below it
     /// and writes the answer back over it — always from the copy — and,
     /// where it is stated by a table rather than by a handful of
@@ -7092,7 +7235,7 @@ impl Opening {
     fn reads_under(&self) -> bool {
         match self {
             Opening::Lay { blend, .. } => *blend != BlendMode::Normal,
-            Opening::Mix { .. } => true,
+            Opening::Mix { .. } | Opening::Twice { .. } => true,
             Opening::Adjust { .. }
             | Opening::Blur { .. }
             | Opening::Smear { .. }
@@ -7129,6 +7272,7 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             Draw::Open
             | Draw::Close { .. }
             | Draw::Mix { .. }
+            | Draw::Twice { .. }
             | Draw::Adjust { .. }
             | Draw::Blur { .. }
             | Draw::Smear { .. }
@@ -7155,6 +7299,17 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                 clear = false;
                 lay = Some(Opening::Mix {
                     from,
+                    quad: quad.clone(),
+                    mask: item.mask,
+                });
+            }
+            Draw::Twice { quad } => {
+                let paint = stack.pop().unwrap_or(0);
+                let drawn = stack.pop().unwrap_or(0);
+                clear = false;
+                lay = Some(Opening::Twice {
+                    drawn,
+                    paint,
                     quad: quad.clone(),
                     mask: item.mask,
                 });
@@ -8283,6 +8438,120 @@ mod tests {
                     apart > 0.002,
                     "a {what} copy: dressed is {apart:.5} from bare"
                 );
+            }
+        }
+    }
+
+    /// A frame brought down by a blend of its own while holding what
+    /// works on the page is drawn twice over, as the reference draws it:
+    /// in place, so the adjustment inside has the page to work on, and
+    /// alone, so what the frame paints meets the page by the blend. Asked
+    /// with and without a ground, plain, faded and masked, against the
+    /// reference — and against the same page with the frame at Normal, so
+    /// that the blend is seen to matter.
+    #[test]
+    fn a_blended_frame_holding_an_adjustment_is_drawn_twice_over() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        for ground in [None, Some(ink(0.2, 0.6, 0.4))] {
+            for (what, opacity, masked) in [
+                ("plain", 1.0, false),
+                ("faded", 0.6, false),
+                ("masked", 1.0, true),
+            ] {
+                for blend in [BlendMode::Exclusion, BlendMode::Multiply, BlendMode::Screen] {
+                    let page = |blend: BlendMode| {
+                        let mut doc = Document::new(64, 40, ColorMode::Rgb);
+                        add(
+                            &mut doc,
+                            filled("ground", rect(64.0, 40.0), ink(0.9, 0.5, 0.2)),
+                            Transform::default(),
+                        );
+                        add(
+                            &mut doc,
+                            filled("stripe", rect(10.0, 40.0), ink(0.1, 0.2, 0.8)),
+                            Transform::translation(20.0, 0.0),
+                        );
+                        let mut frame = Node::artboard("frame", 40.0, 26.0, ground.clone());
+                        frame.blend = blend;
+                        frame.opacity = opacity;
+                        if masked {
+                            frame.mask = Some(chitrakar_doc::Mask {
+                                kind: chitrakar_doc::MaskKind::Vector {
+                                    shape: VectorShape::Ellipse { rx: 16.0, ry: 10.0 },
+                                    transform: Transform::translation(4.0, 3.0),
+                                },
+                                invert: false,
+                                feather: 0.0,
+                            });
+                        }
+                        let frame =
+                            add(&mut doc, Box::new(frame), Transform::translation(8.0, 6.0));
+                        for (i, node) in [
+                            filled("in", rect(12.0, 10.0), ink(0.95, 0.9, 0.1)),
+                            Box::new(Node::adjustment(
+                                "brighter",
+                                chitrakar_doc::Adjustment::Exposure { stops: 0.8 },
+                            )),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            doc.apply(Command::AddNode {
+                                parent: frame,
+                                index: i,
+                                node,
+                            })
+                            .unwrap();
+                        }
+                        let inside = doc.children_of(frame).unwrap()[0];
+                        doc.apply(Command::SetTransform {
+                            id: inside,
+                            transform: Transform::translation(4.0, 8.0),
+                        })
+                        .unwrap();
+                        // And something drawn after it, in the same pass
+                        // as the frame coming down.
+                        add(
+                            &mut doc,
+                            Box::new(Node::text(
+                                "after",
+                                chitrakar_doc::TextSpec::new("Ab", 12.0, ink(0.1, 0.1, 0.1)),
+                            )),
+                            Transform::translation(48.0, 24.0),
+                        );
+                        doc
+                    };
+                    let doc = page(blend);
+                    let said = format!(
+                        "a {what} frame by {blend:?}, ground {}",
+                        if ground.is_some() { "yes" } else { "no" }
+                    );
+                    assert!(GpuRenderer::can_render(&doc), "{said}: drawn");
+                    let (mine, theirs) = (
+                        gpu.render(&doc).unwrap(),
+                        chitrakar_render::render(&doc).unwrap(),
+                    );
+                    let (mean, worst) = difference(&mine, &theirs);
+                    let (_, in_worst, over, at) = interiors(&mine, &theirs);
+                    assert!(
+                        mean < 0.003 && over == 0,
+                        "{said}: mean {mean:.5}, worst {worst:.3}, {over} interior points \
+                         off, the worst by {in_worst:.3} at {at:?}"
+                    );
+                    let (apart, _) = difference(
+                        &theirs,
+                        &chitrakar_render::render(&page(BlendMode::Normal)).unwrap(),
+                    );
+                    assert!(apart > 0.003, "{said}: the blend shows ({apart:.5})");
+                }
             }
         }
     }
@@ -15376,15 +15645,25 @@ mod tests {
             .unwrap();
             doc
         };
-        for (what, doc) in [
-            (
-                "a blended frame working on the page",
-                page(Some(curves), BlendMode::Exclusion, false),
-            ),
-            ("a frame wearing an effect working on the page", shadowed),
-        ] {
-            assert!(!GpuRenderer::can_render(&doc), "{what} goes back");
-        }
+        assert!(
+            !GpuRenderer::can_render(&shadowed),
+            "a frame wearing an effect working on the page goes back"
+        );
+        // Blended, it is drawn twice over (`twice`), as the reference
+        // draws it.
+        let blended = page(Some(curves), BlendMode::Exclusion, false);
+        assert!(
+            GpuRenderer::can_render(&blended),
+            "a blended frame working on the page is drawn"
+        );
+        let (mean, worst) = difference(
+            &gpu.render(&blended).unwrap(),
+            &chitrakar_render::render(&blended).unwrap(),
+        );
+        assert!(
+            mean < 0.002 && worst < 0.15,
+            "a blended frame working on the page: mean {mean:.5} (worst {worst:.4})"
+        );
         // A frame held to the layer under it is drawn, cut to that
         // layer: nothing of it where the ellipse is not, its ground
         // where the ellipse is.

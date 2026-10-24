@@ -870,15 +870,40 @@ fn fs_blend(in: ImageOut) -> @location(0) vec4f {
     let src = overlaid(textureSampleLevel(image, image_sampler, in.uv, 0.0), in.params.y, in.extra)
         * in.alpha
         * mask_cover(in.page, in.mask);
+    return composite(src, dst, i32(in.mode));
+}
+
+// `src` brought down onto `dst` by a blend mode, both premultiplied: the
+// W3C's (1-da)*s + (1-sa)*d + sa*da*B.
+fn composite(src: vec4f, dst: vec4f, mode: i32) -> vec4f {
     let sa = src.a;
     let da = dst.a;
-    let b = max(blended(i32(in.mode), shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0));
+    let b = max(blended(mode, shown3(src.rgb, sa), shown3(dst.rgb, da)), vec3f(0.0));
     let light = vec3f(to_light(b.r), to_light(b.g), to_light(b.b));
-    // W3C compositing: (1-da)*s + (1-sa)*d + sa*da*B, all premultiplied.
     return vec4f(
         (1.0 - da) * src.rgb + (1.0 - sa) * dst.rgb + sa * da * light,
         sa + da * (1.0 - sa),
     );
+}
+
+// A frame brought down by a blend of its own while holding what works on
+// the page, drawn twice as the reference draws it: where it stands, on a
+// surface that began as what is under it (`image`), and on a surface of
+// its own, where what it paints is all there is (`parent_tex`). What it
+// paints meets what is under it (`backdrop`) by the blend; what drawing
+// it in place did beyond laying that paint — what its contents made of
+// the page — is added as it was, the way a blend means nothing to an
+// adjustment. Then the whole is mixed back by the frame's fade and mask.
+@fragment
+fn fs_twice(in: ImageOut) -> @location(0) vec4f {
+    let p = vec2i(floor(in.uv * page.size));
+    let under = textureLoad(backdrop, p, 0);
+    let drawn = textureLoad(image, p, 0);
+    let paint = textureLoad(parent_tex, p, 0);
+    let laid = paint + under * (1.0 - paint.a);
+    let met = composite(paint, under, i32(in.mode));
+    let kept = vec4f(max(met.rgb + drawn.rgb - laid.rgb, vec3f(0.0)), drawn.a);
+    return mix(under, kept, in.alpha * mask_cover(in.page, in.mask));
 }
 
 // An adjustment layer rewrites everything composited below it, weighted
