@@ -2746,6 +2746,10 @@ struct Scene {
     /// it is for, and that call takes it back.
     aside: Option<NodeId>,
     bare: Option<NodeId>,
+    /// How many layers wearing an outline and holding a needle-sharp path
+    /// are being gathered: while any is, such a path is drawn from the CPU
+    /// renderer's pixels (`exact_vector`).
+    exact: u32,
     /// The surface being drawn, in device pixels, and where the page
     /// lands on it once mapped through the view.
     ///
@@ -2792,6 +2796,7 @@ impl Default for Scene {
             placed: Vec::new(),
             aside: None,
             bare: None,
+            exact: 0,
             surface: (0, 0),
             page: chitrakar_render::ClipRect {
                 x0: 0,
@@ -2873,7 +2878,6 @@ fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> Option<(Trans
         space: Transform,
         size: (u32, u32),
         room: &mut u32,
-        clone_worn: &mut bool,
         depth: usize,
     ) {
         if depth >= chitrakar_doc::MAX_DEPTH {
@@ -2904,13 +2908,6 @@ fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> Option<(Trans
             Ok(chitrakar_render::Bounds::Everything) => true,
             _ => false,
         };
-        let casts_inside = node
-            .effects
-            .iter()
-            .any(|e| e.draws() && matches!(e, chitrakar_doc::Effect::InnerShadow { .. }));
-        if clone_like && casts_inside && past() {
-            *clone_worn = true;
-        }
         let drawn = if node.effects.is_empty()
             || matches!(
                 node.kind,
@@ -2947,47 +2944,27 @@ fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> Option<(Trans
                         .ok()
                         .and_then(|o| chitrakar_render::invert(o.transform))
                     {
-                        walk(
-                            doc,
-                            *of,
-                            inner.compose(back),
-                            size,
-                            room,
-                            clone_worn,
-                            depth + 1,
-                        );
+                        walk(doc, *of, inner.compose(back), size, room, depth + 1);
                     }
                 } else {
                     for part in stand_ins {
-                        walk(doc, part, inner, size, room, clone_worn, depth + 1);
+                        walk(doc, part, inner, size, room, depth + 1);
                     }
                 }
             }
             _ => {
                 for &child in doc.children_of(id).unwrap_or(&[]) {
-                    walk(doc, child, inner, size, room, clone_worn, depth + 1);
+                    walk(doc, child, inner, size, room, depth + 1);
                 }
             }
         }
     }
-    let (mut room, mut clone_worn) = (0u32, false);
+    let mut room = 0u32;
     for &child in doc.children_of(doc.root()).unwrap_or(&[]) {
-        walk(doc, child, view, size, &mut room, &mut clone_worn, 0);
+        walk(doc, child, view, size, &mut room, 0);
     }
     if room == 0 {
         return Some((view, size));
-    }
-    // A clone casting an inner shadow and reaching the page's edge, on a
-    // page drawn wider for some other layer, goes back. The reference
-    // grows a clone's effects on a surface cut to the page, with no room
-    // of its own, and drawn wider here the shadow came out with a band
-    // along the page's edge inside the page where the reference has none
-    // (seed 4970, four rows of it at four-fifths of full scale). Its other
-    // effects drawn wider agree with the reference, and either alone is
-    // drawn: this costs 85 of 6000 random pages, where every clone
-    // wearing anything over the edge cost 232.
-    if clone_worn {
-        return none!();
     }
     Some((
         Transform::translation(room as f32, room as f32).compose(view),
@@ -3121,6 +3098,42 @@ fn one(
     in_a_run: Run,
     out: &mut Scene,
 ) -> Option<()> {
+    // An outline round a layer holding a needle — a corner of a path
+    // sharper than five degrees. Near such a tip the path is thinner than
+    // a pixel for pixels on end, and this backend fills a path four
+    // samples a pixel: a quarter where the true coverage is a hundredth.
+    // That is nothing to the picture and everything to an outline, whose
+    // thin-line rule (`ridge`) counts a fifth covered as inside — so the
+    // band ran on down the needle and stopped short of it in the
+    // reference (seed 714). Such a page went back; the needle is drawn
+    // from the CPU renderer's own pixels instead while the outline's layer
+    // is gathered (`exact_vector`), so the band is measured from the
+    // reference's coverage.
+    let exact = doc.node(child).is_ok_and(|node| {
+        node.visible
+            && node.effects.iter().any(|e| {
+                matches!(e, chitrakar_doc::Effect::Outline { width, opacity, .. }
+                    if *width > 0.0 && *opacity > 0.0)
+            })
+            && holds_a_needle(doc, child, 0)
+    });
+    out.exact += exact as u32;
+    let drawn = gathered(doc, child, parent, opacity, bound, in_a_run, out);
+    out.exact -= exact as u32;
+    drawn
+}
+
+/// [`one`], the layer itself.
+#[allow(clippy::too_many_arguments)]
+fn gathered(
+    doc: &Document,
+    child: NodeId,
+    parent: Transform,
+    opacity: f32,
+    bound: Option<chitrakar_render::ClipRect>,
+    in_a_run: Run,
+    out: &mut Scene,
+) -> Option<()> {
     let node = doc.node(child).ok()?;
     if !node.visible || node.opacity <= 0.0 {
         return Some(());
@@ -3227,25 +3240,7 @@ fn one(
         // and casting a shadow is the reference's picture of it
         // (`a_mask_inside_a_masked_layer_is_drawn`), and the random
         // pages went from 3081 drawn to 3107 with none apart.
-        // An outline round a layer holding a needle — a corner of a path
-        // sharper than five degrees — goes back. Near such a
-        // tip the path is thinner than a pixel for pixels on end, and
-        // this backend fills a path four samples a pixel: a quarter
-        // where the true coverage is a hundredth. That is nothing to
-        // the picture, and everything to an outline, whose thin-line
-        // rule (`ridge`) counts a fifth covered as inside — so the band
-        // ran on down the needle here and stopped short of it in the
-        // reference (seed 714, three pixels of band a third of full
-        // scale apart). Anything drawn from a coverage rather than a
-        // yes or a no — a shadow, a glow — averages the samples' error
-        // away and is drawn.
-        let banded = effects_here.iter().any(|e| {
-            matches!(e, chitrakar_doc::Effect::Outline { width, opacity, .. }
-                if *width > 0.0 && *opacity > 0.0)
-        });
-        if banded && holds_a_needle(doc, child, 0) {
-            return none!();
-        }
+
         let shadings: Vec<Shading> = effects_here
             .iter()
             .map(|e| effect_of(doc, e, parent, node.opacity))
@@ -4254,14 +4249,14 @@ fn one(
                     ));
                     out.draws.push(Item::of(Draw::Blur { steps, quad }));
                 }
-                Filtering::Blocks { across, down } => {
-                    let mut steps = out.push(page_quad(
-                        (area, out.surface),
-                        1.0,
-                        across,
-                        [0.0; 4],
-                        [0.0; 3],
-                    ));
+                Filtering::Blocks {
+                    across,
+                    down,
+                    grad,
+                    extra,
+                } => {
+                    let mut steps =
+                        out.push(page_quad((area, out.surface), 1.0, across, grad, extra));
                     steps.end = out
                         .push(page_quad(
                             (area, out.surface),
@@ -4786,6 +4781,8 @@ fn one(
             x1: out.surface.0,
             y1: out.surface.1,
         };
+        let clone_like = matches!(node.kind, NodeKind::Clone { .. })
+            || chitrakar_render::copies_a_clone(doc, child);
         let effects: Vec<Painted> = shadings
             .iter()
             .map(|s| {
@@ -4795,14 +4792,30 @@ fn one(
                 // pass for and what the second number is the threshold
                 // of; everything else is built as a coverage, taken
                 // from the layer or from the hole around it.
+                //
+                // A clone layer, or a copy of one, has its field cut to the
+                // page as well (`params.w`, with the page's rectangle in
+                // the last of `params` and the quad's three extra
+                // numbers): the reference grows a clone's effects on a
+                // surface cut to the page and takes no room for them, and
+                // past the window a field was built over there is nothing
+                // — no silhouette, and no hole. On a scene drawn wider for
+                // another layer there was a hole past the page here, where
+                // the clone lifts nothing, and an inner shadow was cast
+                // from it four rows into the page (seed 4970).
+                let page_cut = clone_like.then_some(out.page);
+                let (cut, edge) = match page_cut {
+                    Some(r) => ([r.y1 as f32, 1.0], [r.x0 as f32, r.y0 as f32, r.x1 as f32]),
+                    None => ([0.0, 0.0], [0.0; 3]),
+                };
                 let said = match s.spread {
-                    Spread::Band { inside, .. } => [2.0, inside, 0.0, 0.0],
-                    _ => [if s.invert { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    Spread::Band { inside, .. } => [2.0, inside, cut[0], cut[1]],
+                    _ => [if s.invert { 1.0 } else { 0.0 }, 0.0, cut[0], cut[1]],
                 };
                 // A bevel's field is heights: the silhouette in white,
                 // its colour coming at the stamp, once it is lit.
                 let built = if s.lit.is_some() { [1.0; 4] } else { s.tint };
-                let field = out.push(page_quad(on, owed, said, built, [0.0; 3]));
+                let field = out.push(page_quad(on, owed, said, built, edge));
                 let mut axes = |first: [f32; 4], second: [f32; 4], tint: [f32; 4]| {
                     let mut steps = out.push(page_quad(on, 1.0, first, [0.0; 4], [0.0; 3]));
                     steps.end = out.push(page_quad(on, 1.0, second, tint, [0.0; 3])).end;
@@ -5699,6 +5712,13 @@ fn vector(
     alpha: f32,
     out: &mut Scene,
 ) -> Option<()> {
+    // A path inside a layer whose outline is measured off a needle: the
+    // CPU renderer's pixels (`Scene::exact`). Every path there, rather
+    // than the needles alone, so that what asks and what answers never
+    // disagree about which is one.
+    if out.exact > 0 && matches!(shape, VectorShape::Path { .. }) {
+        return exact_vector(doc, id, t, alpha, out);
+    }
     // A polygon is drawn as the path through its corners: stencilled
     // and covered, as every path is.
     let as_path = shape.as_path();
@@ -6509,6 +6529,8 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             Filtering::Blocks {
                 across: [r as f32, t, 0.0, 2.0],
                 down: [r as f32, t, 0.0, 3.0],
+                grad: [0.0; 4],
+                extra: [0.0; 3],
             }
         }
         F::Median { radius } => match chitrakar_render::median_radius(*radius, scale) {
@@ -6716,8 +6738,32 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             // which near a block's edge is a whole row in the wrong
             // square.
             let det = view.a * view.d - view.b * view.c;
-            if view.b != 0.0 || view.c != 0.0 || det.abs() < 1e-9 {
+            if det.abs() < 1e-9 {
                 return none!();
+            }
+            // At an angle the blocks lie across the page's rows and
+            // columns, and neither pass can walk one. So one pass does it
+            // all (`fs_block`, mode 4): each pixel averages every pixel
+            // near enough to share its block that does, asked the CPU's
+            // own question of each — where its middle lands mapped back,
+            // over the side — through the same inverse. The second pass
+            // only carries the answer to where the first two leave it.
+            if view.b != 0.0 || view.c != 0.0 {
+                let inv = [view.d / det, -view.b / det, -view.c / det, view.a / det];
+                let side = size.max(1.0 / scale.max(1e-6));
+                // A block's device extent, corner to corner, and a pixel
+                // more for where a middle falls.
+                let reach = (side * scale * std::f32::consts::SQRT_2).ceil() + 1.0;
+                const TURNED_REACH: f32 = 24.0;
+                if reach > TURNED_REACH {
+                    return none!();
+                }
+                return Some(Filtering::Blocks {
+                    across: [view.e, view.f, side, 4.0],
+                    down: [0.0, 0.0, 0.0, 5.0],
+                    grad: inv,
+                    extra: [reach, 0.0, 0.0],
+                });
             }
             // The same inverse the CPU renderer builds, from the same
             // determinant, so the two agree to the last bit.
@@ -6735,6 +6781,8 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             Filtering::Blocks {
                 across: [ia, view.e, side, 0.0],
                 down: [id, view.f, side, 1.0],
+                grad: [0.0; 4],
+                extra: [0.0; 3],
             }
         }
         // A smear along a line. The box passes cannot walk it — they run
@@ -6913,7 +6961,19 @@ fn holds_a_needle(doc: &Document, id: NodeId, depth: usize) -> bool {
     if !node.visible {
         return false;
     }
-    let t = node.transform;
+    match &node.kind {
+        NodeKind::Vector { shape, .. } => is_a_needle(shape, node.transform),
+        NodeKind::Instance { of, .. } => holds_a_needle(doc, *of, depth + 1),
+        _ => doc
+            .children_of(id)
+            .map(|kids| kids.iter().any(|k| holds_a_needle(doc, *k, depth + 1)))
+            .unwrap_or(false),
+    }
+}
+
+/// Whether a shape is a path with a corner sharper than five degrees once
+/// `t` has carried it (which may skew it).
+fn is_a_needle(shape: &VectorShape, t: Transform) -> bool {
     let sharp = |ring: &[[f32; 2]]| {
         let n = ring.len();
         n >= 3
@@ -6932,19 +6992,117 @@ fn holds_a_needle(doc: &Document, id: NodeId, depth: usize) -> bool {
                 cos > (std::f32::consts::TAU / 72.0).cos()
             })
     };
-    match &node.kind {
-        NodeKind::Vector {
-            shape: VectorShape::Path {
-                points, subpaths, ..
-            },
-            ..
+    match shape {
+        VectorShape::Path {
+            points, subpaths, ..
         } => sharp(points) || subpaths.iter().any(|ring| sharp(ring)),
-        NodeKind::Instance { of, .. } => holds_a_needle(doc, *of, depth + 1),
-        _ => doc
-            .children_of(id)
-            .map(|kids| kids.iter().any(|k| holds_a_needle(doc, *k, depth + 1)))
-            .unwrap_or(false),
+        _ => false,
     }
+}
+
+/// A vector layer drawn from the CPU renderer's own pixels: the layer
+/// alone — no fade, mask, blend or effect, which stay this backend's — on
+/// a scratch page the size of the surface, at the transform it is drawn
+/// at here, and laid as a picture on the surface's own grid. For a path
+/// too thin for four samples a pixel to say how much of a pixel it covers
+/// (`is_a_needle`) under an outline, whose band is a yes or a no taken of
+/// that coverage (`Scene::exact`).
+fn exact_vector(
+    doc: &Document,
+    id: NodeId,
+    t: Transform,
+    alpha: f32,
+    out: &mut Scene,
+) -> Option<()> {
+    let mut alone = doc.node(id).ok()?.clone();
+    alone.transform = t;
+    alone.opacity = 1.0;
+    alone.mask = None;
+    alone.blend = BlendMode::Normal;
+    alone.effects.clear();
+    alone.clipped = false;
+    alone.visible = true;
+    alone.style = None;
+    // Its colours as the page resolves them, so the scratch page needs
+    // neither the palette nor the press profile.
+    alone.each_color_mut(&mut |c| {
+        let l = chitrakar_render::resolve_color(doc, c);
+        let straight = |v: f32| {
+            if l.a > 0.0 {
+                chitrakar_color::linear_to_srgb(v / l.a)
+            } else {
+                0.0
+            }
+        };
+        *c = chitrakar_color::AuthoredColor::Srgb {
+            r: straight(l.r),
+            g: straight(l.g),
+            b: straight(l.b),
+            a: l.a,
+        };
+    });
+    let (sw, sh) = out.surface;
+    let mut page = Document::new(sw, sh, chitrakar_color::ColorMode::Rgb);
+    let root = page.root();
+    page.apply(chitrakar_doc::Command::AddNode {
+        parent: root,
+        index: 0,
+        node: Box::new(alone),
+    })
+    .ok()?;
+    let at = *page.children_of(root).ok()?.first()?;
+    let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) =
+        chitrakar_render::bounds_in_parent_space(&page, at).ok()?
+    else {
+        return Some(());
+    };
+    let clamp = |v: f32, hi: u32| (v.max(0.0) as u32).min(hi);
+    let region = chitrakar_render::ClipRect {
+        x0: clamp((x0 - 2.0).floor(), sw),
+        y0: clamp((y0 - 2.0).floor(), sh),
+        x1: clamp((x1 + 2.0).ceil(), sw),
+        y1: clamp((y1 + 2.0).ceil(), sh),
+    };
+    if region.is_empty() {
+        return Some(());
+    }
+    let mut drawn = Surface::new(sw, sh);
+    chitrakar_render::render_region_at(&page, &mut drawn, region, Transform::default()).ok()?;
+    // A transparent texel all round, so the quad's skirt reads nothing.
+    let (w, h) = (region.x1 - region.x0 + 2, region.y1 - region.y0 + 2);
+    if w > out.max_texture || h > out.max_texture {
+        return none!();
+    }
+    let mut texels = vec![0u16; (w * h * 4) as usize];
+    for y in region.y0..region.y1 {
+        for x in region.x0..region.x1 {
+            let p = drawn.get(x, y);
+            let i = (((y - region.y0 + 1) * w + (x - region.x0 + 1)) * 4) as usize;
+            texels[i..i + 4].copy_from_slice(&[p.r, p.g, p.b, p.a].map(f32_to_f16));
+        }
+    }
+    let texture = out.textures.len();
+    out.textures.push(Image {
+        width: w,
+        height: h,
+        channels: 4,
+        texels,
+    });
+    let size = [w as f32, h as f32];
+    let mut verts = quad(
+        Transform::translation(region.x0 as f32 - 1.0, region.y0 as f32 - 1.0),
+        size,
+        [0.0; 4],
+        [0.0, 0.0, 0.0, alpha],
+        [1.0, 1.0, 1.0, 1.0],
+        0.0,
+    );
+    for v in &mut verts {
+        v.local = [v.local[0] / size[0], v.local[1] / size[1]];
+    }
+    let quad = out.push(verts);
+    out.draws.push(Item::of(Draw::Image { quad, texture }));
+    Some(())
 }
 
 /// What a live effect turns into here, or `None` when it stays the
@@ -7169,7 +7327,14 @@ enum Filtering {
     /// separates where the grid is upright on the page. Each carries the
     /// inverse scale along its axis, the origin it is measured from, the
     /// block's side, and which axis it is.
-    Blocks { across: [f32; 4], down: [f32; 4] },
+    Blocks {
+        across: [f32; 4],
+        down: [f32; 4],
+        /// For a grid at an angle, the one pass that does it all reads
+        /// the inverse map here and how far to look in the first of these.
+        grad: [f32; 4],
+        extra: [f32; 3],
+    },
     /// A filter that was asked for nothing: a blur of no radius, a
     /// sharpen of no amount. The CPU renderer draws nothing for these,
     /// and neither does this.
@@ -8249,14 +8414,15 @@ mod tests {
         );
     }
 
-    /// An outline round a needle goes back; round the same path with its
-    /// corners opened out it is drawn, and as the reference draws it.
-    /// Near a needle's tip the path is thinner than a pixel for pixels
-    /// on end, and four samples a pixel make a quarter of what is truly
-    /// a hundredth — enough for the band's thin-line rule to run the
-    /// outline on down the needle (seed 714).
+    /// An outline round a needle is drawn as the reference draws it, and
+    /// so is one round the same path with its corners opened out. Near a
+    /// needle's tip the path is thinner than a pixel for pixels on end,
+    /// and four samples a pixel make a quarter of what is truly a
+    /// hundredth — enough for the band's thin-line rule to run the
+    /// outline on down the needle (seed 714). Under an outline that holds
+    /// one, a path is drawn from the CPU renderer's pixels.
     #[test]
-    fn an_outline_round_a_needle_goes_back() {
+    fn an_outline_round_a_needle_is_measured_off_the_reference_s_coverage() {
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
@@ -8314,38 +8480,38 @@ mod tests {
         };
         // Two points three degrees apart seen from the third: a needle.
         let needle = path(vec![[30.0, 5.0], [31.5, 5.4], [30.4, 36.0]]);
-        for in_a_group in [false, true] {
-            assert!(
-                !GpuRenderer::can_render(&page(needle.clone(), in_a_group)),
-                "a needle under an outline goes back (in a group: {in_a_group})"
-            );
-        }
         let plain = path(vec![[20.0, 8.0], [42.0, 12.0], [30.0, 32.0]]);
-        for in_a_group in [false, true] {
-            let doc = page(plain.clone(), in_a_group);
-            assert!(
-                GpuRenderer::can_render(&doc),
-                "a plain triangle under an outline is drawn (in a group: {in_a_group})"
-            );
-            let (mean, worst) = difference(
-                &gpu.render(&doc).unwrap(),
-                &chitrakar_render::render(&doc).unwrap(),
-            );
-            assert!(
-                mean < 0.003 && worst < 0.5,
-                "in a group: {in_a_group}: mean {mean:.5}, worst {worst:.4}"
-            );
+        for (what, shape) in [("a needle", needle), ("a plain triangle", plain)] {
+            for in_a_group in [false, true] {
+                let doc = page(shape.clone(), in_a_group);
+                assert!(
+                    GpuRenderer::can_render(&doc),
+                    "{what} under an outline is drawn (in a group: {in_a_group})"
+                );
+                let (mine, theirs) = (
+                    gpu.render(&doc).unwrap(),
+                    chitrakar_render::render(&doc).unwrap(),
+                );
+                let (mean, worst) = difference(&mine, &theirs);
+                let (_, in_worst, over, _) = interiors(&mine, &theirs);
+                assert!(
+                    mean < 0.003 && worst < 0.5 && over == 0,
+                    "{what}, in a group: {in_a_group}: mean {mean:.5}, worst {worst:.4}, \
+                     {over} interior points off by up to {in_worst:.3}"
+                );
+            }
         }
     }
 
     /// A clone casting an inner shadow over the page's edge, on a page
-    /// drawn wider for another layer whose effects run past the page,
-    /// goes back; either alone is drawn, as the reference draws it. The
-    /// reference grows a clone's effects on a surface cut to the page,
-    /// and drawn wider here the shadow came out with a band along the
-    /// page's edge (seed 4970; 0.74 apart here with the decline lifted).
+    /// drawn wider for another layer whose effects run past the page, is
+    /// drawn as the reference draws it: the reference grows a clone's
+    /// effects on a surface cut to the page, and past that window there
+    /// is no field. Drawn wider here, the clone had a hole past the page
+    /// where it lifts nothing, and the shadow came out with a band along
+    /// the page's edge (seed 4970); its field is cut to the page now.
     #[test]
-    fn a_clone_casting_an_inner_shadow_takes_no_room_from_another_layer() {
+    fn a_clone_casting_an_inner_shadow_on_a_widened_page_is_cut_at_the_page() {
         let Some(gpu) = gpu_or_skip() else {
             return;
         };
@@ -8409,11 +8575,7 @@ mod tests {
             add(&mut doc, Box::new(clone), Transform::default());
             doc
         };
-        assert!(
-            !GpuRenderer::can_render(&page(true, true)),
-            "both at once go back"
-        );
-        for (shadowed, clone_shadowed) in [(true, false), (false, true)] {
+        for (shadowed, clone_shadowed) in [(true, true), (true, false), (false, true)] {
             let doc = page(shadowed, clone_shadowed);
             assert!(
                 GpuRenderer::can_render(&doc),
@@ -15639,8 +15801,9 @@ mod tests {
             "and the square above it, over the bar's edge, is another"
         );
 
-        // A turned filter is handed back: the blocks lie at an angle on
-        // the page and neither pass can walk them.
+        // A turned filter: the blocks lie at an angle on the page, and
+        // one pass averages each pixel's block by asking every pixel near
+        // enough which block it is in.
         let mut turned = page();
         let root = turned.root();
         turned
@@ -15664,14 +15827,62 @@ mod tests {
                 },
             })
             .unwrap();
+        // What it pixelates is inside the group with it: a group holding
+        // a filter is drawn on a surface of its own.
+        for (i, (x, colour)) in [(4.0, [0.9, 0.2, 0.1]), (17.0, [0.1, 0.3, 0.9])]
+            .into_iter()
+            .enumerate()
+        {
+            turned
+                .apply(Command::AddNode {
+                    parent: group,
+                    index: i,
+                    node: filled(
+                        "bar",
+                        VectorShape::Rect {
+                            width: 13.0,
+                            height: 30.0,
+                            radius: 0.0,
+                        },
+                        AuthoredColor::Srgb {
+                            r: colour[0],
+                            g: colour[1],
+                            b: colour[2],
+                            a: 1.0,
+                        },
+                    ),
+                })
+                .unwrap();
+            let id = turned.children_of(group).unwrap()[i];
+            turned
+                .apply(Command::SetTransform {
+                    id,
+                    transform: Transform::translation(x, 2.0),
+                })
+                .unwrap();
+        }
+        let unfiltered = chitrakar_render::render(&turned).unwrap();
         turned
             .apply(Command::AddNode {
                 parent: group,
-                index: 0,
+                index: 2,
                 node: Box::new(Node::filter("f", F::Pixelate { size: 5.0 })),
             })
             .unwrap();
-        assert!(!GpuRenderer::can_render(&turned), "a turned grid goes back");
+        assert!(GpuRenderer::can_render(&turned), "a turned grid is drawn");
+        let (drawn, reference) = (
+            gpu.render(&turned).unwrap(),
+            chitrakar_render::render(&turned).unwrap(),
+        );
+        let (mean, worst) = difference(&drawn, &reference);
+        let (_, in_worst, over, at) = interiors(&drawn, &reference);
+        assert!(
+            mean < 0.002 && over == 0,
+            "a turned grid: mean {mean:.5} (worst {worst:.3}), {over} interior points off, \
+             the worst by {in_worst:.3} at {at:?}"
+        );
+        let (apart, _) = difference(&reference, &unfiltered);
+        assert!(apart > 0.003, "and the grid does something ({apart:.5})");
 
         // And so does a block wider than a pass is willing to walk.
         assert!(

@@ -2023,6 +2023,16 @@ fn fs_field(in: ImageOut) -> @location(0) vec4f {
     // instead — the CPU renderer builds the same silhouette out of a
     // group's surface *after* fading it.
     let a = textureSampleLevel(image, image_sampler, in.uv, 0.0).a * in.alpha;
+    // A clone's field stops at the page (`params.w`): the page's first
+    // pixel in `extra.xy`, the first past it across in `extra.z` and down
+    // in `params.z`. The reference grows a clone's effects cut to the
+    // page, and past the window a field was built over there is nothing.
+    if in.params.w == 1.0 {
+        let p = floor(in.uv * page.size);
+        if p.x < in.extra.x || p.y < in.extra.y || p.x >= in.extra.z || p.y >= in.params.z {
+            return vec4f(0.0);
+        }
+    }
     // An outline is a distance from an edge, and an edge is where the
     // silhouette is half covered — so what a band is measured out from
     // is a yes or a no rather than a coverage, and `params.y` says at
@@ -2356,8 +2366,54 @@ fn surface_pass(in: ImageOut) -> vec4f {
     return sum / max(total, 1e-6);
 }
 
+// A pixelate whose grid lies at an angle on the page, in one pass: the
+// average of every pixel within `extra.x` of this one, and on the page,
+// that lands in the same block — each asked where its middle goes mapped
+// back through the inverse (`grad`, about the origin in `params.xy`),
+// over the side (`params.z`), the CPU renderer's `block_averages` to the
+// letter.
+fn turned_block(in: ImageOut) -> vec4f {
+    let here = floor(in.uv * page.size);
+    let cell = turned_cell(here, in);
+    let r = i32(in.extra.x);
+    let lo = vec2i(page.lo);
+    let hi = vec2i(page.hi);
+    var sum = vec4f(0.0);
+    var n = 0.0;
+    for (var j = -r; j <= r; j = j + 1) {
+        for (var i = -r; i <= r; i = i + 1) {
+            let q = vec2i(here) + vec2i(i, j);
+            if q.x < lo.x || q.y < lo.y || q.x >= hi.x || q.y >= hi.y {
+                continue;
+            }
+            let c = turned_cell(vec2f(q), in);
+            if c.x != cell.x || c.y != cell.y {
+                continue;
+            }
+            sum = sum + textureLoad(image, q, 0);
+            n = n + 1.0;
+        }
+    }
+    return sum / max(n, 1.0);
+}
+
+fn turned_cell(p: vec2f, in: ImageOut) -> vec2f {
+    let dx = (p.x + 0.5) - in.params.x;
+    let dy = (p.y + 0.5) - in.params.y;
+    let lx = in.grad.x * dx + in.grad.z * dy;
+    let ly = in.grad.y * dx + in.grad.w * dy;
+    return floor(vec2f(lx, ly) / in.params.z);
+}
+
 @fragment
 fn fs_block(in: ImageOut) -> @location(0) vec4f {
+    if in.params.w > 4.5 {
+        // The turned grid's second pass: the first's answer, carried.
+        return textureLoad(image, vec2i(floor(in.uv * page.size)), 0);
+    }
+    if in.params.w > 3.5 {
+        return turned_block(in);
+    }
     if in.params.w > 1.5 {
         return surface_pass(in);
     }
