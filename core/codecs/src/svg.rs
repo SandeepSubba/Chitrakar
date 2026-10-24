@@ -579,6 +579,13 @@ fn write_node(
                         });
                 let inner = stroke.as_ref().filter(|_| offset.is_some());
                 let offset = offset.unwrap_or(0.0);
+                // A band lying inside a closed outline has no ends to
+                // say anything about — until it is dashed, when every
+                // dash has two, which the engine caps as the stroke says
+                // (`stroke_pieces`) and a reader squares off unless told.
+                let dashed = stroke
+                    .as_ref()
+                    .is_some_and(|s| s.dash.iter().any(|d| *d > 0.0));
                 let paint = paint_attrs(
                     doc,
                     fill.as_ref(),
@@ -629,7 +636,7 @@ fn write_node(
                                     None,
                                     child,
                                     defs,
-                                    false,
+                                    dashed,
                                     fade,
                                 );
                                 let _ = writeln!(out, "{pad}<g{common}>");
@@ -659,7 +666,7 @@ fn write_node(
                         Some(band) => {
                             let (ix, iy) = (rx - offset, ry - offset);
                             let line =
-                                paint_attrs(doc, None, Some(band), None, child, defs, false, fade);
+                                paint_attrs(doc, None, Some(band), None, child, defs, dashed, fade);
                             let _ = writeln!(out, "{pad}<g{common}>");
                             let _ = writeln!(
                                 out,
@@ -1144,7 +1151,22 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
         .iter()
         .map(chitrakar_doc::Effect::reach)
         .fold(0.0f32, f32::max);
-    let (x, y, w, h) = match chitrakar_render::bounds_in_parent_space(doc, id).ok()? {
+    // A frame's silhouette is the box it is cut to, which on an upright
+    // frame is its box rounded to whole pixels of the page (`frame_cut`,
+    // and the clipPath written from it) — not its exact box, which the
+    // region was cut from: a frame ending a fraction past a pixel's edge
+    // fills that pixel on the page, and its filter stopped short of it,
+    // so a reader left a frame's last column out wherever it wore an
+    // effect.
+    let silhouette = match &node.kind {
+        NodeKind::Artboard { width, height, .. } => {
+            let to_page = chitrakar_render::ancestor_space(doc, id).compose(node.transform);
+            let (bx, by, bw, bh) = chitrakar_render::frame_cut(to_page, *width, *height);
+            chitrakar_render::transformed_local_bounds(node.transform, (bx, by, bx + bw, by + bh))
+        }
+        _ => chitrakar_render::bounds_in_parent_space(doc, id).ok()?,
+    };
+    let (x, y, w, h) = match silhouette {
         chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => (
             x0 - reach,
             y0 - reach,
@@ -1617,7 +1639,8 @@ fn paint_attrs(
     defs: &mut String,
     // Whether the stroke has ends and corners of its own to say
     // something about: true for a path's line, false for the band lying
-    // inside a rect's or an ellipse's closed outline.
+    // inside a rect's or an ellipse's closed outline — unless the band is
+    // dashed, when each dash has ends of its own.
     ends: bool,
     // The layer's own opacity, taken by each paint as it goes down — the
     // engine fades a shape's fill and its stroke each as it paints, so
@@ -2392,6 +2415,77 @@ mod tests {
         );
     }
 
+    /// A dashed rounded rect's dashes land where a reader lands them,
+    /// whichever side of the edge the band lies. A dash pattern starts
+    /// where its ring starts, and SVG's rect starts at the top edge's left
+    /// end, where the first corner's arc comes out; the engine's rounded
+    /// ring started a quarter arc before that, where the arc goes in, so
+    /// every dash on every rounded rect in an exported file was that far
+    /// out of step with the reader's — a dash where the reader has a gap
+    /// along the top edge and round from there (page 825 of the audit
+    /// below). The engine's ring starts where the reader's does now.
+    #[test]
+    fn a_dashed_rounded_rect_dashes_where_a_reader_does() {
+        for align in [
+            None,
+            Some(chitrakar_doc::StrokeAlign::Inside),
+            Some(chitrakar_doc::StrokeAlign::Centre),
+            Some(chitrakar_doc::StrokeAlign::Outside),
+        ] {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let id = filled(&mut doc, "ring", 20.0, 18.0);
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 20.0,
+                        height: 18.0,
+                        radius: 5.0,
+                    },
+                    fill: None,
+                    stroke: Some(chitrakar_doc::Stroke {
+                        color: RED,
+                        width: 3.0,
+                        widths: Vec::new(),
+                        dash: vec![3.8, 4.0],
+                        dash_offset: 2.3,
+                        cap: chitrakar_doc::StrokeCap::Round,
+                        join: chitrakar_doc::StrokeJoin::Round,
+                        start_marker: Default::default(),
+                        end_marker: Default::default(),
+                        align,
+                    }),
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(18.3, 13.2),
+            })
+            .unwrap();
+            let theirs = resvg_alpha(&doc);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let off = ours
+                .pixels
+                .iter()
+                .zip(&theirs)
+                .filter(|(p, t)| (p.a - *t).abs() > 0.5)
+                .count();
+            let on = ours.pixels.iter().filter(|p| p.a > 0.5).count();
+            assert!(on > 40, "{align:?}: enough of the band is on ({on})");
+            // Twenty-odd dash ends are all edge, and a round cap's
+            // half-covered pixels fall either side of half in two
+            // rasterizers: a handful is an edge, forty-four was the top
+            // edge and the caps.
+            assert!(
+                off <= 6,
+                "{align:?}: {off} pixels a reader covers otherwise — the dashes are out \
+                 of step with the reader's, which starts its rect at the top edge"
+            );
+        }
+    }
+
     /// How a line ends and turns travels too — and only when there is
     /// something to say: SVG already takes flat ends and mitred corners
     /// as read, and a rect's or an ellipse's band has no ends at all.
@@ -2575,6 +2669,60 @@ mod tests {
         assert!(
             svg.contains("matrix(1 0 0 1 -10 -10)"),
             "with the original's own placement undone: {svg}"
+        );
+    }
+
+    /// A frame wearing an effect is filtered over the whole of its cut.
+    /// An upright frame is cut to whole pixels of the page, and its
+    /// filter's region was its exact box, so a frame ending a fraction
+    /// past a pixel's edge — which fills that pixel on the page — had its
+    /// last column left out by a reader wherever it wore an effect (page
+    /// 1049 of the audit below, a frame with a colour overlay on it).
+    #[test]
+    fn a_frame_wearing_an_effect_is_filtered_over_its_whole_cut() {
+        let mut doc = Document::new(48, 36, ColorMode::Rgb);
+        let root = doc.root();
+        let mut board = Node::artboard("frame", 17.8, 12.6, Some(RED));
+        board.transform = Transform::translation(12.87, 2.41);
+        board.effects = vec![chitrakar_doc::Effect::ColorOverlay {
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.5,
+                b: 0.3,
+                a: 1.0,
+            },
+            opacity: 0.6,
+        }];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(board),
+        })
+        .unwrap();
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let w = doc.meta.width as usize;
+        // The frame's last column on the page: 12.87 + 17.8 rounds to 31,
+        // so column 30 is the frame's, whole.
+        assert!(
+            ours.get(30, 5).a > 0.99,
+            "the engine fills the frame's last column"
+        );
+        assert!(ours.get(31, 5).a < 0.01, "and nothing past it");
+        let off: Vec<(usize, usize)> = ours
+            .pixels
+            .iter()
+            .zip(&theirs)
+            .enumerate()
+            .filter(|(_, (p, t))| (p.a - *t).abs() > 0.5)
+            .map(|(i, _)| (i % w, i / w))
+            .collect();
+        assert!(
+            off.is_empty(),
+            "a reader covers {} pixels otherwise, the first at {:?} — the filter's \
+             region stops short of the frame's cut",
+            off.len(),
+            off[0]
         );
     }
 
@@ -4844,6 +4992,55 @@ mod tests {
     /// foot of its letters come out at 0.55 in the reader against 0.05
     /// at most on the page — an edge half a pixel apart, not a layer in
     /// the wrong place. The same block set to the right has four.
+    /// One page nobody wrote, shown: its layers, its SVG, and where a
+    /// reader covers it otherwise, as a map (`#` both, `E` the engine
+    /// alone, `R` the reader alone). For looking at a seed the audit
+    /// below names; it is ignored so it runs only when asked for:
+    /// `CHITRAKAR_SEED=825 cargo test -p chitrakar-codecs show_a_page_nobody_wrote -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a viewer for one seed, run by hand with CHITRAKAR_SEED set"]
+    fn show_a_page_nobody_wrote() {
+        let seed: u64 = std::env::var("CHITRAKAR_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let doc = sayable(seed);
+        for (id, n) in doc.nodes() {
+            eprintln!(
+                "{:?} {:?} visible={} opacity={} blend={:?} effects={} mask={} clipped={} parent={:?}\n    {:?}\n    {:?}",
+                id,
+                n.name,
+                n.visible,
+                n.opacity,
+                n.blend,
+                n.effects.len(),
+                n.mask.is_some(),
+                n.clipped,
+                doc.parent_of(*id),
+                n.transform,
+                n.kind
+            );
+        }
+        eprintln!("{}", export_svg(&doc).unwrap());
+        let theirs = resvg_alpha(&doc);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let w = doc.meta.width as usize;
+        for y in 0..doc.meta.height as usize {
+            let line: String = (0..w)
+                .map(|x| {
+                    let (p, t) = (ours.pixels[y * w + x].a, theirs[y * w + x]);
+                    match (p > 0.5, t > 0.5) {
+                        (true, true) => '#',
+                        (true, false) => 'E',
+                        (false, true) => 'R',
+                        _ => '.',
+                    }
+                })
+                .collect();
+            eprintln!("{line}");
+        }
+    }
+
     #[test]
     fn a_reader_covers_what_the_engine_covers_on_pages_nobody_wrote() {
         const SEEDS: u64 = 800;

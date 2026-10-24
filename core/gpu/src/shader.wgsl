@@ -1803,7 +1803,11 @@ fn fs_clone(in: ImageOut) -> @location(0) vec4f {
     // WGSL's `round`, which takes a half to the even neighbour where the
     // CPU takes it away from zero.
     let at = floor(in.uv * page.size + vec2f(in.params.y, in.params.z));
-    if at.x < 0.0 || at.y < 0.0 || at.x >= page.size.x || at.y >= page.size.y {
+    // Off the page there is nothing to clone: the page, not the surface,
+    // which reaches past it under a view or when the scene is drawn with
+    // room (`with_room`), and holds past it what layers crossing the edge
+    // drew — which the CPU renderer never lays there.
+    if at.x < page.lo.x || at.y < page.lo.y || at.x >= page.hi.x || at.y >= page.hi.y {
         return dst;
     }
     var lifted = textureLoad(backdrop, vec2i(at), 0);
@@ -1854,7 +1858,7 @@ fn fs_clone_aside(in: ImageOut) -> @location(0) vec4f {
         return dst;
     }
     let at = floor(in.uv * page.size + vec2f(in.params.y, in.params.z));
-    if at.x < 0.0 || at.y < 0.0 || at.x >= page.size.x || at.y >= page.size.y {
+    if at.x < page.lo.x || at.y < page.lo.y || at.x >= page.hi.x || at.y >= page.hi.y {
         return dst;
     }
     var lifted = seen(vec2i(at));
@@ -1900,7 +1904,7 @@ fn fs_heal_terms(in: ImageOut) -> Sums {
         return out;
     }
     let source = floor(vec2f(at) + 0.5 + in.params.zw);
-    if source.x < 0.0 || source.y < 0.0 || source.x >= page.size.x || source.y >= page.size.y {
+    if source.x < page.lo.x || source.y < page.lo.y || source.x >= page.hi.x || source.y >= page.hi.y {
         return out;
     }
     let lifted = textureLoad(backdrop, vec2i(source), 0);
@@ -1926,7 +1930,7 @@ fn fs_heal_terms_aside(in: ImageOut) -> Sums {
         return out;
     }
     let source = floor(vec2f(at) + 0.5 + in.params.zw);
-    if source.x < 0.0 || source.y < 0.0 || source.x >= page.size.x || source.y >= page.size.y {
+    if source.x < page.lo.x || source.y < page.lo.y || source.x >= page.hi.x || source.y >= page.hi.y {
         return out;
     }
     let lifted = seen(vec2i(source));

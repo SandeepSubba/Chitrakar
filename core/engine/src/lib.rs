@@ -14988,7 +14988,17 @@ mod tests {
     fn a_shadowed_shape_wrapped_and_let_out_leaves_a_heal_where_it_was() {
         let f = chitrakar_doc::fixture::everything();
         let (c, sn) = (0.4f32.cos(), 0.4f32.sin());
-        let moved = Transform::translation(9.0, 5.0).compose(Transform {
+        // Not the whole numbers the other tests move by: at (9, 5) one
+        // sample of the sampler's grid falls exactly on an edge of the
+        // shape, and which side it lands on is decided by the last bit of
+        // a composed transform. Wrapped and let out compose it in a
+        // different order, and the shape runs off the page wearing a
+        // shadow, which draws it on a page with room round it — one more
+        // translation in the composition — so one sample at one pixel
+        // flipped, and the shadow blurred that sixteenth over a patch. A
+        // knife-edge in the arithmetic, not a difference in what is drawn;
+        // a third of a pixel either way and there is no tie to break.
+        let moved = Transform::translation(9.3, 5.2).compose(Transform {
             a: 1.25 * c,
             b: 1.25 * sn,
             c: -1.25 * sn,

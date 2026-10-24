@@ -1357,7 +1357,8 @@ impl GpuRenderer {
             max_buffer: self.max_buffer,
             ..Scene::default()
         };
-        gather(doc, view, size, &mut scene)?;
+        let (view, wide) = with_room(doc, view, size);
+        gather(doc, view, wide, &mut scene)?;
         let heals = scene
             .draws
             .iter()
@@ -1365,7 +1366,19 @@ impl GpuRenderer {
         if heals && !self.sums {
             return None;
         }
-        Some(self.draw(size.0, size.1, &scene))
+        let drawn = self.draw(wide.0, wide.1, &scene);
+        if wide == size {
+            return Some(drawn);
+        }
+        // The surface asked for, out of the middle of the wider one.
+        let m = ((wide.0 - size.0) / 2) as usize;
+        let mut out = Surface::new(size.0, size.1);
+        let (w, ww) = (size.0 as usize, wide.0 as usize);
+        for y in 0..size.1 as usize {
+            let from = (y + m) * ww + m;
+            out.pixels[y * w..(y + 1) * w].copy_from_slice(&drawn.pixels[from..from + w]);
+        }
+        Some(out)
     }
 
     /// Whether [`render`](Self::render) would draw this document.
@@ -1378,6 +1391,7 @@ impl GpuRenderer {
     /// with the textures every adapter guarantees. A renderer in hand
     /// may draw more ([`draws_view`](Self::draws_view)).
     pub fn can_render_view(doc: &Document, view: Transform, size: (u32, u32)) -> bool {
+        let (view, size) = with_room(doc, view, size);
         gather(doc, view, size, &mut Scene::default()).is_some()
     }
 
@@ -1389,6 +1403,7 @@ impl GpuRenderer {
             max_buffer: self.max_buffer,
             ..Scene::default()
         };
+        let (view, size) = with_room(doc, view, size);
         gather(doc, view, size, &mut scene).is_some()
     }
 
@@ -2635,6 +2650,14 @@ struct Scene {
     /// that surface meets the masks above once, where the surface comes
     /// down, and so it is that quad which folds them in.
     worn: Vec<Above>,
+    /// How many surfaces of layers' own are open round what is being
+    /// drawn: inside one, a layer's drawing is laid over the whole
+    /// surface and not only over the page, since the surface may reach
+    /// past the page (`with_room`) and what is past it is on the
+    /// surface for the effects grown from it, as the CPU renderer draws
+    /// a layer whole onto a surface of its own. On the page itself,
+    /// over the page alone, as ever.
+    inside: u32,
     /// Every coverage put on a run of quads so far, in the order they
     /// were put on. A layer writing its own over everything it drew puts
     /// these back afterwards, newest first, so a slot ends up holding the
@@ -2682,6 +2705,7 @@ impl Default for Scene {
             ids: Vec::new(),
             depths: Vec::new(),
             worn: Vec::new(),
+            inside: 0,
             placed: Vec::new(),
             surface: (0, 0),
             page: chitrakar_render::ClipRect {
@@ -2698,6 +2722,21 @@ impl Default for Scene {
 }
 
 impl Scene {
+    /// Where a layer's drawing is laid: the page, or the whole of the
+    /// surface it is drawn on when that is a layer's own.
+    fn laid(&self) -> chitrakar_render::ClipRect {
+        if self.inside > 0 {
+            chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: self.surface.0,
+                y1: self.surface.1,
+            }
+        } else {
+            self.page
+        }
+    }
+
     /// Take a run of vertices as the range it occupies.
     fn push(&mut self, verts: Vec<Vertex>) -> std::ops::Range<u32> {
         let start = self.vertices.len() as u32;
@@ -2727,6 +2766,74 @@ macro_rules! none {
 /// Everything the page needs drawn onto a surface of `size`, with the
 /// document mapped through `view` on the way — or `None` when some of it
 /// cannot be.
+/// The view and surface to draw, given room past the page where the CPU
+/// renderer gives it: a layer running past the surface and wearing an
+/// effect that puts something down is drawn there on the page widened by
+/// the effects' reach (`draw_with_room`), so the part of it past the edge
+/// is on the surface its effects are grown from and a shadow pulled back
+/// onto the page reaches the edge. Every surface here is the one size, so
+/// the whole scene is drawn that much wider — the view moved by the
+/// margin — and the surface asked for is cut out of the middle afterwards.
+/// The same reading of the extent as there: the layer's box grown by the
+/// reach, and a layer that reaches everywhere taken to run past. Capped
+/// at the surface's own size, as there.
+fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> (Transform, (u32, u32)) {
+    let mut room = 0u32;
+    for (id, node) in doc.nodes() {
+        if !node.visible || node.opacity <= 0.0 || node.effects.is_empty() {
+            continue;
+        }
+        // Nor a clone layer, or a copy of one: those paint with what is
+        // under them and never go onto a surface of their own there, so
+        // their effects are grown from the strokes they lay, cut at the
+        // page as ever.
+        if matches!(
+            node.kind,
+            NodeKind::Adjustment(_) | NodeKind::Filter(_) | NodeKind::Clone { .. }
+        ) || chitrakar_render::rewrites_what_is_under_it(doc, *id)
+            || chitrakar_render::copies_a_clone(doc, *id)
+        {
+            continue;
+        }
+        let drawn = node
+            .effects
+            .iter()
+            .filter(|e| e.draws())
+            .map(chitrakar_doc::Effect::reach)
+            .fold(0.0f32, f32::max);
+        if drawn <= 0.0 {
+            continue;
+        }
+        let space = view.compose(chitrakar_render::ancestor_space(doc, *id));
+        let past = match chitrakar_render::bounds_in_parent_space(doc, *id) {
+            Ok(chitrakar_render::Bounds::Rect(x0, y0, x1, y1)) => {
+                match chitrakar_render::transformed_box(space, [x0, y0, x1, y1]) {
+                    chitrakar_render::Bounds::Rect(x0, y0, x1, y1) => {
+                        x0 < 0.0 || y0 < 0.0 || x1 > size.0 as f32 || y1 > size.1 as f32
+                    }
+                    chitrakar_render::Bounds::Everything => true,
+                    chitrakar_render::Bounds::None => false,
+                }
+            }
+            Ok(chitrakar_render::Bounds::Everything) => true,
+            _ => false,
+        };
+        if past {
+            let m = (drawn * space.max_scale()).ceil();
+            if m.is_finite() && m > 0.0 {
+                room = room.max((m as u32).min(size.0.max(size.1)));
+            }
+        }
+    }
+    if room == 0 {
+        return (view, size);
+    }
+    (
+        Transform::translation(room as f32, room as f32).compose(view),
+        (size.0 + 2 * room, size.1 + 2 * room),
+    )
+}
+
 fn gather(doc: &Document, view: Transform, size: (u32, u32), out: &mut Scene) -> Option<()> {
     if size.0 > out.max_texture || size.1 > out.max_texture {
         return none!();
@@ -3300,6 +3407,7 @@ fn one(
     let alone = alone && (worn || !clone);
     if alone {
         out.draws.push(Item::of(Draw::Open));
+        out.inside += 1;
         if mixed_back {
             // Before the layer's own drawing is marked, so neither its
             // mask nor its cut is ever put on the copy.
@@ -3509,7 +3617,7 @@ fn one(
                     continue;
                 }
                 let quad = out.push(page_quad(
-                    (out.page, out.surface),
+                    (out.laid(), out.surface),
                     alpha,
                     [0.0; 4],
                     colour,
@@ -4024,6 +4132,7 @@ fn one(
                 // (`a_turned_frame_is_cut_the_way_the_cpu_cuts_it`).
                 if wears {
                     out.draws.push(Item::of(Draw::Open));
+                    out.inside += 1;
                 }
                 if node.blend != BlendMode::Normal
                     && chitrakar_render::works_on_what_is_under(doc, child).ok()?
@@ -4058,8 +4167,9 @@ fn one(
                 }
                 collect(doc, child, t, 1.0, bound, out)?;
                 if wears {
+                    out.inside -= 1;
                     let quad = out.push(page_quad(
-                        (out.page, out.surface),
+                        (out.laid(), out.surface),
                         1.0,
                         [blend_index(BlendMode::Normal) as f32, 0.0, 0.0, 0.0],
                         [0.0; 4],
@@ -4303,7 +4413,10 @@ fn one(
     // pixels, so the cut can be the rectangle the quads are drawn over
     // rather than a coverage they read — which leaves the mask texture
     // for the mask, and leaves what was drawn into the surface uncut.
-    let down = framed.unwrap_or(out.page);
+    if alone {
+        out.inside -= 1;
+    }
+    let down = framed.unwrap_or(out.laid());
     if alone {
         if !worn {
             // The mask and the opacity go on the quad that lays the
@@ -4668,6 +4781,7 @@ fn nothing_drawn(
     out.draws.truncate(mark.1);
     out.placed.truncate(placed_from);
     if alone {
+        out.inside -= 1;
         // A surface opened over a copy of what is under it: the copy
         // went in before the layer's drawing was marked, and goes with
         // the surface.

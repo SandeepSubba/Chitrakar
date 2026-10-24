@@ -416,7 +416,7 @@ pub fn transformed_box(t: Transform, box_: [f32; 4]) -> Bounds {
 
 /// Doc-space bounds of a local box: the axis-aligned box around all four
 /// mapped corners, since a rotated box is not one of them.
-fn transformed_local_bounds(t: Transform, lb: (f32, f32, f32, f32)) -> Bounds {
+pub fn transformed_local_bounds(t: Transform, lb: (f32, f32, f32, f32)) -> Bounds {
     let corners = [
         to_device(t, lb.0, lb.1),
         to_device(t, lb.2, lb.1),
@@ -2619,6 +2619,125 @@ fn draw_layer(
             // through rather than nothing.
             return Ok(capture.map(|pad| Cover::everywhere(grow(clip, pad, dst.width, dst.height))));
         }
+        draw_effected(doc, child, dst, clip, parent, cover, capture, bare, 0)
+    }
+}
+
+/// [`draw_effected`] on a page widened by `m` pixels all round, so a layer
+/// running past the page is on the surface its effects are grown from as
+/// far as they reach (see there). The page's pixels under the region are
+/// copied into the wider surface, the layer is drawn there as it would
+/// be on the page, and the region is copied back; a cover taken of it
+/// comes back cut to the page.
+#[allow(clippy::too_many_arguments)]
+fn draw_with_room(
+    doc: &Document,
+    child: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+    cover: Option<&Cover>,
+    capture: Option<u32>,
+    bare: bool,
+    m: u32,
+) -> Result<Option<Cover>, DocError> {
+    let shift = |r: ClipRect| ClipRect {
+        x0: r.x0 + m,
+        y0: r.y0 + m,
+        x1: r.x1 + m,
+        y1: r.y1 + m,
+    };
+    let mut wide = Surface::new(dst.width + 2 * m, dst.height + 2 * m);
+    // The whole page, not only the region: what is inside the layer may
+    // read the page past the region — a filter inside a frame drawn in
+    // place reads its neighbours — and the surface stands for the page.
+    let (dw, ww, mm) = (dst.width as usize, wide.width as usize, m as usize);
+    for y in 0..dst.height as usize {
+        let (from, to) = (y * dw, (y + mm) * ww + mm);
+        wide.pixels[to..to + dw].copy_from_slice(&dst.pixels[from..from + dw]);
+    }
+    wide.wanted = dst.wanted.map(shift);
+    let moved = cover.map(|c| Cover {
+        alpha: c.alpha.clone(),
+        origin: (c.origin.0 + m, c.origin.1 + m),
+        width: c.width,
+        height: c.height,
+    });
+    let out = Transform::translation(m as f32, m as f32).compose(parent);
+    let taken = draw_effected(
+        doc,
+        child,
+        &mut wide,
+        shift(clip),
+        out,
+        moved.as_ref(),
+        capture,
+        bare,
+        m,
+    )?;
+    let n = (clip.x1 - clip.x0) as usize;
+    for y in clip.y0 as usize..clip.y1 as usize {
+        let (from, to) = (
+            (y + mm) * ww + clip.x0 as usize + mm,
+            y * dw + clip.x0 as usize,
+        );
+        dst.pixels[to..to + n].copy_from_slice(&wide.pixels[from..from + n]);
+    }
+    // The cover, cut to the page and put back where the page is.
+    Ok(taken.map(|c| {
+        let rect = c.rect().intersect(ClipRect {
+            x0: m,
+            y0: m,
+            x1: m + dst.width,
+            y1: m + dst.height,
+        });
+        if rect.is_empty() {
+            return Cover::nothing();
+        }
+        let (width, height) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
+        let mut alpha = Vec::with_capacity((width * height) as usize);
+        for y in rect.y0..rect.y1 {
+            let from = at_in(c.origin, c.width, rect.x0, y);
+            alpha.extend_from_slice(&c.alpha[from..from + width as usize]);
+        }
+        Cover {
+            alpha,
+            origin: (rect.x0 - m, rect.y0 - m),
+            width,
+            height,
+        }
+    }))
+}
+
+/// The rest of [`draw_layer`] for a layer that draws a picture of its own
+/// and wears effects, a blend, a mask that softens, or is held to: drawn
+/// onto a surface of its own and brought down once.
+///
+/// `room` is how far `dst` already reaches past the page on every side.
+/// The surface a layer is drawn onto for its effects is cut to the page,
+/// and past its edge there is nothing — so the part of a layer running
+/// off the page was never on it, and an effect grown from the silhouette
+/// stopped at the page's edge: a shadow pulled back onto the page from a
+/// shape running off the right ended short of the edge, and an outline
+/// grew a band along the cut. Where that can happen — the layer runs
+/// past the page and its effects reach — the page is given a margin as
+/// wide as they reach, the layer is drawn there, and the page's own
+/// pixels are taken back: so an effect is a function of the layer, and
+/// not of where the page ends (`the_pages_edge_casts_no_shadow_and_wears_no_outline`).
+#[allow(clippy::too_many_arguments)]
+fn draw_effected(
+    doc: &Document,
+    child: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    parent: Transform,
+    cover: Option<&Cover>,
+    capture: Option<u32>,
+    bare: bool,
+    room: u32,
+) -> Result<Option<Cover>, DocError> {
+    {
+        let node = doc.node(child)?;
         let scale = max_scale(parent);
         let reach = node
             .effects
@@ -2656,6 +2775,46 @@ fn draw_layer(
             Bounds::Rect(x0, y0, x1, y1) => transformed_local_bounds(parent, (x0, y0, x1, y1)),
             other => other,
         };
+        // The layer runs past the page, and its effects reach: the
+        // page is widened by their reach so the part past it is on the
+        // surface the effects are grown from (see above). Once — the
+        // widened page is a page too, and the layer may run past that as
+        // well, but nothing past the margin reaches back onto the page.
+        // The extent is the layer's box grown by the reach, and it is
+        // the padded box that matters: an effect's field is cut at the
+        // window, so a layer whose effects reach past the page has its
+        // field cut by the page's edge even when the layer itself ends
+        // short of it — a bevel's heights fell to nothing at the edge
+        // and lit a cliff there. A layer that reaches everywhere — a
+        // copy of a layer wearing effects, whose reach is not known — is
+        // taken to run past the page too.
+        // Only for effects that put something down: an effect at no
+        // opacity is no effect, and may not send the layer down another
+        // road (`an_effect_that_draws_nothing_is_no_effect`) — a feathered
+        // mask, or a filter inside the layer, softens against the page's
+        // edge as it always has, and would not with room.
+        let drawn = node
+            .effects
+            .iter()
+            .filter(|e| e.draws())
+            .map(Effect::reach)
+            .fold(0.0f32, f32::max);
+        if room == 0 && drawn > 0.0 && !clip.is_empty() {
+            let past = match extent {
+                Bounds::Rect(x0, y0, x1, y1) => {
+                    x0 < 0.0 || y0 < 0.0 || x1 > dst.width as f32 || y1 > dst.height as f32
+                }
+                Bounds::Everything => true,
+                Bounds::None => false,
+            };
+            // No wider than the page itself: a file can say a reach
+            // nobody could mean, and a margin is room for an effect's
+            // tail, not a second page.
+            let m = ((drawn * scale).ceil() as u32).min(dst.width.max(dst.height));
+            if past && m > 0 {
+                return draw_with_room(doc, child, dst, clip, parent, cover, capture, bare, m);
+            }
+        }
         // A feathered mask is worked out as a plane and then softened, and
         // a softening reads its neighbours: at the plane's own first row
         // and column there are none, so it clamps and comes out different
@@ -5462,6 +5621,17 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
                     ring.push([cx + r * a.cos(), cy + r * a.sin()]);
                 }
             }
+            // The ring starts where SVG's and PDF's rounded rectangle
+            // starts — at the top edge's left end, (r, 0), where the
+            // first corner's arc comes out — and not at that arc's way in
+            // at (0, r). Where a closed ring starts is where a dash
+            // pattern and a line of text along it start too, so a ring
+            // starting a quarter arc before a reader's put every dash on
+            // every rounded rect out of step with the exported file: a
+            // dash where the reader left a gap, along the whole top edge
+            // and round from there. The square-cornered ring already
+            // starts at the corner both agree on.
+            ring.rotate_left(PER_QUARTER);
             vec![ring]
         }
         VectorShape::Path { .. } => {
@@ -31747,6 +31917,108 @@ mod tests {
             answers[0], answers[1],
             "a copy of an adjustment reaches exactly as far as the adjustment"
         );
+    }
+
+    /// A layer's effects are a function of the layer, not of where the
+    /// page ends: a shape running off the page casts the same shadow onto
+    /// the page whether the page ends there or somewhere further out.
+    ///
+    /// A layer wearing effects is drawn onto a surface of its own, cut to
+    /// the page, and its effects are grown from the silhouette on that
+    /// surface — past whose edge there is nothing. For a layer near the
+    /// page's edge that is right: repeating the edge would invent
+    /// silhouette. For a layer *across* the edge it is not: the part of
+    /// it past the page was not on the surface, so a shadow offset back
+    /// onto the page stopped short of the edge (page 1083 of the SVG
+    /// audit, a rect running off the right wearing a shadow pulled left,
+    /// which a reader draws whole), and an outline grew a band along the
+    /// cut where the page ended. The surface is given room past the page
+    /// now, as far as the effects reach, when the layer runs past it.
+    #[test]
+    fn the_pages_edge_casts_no_shadow_and_wears_no_outline() {
+        let shadow = Effect::DropShadow {
+            dx: -2.6,
+            dy: 2.9,
+            blur: 1.4,
+            color: AuthoredColor::Srgb {
+                r: 0.1,
+                g: 0.8,
+                b: 0.5,
+                a: 1.0,
+            },
+            opacity: 0.9,
+            spread: 0.0,
+        };
+        let outline = Effect::Outline {
+            width: 3.0,
+            color: BLUE,
+            opacity: 1.0,
+        };
+        // Where the layer sits and which way its shadow goes, so each
+        // page edge is run past with the shadow pulled back over it.
+        let cases = [
+            ("off the right", (33.7, 16.4), (-2.6, 2.9)),
+            ("off the left", (-12.3, 10.2), (2.6, 1.1)),
+            ("off the top", (10.6, -5.3), (1.3, 2.6)),
+            ("off the bottom", (5.2, 27.1), (-1.1, -2.6)),
+        ];
+        for (where_, at, (dx, dy)) in cases {
+            for (what, effect) in [("shadow", &shadow), ("outline", &outline)] {
+                let effect = match effect {
+                    Effect::DropShadow {
+                        blur,
+                        color,
+                        opacity,
+                        spread,
+                        ..
+                    } => Effect::DropShadow {
+                        dx,
+                        dy,
+                        blur: *blur,
+                        color: color.clone(),
+                        opacity: *opacity,
+                        spread: *spread,
+                    },
+                    other => other.clone(),
+                };
+                // The same layer on the page, and on a page with a margin
+                // of twelve all round — the picture moved by that margin.
+                let page = |margin: f32| {
+                    let m = margin as u32;
+                    let mut doc = Document::new(48 + 2 * m, 36 + 2 * m, ColorMode::Rgb);
+                    let mut node = filled_rect("r", 22.7, 10.6, RED);
+                    node.transform = Transform::translation(at.0 + margin, at.1 + margin);
+                    node.effects = vec![effect.clone()];
+                    add(&mut doc, node);
+                    render(&doc).unwrap()
+                };
+                let (tight, roomy) = (page(0.0), page(12.0));
+                let (mut n, mut worst, mut at_px) = (0usize, 0.0f32, (0u32, 0u32));
+                for y in 0..36u32 {
+                    for x in 0..48u32 {
+                        let (a, b) = (tight.get(x, y), roomy.get(x + 12, y + 12));
+                        let d = (a.r - b.r)
+                            .abs()
+                            .max((a.g - b.g).abs())
+                            .max((a.b - b.b).abs())
+                            .max((a.a - b.a).abs());
+                        if d > 1e-3 {
+                            n += 1;
+                        }
+                        if d > worst {
+                            worst = d;
+                            at_px = (x, y);
+                        }
+                    }
+                }
+                assert!(
+                    n == 0,
+                    "{where_}, a {what}: {n} pixels differ between the page and the same page \
+                     with room round it, the worst by {worst:.3} at {at_px:?} — the effect \
+                     was grown from the layer cut at the page's edge"
+                );
+            }
+        }
     }
 
     #[test]

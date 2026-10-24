@@ -2420,6 +2420,29 @@ impl Effect {
         matches!(self, Effect::InnerShadow { .. } | Effect::Bevel { .. })
     }
 
+    /// Whether the effect puts anything down at all: a shadow or an
+    /// outline at no opacity, an outline of no width and a bevel with no
+    /// light to be lit by draw nothing, and the renderer gives them no
+    /// room (`an_effect_that_draws_nothing_is_no_effect`).
+    pub fn draws(&self) -> bool {
+        match self {
+            Effect::DropShadow { opacity, .. } | Effect::InnerShadow { opacity, .. } => {
+                *opacity > 0.0
+            }
+            Effect::Outline { width, opacity, .. } => *width > 0.0 && *opacity > 0.0,
+            Effect::Bevel {
+                size,
+                depth,
+                lx,
+                ly,
+                altitude,
+                opacity,
+                ..
+            } => *opacity > 0.0 && bevel_light(*size, *depth, [*lx, *ly], *altitude, 1.0).is_some(),
+            Effect::ColorOverlay { opacity, .. } => *opacity > 0.0,
+        }
+    }
+
     /// A short name for history labels and the effect list.
     pub fn label(&self) -> &'static str {
         match self {
