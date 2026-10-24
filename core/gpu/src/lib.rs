@@ -209,6 +209,17 @@ enum Draw {
     /// — coming back down together by the frame's blend, fade and mask
     /// (`fs_twice`).
     Twice { quad: std::ops::Range<u32> },
+    /// A frame's surface drawn alone for the silhouette its effects grow
+    /// from, coming down as its effects behind it and nothing of itself:
+    /// the frame is drawn where it stands next, and its surface is kept
+    /// for the effects over it (`Over`).
+    Aside {
+        blend: BlendMode,
+        effects: Vec<Painted>,
+    },
+    /// The effects over the frame last set `Aside`, from the surface kept
+    /// for them, once the frame has been drawn where it stands.
+    Over,
     /// A path's stroke: the pieces that make up the region it covers,
     /// which the stencil takes the union of, and the quad that paints
     /// the union.
@@ -2546,6 +2557,8 @@ impl GpuRenderer {
                         Draw::Open
                         | Draw::Mix { .. }
                         | Draw::Twice { .. }
+                        | Draw::Aside { .. }
+                        | Draw::Over
                         | Draw::Close { .. }
                         | Draw::Adjust { .. }
                         | Draw::Blur { .. }
@@ -2726,6 +2739,13 @@ struct Scene {
     /// these back afterwards, newest first, so a slot ends up holding the
     /// coverage built for it — which already folds in the masks above.
     placed: Vec<Settled>,
+    /// A frame drawn where it stands while wearing an effect is gathered
+    /// twice: once alone, for the silhouette its effects grow from and
+    /// laid down as those effects only (`aside`), and once in place as
+    /// if it wore none (`bare`). Each names the frame for the one call
+    /// it is for, and that call takes it back.
+    aside: Option<NodeId>,
+    bare: Option<NodeId>,
     /// The surface being drawn, in device pixels, and where the page
     /// lands on it once mapped through the view.
     ///
@@ -2770,6 +2790,8 @@ impl Default for Scene {
             worn: Vec::new(),
             inside: 0,
             placed: Vec::new(),
+            aside: None,
+            bare: None,
             surface: (0, 0),
             page: chitrakar_render::ClipRect {
                 x0: 0,
@@ -3103,6 +3125,48 @@ fn one(
     if !node.visible || node.opacity <= 0.0 {
         return Some(());
     }
+    // An upright frame holding something that works on the page, wearing
+    // an effect: the reference grows the effects from the frame drawn on
+    // a surface of its own, lays the ones behind it, draws the frame
+    // where it stands — what it holds has the page to work on — and lays
+    // the ones over it (`frame_in_place`, in its effected road). So it is
+    // gathered twice here, aside and bare, and the effects over it come
+    // last from the surface kept aside (`Draw::Over`). It used to go
+    // back: an effect put the frame on a surface, where an invert inside
+    // it had nothing to invert.
+    let bare = out.bare == Some(child);
+    if bare {
+        out.bare = None;
+    }
+    let aside = out.aside == Some(child);
+    if aside {
+        out.aside = None;
+    }
+    if !bare
+        && !aside
+        && !node.effects.is_empty()
+        && !node.clipped
+        && matches!(node.kind, NodeKind::Artboard { .. })
+        && chitrakar_render::frame_in_place(doc, child, parent).ok()?
+        && !chitrakar_render::rewrites_what_is_under_it(doc, child)
+    {
+        let from = out.draws.len();
+        out.aside = Some(child);
+        one(doc, child, parent, opacity, bound, in_a_run, out)?;
+        // A frame with nothing to draw aside — off the page, or cut to
+        // nothing — sets nothing aside, and has no effects to lay over.
+        let set_aside = out.draws[from..]
+            .iter()
+            .any(|item| matches!(item.draw, Draw::Aside { .. }));
+        out.bare = Some(child);
+        one(doc, child, parent, opacity, bound, in_a_run, out)?;
+        if set_aside {
+            out.draws.push(Item::of(Draw::Over));
+        }
+        return Some(());
+    }
+    // Drawn bare, the frame's effects are someone else's.
+    let effects_here: &[chitrakar_doc::Effect] = if bare { &[] } else { &node.effects };
     // A layer with live effects goes onto a surface of its own — the
     // effects are built from its silhouette, so there has to be one —
     // and only where its silhouette is a plain question. Its own
@@ -3124,7 +3188,7 @@ fn one(
     // at no opacity at all, vanishing. So the effects are ignored here
     // exactly as they are there.
     let rewriting = chitrakar_render::rewrites_what_is_under_it(doc, child);
-    let shadings: Vec<Shading> = if node.effects.is_empty() || rewriting {
+    let shadings: Vec<Shading> = if effects_here.is_empty() || rewriting {
         Vec::new()
     } else {
         // What is left out, and only these two. A frame: the CPU renderer
@@ -3175,15 +3239,14 @@ fn one(
         // scale apart). Anything drawn from a coverage rather than a
         // yes or a no — a shadow, a glow — averages the samples' error
         // away and is drawn.
-        let banded = node.effects.iter().any(|e| {
+        let banded = effects_here.iter().any(|e| {
             matches!(e, chitrakar_doc::Effect::Outline { width, opacity, .. }
                 if *width > 0.0 && *opacity > 0.0)
         });
         if banded && holds_a_needle(doc, child, 0) {
             return none!();
         }
-        let shadings: Vec<Shading> = node
-            .effects
+        let shadings: Vec<Shading> = effects_here
             .iter()
             .map(|e| effect_of(doc, e, parent, node.opacity))
             .collect::<Option<Vec<_>>>()?
@@ -3194,10 +3257,10 @@ fn one(
     };
     // Its colour overlays, folded into one colour and one strength by the
     // CPU renderer's own arithmetic, for the quad that lays it down.
-    let overlay = if node.effects.is_empty() || rewriting {
+    let overlay = if effects_here.is_empty() || rewriting {
         None
     } else {
-        chitrakar_render::overlay_tint(doc, &node.effects)
+        chitrakar_render::overlay_tint(doc, effects_here)
     };
     // A layer held to the one under it shows only where that
     // layer's own alpha does. That alpha is the layer drawn aside,
@@ -3428,7 +3491,7 @@ fn one(
     // pages, and all of them draw as the reference does.
     let mixable = faded_clone_copy(doc, child)
         && node.blend == BlendMode::Normal
-        && node.effects.is_empty()
+        && effects_here.is_empty()
         && held_to.is_none();
     if (chitrakar_render::copies_a_clone(doc, child)
         || (chitrakar_render::copies_a_clone_within(doc, child) && !copies_a_group(doc, child)))
@@ -3437,7 +3500,7 @@ fn one(
             || node.opacity < 1.0
             || held_to.is_some()
             || node.blend != BlendMode::Normal
-            || !node.effects.is_empty())
+            || !effects_here.is_empty())
     {
         return none!();
     }
@@ -3492,9 +3555,10 @@ fn one(
     let mixed_back = (matches!(node.kind, NodeKind::Artboard { .. })
         && turned_frame.is_none()
         && chitrakar_render::reads_backdrop(doc, child).ok()?
-        || faded_clone_copy(doc, child))
+        || faded_clone_copy(doc, child)
+        || copies_a_frame_in_place(doc, child, parent))
         && node.blend == BlendMode::Normal
-        && node.effects.is_empty()
+        && effects_here.is_empty()
         && held_to.is_none()
         && (node.opacity < 1.0 || node.mask.is_some());
     // An upright frame brought down by a blend of its own while holding
@@ -3513,7 +3577,7 @@ fn one(
     let twice = matches!(node.kind, NodeKind::Artboard { .. })
         && turned_frame.is_none()
         && node.blend != BlendMode::Normal
-        && node.effects.is_empty()
+        && effects_here.is_empty()
         && held_to.is_none()
         && chitrakar_render::works_on_what_is_under(doc, child).ok()?;
     let copy_isolates = match &node.kind {
@@ -4293,12 +4357,15 @@ fn one(
             // page, the CPU draws a frame where it stands
             // (`frame_in_place`): on a surface of its own, an adjustment
             // or a filter inside it would have nothing under it to work
-            // on. Here an effect puts the frame on one, so an invert in a
+            // on. An effect put the frame on one here, so an invert in a
             // frame with an inner shadow inverted nothing — a tenth of
             // full scale apart, on a page whose halftone had kept it out
-            // of every audit until filters in frames were drawn. It goes
-            // back.
-            if !node.effects.is_empty()
+            // of every audit until filters in frames were drawn. Such a
+            // frame is gathered aside and bare now (top of `one`), and
+            // what reaches this unasked is one held to the layer under
+            // it, which still goes back.
+            if !effects_here.is_empty()
+                && !aside
                 && chitrakar_render::frame_in_place(doc, child, parent).ok()?
             {
                 return none!();
@@ -4325,7 +4392,7 @@ fn one(
             // and the cut is taken where that inner surface comes down:
             // one quad, one slot.
             if !upright {
-                let wears = !node.effects.is_empty();
+                let wears = !effects_here.is_empty();
                 // Held to the layer under it, or wearing an effect inside
                 // another frame, it used to go back: the one coverage
                 // slot, where the outer bound laid over everything the
@@ -4439,6 +4506,7 @@ fn one(
             // once a frame between pixels stopped being handed back.)
             if node.blend != BlendMode::Normal
                 && !twice
+                && !aside
                 && chitrakar_render::works_on_what_is_under(doc, child).ok()?
             {
                 return none!();
@@ -4853,6 +4921,11 @@ fn one(
             out.draws.push(Item::of(Draw::Mix { quad }));
         } else if twice {
             out.draws.push(Item::of(Draw::Twice { quad }));
+        } else if aside {
+            out.draws.push(Item::of(Draw::Aside {
+                blend: node.blend,
+                effects,
+            }));
         } else {
             lay_quad = Some(quad.clone());
             out.draws.push(Item::of(Draw::Close {
@@ -6783,6 +6856,35 @@ fn faded_clone_copy(doc: &Document, id: NodeId) -> bool {
     })
 }
 
+/// A copy, with no stand-ins of its own, of a frame the reference draws
+/// where it stands (`frame_in_place`, asked in the space the copy puts
+/// the frame in). Faded or masked, the reference draws such a copy in
+/// place too and mixes it back by its fade and mask (its copy arm,
+/// `lays_a_frame_in_place`): on a surface of its own what the frame
+/// holds would have no page. Found as page 4512, a faded and masked copy
+/// of a frame holding a high pass, a third of full scale apart on a
+/// surface.
+fn copies_a_frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> bool {
+    let Ok(node) = doc.node(id) else {
+        return false;
+    };
+    let NodeKind::Instance { of, .. } = &node.kind else {
+        return false;
+    };
+    if !chitrakar_render::copy_children(doc, id).is_ok_and(|parts| parts.is_empty()) {
+        return false;
+    }
+    let Some(back) = doc
+        .node(*of)
+        .ok()
+        .and_then(|o| chitrakar_render::invert(o.transform))
+    else {
+        return false;
+    };
+    let space = parent.compose(node.transform).compose(back);
+    chitrakar_render::frame_in_place(doc, *of, space).unwrap_or(false)
+}
+
 /// Whether a copy, followed through copies of copies, copies a group.
 fn copies_a_group(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
@@ -7265,6 +7367,9 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
     let mut stack = vec![0usize];
     let (mut start, mut clear, mut lay) = (0usize, true, None);
     let mut within = None;
+    // The frames set aside and not yet given the effects over them: the
+    // surface each was drawn on, those effects, its coverage and blend.
+    let mut kept: Vec<(usize, Vec<Painted>, Option<usize>, BlendMode)> = Vec::new();
     for (i, item) in draws.iter().enumerate() {
         // Only the four that change what the pass is drawing on, or
         // want to read it, cut it.
@@ -7273,6 +7378,8 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
             | Draw::Close { .. }
             | Draw::Mix { .. }
             | Draw::Twice { .. }
+            | Draw::Aside { .. }
+            | Draw::Over
             | Draw::Adjust { .. }
             | Draw::Blur { .. }
             | Draw::Smear { .. }
@@ -7369,6 +7476,60 @@ fn plan(draws: &[Item]) -> Vec<Pass> {
                         passes.push(painted(effect));
                     }
                     lay = None;
+                }
+            }
+            Draw::Aside { blend, effects } => {
+                let from = stack.pop().unwrap_or(0);
+                clear = false;
+                lay = None;
+                let target = *stack.last().unwrap();
+                for at in effects.iter().filter(|e| !e.over) {
+                    passes.push(Pass {
+                        target,
+                        clear: false,
+                        within: None,
+                        lay: Some(Opening::Effect {
+                            from,
+                            at: at.clone(),
+                            mask: item.mask,
+                            blend: *blend,
+                        }),
+                        items: i..i,
+                        under_from: None,
+                    });
+                }
+                // The surface is kept: the target is pushed again over it,
+                // so what is drawn next draws onto the same surface and
+                // anything opened meanwhile takes a fresh one.
+                stack.push(target);
+                kept.push((
+                    from,
+                    effects.iter().filter(|e| e.over).cloned().collect(),
+                    item.mask,
+                    *blend,
+                ));
+            }
+            Draw::Over => {
+                stack.pop();
+                clear = false;
+                lay = None;
+                let target = *stack.last().unwrap();
+                if let Some((from, over, mask, blend)) = kept.pop() {
+                    for at in &over {
+                        passes.push(Pass {
+                            target,
+                            clear: false,
+                            within: None,
+                            lay: Some(Opening::Effect {
+                                from,
+                                at: at.clone(),
+                                mask,
+                                blend,
+                            }),
+                            items: i..i,
+                            under_from: None,
+                        });
+                    }
                 }
             }
             Draw::Adjust { quad, table } => {
@@ -8553,6 +8714,237 @@ mod tests {
                     assert!(apart > 0.003, "{said}: the blend shows ({apart:.5})");
                 }
             }
+        }
+    }
+
+    /// A frame holding what works on the page and wearing an effect is
+    /// drawn the reference's way: its effects grown from the frame drawn
+    /// alone, the ones behind it laid, the frame drawn where it stands —
+    /// so the invert inside it has the page to invert — and the ones
+    /// over it laid last. Each of four effects, on a frame plain, faded,
+    /// masked and blended, with a ground and without.
+    #[test]
+    fn a_frame_working_on_the_page_wears_its_effects_around_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        use chitrakar_doc::Effect as E;
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let effects = [
+            (
+                "a drop shadow",
+                E::DropShadow {
+                    dx: 2.5,
+                    dy: 2.0,
+                    blur: 1.5,
+                    color: ink(0.05, 0.05, 0.1),
+                    opacity: 0.8,
+                    spread: 0.0,
+                },
+            ),
+            (
+                "an inner shadow",
+                E::InnerShadow {
+                    dx: 2.0,
+                    dy: 2.0,
+                    blur: 1.0,
+                    color: ink(0.1, 0.1, 0.6),
+                    opacity: 0.6,
+                    spread: 0.0,
+                },
+            ),
+            (
+                "a bevel",
+                E::Bevel {
+                    size: 3.0,
+                    depth: 1.0,
+                    lx: -1.0,
+                    ly: -1.0,
+                    altitude: 30.0,
+                    highlight: ink(1.0, 1.0, 1.0),
+                    shadow: ink(0.0, 0.0, 0.0),
+                    opacity: 0.8,
+                },
+            ),
+            (
+                "an outline",
+                E::Outline {
+                    width: 2.0,
+                    color: ink(0.9, 0.1, 0.6),
+                    opacity: 1.0,
+                },
+            ),
+        ];
+        for ground in [None, Some(ink(0.2, 0.6, 0.4))] {
+            for (dress, opacity, masked, blend) in [
+                ("plain", 1.0, false, BlendMode::Normal),
+                ("faded", 0.6, false, BlendMode::Normal),
+                ("masked", 1.0, true, BlendMode::Normal),
+                ("blended", 1.0, false, BlendMode::Multiply),
+            ] {
+                for (what, effect) in &effects {
+                    let page = |effect: Option<E>| {
+                        let mut doc = Document::new(64, 44, ColorMode::Rgb);
+                        add(
+                            &mut doc,
+                            filled("ground", rect(64.0, 44.0), ink(0.9, 0.5, 0.2)),
+                            Transform::default(),
+                        );
+                        add(
+                            &mut doc,
+                            filled("stripe", rect(10.0, 44.0), ink(0.1, 0.2, 0.8)),
+                            Transform::translation(22.0, 0.0),
+                        );
+                        let mut frame = Node::artboard("frame", 36.0, 24.0, ground.clone());
+                        frame.blend = blend;
+                        frame.opacity = opacity;
+                        frame.effects = effect.into_iter().collect();
+                        if masked {
+                            frame.mask = Some(chitrakar_doc::Mask {
+                                kind: chitrakar_doc::MaskKind::Vector {
+                                    shape: VectorShape::Ellipse { rx: 15.0, ry: 10.0 },
+                                    transform: Transform::translation(3.0, 2.0),
+                                },
+                                invert: false,
+                                feather: 0.0,
+                            });
+                        }
+                        let frame =
+                            add(&mut doc, Box::new(frame), Transform::translation(10.0, 8.0));
+                        for (i, node) in [
+                            filled("in", rect(12.0, 10.0), ink(0.95, 0.9, 0.1)),
+                            Box::new(Node::adjustment(
+                                "invert",
+                                chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+                            )),
+                        ]
+                        .into_iter()
+                        .enumerate()
+                        {
+                            doc.apply(Command::AddNode {
+                                parent: frame,
+                                index: i,
+                                node,
+                            })
+                            .unwrap();
+                        }
+                        let inside = doc.children_of(frame).unwrap()[0];
+                        doc.apply(Command::SetTransform {
+                            id: inside,
+                            transform: Transform::translation(4.0, 8.0),
+                        })
+                        .unwrap();
+                        add(
+                            &mut doc,
+                            Box::new(Node::text(
+                                "after",
+                                chitrakar_doc::TextSpec::new("Ab", 12.0, ink(0.1, 0.1, 0.1)),
+                            )),
+                            Transform::translation(48.0, 30.0),
+                        );
+                        doc
+                    };
+                    let doc = page(Some(effect.clone()));
+                    let said = format!(
+                        "{what} on a {dress} frame, ground {}",
+                        if ground.is_some() { "yes" } else { "no" }
+                    );
+                    assert!(GpuRenderer::can_render(&doc), "{said}: drawn");
+                    let (mine, theirs) = (
+                        gpu.render(&doc).unwrap(),
+                        chitrakar_render::render(&doc).unwrap(),
+                    );
+                    let (mean, worst) = difference(&mine, &theirs);
+                    let (_, in_worst, over, at) = interiors(&mine, &theirs);
+                    // An outline is a yes or a no taken of an edge, and at
+                    // a mask's antialiased edge the two renderers can
+                    // answer a pixel differently; everything else here is
+                    // a coverage, and close at every pixel.
+                    let edge = if *what == "an outline" { 1.0 } else { 0.2 };
+                    assert!(
+                        mean < 0.003 && worst < edge && over == 0,
+                        "{said}: mean {mean:.5}, worst {worst:.3}, {over} interior points \
+                         off, the worst by {in_worst:.3} at {at:?}"
+                    );
+                    let (_, apart) =
+                        difference(&theirs, &chitrakar_render::render(&page(None)).unwrap());
+                    assert!(apart > 0.05, "{said}: the effect shows (by {apart:.3})");
+                }
+            }
+        }
+    }
+
+    /// A faded or masked copy of a frame that works on the page is drawn
+    /// where it stands and mixed back by its fade and mask, as the
+    /// reference draws it; on a surface of its own the invert inside it
+    /// had no page to invert (page 4512, with a high pass).
+    #[test]
+    fn a_faded_copy_of_a_frame_working_on_the_page_is_mixed_back() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rect = |w: f32, h: f32| VectorShape::Rect {
+            width: w,
+            height: h,
+            radius: 0.0,
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        for (what, opacity, masked) in [("faded", 0.6, false), ("masked", 1.0, true)] {
+            let mut doc = Document::new(64, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled("ground", rect(64.0, 40.0), ink(0.9, 0.5, 0.2)),
+                Transform::default(),
+            );
+            add(
+                &mut doc,
+                filled("stripe", rect(8.0, 40.0), ink(0.1, 0.2, 0.8)),
+                Transform::translation(44.0, 0.0),
+            );
+            let frame = add(
+                &mut doc,
+                Box::new(Node::artboard("frame", 20.0, 16.0, None)),
+                Transform::translation(4.0, 4.0),
+            );
+            doc.apply(Command::AddNode {
+                parent: frame,
+                index: 0,
+                node: Box::new(Node::adjustment(
+                    "invert",
+                    chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+                )),
+            })
+            .unwrap();
+            let mut copy = Node::instance("copy", frame);
+            copy.opacity = opacity;
+            if masked {
+                copy.mask = Some(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 9.0, ry: 7.0 },
+                        transform: Transform::translation(5.0, 5.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                });
+            }
+            add(&mut doc, Box::new(copy), Transform::translation(34.0, 16.0));
+            assert!(GpuRenderer::can_render(&doc), "a {what} copy is drawn");
+            let (mine, theirs) = (
+                gpu.render(&doc).unwrap(),
+                chitrakar_render::render(&doc).unwrap(),
+            );
+            let (mean, worst) = difference(&mine, &theirs);
+            let (_, in_worst, over, at) = interiors(&mine, &theirs);
+            assert!(
+                mean < 0.002 && over == 0,
+                "a {what} copy: mean {mean:.5}, worst {worst:.3}, {over} interior points off, \
+                 the worst by {in_worst:.3} at {at:?}"
+            );
         }
     }
 
@@ -15625,9 +16017,9 @@ mod tests {
             }
         }
         let curves = Node::adjustment("curves", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
-        // An effect puts the frame on a surface of its own here, where an
-        // invert inside it has nothing to invert; the CPU draws the frame
-        // where it stands.
+        // An effect put the frame on a surface of its own here, where an
+        // invert inside it had nothing to invert; the CPU draws the frame
+        // where it stands, and so does this now.
         let shadowed = {
             let mut doc = page(Some(curves.clone()), BlendMode::Normal, false);
             let frame = doc.children_of(doc.root()).unwrap()[1];
@@ -15645,9 +16037,20 @@ mod tests {
             .unwrap();
             doc
         };
+        // Wearing an effect, it is drawn where it stands with its effects
+        // around it (`Draw::Aside`, `Draw::Over`), as the reference draws
+        // it.
         assert!(
-            !GpuRenderer::can_render(&shadowed),
-            "a frame wearing an effect working on the page goes back"
+            GpuRenderer::can_render(&shadowed),
+            "a frame wearing an effect working on the page is drawn"
+        );
+        let (mean, worst) = difference(
+            &gpu.render(&shadowed).unwrap(),
+            &chitrakar_render::render(&shadowed).unwrap(),
+        );
+        assert!(
+            mean < 0.002 && worst < 0.15,
+            "a frame wearing an effect working on the page: mean {mean:.5} (worst {worst:.4})"
         );
         // Blended, it is drawn twice over (`twice`), as the reference
         // draws it.
