@@ -1929,11 +1929,15 @@ fn stroke_attrs(
             id.0
         );
         let (l, r) = (chitrakar_doc::MARKER_LENGTH, chitrakar_doc::MARKER_REACH);
+        // Visible past its box: a marker's box is cut at the line's end,
+        // and a bar or a dot sits half beyond it — half a bar and half a
+        // dot were all a reader drew of them, since SVG clips a marker to
+        // its box unless told not to.
         let _ = write!(
             defs,
             concat!(
                 r#"    <marker id="{name}" markerUnits="strokeWidth" markerWidth="{w}""#,
-                r#" markerHeight="{h}" refX="{rx}" refY="{ry}" orient="auto">"#,
+                r#" markerHeight="{h}" refX="{rx}" refY="{ry}" orient="auto" overflow="visible">"#,
                 "\n      <path d=\"{shape}\" fill=\"{fill}\"/>\n    </marker>\n"
             ),
             name = name,
@@ -2643,6 +2647,72 @@ mod tests {
     /// How a line ends and turns travels too — and only when there is
     /// something to say: SVG already takes flat ends and mitred corners
     /// as read, and a rect's or an ellipse's band has no ends at all.
+    /// What a line carries at its ends is drawn by a reader as the engine
+    /// draws it: an arrow, a bar across the line its own width thick, and
+    /// a dot, each on a line thick enough that a marker is many pixels
+    /// and not an edge. Nothing drew a marker and looked at it, so a bar
+    /// written a fifth of its width passed every test there was — and a
+    /// reader drew half of every bar and every dot, the half on the
+    /// line's side of its end, since SVG clips a marker to its box and
+    /// the box stopped at the end (`overflow="visible"` now).
+    #[test]
+    fn a_lines_end_markers_are_what_a_reader_draws() {
+        for marker in [
+            chitrakar_doc::Marker::Arrow,
+            chitrakar_doc::Marker::Bar,
+            chitrakar_doc::Marker::Dot,
+        ] {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let id = filled(&mut doc, "line", 30.0, 30.0);
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(chitrakar_doc::NodeKind::Vector {
+                    shape: VectorShape::Path {
+                        points: vec![[0.0, 0.0], [30.0, 0.0]],
+                        closed: false,
+                        smooth: false,
+                        handles: Vec::new(),
+                        subpaths: Vec::new(),
+                    },
+                    fill: None,
+                    stroke: Some(chitrakar_doc::Stroke {
+                        color: RED,
+                        width: 4.0,
+                        widths: Vec::new(),
+                        dash: Vec::new(),
+                        dash_offset: 0.0,
+                        cap: Default::default(),
+                        join: Default::default(),
+                        start_marker: marker,
+                        end_marker: marker,
+                        align: None,
+                    }),
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+            doc.apply(Command::SetTransform {
+                id,
+                transform: chitrakar_doc::Transform::translation(15.0, 20.0),
+            })
+            .unwrap();
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let theirs = resvg_pixels(&doc);
+            let mut apart = 0;
+            for (i, p) in ours.pixels.iter().enumerate() {
+                if (p.a - theirs[i * 4 + 3] as f32 / 255.0).abs() > 0.5 {
+                    apart += 1;
+                }
+            }
+            let covered = ours.pixels.iter().filter(|p| p.a > 0.5).count();
+            assert!(covered > 150, "{marker:?}: there is a line ({covered})");
+            assert!(
+                apart <= 2,
+                "{marker:?}: {apart} pixels a reader covers otherwise"
+            );
+        }
+    }
+
     #[test]
     fn how_a_line_ends_and_turns_travels() {
         let mut doc = Document::new(80, 80, ColorMode::Rgb);

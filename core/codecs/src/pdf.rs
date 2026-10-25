@@ -3576,6 +3576,71 @@ mod tests {
         ));
     }
 
+    /// A line's corners turn in Ghostscript as they turn on the page: a
+    /// chevron eight wide, mitred, keeps its point — the tip reaches
+    /// nine pixels past the corner, where a round join would stop at
+    /// four — and rounded, it does not. Every other Ghostscript test is
+    /// of coverage over a page, where a corner is a few edge pixels, so
+    /// a mitre written as a round join passed all of them.
+    #[test]
+    fn a_lines_corner_turns_in_ghostscript_as_on_the_page() {
+        for (join, pointed) in [
+            (chitrakar_doc::StrokeJoin::Miter, true),
+            (chitrakar_doc::StrokeJoin::Round, false),
+        ] {
+            let mut doc = Document::new(60, 60, chitrakar_color::ColorMode::Rgb);
+            let root = doc.root();
+            let mut line = chitrakar_doc::Node::vector(
+                "chevron",
+                VectorShape::Path {
+                    points: vec![[10.0, 50.0], [30.0, 10.0], [50.0, 50.0]],
+                    closed: false,
+                    smooth: false,
+                    handles: Vec::new(),
+                    subpaths: Vec::new(),
+                },
+            );
+            if let chitrakar_doc::NodeKind::Vector { stroke, .. } = &mut line.kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width: 8.0,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    cap: Default::default(),
+                    join,
+                    align: None,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(line),
+            })
+            .unwrap();
+            let Some(theirs) = ghostscript_rgba(&doc) else {
+                return;
+            };
+            let ours = chitrakar_render::render(&doc).unwrap();
+            // Three pixels down the bisector from where the mitre's point
+            // is, and two above where a round join would end.
+            for (x, y) in [(29u32, 3u32), (30, 3)] {
+                let painted = theirs[(y * 60 + x) as usize][1] < 128;
+                assert_eq!(
+                    ours.get(x, y).a > 0.5,
+                    pointed,
+                    "{join:?}: the page's corner at {x},{y}"
+                );
+                assert_eq!(
+                    painted, pointed,
+                    "{join:?}: ghostscript's corner at {x},{y} is the page's"
+                );
+            }
+        }
+    }
+
     /// A page holding many layers that work on what is under them is one
     /// picture under the last of them, rendered once. Each used to make
     /// the page so far a picture of its own and let the one before go, so

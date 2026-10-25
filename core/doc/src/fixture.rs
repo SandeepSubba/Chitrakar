@@ -977,6 +977,44 @@ pub fn everything() -> Fixture {
         },
     })
     .unwrap();
+    // And one held to the frame's middle each way, the one pin the page
+    // did not hold: a frame given a new size moves it by half of what it
+    // grew, which neither end nor a stretch asks.
+    {
+        let mut node = Node::vector(
+            "middling",
+            VectorShape::Rect {
+                width: 3.0,
+                height: 2.0,
+                radius: 0.5,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.3,
+                g: 0.3,
+                b: 0.9,
+                a: 1.0,
+            });
+        }
+        node.transform = Transform::translation(4.0, 3.0);
+        let index = doc.children_of(frame).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: frame,
+            index,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let middling = doc.children_of(frame).unwrap()[index];
+        doc.apply(Command::SetPinning {
+            id: middling,
+            pinned: Pinning {
+                x: Pin::Middle,
+                y: Pin::Middle,
+            },
+        })
+        .unwrap();
+    }
     // The four kinds that draw by reading rather than by covering: an
     // adjustment and a filter rewrite what is composited below them, a
     // clone lays down what the page already holds somewhere else, and a
@@ -1326,7 +1364,9 @@ pub fn everything() -> Fixture {
     .unwrap();
 
     doc.apply(Command::SetGuides {
-        guides: vec![Guide::Vertical(12.0)],
+        // And one across: every guide the page had stood upright, so a
+        // command that moves the page was only asked about one axis.
+        guides: vec![Guide::Vertical(12.0), Guide::Horizontal(30.5)],
     })
     .unwrap();
 
@@ -2153,6 +2193,175 @@ pub fn everything() -> Fixture {
             node: Box::new(node),
         })
         .unwrap();
+    }
+    // Every way a stroke ends, turns and lies that the page did not
+    // hold, and every way a gradient goes on past its ends: two open
+    // zigzags — one butt-capped and mitred with a bar at its start, laid
+    // along its outline's middle; one square-capped and rounded — a
+    // closed box stroked inside its edge, and two boxes whose gradients
+    // reflect and repeat. And the two text alignments the page did not
+    // hold, right and justified.
+    {
+        let ink = |r: f32, g: f32, b: f32| chitrakar_color::AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let stroke = |cap, join, align, start| Stroke {
+            color: ink(0.15, 0.25, 0.6),
+            width: 1.2,
+            widths: Vec::new(),
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            cap,
+            join,
+            align,
+            start_marker: start,
+            end_marker: Marker::None,
+        };
+        let zigzag = VectorShape::Path {
+            points: vec![[0.0, 4.0], [4.0, 0.5], [8.0, 4.0], [12.0, 0.5]],
+            handles: vec![[0.0; 4]; 4],
+            closed: false,
+            smooth: false,
+            subpaths: Vec::new(),
+        };
+        let mut lines = vec![
+            (
+                "butt",
+                zigzag.clone(),
+                stroke(
+                    crate::StrokeCap::Butt,
+                    crate::StrokeJoin::Miter,
+                    Some(StrokeAlign::Centre),
+                    Marker::Bar,
+                ),
+                None,
+                [3.0, 27.0],
+            ),
+            (
+                "square",
+                zigzag,
+                stroke(
+                    crate::StrokeCap::Square,
+                    crate::StrokeJoin::Round,
+                    None,
+                    Marker::None,
+                ),
+                None,
+                [3.0, 33.0],
+            ),
+            (
+                "boxed in",
+                VectorShape::Rect {
+                    width: 8.0,
+                    height: 6.0,
+                    radius: 0.0,
+                },
+                stroke(
+                    crate::StrokeCap::Butt,
+                    crate::StrokeJoin::Miter,
+                    Some(StrokeAlign::Inside),
+                    Marker::None,
+                ),
+                None,
+                [66.0, 14.0],
+            ),
+        ];
+        let stops = vec![
+            GradientStop {
+                offset: 0.0,
+                color: ink(0.9, 0.3, 0.1),
+            },
+            GradientStop {
+                offset: 1.0,
+                color: ink(0.1, 0.5, 0.9),
+            },
+        ];
+        for (name, gradient, at) in [
+            (
+                "reflected",
+                Gradient::Linear {
+                    from: [0.0, 0.0],
+                    to: [0.3, 0.0],
+                    stops: stops.clone(),
+                    spread: crate::Spread::Reflect,
+                },
+                [66.0, 22.0],
+            ),
+            (
+                "repeated",
+                Gradient::Radial {
+                    center: [0.5, 0.5],
+                    radius: 0.25,
+                    stops: stops.clone(),
+                    axes: None,
+                    spread: crate::Spread::Repeat,
+                    focus: None,
+                },
+                [66.0, 29.0],
+            ),
+        ] {
+            lines.push((
+                name,
+                VectorShape::Rect {
+                    width: 10.0,
+                    height: 6.0,
+                    radius: 0.0,
+                },
+                stroke(
+                    crate::StrokeCap::Butt,
+                    crate::StrokeJoin::Miter,
+                    None,
+                    Marker::None,
+                ),
+                Some(gradient),
+                at,
+            ));
+        }
+        for (name, shape, stroke, gradient, at) in lines {
+            let painted = gradient.is_some();
+            let node = Node {
+                transform: Transform::translation(at[0], at[1]),
+                kind: NodeKind::Vector {
+                    shape,
+                    fill: None,
+                    stroke: (!painted).then_some(stroke),
+                    gradient,
+                },
+                ..Node::group(name)
+            };
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+        }
+        for (name, words, align, at) in [
+            (
+                "to the right",
+                "set right",
+                crate::TextAlign::Right,
+                [44.0, 40.0],
+            ),
+            (
+                "justified",
+                "set out to both sides of the line",
+                crate::TextAlign::Justify,
+                [44.0, 45.0],
+            ),
+        ] {
+            let mut spec = TextSpec::new(words, 3.0, ink(0.1, 0.1, 0.1));
+            spec.width = 20.0;
+            spec.align = align;
+            let mut node = Node::text(name, spec);
+            node.transform = Transform::translation(at[0], at[1]);
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+        }
     }
     // Every blend mode the page did not hold. Three of fifteen stood
     // here — Multiply, Soft light and Hue — so the file, the clipboard,
