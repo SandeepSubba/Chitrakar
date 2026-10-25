@@ -8594,8 +8594,17 @@ mod tests {
             let mine = gpu.render(doc).expect("can_render said it would");
             let reference = chitrakar_render::render(doc).unwrap();
             let (mean, worst) = difference(&mine, &reference);
+            // A coarse net, over the whole page: the two renderers
+            // antialias an edge each their own way, and the fixture holds
+            // filters that make an edge of every edge — find edges, an
+            // emboss, a sharpen, a high pass — each over its own sliver of
+            // the page. Without them the page sits at 0.0021; with them at
+            // 0.0038 to 0.0040, each adding a ten-thousandth, while the
+            // interiors below stay at 0.0002 with none off. So the net is
+            // a quarter again what the page sits at, and what notices a
+            // layer drawn wrongly is the interiors.
             assert!(
-                mean < 0.004,
+                mean < 0.005,
                 "after {what}: mean {mean:.5}, worst {worst:.3}"
             );
             // And a reading that a small layer cannot hide from. The

@@ -16766,7 +16766,21 @@ mod tests {
     /// padded-region audit crosses no part of this disc.
     #[test]
     fn the_fixtures_twirl_turns_inside_its_disc_and_nothing_outside() {
-        let f = chitrakar_doc::fixture::everything();
+        let mut f = chitrakar_doc::fixture::everything();
+        // What stands above the twirl and reads a neighbourhood of what is
+        // under it — a blur, a median — reads the whirl as well and moves
+        // with it a few pixels past the disc, as it should. Put away, so
+        // what is asked is the twirl's own.
+        let root = f.doc.root();
+        let layers = f.doc.children_of(root).unwrap().to_vec();
+        let at = layers.iter().position(|id| *id == f.swirled).unwrap();
+        for &id in &layers[at + 1..] {
+            if matches!(f.doc.node(id).unwrap().kind, NodeKind::Filter(_)) {
+                f.doc
+                    .apply(Command::SetVisible { id, visible: false })
+                    .unwrap();
+            }
+        }
         let page = |doc: &Document| render(doc).unwrap();
         let with = page(&f.doc);
         let mut hidden = f.doc.clone();

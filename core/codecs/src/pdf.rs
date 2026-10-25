@@ -595,6 +595,18 @@ impl Page {
         // picture, so long as each lands with the default blend.
         let mut pending: Vec<NodeId> = Vec::new();
         let mut next = 0;
+        // Each layer that works on what is under it makes everything under
+        // it one picture, and the pictures before it are let go — so only
+        // the last of them is ever on the page. Rendered at every one in
+        // turn, a page holding thirty adjustments and filters was rendered
+        // thirty times at print resolution to keep one, and took ten
+        // seconds to write for an eighty-pixel page. So the last is found
+        // first, the page under it drawn once, and the rest goes on from
+        // there.
+        if let Some(end) = self.last_flattened(&children)? {
+            self.place_rendered(&children[..end], BlendMode::Normal)?;
+            next = end;
+        }
         while next < children.len() {
             let i = next;
             let child = children[i];
@@ -668,6 +680,46 @@ impl Page {
         }
         self.flush(&mut pending)?;
         Ok(())
+    }
+
+    /// Where the last of the top-level layers that make everything under
+    /// them one picture ends — the same question `draw_page` asks of each
+    /// in turn, asked of all of them first: a run held together with a
+    /// blend in it or something that works on what is under it, when it
+    /// cannot be drawn live, or a shown layer that works on what is under
+    /// it. `None` for a page with none.
+    fn last_flattened(&self, children: &[NodeId]) -> Result<Option<usize>, PdfError> {
+        let mut last = None;
+        let mut next = 0;
+        while next < children.len() {
+            let i = next;
+            let mut end = i + 1;
+            while end < children.len() && self.doc.node(children[end])?.clipped {
+                end += 1;
+            }
+            next = end;
+            if end > i + 1 {
+                let run = &children[i..end];
+                if self.siblings_live(run)? {
+                    continue;
+                }
+                let mut whole = false;
+                for &c in run {
+                    let n = self.doc.node(c)?;
+                    whole |= n.blend != BlendMode::Normal || works_on_what_is_under(&self.doc, c);
+                }
+                if whole {
+                    last = Some(end);
+                }
+                continue;
+            }
+            let node = self.doc.node(children[i])?;
+            if node.visible && node.opacity > 0.0 && works_on_what_is_under(&self.doc, children[i])
+            {
+                last = Some(i + 1);
+            }
+        }
+        Ok(last)
     }
 
     fn flush(&mut self, pending: &mut Vec<NodeId>) -> Result<(), PdfError> {
@@ -3522,6 +3574,60 @@ mod tests {
         assert!(!text.contains(
             "/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length 0"
         ));
+    }
+
+    /// A page holding many layers that work on what is under them is one
+    /// picture under the last of them, rendered once. Each used to make
+    /// the page so far a picture of its own and let the one before go, so
+    /// a page of ten adjustments was rendered ten times at print
+    /// resolution, and the nine pictures let go were still written into
+    /// the file, where nothing drew them; the fixture, holding thirty-six,
+    /// took ten seconds to write. One picture now, and a rectangle above
+    /// the last is still live.
+    #[test]
+    fn many_adjustments_are_one_picture_rendered_once() {
+        let mut doc = everything();
+        let root = doc.root();
+        for k in 0..10 {
+            let count = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: count,
+                node: Box::new(chitrakar_doc::Node::adjustment(
+                    &format!("exp {k}"),
+                    chitrakar_doc::Adjustment::Exposure { stops: 0.1 },
+                )),
+            })
+            .unwrap();
+        }
+        add(
+            &mut doc,
+            shape(
+                "top",
+                VectorShape::Rect {
+                    width: 5.0,
+                    height: 5.0,
+                    radius: 0.0,
+                },
+                Some(RED),
+            ),
+            [100.0, 70.0],
+        );
+        let pdf = export_pdf_document(&doc).unwrap();
+        let images = String::from_utf8_lossy(&pdf)
+            .matches("/Subtype /Image")
+            .count();
+        // The picture, and the soft mask its alpha goes as.
+        assert!(
+            images <= 2,
+            "one picture of everything under the last adjustment, not {images} images"
+        );
+        let content = content_of(&pdf);
+        assert_eq!(content.matches(" Do").count(), 1, "and it is drawn once");
+        assert!(
+            content.contains("0 0 5 5 re"),
+            "the rect above them is live"
+        );
     }
 
     #[test]

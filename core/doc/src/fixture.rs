@@ -2205,6 +2205,162 @@ pub fn everything() -> Fixture {
         })
         .unwrap();
     }
+    // Every filter and every adjustment the page did not hold. Three of
+    // eighteen filters stood here and six of eighteen adjustments, so the
+    // file, the clipboard, the wire, undo and the readers outside were
+    // asked about those alone; the random pages draw the rest, and nothing
+    // else does. Each is masked to a sliver of the page, top to bottom,
+    // so every one of them works on something — type, a photograph, the
+    // strip of blends — and none of them hides what the others did.
+    {
+        let filters = [
+            Filter::Sharpen {
+                sigma: 1.0,
+                amount: 0.8,
+            },
+            Filter::HighPass { sigma: 1.5 },
+            Filter::Halftone {
+                size: 3.0,
+                degrees: 30.0,
+            },
+            Filter::Emboss {
+                degrees: 225.0,
+                height: 1.0,
+                amount: 1.5,
+            },
+            Filter::MotionBlur {
+                distance: 4.0,
+                degrees: 30.0,
+            },
+            Filter::RadialBlur {
+                amount: 0.1,
+                spin: false,
+                center: [0.4, 0.6],
+            },
+            Filter::Pinch {
+                amount: 0.5,
+                radius: 0.5,
+                center: [0.3, 0.5],
+            },
+            Filter::Ripple {
+                amplitude: 1.5,
+                wavelength: 9.0,
+            },
+            Filter::FindEdges { amount: 0.8 },
+            Filter::OilPaint { radius: 2.0 },
+            Filter::LensCorrection { amount: 0.3 },
+            Filter::Pixelate { size: 3.0 },
+            Filter::Vignette {
+                amount: 0.5,
+                radius: 0.2,
+                softness: 0.5,
+            },
+            Filter::Median { radius: 1.0 },
+            Filter::SurfaceBlur {
+                radius: 3.0,
+                threshold: 0.2,
+            },
+        ];
+        let adjustments = [
+            Adjustment::BrightnessContrast {
+                brightness: 0.1,
+                contrast: 0.2,
+            },
+            Adjustment::HueSaturation {
+                hue_degrees: 40.0,
+                saturation: 0.2,
+                lightness: 0.0,
+                colorize: false,
+            },
+            Adjustment::WhiteBalance {
+                temperature: 0.3,
+                tint: -0.1,
+            },
+            Adjustment::Vibrance { amount: 0.5 },
+            Adjustment::BlackAndWhite {
+                red: 0.5,
+                green: 0.3,
+                blue: 0.2,
+            },
+            Adjustment::Invert { amount: 1.0 },
+            Adjustment::SelectiveHsl {
+                bands: vec![
+                    [0.2, 0.1, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [0.0, -0.3, 0.1],
+                    [0.0, 0.0, 0.0],
+                    [-0.1, 0.2, -0.1],
+                    [0.0, 0.0, 0.0],
+                ],
+            },
+            Adjustment::ShadowsHighlights {
+                shadows: 0.4,
+                highlights: 0.3,
+            },
+            Adjustment::ColorBalance {
+                shadows: [0.1, 0.0, -0.1],
+                midtones: [0.0, 0.1, 0.0],
+                highlights: [-0.1, 0.0, 0.1],
+                preserve_luminosity: true,
+            },
+            Adjustment::Posterize { levels: 4.0 },
+            Adjustment::Threshold { level: 0.5 },
+            Adjustment::ChannelMixer {
+                red: [0.8, 0.2, 0.0],
+                green: [0.1, 0.8, 0.1],
+                blue: [0.0, 0.3, 0.7],
+                constant: [0.0, 0.0, 0.05],
+                monochrome: false,
+            },
+            Adjustment::PhotoFilter {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.9,
+                    g: 0.6,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                density: 0.4,
+                preserve_luminosity: true,
+            },
+        ];
+        let made: Vec<Node> = filters
+            .into_iter()
+            .enumerate()
+            .map(|(k, f)| Node::filter(&format!("filter {k}"), f))
+            .chain(
+                adjustments
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, a)| Node::adjustment(&format!("adjustment {k}"), a)),
+            )
+            .collect();
+        // A width on an eighth of a pixel, so that a page turned round
+        // and back puts every sliver where it was to the bit: `80 − x`
+        // twice gives `x` back only when `x` sits on a grid that coarse.
+        // Laid at 80 / 28, the page turned twice moved them by an ulp.
+        let wide = 2.875;
+        for (k, mut node) in made.into_iter().enumerate() {
+            node.mask = Some(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: wide,
+                        height: 60.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(wide * k as f32, 0.0),
+                },
+                invert: false,
+                feather: 0.0,
+            });
+            let index = doc.children_of(root).unwrap().len();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+        }
+    }
     // A colour lookup, gently warm and at half strength, over the whole
     // page: an adjustment whose numbers are not in the document at all
     // but in a resource beside it, so every audit that carries a layer
@@ -4599,19 +4755,39 @@ pub fn state(doc: &Document) -> serde_json::Value {
 /// Two documents the same to within `tol` on every number in them, and
 /// exactly the same in everything else.
 pub fn close(a: &serde_json::Value, b: &serde_json::Value, tol: f64) -> bool {
+    within(a, b, tol, false)
+}
+
+/// [`close`], with `tol` a share of the larger number rather than an
+/// amount, below one: a float's rounding grows with what it holds, so a
+/// sliver of mask turned with the page and back came back fifteen
+/// millionths off at seventy-two pixels — two ulps there — where the same
+/// turn at the page's corner is exact to a millionth.
+pub fn close_relative(a: &serde_json::Value, b: &serde_json::Value, tol: f64) -> bool {
+    within(a, b, tol, true)
+}
+
+fn within(a: &serde_json::Value, b: &serde_json::Value, tol: f64, relative: bool) -> bool {
     use serde_json::Value as V;
     match (a, b) {
         (V::Number(x), V::Number(y)) => match (x.as_f64(), y.as_f64()) {
-            (Some(x), Some(y)) => (x - y).abs() <= tol,
+            (Some(x), Some(y)) => {
+                let scale = if relative {
+                    x.abs().max(y.abs()).max(1.0)
+                } else {
+                    1.0
+                };
+                (x - y).abs() <= tol * scale
+            }
             _ => x == y,
         },
         (V::Array(x), V::Array(y)) => {
-            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| close(x, y, tol))
+            x.len() == y.len() && x.iter().zip(y).all(|(x, y)| within(x, y, tol, relative))
         }
         (V::Object(x), V::Object(y)) => {
             x.len() == y.len()
                 && x.iter()
-                    .all(|(k, v)| y.get(k).is_some_and(|w| close(v, w, tol)))
+                    .all(|(k, v)| y.get(k).is_some_and(|w| within(v, w, tol, relative)))
         }
         _ => a == b,
     }
@@ -4637,7 +4813,9 @@ pub fn differing(a: &serde_json::Value, b: &serde_json::Value) -> String {
 /// for bit. The one that cannot — [`exact`] names it — is allowed its
 /// numbers to within a float, and its guides to within a page pixel,
 /// since an axis-aligned guide cannot record a tilt and comes back on
-/// its own axis where it crosses the middle of the page.
+/// its own axis where it crosses the middle of the page. Within a float
+/// is a share of the number (a millionth), not an amount: a turned page's
+/// rounding grows with how far from the corner a thing is.
 ///
 /// `Err` carries what differed, for a message that says something
 /// without printing the whole document.
@@ -4655,7 +4833,7 @@ pub fn came_back(
     }
     let (mut got, mut want) = (got.clone(), want.clone());
     let (has, had) = (got["guides"].take(), want["guides"].take());
-    if !close(&got, &want, 1e-5) {
+    if !close_relative(&got, &want, 1e-6) {
         return Err(differing(&got, &want));
     }
     if !close(&has, &had, 1.0) {

@@ -964,10 +964,18 @@ mod tests {
             match v {
                 serde_json::Value::Object(map) => {
                     for (k, child) in map {
-                        // A single-key object is an enum's tag: its one
-                        // key says which variant, so removing it is not a
-                        // question about additive fields either.
-                        if named && map.len() > 1 {
+                        // A single-key object whose key is a variant's
+                        // name is an enum's tag: its one key says which
+                        // variant, so removing it is not a question about
+                        // additive fields either. One whose key is a
+                        // field's is a struct with one field — an invert's
+                        // amount, a pixelate's size — and was passed over
+                        // with the tags, so a one-field filter or
+                        // adjustment could lose its field without this
+                        // audit asking. Variants are named in capitals and
+                        // fields in small letters, which tells them apart.
+                        let tag = map.len() == 1 && k.starts_with(char::is_uppercase);
+                        if named && !tag {
                             out.push((at.clone(), k.clone()));
                         }
                         keys(
@@ -1349,6 +1357,67 @@ mod tests {
             "/document:root",
             ":document",
             ":format_version",
+            // Every filter and adjustment the fixture holds now, each as
+            // required as a blur's sigma: a filter with no strength is not
+            // a filter. And the fields of a struct with only one — an
+            // exposure's stops, a stroke list — which this audit passed
+            // over with the enum tags until it told the two apart.
+            "/document/nodes/*/effects/*/Blur:sigma",
+            "/document/nodes/*/kind/Adjustment/BlackAndWhite:blue",
+            "/document/nodes/*/kind/Adjustment/BlackAndWhite:green",
+            "/document/nodes/*/kind/Adjustment/BlackAndWhite:red",
+            "/document/nodes/*/kind/Adjustment/BrightnessContrast:brightness",
+            "/document/nodes/*/kind/Adjustment/BrightnessContrast:contrast",
+            "/document/nodes/*/kind/Adjustment/ChannelMixer:blue",
+            "/document/nodes/*/kind/Adjustment/ChannelMixer:green",
+            "/document/nodes/*/kind/Adjustment/ChannelMixer:red",
+            "/document/nodes/*/kind/Adjustment/Exposure:stops",
+            "/document/nodes/*/kind/Adjustment/GradientMap:stops",
+            "/document/nodes/*/kind/Adjustment/HueSaturation:hue_degrees",
+            "/document/nodes/*/kind/Adjustment/HueSaturation:lightness",
+            "/document/nodes/*/kind/Adjustment/HueSaturation:saturation",
+            "/document/nodes/*/kind/Adjustment/Invert:amount",
+            "/document/nodes/*/kind/Adjustment/PhotoFilter/color/Srgb:a",
+            "/document/nodes/*/kind/Adjustment/PhotoFilter/color/Srgb:b",
+            "/document/nodes/*/kind/Adjustment/PhotoFilter/color/Srgb:g",
+            "/document/nodes/*/kind/Adjustment/PhotoFilter/color/Srgb:r",
+            "/document/nodes/*/kind/Adjustment/PhotoFilter:color",
+            "/document/nodes/*/kind/Adjustment/PhotoFilter:density",
+            "/document/nodes/*/kind/Adjustment/Posterize:levels",
+            "/document/nodes/*/kind/Adjustment/ShadowsHighlights:highlights",
+            "/document/nodes/*/kind/Adjustment/ShadowsHighlights:shadows",
+            "/document/nodes/*/kind/Adjustment/Threshold:level",
+            "/document/nodes/*/kind/Adjustment/Vibrance:amount",
+            "/document/nodes/*/kind/Adjustment/WhiteBalance:temperature",
+            "/document/nodes/*/kind/Adjustment/WhiteBalance:tint",
+            "/document/nodes/*/kind/Clone:strokes",
+            "/document/nodes/*/kind/Filter/Emboss:amount",
+            "/document/nodes/*/kind/Filter/Emboss:degrees",
+            "/document/nodes/*/kind/Filter/Emboss:height",
+            "/document/nodes/*/kind/Filter/FindEdges:amount",
+            "/document/nodes/*/kind/Filter/GaussianBlur:sigma",
+            "/document/nodes/*/kind/Filter/Halftone:degrees",
+            "/document/nodes/*/kind/Filter/Halftone:size",
+            "/document/nodes/*/kind/Filter/HighPass:sigma",
+            "/document/nodes/*/kind/Filter/LensCorrection:amount",
+            "/document/nodes/*/kind/Filter/Median:radius",
+            "/document/nodes/*/kind/Filter/MotionBlur:degrees",
+            "/document/nodes/*/kind/Filter/MotionBlur:distance",
+            "/document/nodes/*/kind/Filter/OilPaint:radius",
+            "/document/nodes/*/kind/Filter/Pinch:amount",
+            "/document/nodes/*/kind/Filter/Pixelate:size",
+            "/document/nodes/*/kind/Filter/RadialBlur:amount",
+            "/document/nodes/*/kind/Filter/Ripple:amplitude",
+            "/document/nodes/*/kind/Filter/Ripple:wavelength",
+            "/document/nodes/*/kind/Filter/Sharpen:amount",
+            "/document/nodes/*/kind/Filter/Sharpen:sigma",
+            "/document/nodes/*/kind/Filter/SurfaceBlur:radius",
+            "/document/nodes/*/kind/Filter/SurfaceBlur:threshold",
+            "/document/nodes/*/kind/Filter/Vignette:amount",
+            "/document/nodes/*/kind/Filter/Vignette:radius",
+            "/document/nodes/*/kind/Filter/Vignette:softness",
+            "/document/nodes/*/kind/Paint:strokes",
+            "/document/nodes/*/mask/kind/Painted:strokes",
         ];
 
         let f = chitrakar_doc::fixture::everything();
