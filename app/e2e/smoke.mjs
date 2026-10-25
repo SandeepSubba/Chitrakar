@@ -3538,6 +3538,50 @@ assert(
   assert((await canvasPixel(300, 200)).join() === own.join(), "and removed, the shape is itself");
 }
 
+// 8x2f. Blur: the one layer out of focus. Added, the shape's edge
+// softens both ways — a little of it past where it was, a little less of
+// it just inside — while its middle and the paper far from it stay as
+// they were; more blur reaches further; one undo is one step back;
+// removed, the edge is sharp again.
+{
+  await newDocument(600, 400, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await setColor("Fill colour", "#2266cc");
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(500, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const middle = await canvasPixel(300, 200);
+  assert((await canvasPixel(96, 200))[3] === 0, "sharp, nothing past the edge");
+  await page.selectOption('select[aria-label="Add effect"]', "Blur");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".effect .effect-head span").allTextContents()).join() === "Blur",
+    "the blur is listed",
+  );
+  const past = (await canvasPixel(97, 200))[3];
+  const inside = (await canvasPixel(102, 200))[3];
+  assert(past > 10 && past < 128, `a little of it past the edge (${past})`);
+  assert(inside > 128 && inside < 250, `and a little less of it just inside (${inside})`);
+  assert((await canvasPixel(300, 200)).join() === middle.join(), "its middle is as it was");
+  assert((await canvasPixel(40, 200))[3] === 0, "and far from it the paper is too");
+  await setSlider("Blur amount", 20);
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(70, 200))[3] > 10, "more blur reaches further");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(97, 200))[3] === past, "one undo is the first blur again");
+  await page.click('button[aria-label="Remove Blur"]');
+  await page.waitForTimeout(300);
+  assert((await canvasPixel(97, 200))[3] === 0, "and removed, the edge is sharp again");
+}
+
 // 8x2e. Distances: with a layer picked and alt held, the Move tool shows
 // how far it is from the layer under the pointer — the gap between two
 // side by side — and, over nothing, how far in from each side of the

@@ -348,10 +348,13 @@ export type Effect =
     }
   /** The layer in one colour, its soft edge and all: every pixel
    * `opacity` of the way to `color` at its own cover. */
-  | { ColorOverlay: { color: AuthoredColor; opacity: number } };
+  | { ColorOverlay: { color: AuthoredColor; opacity: number } }
+  /** The layer itself out of focus: its own pixels blurred by `sigma`,
+   * before a shadow or an outline is grown from it. */
+  | { Blur: { sigma: number } };
 
 /** The variant name of an effect — its single key. */
-export type EffectKind = "DropShadow" | "Outline" | "InnerShadow" | "Bevel" | "ColorOverlay";
+export type EffectKind = "DropShadow" | "Outline" | "InnerShadow" | "Bevel" | "ColorOverlay" | "Blur";
 
 export function effectKind(e: Effect): EffectKind {
   return Object.keys(e)[0] as EffectKind;

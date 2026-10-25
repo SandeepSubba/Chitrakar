@@ -611,10 +611,7 @@ fn bounds_in_parent_space_inner(
     // the dirty tracking are cut from — but not the one the layer is said
     // to occupy, which is why the caller chooses.
     let effect_pad = if effects {
-        node.effects
-            .iter()
-            .map(Effect::reach)
-            .fold(0.0f32, f32::max)
+        Effect::reach_of(&node.effects)
     } else {
         0.0
     };
@@ -853,11 +850,7 @@ pub fn effects_reach(doc: &Document) -> f32 {
     doc.nodes()
         .filter(|(_, node)| node.visible && !node.effects.is_empty())
         .map(|(id, node)| {
-            let reach = node
-                .effects
-                .iter()
-                .map(Effect::reach)
-                .fold(0.0f32, f32::max);
+            let reach = Effect::reach_of(&node.effects);
             reach * max_scale(ancestor_space(doc, *id))
         })
         .filter(|r| r.is_finite())
@@ -1374,7 +1367,7 @@ fn render_siblings(
             let reach = children[i + 1..end]
                 .iter()
                 .filter_map(|&c| doc.node(c).ok())
-                .flat_map(|n| n.effects.iter().map(Effect::reach))
+                .map(|n| Effect::reach_of(&n.effects))
                 .fold(0.0f32, f32::max);
             // A soft-edged mask reads beyond its own pixels too, for the
             // same reason and by its own margin: the plane it softens on
@@ -1716,7 +1709,13 @@ pub fn frame_in_place(doc: &Document, id: NodeId, parent: Transform) -> Result<b
         return Ok(false);
     }
     let t = parent.compose(node.transform);
-    Ok(t.b.abs() < 1e-6 && t.c.abs() < 1e-6 && reads_in_place(doc, id, node.blend)?)
+    // A frame out of focus is blurred as a whole picture, which wants it
+    // on a surface of its own: drawn where it stands there is nothing of
+    // it apart from the page to blur.
+    Ok(t.b.abs() < 1e-6
+        && t.c.abs() < 1e-6
+        && Effect::blur_of(&node.effects) == 0.0
+        && reads_in_place(doc, id, node.blend)?)
 }
 
 /// Whether a layer lets everything held to it through: an adjustment, a
@@ -1860,9 +1859,8 @@ fn effects_within(doc: &Document, id: NodeId, space: Transform, depth: usize) ->
         return 0.0;
     };
     let inner = space.compose(node.transform);
-    let worn = |n: &chitrakar_doc::Node, at: Transform| {
-        n.effects.iter().map(Effect::reach).fold(0.0f32, f32::max) * max_scale(at)
-    };
+    let worn =
+        |n: &chitrakar_doc::Node, at: Transform| Effect::reach_of(&n.effects) * max_scale(at);
     let mut most = 0.0f32;
     for child in doc.children_of(id).unwrap_or_default() {
         if let Ok(c) = doc.node(*child) {
@@ -1909,6 +1907,32 @@ fn clone_alone(
     dst: &mut Surface,
     clip: ClipRect,
     space: Transform,
+) -> Result<bool, DocError> {
+    clone_alone_as(doc, id, dst, clip, space, false)
+}
+
+/// What a clone layer lays drawn aside, as [`clone_alone`], without its
+/// effects: the cut a layer held to it is held to, which the page takes
+/// from what the clone laid before its effects grow (`lay_clone`). Read
+/// with them, a clone's inner shadow over its own soft edge — a blurred
+/// clone's — let more of what is held to it through than the page does.
+fn clone_cut(
+    doc: &Document,
+    id: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    space: Transform,
+) -> Result<bool, DocError> {
+    clone_alone_as(doc, id, dst, clip, space, true)
+}
+
+fn clone_alone_as(
+    doc: &Document,
+    id: NodeId,
+    dst: &mut Surface,
+    clip: ClipRect,
+    space: Transform,
+    bare: bool,
 ) -> Result<bool, DocError> {
     let root = doc.root();
     let node = doc.node(id)?;
@@ -2026,12 +2050,7 @@ fn clone_alone(
     // stroke lifts from, off a thumbnail's square or off the part of the
     // page on screen, is drawn, and drawn as the page has it.
     let scale = max_scale(view);
-    let reach = node
-        .effects
-        .iter()
-        .map(Effect::reach)
-        .fold(0.0f32, f32::max)
-        * scale;
+    let reach = Effect::reach_of(&node.effects) * scale;
     let pad = reach + filter_reach(&below) as f32 * scale + 2.0;
     let (nx0, ny0, nx1, ny1) = (
         clip.x0 as f32,
@@ -2103,7 +2122,7 @@ fn clone_alone(
         _ => return Ok(false),
     };
     let mut shown = Surface::new(w, h);
-    lay_clone(
+    let laid = lay_clone(
         doc,
         behind.wears,
         behind,
@@ -2113,6 +2132,7 @@ fn clone_alone(
         None,
         shifted,
     );
+    let shown = if bare { laid } else { shown };
     // Back into the window that was asked for, onto nothing — which is
     // what a layer shown on its own is drawn on.
     for y in clip.y0..clip.y1 {
@@ -2196,15 +2216,22 @@ fn lay_clone(
     let blend = behind.blend;
     // Whatever it is held to cuts what it laid before
     // anything is made of it, so the effects grow from the
-    // shape that will really be seen.
-    if let Some(c) = cover {
-        for y in region.y0..region.y1 {
-            for x in region.x0..region.x1 {
-                let a = c.alpha[at_in(c.origin, c.width, x, y)];
-                let i = (y * laid.width + x) as usize;
-                laid.pixels[i] = scale_alpha(laid.pixels[i], a);
+    // shape that will really be seen; blurred, it is cut again
+    // (`draw_effected`).
+    let cut = |laid: &mut Surface| {
+        if let Some(c) = cover {
+            for y in region.y0..region.y1 {
+                for x in region.x0..region.x1 {
+                    let a = c.alpha[at_in(c.origin, c.width, x, y)];
+                    let i = (y * laid.width + x) as usize;
+                    laid.pixels[i] = scale_alpha(laid.pixels[i], a);
+                }
             }
         }
+    };
+    cut(&mut laid);
+    if wear_blur(&mut laid, (0, 0), region, &node.effects, parent) {
+        cut(&mut laid);
     }
     if let Some(tint) = overlay_tint(doc, &node.effects) {
         wear_overlay(&mut laid, (0, 0), region, tint);
@@ -2286,6 +2313,11 @@ fn lay_levels(
                 fade(&mut pic, *mask, *space, *opacity);
             }
             Level::Wear(node, space) => {
+                // What is held to it is held to it blurred, as it is to
+                // any blurred layer.
+                if wear_blur(&mut pic, (0, 0), region, &node.effects, *space) {
+                    wear_blur(&mut shape, (0, 0), region, &node.effects, *space);
+                }
                 if let Some(tint) = overlay_tint(doc, &node.effects) {
                     wear_overlay(&mut pic, (0, 0), region, tint);
                 }
@@ -2697,11 +2729,7 @@ fn draw_layer(
         if let Some(behind) = resolved {
             {
                 let scale = max_scale(parent);
-                let reach = node
-                    .effects
-                    .iter()
-                    .map(Effect::reach)
-                    .fold(0.0f32, f32::max);
+                let reach = Effect::reach_of(&node.effects);
                 // As far as the effects reach, and as far as what is held
                 // to it wants its alpha.
                 let pad = ((reach * scale).ceil() as u32).max(capture.unwrap_or(0));
@@ -2970,11 +2998,7 @@ fn draw_effected(
     {
         let node = doc.node(child)?;
         let scale = max_scale(parent);
-        let reach = node
-            .effects
-            .iter()
-            .map(Effect::reach)
-            .fold(0.0f32, f32::max);
+        let reach = Effect::reach_of(&node.effects);
         // A feathered mask softens over a margin of its own, and the
         // layer has to be drawn over that margin for the softening to have
         // anything to read. The *extent* is grown by it below, which is
@@ -3024,12 +3048,7 @@ fn draw_effected(
         // road (`an_effect_that_draws_nothing_is_no_effect`) — a feathered
         // mask, or a filter inside the layer, softens against the page's
         // edge as it always has, and would not with room.
-        let drawn = node
-            .effects
-            .iter()
-            .filter(|e| e.draws())
-            .map(Effect::reach)
-            .fold(0.0f32, f32::max);
+        let drawn = Effect::reach_of(node.effects.iter().filter(|e| e.draws()));
         if room == 0 && drawn > 0.0 && !clip.is_empty() {
             let past = match extent {
                 Bounds::Rect(x0, y0, x1, y1) => {
@@ -3136,15 +3155,23 @@ fn draw_effected(
         )?;
         // Cut the layer to what it is clipped to before anything is made
         // of it, so its effects grow from the shape that will actually be
-        // seen rather than from the whole of it.
-        if let Some(c) = cover {
-            for y in layer_clip.y0..layer_clip.y1 {
-                for x in layer_clip.x0..layer_clip.x1 {
-                    let a = c.alpha_at(x, y);
-                    let i = at_in(origin, layer.width, x, y);
-                    layer.pixels[i] = scale_alpha(layer.pixels[i], a);
+        // seen rather than from the whole of it. Then out of focus: what
+        // shows of it is blurred, and cut again, so the blur stays inside
+        // what it is held to as a shadow does and its edge there is sharp.
+        let cut = |layer: &mut Surface| {
+            if let Some(c) = cover {
+                for y in layer_clip.y0..layer_clip.y1 {
+                    for x in layer_clip.x0..layer_clip.x1 {
+                        let a = c.alpha_at(x, y);
+                        let i = at_in(origin, layer.width, x, y);
+                        layer.pixels[i] = scale_alpha(layer.pixels[i], a);
+                    }
                 }
             }
+        };
+        cut(&mut layer);
+        if wear_blur(&mut layer, origin, layer_clip, &node.effects, parent) {
+            cut(&mut layer);
         }
         let taken = capture.map(|_| Cover {
             alpha: layer.pixels.iter().map(|p| p.a).collect(),
@@ -4146,8 +4173,9 @@ fn draw_effect(
     }
     match effect {
         // Not drawn beside the layer at all: it is the layer's own
-        // pixels, recoloured before they come down (`wear_overlay`).
-        Effect::ColorOverlay { .. } => {}
+        // pixels, recoloured or blurred before they come down
+        // (`wear_overlay`, `wear_blur`).
+        Effect::ColorOverlay { .. } | Effect::Blur { .. } => {}
         Effect::DropShadow {
             dx,
             dy,
@@ -4722,6 +4750,32 @@ fn wear_overlay(pic: &mut Surface, origin: (u32, u32), region: ClipRect, tint: (
             p.b += (b * p.a - p.b) * w;
         }
     }
+}
+
+/// A layer's own pixels inside `region` out of focus by its blurs
+/// (`Effect::blur_of`), carried into device pixels by the scale of
+/// `space`. Past the layer's surface there is nothing, not its edge
+/// repeated: a layer blurred is soft all the way round, and a surface
+/// cut short by the page's edge is given room before it gets here.
+/// Whether there was anything to blur.
+fn wear_blur(
+    pic: &mut Surface,
+    origin: (u32, u32),
+    region: ClipRect,
+    effects: &[Effect],
+    space: Transform,
+) -> bool {
+    let sigma = Effect::blur_of(effects) * max_scale(space);
+    if !sigma.is_finite() || sigma <= 0.01 {
+        return false;
+    }
+    blur::gaussian_blur(
+        pic,
+        shift_clip(region, origin),
+        sigma,
+        blur::Beyond::Nothing,
+    );
+    true
 }
 
 fn scale_alpha(px: LinearRgba, s: f32) -> LinearRgba {
@@ -11657,7 +11711,7 @@ fn clip_pixels_over(
     // (`clip_coverage_at`): before its effects, so a shadow cast by the
     // base does not let the layer above it show through in the file
     // where it does not on the page.
-    let alpha = if clone_alone(doc, base, &mut surface, clip, space)? {
+    let alpha = if clone_cut(doc, base, &mut surface, clip, space)? {
         surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect()
     } else {
         clip_coverage_at(doc, base, space, (w, h))?
@@ -11878,7 +11932,7 @@ pub fn clip_coverage_at(
     // one is (`clip_pixels`) — the cut the page itself takes of what it
     // laid. This was what the GPU backend handed a layer held to a clone
     // back for, the most of anything on the random pages.
-    if clone_alone(doc, id, &mut surface, clip, parent)? {
+    if clone_cut(doc, id, &mut surface, clip, parent)? {
         return Ok(surface.pixels.iter().map(|p| p.a.clamp(0.0, 1.0)).collect());
     }
     let cover = draw_layer(doc, id, &mut surface, clip, parent, None, Some(0), false)?;
@@ -26243,6 +26297,339 @@ mod tests {
         for ((f, p), u) in faint.pixels.iter().zip(&pinched.pixels).zip(&flat.pixels) {
             assert!((f.r - (p.r + u.r) / 2.0).abs() < 1e-5, "half way");
         }
+    }
+
+    /// Effects running off the page are the same page as on a wider one,
+    /// cut back, through every surface a layer is drawn on: a shadowed
+    /// shape alone, in a group, in a group wearing an outline of its own,
+    /// in a masked group, and in a copy of the group — plain, and wearing
+    /// an outline. A group, a copy or a masked layer is drawn through more
+    /// than one surface, and the roadmap had it that every one would have
+    /// to reach past the edge together, which a single layer's room did
+    /// not give. Each surface is given room of its own now
+    /// (`draw_with_room`), and the pages agree exactly.
+    #[test]
+    fn effects_past_the_pages_edge_are_the_wider_pages_through_every_surface() {
+        let rgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let rect = |name: &str, w: f32, h: f32, c: AuthoredColor| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 2.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(c);
+            }
+            Box::new(n)
+        };
+        let build = |w: u32, shift: f32, how: &str| {
+            let mut doc = Document::new(w, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let mut ground = rect("ground", 400.0, 40.0, rgb(0.9, 0.9, 0.8));
+            ground.transform = Transform::translation(-100.0, 0.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: ground,
+            })
+            .unwrap();
+            let shadow = Effect::DropShadow {
+                dx: -3.0,
+                dy: 2.0,
+                blur: 2.0,
+                color: rgb(0.1, 0.0, 0.2),
+                opacity: 0.8,
+                spread: 0.0,
+            };
+            let outline = Effect::Outline {
+                width: 3.0,
+                color: rgb(0.0, 0.5, 0.0),
+                opacity: 1.0,
+            };
+            let mut shape = rect("shape", 14.0, 12.0, rgb(0.8, 0.1, 0.1));
+            shape.transform = Transform::translation(-4.0 + shift, 10.0);
+            shape.effects = vec![shadow];
+            if how == "alone" {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: shape,
+                })
+                .unwrap();
+                return doc;
+            }
+            let mut g = Node::group("g");
+            if how == "group wearing an outline" {
+                g.effects = vec![outline.clone()];
+            }
+            if how == "masked group" {
+                g.mask = Some(Mask {
+                    kind: MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 30.0, ry: 30.0 },
+                        transform: Transform::translation(-30.0 + shift, -10.0),
+                    },
+                    invert: false,
+                    feather: 1.0,
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(g),
+            })
+            .unwrap();
+            let g = doc.children_of(root).unwrap()[1];
+            doc.apply(Command::AddNode {
+                parent: g,
+                index: 0,
+                node: shape,
+            })
+            .unwrap();
+            if how.starts_with("copy") {
+                let mut c = Node::instance("copy", g);
+                c.transform = Transform::translation(0.0, 16.0);
+                if how == "copy wearing an outline" {
+                    c.effects = vec![outline];
+                }
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 2,
+                    node: Box::new(c),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        for how in [
+            "alone",
+            "group",
+            "group wearing an outline",
+            "masked group",
+            "copy",
+            "copy wearing an outline",
+        ] {
+            let narrow = render(&build(40, 0.0, how)).unwrap();
+            let wide = render(&build(80, 40.0, how)).unwrap();
+            let without = {
+                let mut d = build(40, 0.0, how);
+                let id = d.children_of(d.root()).unwrap()[1];
+                d.apply(Command::SetVisible { id, visible: false }).unwrap();
+                render(&d).unwrap()
+            };
+            let mut shown = 0.0f32;
+            for y in 0..40 {
+                for x in 0..40 {
+                    let (p, q) = (narrow.get(x, y), wide.get(x + 40, y));
+                    let d = (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs());
+                    assert!(
+                        d < 1e-5,
+                        "{how}: the page and the wider one part by {d} at {x},{y}"
+                    );
+                    if x < 3 {
+                        shown = shown.max((p.r - without.get(x, y).r).abs());
+                    }
+                }
+            }
+            assert!(shown > 0.1, "{how}: something runs off the page ({shown})");
+        }
+    }
+
+    /// A blur is the one layer out of focus. Over plain white ground it
+    /// is exactly what a blur filter over the whole page gives, since
+    /// blurring white leaves it white — an outside witness for what the
+    /// effect does, through the filter's own path. Two blurs are one of
+    /// the root of their summed squares. A shadow it wears is cast from
+    /// the blurred layer, and so reaches further. Near the page's edge it
+    /// is given room, so the part of it on the page is the part of the
+    /// same layer on a wider page. Held to a disc, it is cut sharp at the
+    /// disc's edge; and a layer held to it is held to its blurred shape.
+    #[test]
+    fn a_blur_is_the_one_layer_out_of_focus() {
+        let rgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let page = |w: u32, h: u32, at: (f32, f32), effects: Vec<Effect>, filter: Option<f32>| {
+            let mut doc = Document::new(w, h, ColorMode::Rgb);
+            let root = doc.root();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("ground", w as f32, h as f32, WHITE),
+            })
+            .unwrap();
+            let mut r = filled_rect("shape", 17.3, 12.6, rgb(0.1, 0.3, 0.9));
+            r.transform = Transform::translation(at.0, at.1);
+            r.effects = effects;
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: r,
+            })
+            .unwrap();
+            if let Some(sigma) = filter {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 2,
+                    node: Box::new(Node::filter("blur", Filter::GaussianBlur { sigma })),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let worst = |a: &Surface, b: &Surface| {
+            a.pixels
+                .iter()
+                .zip(&b.pixels)
+                .map(|(p, q)| {
+                    (p.r - q.r)
+                        .abs()
+                        .max((p.g - q.g).abs())
+                        .max((p.b - q.b).abs())
+                        .max((p.a - q.a).abs())
+                })
+                .fold(0.0f32, f32::max)
+        };
+        let blur = |sigma: f32| Effect::Blur { sigma };
+        let sharp = render(&page(56, 44, (19.2, 15.4), vec![], None)).unwrap();
+        let soft = render(&page(56, 44, (19.2, 15.4), vec![blur(2.5)], None)).unwrap();
+        let filtered = render(&page(56, 44, (19.2, 15.4), vec![], Some(2.5))).unwrap();
+        assert!(worst(&soft, &sharp) > 0.2, "it is blurred");
+        assert!(
+            worst(&soft, &filtered) < 1e-4,
+            "as a blur filter over white ground blurs it: {}",
+            worst(&soft, &filtered)
+        );
+        let twice = render(&page(
+            56,
+            44,
+            (19.2, 15.4),
+            vec![blur(1.5), blur(2.0)],
+            None,
+        ))
+        .unwrap();
+        assert!(
+            worst(
+                &twice,
+                &render(&page(56, 44, (19.2, 15.4), vec![blur(2.5)], None)).unwrap()
+            ) < 1e-4,
+            "two blurs are one"
+        );
+        // The shadow of the blurred layer reaches past the sharp one's.
+        let shadow = Effect::DropShadow {
+            dx: 0.0,
+            dy: 0.0,
+            blur: 0.0,
+            color: rgb(0.0, 0.0, 0.0),
+            opacity: 1.0,
+            spread: 0.0,
+        };
+        let shaded = render(&page(56, 44, (19.2, 15.4), vec![shadow.clone()], None)).unwrap();
+        let both = render(&page(56, 44, (19.2, 15.4), vec![blur(2.5), shadow], None)).unwrap();
+        let reached = |s: &Surface| (0..56).filter(|&x| s.get(x, 21).r < 0.99).count();
+        assert!(
+            reached(&both) > reached(&shaded) + 4,
+            "the shadow of the blurred layer: {} against {}",
+            reached(&both),
+            reached(&shaded)
+        );
+        // Off the page's left edge: the page is the part of a wider one.
+        let narrow = render(&page(40, 44, (-6.0, 15.4), vec![blur(2.5)], None)).unwrap();
+        let mut wide_doc = page(72, 44, (10.0, 15.4), vec![blur(2.5)], None);
+        let _ = &mut wide_doc;
+        let wide = render(&wide_doc).unwrap();
+        for y in 0..44 {
+            for x in 0..40 {
+                let (p, q) = (narrow.get(x, y), wide.get(x + 16, y));
+                assert!(
+                    (p.b - q.b).abs() < 1e-4 && (p.r - q.r).abs() < 1e-4,
+                    "the page's edge given room, at {x},{y}: {p:?} against {q:?}"
+                );
+            }
+        }
+        // Held to a disc: nothing of it past the disc's edge.
+        let mut doc = page(56, 44, (19.2, 15.4), vec![blur(2.5)], None);
+        let root = doc.root();
+        let mut disc = Node::vector("disc", VectorShape::Ellipse { rx: 9.0, ry: 7.0 });
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(rgb(0.9, 0.8, 0.1));
+        }
+        disc.transform = Transform::translation(18.0, 14.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(disc),
+        })
+        .unwrap();
+        let shape = doc.children_of(root).unwrap()[2];
+        let mut held = doc.node(shape).unwrap().clone();
+        held.clipped = true;
+        doc.apply(Command::RemoveNode { id: shape }).unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: Box::new(held),
+        })
+        .unwrap();
+        let cut = render(&doc).unwrap();
+        let mut bare = doc.clone();
+        let shape = bare.children_of(root).unwrap()[2];
+        bare.apply(Command::SetVisible {
+            id: shape,
+            visible: false,
+        })
+        .unwrap();
+        let without = render(&bare).unwrap();
+        let mut outside = 0;
+        for y in 0..44 {
+            for x in 0..56 {
+                let (dx, dy) = ((x as f32 + 0.5 - 27.0) / 9.0, (y as f32 + 0.5 - 21.0) / 7.0);
+                if dx * dx + dy * dy > 1.3 {
+                    outside += 1;
+                    let (p, q) = (cut.get(x, y), without.get(x, y));
+                    assert!(
+                        (p.b - q.b).abs() < 1e-6,
+                        "nothing past the disc at {x},{y}: {p:?} against {q:?}"
+                    );
+                }
+            }
+        }
+        assert!(outside > 1000);
+        // And a layer held to the blurred one follows its soft edge.
+        let mut doc = page(56, 44, (19.2, 15.4), vec![blur(2.5)], None);
+        let root = doc.root();
+        let mut over = filled_rect("over", 56.0, 44.0, rgb(0.9, 0.1, 0.1));
+        over.clipped = true;
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 2,
+            node: over,
+        })
+        .unwrap();
+        let red = render(&doc).unwrap();
+        // Where the blurred layer is part there, so is the red, by as
+        // much: the red is laid at the blurred layer's own cover.
+        let (blue, ink) = (sharp.get(28, 21), red.get(28, 21));
+        for x in 8..48 {
+            let a = (1.0 - soft.get(x, 21).r) / (1.0 - blue.r);
+            let want = ink.g * a + soft.get(x, 21).g * (1.0 - a);
+            let p = red.get(x, 21);
+            assert!(
+                (p.g - want).abs() < 1e-3,
+                "red at the blurred cover {a} at {x}: {p:?}, want g {want}"
+            );
+        }
+        assert!(
+            (8..48).any(|x| {
+                let a = (1.0 - soft.get(x, 21).r) / (1.0 - blue.r);
+                a > 0.2 && a < 0.8
+            }),
+            "and there is a soft edge to be held to"
+        );
     }
 
     /// A colour overlay is the layer in one colour, its soft edge and

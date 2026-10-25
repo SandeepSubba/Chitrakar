@@ -2114,6 +2114,46 @@ pub fn everything() -> Fixture {
         }],
     })
     .unwrap();
+    // A layer out of focus, with a shadow grown from the blurred shape:
+    // the one effect that moves a layer's own pixels about rather than
+    // recolouring them or drawing beside them, and so the one whose reach
+    // adds to the others' instead of standing beside them. Near the
+    // page's left edge, so both renderers are asked to give it room.
+    {
+        let mut node = Node::vector("soft", VectorShape::Ellipse { rx: 5.0, ry: 3.5 });
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.25,
+                g: 0.7,
+                b: 0.45,
+                a: 1.0,
+            });
+        }
+        node.transform = Transform::translation(2.0, 46.0);
+        node.effects = vec![
+            Effect::Blur { sigma: 1.4 },
+            Effect::DropShadow {
+                dx: 1.5,
+                dy: 1.5,
+                blur: 1.0,
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.2,
+                    a: 1.0,
+                },
+                opacity: 0.6,
+                spread: 0.0,
+            },
+        ];
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(node),
+        })
+        .unwrap();
+    }
     // A colour lookup, gently warm and at half strength, over the whole
     // page: an adjustment whose numbers are not in the document at all
     // but in a resource beside it, so every audit that carries a layer
@@ -3377,6 +3417,19 @@ impl Rng {
                     color: tint.color(1.0),
                     opacity: tint.between(0.3, 1.0),
                 });
+            }
+            // A quarter out of focus as well, anywhere in the list — the
+            // blur is done first wherever it is written — from a stream
+            // of their own again.
+            let mut soft = Rng((self.0 ^ 0x6a09_e667_f3bc_c909) | 1);
+            if soft.chance(4) {
+                let at = soft.upto(effects.len() as u64 + 1) as usize;
+                effects.insert(
+                    at.min(effects.len()),
+                    Effect::Blur {
+                        sigma: soft.between(0.3, 3.0),
+                    },
+                );
             }
             doc.apply(Command::SetEffects { id, effects }).unwrap();
         }

@@ -2938,11 +2938,7 @@ fn with_room(doc: &Document, view: Transform, size: (u32, u32)) -> Option<(Trans
         {
             0.0
         } else {
-            node.effects
-                .iter()
-                .filter(|e| e.draws())
-                .map(chitrakar_doc::Effect::reach)
-                .fold(0.0f32, f32::max)
+            chitrakar_doc::Effect::reach_of(node.effects.iter().filter(|e| e.draws()))
         };
         if drawn > 0.0 && past() {
             let m = (drawn * space.max_scale()).ceil();
@@ -3367,6 +3363,13 @@ fn gathered(
     } else {
         chitrakar_render::overlay_tint(doc, effects_here)
     };
+    // Its blurs, as one, for box passes over its own surface before
+    // anything is made of it (`wear_blur`): the radius of each box.
+    let soft = if effects_here.is_empty() || rewriting {
+        None
+    } else {
+        box_radius(chitrakar_doc::Effect::blur_of(effects_here) * fx_parent.max_scale())
+    };
     // A layer held to the one under it shows only where that
     // layer's own alpha does. That alpha is the layer drawn aside,
     // which is what the CPU renderer does to it — so it arrives
@@ -3738,6 +3741,8 @@ fn gathered(
         // A layer in a colour overlay, which is recoloured where its
         // surface comes back down.
         || overlay.is_some()
+        // A layer out of focus, blurred on its own surface.
+        || soft.is_some()
         // A brush layer always: its strokes go on one after another and
         // an eraser takes off what the ones before it left, which is a
         // conversation among the strokes and not with the page. On a
@@ -3819,7 +3824,21 @@ fn gathered(
     let clone = matches!(node.kind, NodeKind::Clone { .. });
     // A clone in a colour overlay goes aside on the same terms: the
     // recolouring is of the whole of what it laid.
+    // Blurred, a layer is cut and masked in its drawing as one with
+    // effects is, since what is blurred is what shows; and the cases this
+    // backend does not blur yet go back: a copy of a clone that is one of
+    // a chain, or inside a group.
+    if soft.is_some()
+        && (hands_down
+            || mixed_back
+            || twice
+            || aside
+            || (chitrakar_render::copies_a_clone(doc, child) && wearing_clone.is_none()))
+    {
+        return none!();
+    }
     let worn = !shadings.is_empty()
+        || soft.is_some()
         || (clone
             && blend_over.is_none()
             && (node.blend != BlendMode::Normal || overlay.is_some()));
@@ -3859,7 +3878,7 @@ fn gathered(
     // rather than a coverage they read — which leaves the mask texture
     // for the mask, and leaves what was drawn into the surface uncut.
     let framed = match bound {
-        Some(b) if !shadings.is_empty() => Some(out.page.intersect(b)),
+        Some(b) if !shadings.is_empty() || soft.is_some() => Some(out.page.intersect(b)),
         _ => None,
     };
     // What the layer is held back by that rides the one coverage slot
@@ -4347,8 +4366,19 @@ fn gathered(
                 out.textures.push(img);
                 at
             });
+            // Over the whole surface, not the page alone: a surface drawn
+            // wider than the page gives a layer past the edge room, and
+            // the reference adjusts what is in that room as well — which
+            // a blurred frame holding an adjustment brings back onto the
+            // page (seed 1767). Past the page it is never seen otherwise.
+            let surface = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: out.surface.0,
+                y1: out.surface.1,
+            };
             let quad = out.push(page_quad(
-                (out.page, out.surface),
+                (surface, out.surface),
                 alpha,
                 plan.params,
                 plan.grad,
@@ -4385,6 +4415,14 @@ fn gathered(
             let marked = out.draws.len();
             match filter_of(filter, parent, out.size)? {
                 Filtering::Pointwise(params, grad, extra) => {
+                    // The whole surface, as an adjustment's, unless a
+                    // frame bounds it.
+                    let area = within.unwrap_or(chitrakar_render::ClipRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: out.surface.0,
+                        y1: out.surface.1,
+                    });
                     let quad = out.push(page_quad((area, out.surface), alpha, params, grad, extra));
                     out.draws.push(Item::of(Draw::Adjust { quad, table: None }));
                 }
@@ -4663,11 +4701,15 @@ fn gathered(
             // what works on the page had nothing under it: a curves layer
             // in a frame set to Exclusion left the page as it was. Found
             // once a frame between pixels stopped being handed back.)
+            // Out of focus, though, it is a surface of its own on the
+            // reference too (`frame_in_place`), what it holds working on
+            // the frame's own ground, and so it is drawn.
             if node.blend != BlendMode::Normal
                 && upright
                 && !twice
                 && !aside
                 && held_to.is_none()
+                && soft.is_none()
                 && chitrakar_render::works_on_what_is_under(doc, child).ok()?
             {
                 return none!();
@@ -4966,6 +5008,8 @@ fn gathered(
         out.inside -= 1;
     }
     let down = framed.unwrap_or(out.laid());
+    // Where its own blur went, and the quad that puts it back.
+    let mut blurred_at: Option<(usize, std::ops::Range<u32>)> = None;
     if alone {
         if !worn {
             // The mask and the opacity go on the quad that lays the
@@ -5118,6 +5162,46 @@ fn gathered(
                 }
             })
             .collect();
+        // Out of focus before anything is made of it: the surface run
+        // through the six box passes, finding nothing past its edge, and
+        // put back in place of itself whatever the layer is masked or
+        // held by — those are in what was drawn (the 1 in the third of
+        // the lay-down's numbers).
+        if let Some(radius) = soft {
+            let whole = chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: out.surface.0,
+                y1: out.surface.1,
+            };
+            let on = (whole, out.surface);
+            let page_only = if clone_like { 1.0 } else { 0.0 };
+            let axis = |a: f32| page_quad(on, 1.0, [radius, a, 1.0, page_only], [0.0; 4], [0.0; 3]);
+            let mut steps = out.push(axis(0.0));
+            steps.end = out.push(axis(1.0)).end;
+            // Held, it is cut again as it is put back (the 2): the blur
+            // reaches past the cut its drawing took, and the reference
+            // cuts the blurred layer a second time before its effects
+            // grow from it.
+            // Both a copy and the clone it copies wearing effects, what
+            // holds the copy cuts the whole once the levels are laid and
+            // not before (`cut_last`), on the reference as here.
+            let mode = if held_to.is_some() && !cut_last {
+                2.0
+            } else {
+                1.0
+            };
+            let quad = out.push(page_quad(
+                on,
+                1.0,
+                [0.0, 0.0, mode, 0.0],
+                [0.0; 4],
+                [0.0; 3],
+            ));
+            // Before the effects' own passes, which read the surface.
+            blurred_at = Some((out.draws.len(), quad.clone()));
+            out.draws.push(Item::of(Draw::Blur { steps, quad }));
+        }
         let quad = out.push(page_quad(
             (down, out.surface),
             if !in_surface {
@@ -5261,6 +5345,7 @@ fn gathered(
     //
     // And from the masks above it, which what it drew was kept clear
     // of for the same reason: a surface meets them once.
+    let placed_before = out.placed.len();
     if let Some((from, draws)) = laid {
         let (over, box_over) = if held_to.is_some() || coverage.is_some() || !out.worn.is_empty() {
             mask_texture(
@@ -5334,6 +5419,39 @@ fn gathered(
                 quad: box_down,
             });
         }
+    }
+    // A held layer's blur is put back cut by what it is held to and by
+    // nothing else — not the masks above, which its way down takes, and
+    // not a frame's bound — so it has a coverage of its own. Settled
+    // before the rest of the layer's, so a coverage put back over the
+    // run later lands first and this one last.
+    if let (Some((at, quad)), Some(_), false) = (blurred_at, held_to, cut_last) {
+        let (cut, box_cut) = mask_texture(
+            doc,
+            child,
+            Held {
+                mask: None,
+                to: held_to,
+                bound: None,
+                parent,
+                turned: None,
+            },
+            false,
+            out,
+        )?;
+        for v in &mut out.vertices[quad.start as usize..quad.end as usize] {
+            v.mask = box_cut;
+        }
+        out.draws[at].mask = cut;
+        out.placed.insert(
+            placed_before,
+            Settled {
+                vertices: quad.start as usize..quad.end as usize,
+                draws: at..at + 1,
+                texture: cut,
+                quad: box_cut,
+            },
+        );
     }
     Some(())
 }
@@ -5759,13 +5877,7 @@ fn mask_texture(
     // clip cut the layer and let its effects escape. The same texture
     // carries a mask and a frame's bound, so all three leaked the same
     // way and for the same reason.
-    let reach = doc
-        .node(id)
-        .ok()?
-        .effects
-        .iter()
-        .map(chitrakar_doc::Effect::reach)
-        .fold(0.0f32, f32::max);
+    let reach = chitrakar_doc::Effect::reach_of(&doc.node(id).ok()?.effects);
     let pad = 1 + (reach * parent.max_scale()).ceil().max(0.0) as i64;
     let x0 = (bx0.floor() as i64 - pad).clamp(0, page.0 as i64) as u32;
     let y0 = (by0.floor() as i64 - pad).clamp(0, page.1 as i64) as u32;
@@ -7339,7 +7451,9 @@ fn effect_of(
     match effect {
         // No pass of its own: it is the layer's own pixels recoloured on
         // the quad that lays the layer down (`overlay_tint`).
-        E::ColorOverlay { .. } => Some(Vec::new()),
+        // Nor a blur: it is the layer's own surface run through the box
+        // passes before it comes down (`soft`).
+        E::ColorOverlay { .. } | E::Blur { .. } => Some(Vec::new()),
         E::DropShadow {
             dx,
             dy,
@@ -14090,6 +14204,315 @@ mod tests {
             "and inside it, half inverted: {:?}",
             weighed.get(10, 20)
         );
+    }
+
+    /// A blur is the layer's own surface run through the box passes
+    /// before anything is made of it, and it is the CPU's: on a shape
+    /// alone, with a shadow grown from the blurred shape, with an
+    /// overlay, blended, faded and masked (the mask is in what is
+    /// blurred), on a group of two that overlap, inside a group that
+    /// scales it, inside a masked group wearing a shadow (whose mask is
+    /// folded into everything drawn inside it), held to the layer under
+    /// it (cut, blurred, and cut again on the way down), and hanging off
+    /// the page's edge, where both give it room.
+    #[test]
+    fn a_blur_is_the_cpus() {
+        use chitrakar_doc::Effect as E;
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let rgb = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        struct Case {
+            effects: Vec<E>,
+            blend: BlendMode,
+            faded: bool,
+            group: bool,
+            at: (f32, f32),
+            scaled: bool,
+            /// Inside a group that is masked and wears a shadow, whose
+            /// mask is folded into everything drawn inside it.
+            worn: bool,
+            /// Held to an ellipse under it.
+            held: bool,
+        }
+        let page = |c: &Case| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            add(
+                &mut doc,
+                filled(
+                    "ground",
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 40.0,
+                        radius: 0.0,
+                    },
+                    rgb(0.9, 0.85, 0.3),
+                ),
+                Transform::default(),
+            );
+            let root = doc.root();
+            let holder = if c.worn {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::group("worn")),
+                })
+                .unwrap();
+                let g = doc.children_of(root).unwrap()[1];
+                doc.apply(Command::SetEffects {
+                    id: g,
+                    effects: vec![E::DropShadow {
+                        dx: -2.0,
+                        dy: 2.0,
+                        blur: 1.0,
+                        color: rgb(0.0, 0.2, 0.1),
+                        opacity: 0.8,
+                        spread: 0.0,
+                    }],
+                })
+                .unwrap();
+                doc.apply(Command::SetMask {
+                    id: g,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Ellipse { rx: 16.0, ry: 13.0 },
+                            transform: Transform::translation(12.0, 6.0),
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+                g
+            } else if c.scaled {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 1,
+                    node: Box::new(Node::group("scaled")),
+                })
+                .unwrap();
+                let g = doc.children_of(root).unwrap()[1];
+                doc.apply(Command::SetTransform {
+                    id: g,
+                    transform: Transform {
+                        a: 1.5,
+                        b: 0.0,
+                        c: 0.0,
+                        d: 1.5,
+                        e: -4.0,
+                        f: -3.0,
+                    },
+                })
+                .unwrap();
+                g
+            } else {
+                root
+            };
+            if c.held {
+                let index = doc.children_of(holder).unwrap().len();
+                let mut base = filled(
+                    "base",
+                    VectorShape::Ellipse { rx: 12.0, ry: 10.0 },
+                    rgb(0.2, 0.3, 0.9),
+                );
+                base.transform = Transform::translation(20.0, 12.0);
+                doc.apply(Command::AddNode {
+                    parent: holder,
+                    index,
+                    node: base,
+                })
+                .unwrap();
+            }
+            let index = doc.children_of(holder).unwrap().len();
+            let id = if c.group {
+                doc.apply(Command::AddNode {
+                    parent: holder,
+                    index,
+                    node: Box::new(Node::group("g")),
+                })
+                .unwrap();
+                let g = doc.children_of(holder).unwrap()[index];
+                for (i, (x, ink)) in [(6.0, rgb(1.0, 0.0, 0.0)), (20.0, rgb(0.0, 0.6, 0.2))]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut n = filled(
+                        "r",
+                        VectorShape::Rect {
+                            width: 24.0,
+                            height: 20.0,
+                            radius: 4.0,
+                        },
+                        ink,
+                    );
+                    n.transform = Transform::translation(x, 8.0 + 4.0 * i as f32);
+                    doc.apply(Command::AddNode {
+                        parent: g,
+                        index: i,
+                        node: n,
+                    })
+                    .unwrap();
+                }
+                g
+            } else {
+                let mut n = filled(
+                    "disc",
+                    VectorShape::Ellipse { rx: 13.3, ry: 9.6 },
+                    rgb(1.0, 0.0, 0.0),
+                );
+                n.transform = Transform::translation(c.at.0, c.at.1);
+                doc.apply(Command::AddNode {
+                    parent: holder,
+                    index,
+                    node: n,
+                })
+                .unwrap();
+                doc.children_of(holder).unwrap()[index]
+            };
+            doc.apply(Command::SetEffects {
+                id,
+                effects: c.effects.clone(),
+            })
+            .unwrap();
+            doc.apply(Command::SetBlendMode { id, blend: c.blend })
+                .unwrap();
+            if c.held {
+                doc.apply(Command::SetClipped { id, clipped: true })
+                    .unwrap();
+            }
+            if c.faded {
+                doc.apply(Command::SetOpacity { id, opacity: 0.6 }).unwrap();
+                doc.apply(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 14.0,
+                                height: 30.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(18.0, 2.0),
+                        },
+                        invert: false,
+                        feather: 1.5,
+                    })),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let blur = |sigma: f32| E::Blur { sigma };
+        let shadow = E::DropShadow {
+            dx: 2.0,
+            dy: 3.0,
+            blur: 1.5,
+            color: rgb(0.1, 0.0, 0.2),
+            opacity: 0.7,
+            spread: 0.0,
+        };
+        let plain = |effects: Vec<E>| Case {
+            effects,
+            blend: BlendMode::Normal,
+            faded: false,
+            group: false,
+            at: (14.4, 9.7),
+            scaled: false,
+            worn: false,
+            held: false,
+        };
+        let cases = [
+            ("alone", plain(vec![blur(2.5)])),
+            ("with a shadow", plain(vec![shadow.clone(), blur(1.8)])),
+            (
+                "with an overlay",
+                plain(vec![
+                    E::ColorOverlay {
+                        color: rgb(0.1, 0.2, 1.0),
+                        opacity: 0.7,
+                    },
+                    blur(2.0),
+                ]),
+            ),
+            (
+                "blended",
+                Case {
+                    blend: BlendMode::Multiply,
+                    ..plain(vec![blur(2.5)])
+                },
+            ),
+            (
+                "faded and masked",
+                Case {
+                    faded: true,
+                    ..plain(vec![blur(2.5)])
+                },
+            ),
+            (
+                "a group",
+                Case {
+                    group: true,
+                    ..plain(vec![blur(3.0)])
+                },
+            ),
+            (
+                "scaled",
+                Case {
+                    scaled: true,
+                    ..plain(vec![blur(2.0)])
+                },
+            ),
+            (
+                "inside a masked group wearing a shadow",
+                Case {
+                    worn: true,
+                    ..plain(vec![blur(2.5)])
+                },
+            ),
+            (
+                "held to an ellipse",
+                Case {
+                    held: true,
+                    ..plain(vec![blur(2.5)])
+                },
+            ),
+            (
+                "held, with a shadow, faded and masked",
+                Case {
+                    held: true,
+                    faded: true,
+                    ..plain(vec![shadow.clone(), blur(2.0)])
+                },
+            ),
+            (
+                "off the page's edge",
+                Case {
+                    at: (-9.0, 22.0),
+                    ..plain(vec![shadow, blur(2.5)])
+                },
+            ),
+        ];
+        for (what, case) in cases {
+            let doc = page(&case);
+            assert!(GpuRenderer::can_render(&doc), "{what} is drawn");
+            let drawn = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&drawn, &reference);
+            assert!(
+                mean < 0.002 && worst < 0.04,
+                "{what}: mean channel difference {mean:.5} (worst {worst:.3})"
+            );
+            let sharp = page(&Case {
+                effects: case
+                    .effects
+                    .iter()
+                    .filter(|e| !matches!(e, E::Blur { .. }))
+                    .cloned()
+                    .collect(),
+                ..case
+            });
+            let (moved, _) = difference(&drawn, &chitrakar_render::render(&sharp).unwrap());
+            assert!(moved > 0.003, "{what}: the blur shows ({moved:.4})");
+        }
     }
 
     /// Filter layers. Two of the five are a function of one pixel and of

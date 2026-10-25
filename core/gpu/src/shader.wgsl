@@ -1572,6 +1572,15 @@ fn fs_box(in: ImageOut) -> @location(0) vec4f {
     let size = vec2i(page.size);
     let lo = vec2i(page.lo);
     let hi = vec2i(page.hi) - vec2i(1, 1);
+    // And with `params.w`, nothing past the page either: a clone layer
+    // lays its strokes on the page alone, so a blur of what it laid finds
+    // nothing beyond the page's edge even on a surface drawn wider.
+    var first = vec2i(0, 0);
+    var last = size - vec2i(1, 1);
+    if in.params.w != 0.0 {
+        first = lo;
+        last = hi;
+    }
     let here = vec2i(floor(in.uv * page.size));
     var sum = vec4f(0.0, 0.0, 0.0, 0.0);
     for (var i = -radius; i <= radius; i = i + 1) {
@@ -1582,7 +1591,7 @@ fn fs_box(in: ImageOut) -> @location(0) vec4f {
             p.x = p.x + i;
         }
         if nothing {
-            if p.x >= 0 && p.y >= 0 && p.x < size.x && p.y < size.y {
+            if p.x >= first.x && p.y >= first.y && p.x <= last.x && p.y <= last.y {
                 sum = sum + textureLoad(image, p, 0);
             }
         } else {
@@ -2472,7 +2481,16 @@ fn fs_block(in: ImageOut) -> @location(0) vec4f {
 fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
     let was = textureSampleLevel(backdrop, backdrop_sampler, in.uv, 0.0);
     let soft = textureSampleLevel(image, image_sampler, in.uv, 0.0);
-    let weight = in.alpha * mask_cover(in.page, in.mask);
+    // A layer's own blur (`params.z`) takes the whole of what it blurs:
+    // what the layer is masked by is already in what was drawn. Held (the
+    // 2), the blurred layer is cut again by what it is held to.
+    if in.params.z == 2.0 {
+        return soft * mask_cover(in.page, in.mask);
+    }
+    var weight = in.alpha;
+    if in.params.z == 0.0 {
+        weight = in.alpha * mask_cover(in.page, in.mask);
+    }
     // A high pass: the difference from the blur on a grey of half of
     // what is covered, held at nothing below, weighed in as a blur is.
     if in.params.y != 0.0 {

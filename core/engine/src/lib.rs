@@ -7212,6 +7212,7 @@ impl Session {
                     flat(highlight);
                     flat(shadow);
                 }
+                chitrakar_doc::Effect::Blur { .. } => {}
             }
         }
         let mut styles = self.doc.styles().to_vec();

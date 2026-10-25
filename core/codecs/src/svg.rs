@@ -302,6 +302,7 @@ fn write_node(
         // it so the shadow shows only where the base does.
         // Only where an effect reaches out past the layer: an inner
         // shadow and a bevel stay inside what shows, which is cut already.
+        // A blur softens what shows out past it, and is kept in as well.
         let held_again = effects.is_some()
             && !confined.is_empty()
             && node.effects.iter().any(|e| {
@@ -309,6 +310,7 @@ fn write_node(
                     e,
                     chitrakar_doc::Effect::DropShadow { .. }
                         | chitrakar_doc::Effect::Outline { .. }
+                        | chitrakar_doc::Effect::Blur { .. }
                 )
             });
         if held_again {
@@ -1204,11 +1206,7 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
     {
         return None;
     }
-    let reach = node
-        .effects
-        .iter()
-        .map(chitrakar_doc::Effect::reach)
-        .fold(0.0f32, f32::max);
+    let reach = chitrakar_doc::Effect::reach_of(&node.effects);
     // A frame's silhouette is the box it is cut to, which on an upright
     // frame is its box rounded to whole pixels of the page (`frame_cut`,
     // and the clipPath written from it) — not its exact box, which the
@@ -1296,6 +1294,9 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
     for (k, effect) in node.effects.iter().enumerate() {
         let name = format!("fx{k}");
         match effect {
+            // Taken before everything else, wherever it is written
+            // (`blurred_first` below).
+            chitrakar_doc::Effect::Blur { .. } => continue,
             // Every pixel of the layer `w` of the way to the colour at its
             // own cover: the colour cut to the layer, weighed `w` against
             // the layer at `1 - w` — premultiplied and in linear light,
@@ -1462,6 +1463,24 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                     over.push(format!("{name}{part}"));
                 }
             }
+        }
+    }
+    // Out of focus before anything is made of it, as the engine does
+    // (`wear_blur`): the layer blurred, every blurs' sigma as one, and its
+    // alpha beside it, and everything above that read the layer reads
+    // these instead.
+    let soft = spread(chitrakar_doc::Effect::blur_of(&node.effects));
+    if soft > 0.0 {
+        let swap = |s: &str| {
+            s.replace(r#""SourceGraphic""#, r#""fxsoft""#)
+                .replace(r#""SourceAlpha""#, r#""fxsofta""#)
+        };
+        body = format!(
+            r#"<feGaussianBlur in="SourceGraphic" stdDeviation="{soft}" result="fxsoft"/><feColorMatrix in="fxsoft" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="fxsofta"/>{}"#,
+            swap(&body)
+        );
+        if source == "SourceGraphic" {
+            source = String::from("fxsoft");
         }
     }
     if under.is_empty() && over.is_empty() && source == "SourceGraphic" {

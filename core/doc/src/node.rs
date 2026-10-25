@@ -2261,6 +2261,18 @@ pub enum Effect {
     /// layer nor over it (`over` says false), and no reach: it is the
     /// layer.
     ColorOverlay { color: AuthoredColor, opacity: f32 },
+    /// The layer itself out of focus: its own pixels blurred by `sigma`,
+    /// the softening the blur filter does, in the layer's parent space so
+    /// it scales with the group it is in. A filter layer blurs everything
+    /// under it; this blurs the one layer, which is how an element given
+    /// SVG's `feGaussianBlur` says it. Done to the layer before anything
+    /// is made of it, so a shadow it wears is the shadow of the blurred
+    /// layer and what is held to it is held to the blurred shape. Held
+    /// itself, it is what shows of the layer that is blurred, and the
+    /// blur is kept inside what it is held to, as a shadow is — so its
+    /// edge there stays sharp. Neither under the layer nor over it: it is
+    /// the layer.
+    Blur { sigma: f32 },
 }
 
 /// What a bevel is lit by and how its heights are read, as every
@@ -2378,7 +2390,40 @@ impl Effect {
             Effect::Bevel { size, .. } => blurred(size * 0.5) + 3.0,
             // Nowhere the layer is not.
             Effect::ColorOverlay { .. } => 0.0,
+            Effect::Blur { sigma } => blurred(*sigma),
         }
+    }
+
+    /// How far a layer's effects together reach beyond its own bounds.
+    ///
+    /// Not the widest of them: a blur moves the edge every other effect
+    /// is grown from, so a shadow under a blurred layer reaches the blur
+    /// and then its own reach past that. Blurs add up for the same
+    /// reason; the rest are drawn from the one edge and the widest
+    /// decides.
+    pub fn reach_of<'a>(effects: impl IntoIterator<Item = &'a Effect>) -> f32 {
+        let (mut blurs, mut widest) = (0.0f32, 0.0f32);
+        for effect in effects {
+            match effect {
+                Effect::Blur { .. } => blurs += effect.reach(),
+                _ => widest = widest.max(effect.reach()),
+            }
+        }
+        blurs + widest
+    }
+
+    /// How far a layer's blurs together soften it, as one sigma: two
+    /// gaussians in turn are one whose variance is the sum of theirs.
+    /// Nought for none, or none that softens anything.
+    pub fn blur_of<'a>(effects: impl IntoIterator<Item = &'a Effect>) -> f32 {
+        effects
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Blur { sigma } if sigma.is_finite() && *sigma > 0.01 => Some(sigma * sigma),
+                _ => None,
+            })
+            .sum::<f32>()
+            .sqrt()
     }
 
     /// The same effect, read in a space one transform further out.
@@ -2409,6 +2454,7 @@ impl Effect {
                 (*lx, *ly) = (m.a * *lx + m.c * *ly, m.b * *lx + m.d * *ly);
             }
             Effect::ColorOverlay { .. } => {}
+            Effect::Blur { sigma } => *sigma *= k,
         }
         out
     }
@@ -2440,6 +2486,7 @@ impl Effect {
                 ..
             } => *opacity > 0.0 && bevel_light(*size, *depth, [*lx, *ly], *altitude, 1.0).is_some(),
             Effect::ColorOverlay { opacity, .. } => *opacity > 0.0,
+            Effect::Blur { sigma } => sigma.is_finite() && *sigma > 0.01,
         }
     }
 
@@ -2451,6 +2498,7 @@ impl Effect {
             Effect::InnerShadow { .. } => "Inner shadow",
             Effect::Bevel { .. } => "Bevel",
             Effect::ColorOverlay { .. } => "Colour overlay",
+            Effect::Blur { .. } => "Blur",
         }
     }
 }
@@ -2532,6 +2580,7 @@ impl Node {
                     f(highlight);
                     f(shadow);
                 }
+                Effect::Blur { .. } => {}
             }
         }
         if let Some(mask) = &mut self.mask {

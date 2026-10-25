@@ -669,6 +669,7 @@ const EFFECT_LABELS: Record<EffectKind, string> = {
   InnerShadow: "Inner shadow",
   Bevel: "Bevel",
   ColorOverlay: "Colour overlay",
+  Blur: "Blur",
 };
 
 /** The colours each effect is painted in, and what each is called: one
@@ -682,6 +683,7 @@ const EFFECT_COLORS: Record<EffectKind, [string, string][]> = {
     ["shadow", "shadow"],
   ],
   ColorOverlay: [["color", "colour"]],
+  Blur: [],
 };
 
 /** The tunable numbers of each effect: [field, label, min, max, step]. */
@@ -715,6 +717,7 @@ const EFFECT_FIELDS: Record<
     ["opacity", "Strength", 0, 1, 0.01],
   ],
   ColorOverlay: [["opacity", "Strength", 0, 1, 0.01]],
+  Blur: [["sigma", "Amount", 0.5, 40, 0.5]],
 };
 
 /** A number an effect's row shows that the effect does not store as
@@ -813,6 +816,9 @@ function newEffect(
     // The whole of the layer in the colour in hand.
     case "ColorOverlay":
       return { ColorOverlay: { color, opacity: 1 } };
+    // Soft enough to see at once, not so soft it is gone.
+    case "Blur":
+      return { Blur: { sigma: 4 } };
     case "InnerShadow":
       return { InnerShadow: { dx: 4, dy: 4, blur: 6, color, opacity: 0.5 } };
     default:

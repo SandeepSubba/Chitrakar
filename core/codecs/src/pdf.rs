@@ -700,11 +700,13 @@ impl Page {
         // picture beside a live layer can be — laid over it, a soft edge
         // keeps a ring of the colour it had. So the layer goes as the
         // pixels the engine draws.
-        if node
-            .effects
-            .iter()
-            .any(|e| matches!(e, chitrakar_doc::Effect::ColorOverlay { .. }))
-        {
+        // A blur is the same: the layer's own pixels out of focus.
+        if node.effects.iter().any(|e| {
+            matches!(
+                e,
+                chitrakar_doc::Effect::ColorOverlay { .. } | chitrakar_doc::Effect::Blur { .. }
+            )
+        }) {
             return Ok(false);
         }
         // A layer held to the one below it is drawn under a soft mask of

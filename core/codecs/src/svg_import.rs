@@ -689,9 +689,10 @@ fn effects_of(
     use chitrakar_doc::Effect;
     use usvg::filter::{Input, Kind};
     let mut out = Vec::new();
-    let page = Page {
+    let mut page = Page {
         at,
         edge: std::cell::Cell::new(None),
+        soft: None,
     };
     for filter in group.filters() {
         let prims = filter.primitives();
@@ -702,8 +703,40 @@ fn effects_of(
                 _ => None,
             }
         };
+        // A layer out of focus and nothing else, which is how a design
+        // tool says it: one blur of the layer.
+        if let [only] = prims {
+            if let Kind::GaussianBlur(g) = only.kind() {
+                if *g.input() == Input::SourceGraphic {
+                    let sigma = page.blur((g.std_dev_x().get() + g.std_dev_y().get()) / 2.0);
+                    if sigma > 0.0 {
+                        out.push(Effect::Blur { sigma });
+                    }
+                    continue;
+                }
+            }
+        }
+        // This editor's: the layer blurred first and its alpha taken, and
+        // everything after reading those in place of the source
+        // (`svg::effect_filter`).
+        page.soft = None;
+        if let [first, second, ..] = prims {
+            if let (Kind::GaussianBlur(g), Kind::ColorMatrix(m)) = (first.kind(), second.kind()) {
+                let alpha_of_it = *m.input() == Input::Reference(first.result().to_string())
+                    && matches!(m.kind(), usvg::filter::ColorMatrixKind::Matrix(v)
+                        if v.iter().enumerate().all(|(i, x)| (x - if i == 18 { 1.0 } else { 0.0 }).abs() < 1e-6));
+                if *g.input() == Input::SourceGraphic && alpha_of_it {
+                    let sigma = page.blur((g.std_dev_x().get() + g.std_dev_y().get()) / 2.0);
+                    if sigma > 0.0 {
+                        out.push(Effect::Blur { sigma });
+                    }
+                    page.soft = Some((first.result().to_string(), second.result().to_string()));
+                }
+            }
+        }
+        let page = &page;
         match last.kind() {
-            Kind::DropShadow(d) if *d.input() == Input::SourceGraphic => {
+            Kind::DropShadow(d) if page.graphic(d.input()) => {
                 let (dx, dy) = page.offset(d.dx(), d.dy());
                 out.push(Effect::DropShadow {
                     dx,
@@ -721,8 +754,8 @@ fn effects_of(
                 let inputs = m.inputs();
                 let at_source = inputs
                     .iter()
-                    .position(|i| *i == Input::SourceGraphic || recoloured(i, &named).is_some())?;
-                let overlays = recoloured(&inputs[at_source], &named)?;
+                    .position(|i| page.graphic(i) || recoloured(i, &named, page).is_some())?;
+                let overlays = recoloured(&inputs[at_source], &named, page)?;
                 let mut k = 0;
                 while k < inputs.len() {
                     if k == at_source {
@@ -747,9 +780,7 @@ fn effects_of(
             }
             // A design tool's: the source blended in over the shadows,
             // each blended in over the ones before it, down to nothing.
-            Kind::Blend(b)
-                if *b.input1() == Input::SourceGraphic && b.mode() == usvg::BlendMode::Normal =>
-            {
+            Kind::Blend(b) if page.graphic(b.input1()) && b.mode() == usvg::BlendMode::Normal => {
                 let mut shadows = Vec::new();
                 let mut at_blend = named(b.input2())?;
                 loop {
@@ -794,9 +825,10 @@ fn effects_of(
 fn recoloured<'a>(
     input: &usvg::filter::Input,
     named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
+    page: &Page,
 ) -> Option<Vec<chitrakar_doc::Effect>> {
-    use usvg::filter::{CompositeOperator, Input, Kind};
-    if *input == Input::SourceGraphic {
+    use usvg::filter::{CompositeOperator, Kind};
+    if page.graphic(input) {
         return Some(Vec::new());
     }
     let Kind::Composite(c) = named(input)?.kind() else {
@@ -816,13 +848,13 @@ fn recoloured<'a>(
     let Kind::Composite(cut) = named(c.input1())?.kind() else {
         return None;
     };
-    if cut.operator() != CompositeOperator::In || *cut.input2() != Input::SourceAlpha {
+    if cut.operator() != CompositeOperator::In || !page.alpha(cut.input2()) {
         return None;
     }
     let Kind::Flood(f) = named(cut.input1())?.kind() else {
         return None;
     };
-    let mut before = recoloured(c.input2(), named)?;
+    let mut before = recoloured(c.input2(), named, page)?;
     before.push(chitrakar_doc::Effect::ColorOverlay {
         color: color_of(f.color(), 1.0),
         opacity: k2 * f.opacity().get(),
@@ -845,9 +877,33 @@ struct Page {
     at: usvg::Transform,
     /// Where an outline among the effects puts its edge, as a coverage.
     edge: std::cell::Cell<Option<f32>>,
+    /// What the layer blurred and its alpha are called, when the filter
+    /// blurs it first: what the rest reads in place of the source.
+    soft: Option<(String, String)>,
 }
 
 impl Page {
+    /// Whether a primitive reads the layer: the source, or the source
+    /// blurred first.
+    fn graphic(&self, input: &usvg::filter::Input) -> bool {
+        use usvg::filter::Input;
+        match (input, &self.soft) {
+            (Input::SourceGraphic, None) => true,
+            (Input::Reference(name), Some((soft, _))) => name == soft,
+            _ => false,
+        }
+    }
+
+    /// Whether a primitive reads the layer's alpha, the same way.
+    fn alpha(&self, input: &usvg::filter::Input) -> bool {
+        use usvg::filter::Input;
+        match (input, &self.soft) {
+            (Input::SourceAlpha, None) => true,
+            (Input::Reference(name), Some((_, soft))) => name == soft,
+            _ => false,
+        }
+    }
+
     fn offset(&self, dx: f32, dy: f32) -> (f32, f32) {
         let t = self.at;
         (t.sx * dx + t.kx * dy, t.ky * dx + t.sy * dy)
@@ -896,13 +952,11 @@ impl Page {
         over: bool,
     ) -> Option<chitrakar_doc::Effect> {
         use chitrakar_doc::Effect;
-        use usvg::filter::{ColorMatrixKind, CompositeOperator, Input, Kind};
+        use usvg::filter::{ColorMatrixKind, CompositeOperator, Kind};
         match p.kind() {
             // Cut to the source again: an inner shadow, which sits over.
             Kind::Composite(c)
-                if over
-                    && c.operator() == CompositeOperator::In
-                    && *c.input2() == Input::SourceAlpha =>
+                if over && c.operator() == CompositeOperator::In && self.alpha(c.input2()) =>
             {
                 let (color, opacity, shape) = self.flooded(named(c.input1())?, named)?;
                 let Shaped {
@@ -1008,11 +1062,11 @@ impl Page {
         p: &'a usvg::filter::Primitive,
         named: &dyn Fn(&usvg::filter::Input) -> Option<&'a usvg::filter::Primitive>,
     ) -> Option<LitHalf<'a>> {
-        use usvg::filter::{ColorMatrixKind, CompositeOperator, Input, Kind};
+        use usvg::filter::{ColorMatrixKind, CompositeOperator, Kind};
         let Kind::Composite(c) = p.kind() else {
             return None;
         };
-        if c.operator() != CompositeOperator::In || *c.input2() != Input::SourceAlpha {
+        if c.operator() != CompositeOperator::In || !self.alpha(c.input2()) {
             return None;
         }
         let (color, opacity, shape) = self.flooded(named(c.input1())?, named)?;
@@ -1041,7 +1095,7 @@ impl Page {
     /// A bevel from its two halves: the light they share, the blur its
     /// heights were read from, and the colours.
     fn bevel(&self, up: LitHalf<'_>, down: LitHalf<'_>) -> Option<chitrakar_doc::Effect> {
-        use usvg::filter::{Input, Kind, LightSource};
+        use usvg::filter::{Kind, LightSource};
         if !up.highlight || down.highlight || up.light.result() != down.light.result() {
             return None;
         }
@@ -1058,7 +1112,7 @@ impl Page {
         let Kind::GaussianBlur(g) = blurred.kind() else {
             return None;
         };
-        if *g.input() != Input::SourceAlpha {
+        if !self.alpha(g.input()) {
             return None;
         }
         let sigma = self.blur((g.std_dev_x().get() + g.std_dev_y().get()) / 2.0);
@@ -1203,6 +1257,16 @@ impl Page {
                 }
                 _ => return None,
             };
+            if self.alpha(input) {
+                return Some(Shaped {
+                    dx,
+                    dy,
+                    blur,
+                    inverted,
+                    grown,
+                    spread,
+                });
+            }
             match input {
                 Input::SourceAlpha => {
                     return Some(Shaped {
@@ -5101,6 +5165,120 @@ mod tests {
         }
     }
 
+    /// A blur goes out as the layer blurred inside its filter, ahead of
+    /// what is grown from it, and comes back as itself; a reader draws
+    /// it as the engine does. And a blur another tool wrote — one
+    /// `feGaussianBlur` on one element, which is how a layer out of focus
+    /// is said in SVG — comes in as the layer's blur rather than being
+    /// passed over, which left the element sharp.
+    #[test]
+    fn a_blur_goes_out_and_comes_back_and_a_foreign_one_comes_in() {
+        use chitrakar_doc::Effect;
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let page = |effects: Vec<Effect>| {
+            let mut doc = Document::new(64, 48, ColorMode::Rgb);
+            let root = doc.root();
+            let mut disc = Node::vector("disc", VectorShape::Ellipse { rx: 15.3, ry: 11.6 });
+            disc.transform = chitrakar_doc::Transform::translation(14.4, 11.7);
+            if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+                *fill = Some(ink(0.9, 0.1, 0.2));
+            }
+            disc.effects = effects;
+            for (index, node) in [disc].into_iter().enumerate() {
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index,
+                    node: Box::new(node),
+                })
+                .unwrap();
+            }
+            doc
+        };
+        let engine_draws = |doc: &Document| -> Vec<[u8; 4]> {
+            let s = chitrakar_render::render(doc).unwrap();
+            s.pixels.iter().map(|p| p.to_srgb8()).collect()
+        };
+        // Coverage everywhere, and colour where the layer is solid: over
+        // a page, a reader lays a soft edge in sRGB and the engine in
+        // linear light, which is a difference of compositing and not of
+        // blurring (the other reader checks compare coverage for the same
+        // reason); and a reader keeps a faint pixel's colour in eight bits
+        // premultiplied, and moves a part-covered pixel's colour by its curve.
+        let parted = |a: &[[u8; 4]], b: &[[u8; 4]]| {
+            a.iter()
+                .zip(b)
+                .map(|(p, q)| {
+                    let cover = p[3].abs_diff(q[3]);
+                    if p[3] > 250 && q[3] > 250 {
+                        cover.max((0..3).map(|k| p[k].abs_diff(q[k])).max().unwrap())
+                    } else {
+                        cover
+                    }
+                })
+                .max()
+                .unwrap()
+        };
+        let shadow = Effect::DropShadow {
+            dx: 2.0,
+            dy: 3.0,
+            blur: 3.0,
+            color: ink(0.1, 0.1, 0.6),
+            opacity: 0.8,
+            spread: 0.0,
+        };
+        // Wide enough that a reader blurs by three boxes as the engine
+        // does: under a deviation of two it takes another curve, whose
+        // tail is its own.
+        for effects in [
+            vec![Effect::Blur { sigma: 2.5 }],
+            vec![shadow.clone(), Effect::Blur { sigma: 2.5 }],
+        ] {
+            let doc = page(effects.clone());
+            let svg = crate::export_svg(&doc).unwrap();
+            let ours = engine_draws(&doc);
+            let sharp = engine_draws(&page(vec![]));
+            assert!(parted(&ours, &sharp) > 60, "the engine blurs it");
+            let theirs = reader_draws(&svg, 64, 48);
+            // Where a shadow shows through the blurred layer's soft edge
+            // the two are mixed, which a reader does its own way; what
+            // they cover is the blur's and the shadow's reach.
+            let gap = if effects.len() == 1 {
+                parted(&ours, &theirs)
+            } else {
+                ours.iter()
+                    .zip(&theirs)
+                    .map(|(p, q)| p[3].abs_diff(q[3]))
+                    .max()
+                    .unwrap()
+            };
+            assert!(
+                gap <= 4,
+                "a reader draws the blur the engine draws: {gap}; {effects:?}"
+            );
+            let back = brought_in(&svg, 64, 48);
+            let id = back.children_of(back.root()).unwrap()[0];
+            let fx = &back.node(id).unwrap().effects;
+            assert!(
+                fx.iter().any(|e| matches!(e, Effect::Blur { .. })) && fx.len() == effects.len(),
+                "it came back as itself: {fx:?}"
+            );
+            let gap = parted(&ours, &engine_draws(&back));
+            assert!(gap <= 3, "and the page came back as it was: {gap}");
+        }
+        // Another tool's. The engine blurs by three boxes of a whole
+        // radius, so a deviation between two of them comes in as the
+        // nearer; this one a reader also takes as three boxes of seven.
+        let foreign = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="48" viewBox="0 0 64 48"><defs><filter id="soft" x="-1" y="-1" width="3" height="3"><feGaussianBlur stdDeviation="3.5"/></filter></defs><rect x="16" y="12" width="30" height="22" fill="#2050d0" filter="url(#soft)"/></svg>"##;
+        let doc = brought_in(foreign, 64, 48);
+        let blurred = doc
+            .nodes()
+            .filter(|(_, n)| n.effects.iter().any(|e| matches!(e, Effect::Blur { .. })))
+            .count();
+        assert_eq!(blurred, 1, "the rectangle came in out of focus");
+        let gap = parted(&engine_draws(&doc), &reader_draws(foreign, 64, 48));
+        assert!(gap <= 4, "as the reader draws it: {gap}");
+    }
+
     /// Colour overlays go out as the layer recoloured inside its filter
     /// and come back as themselves, beside a shadow, in the order they
     /// were taken: a reader draws the recoloured layer with no ring of
@@ -5506,6 +5684,7 @@ mod tests {
                     Effect::InnerShadow { .. } => "inner",
                     Effect::Bevel { .. } => "bevel",
                     Effect::ColorOverlay { .. } => "overlay",
+                    Effect::Blur { .. } => "blur",
                 })
                 .collect::<Vec<_>>()
         };
@@ -5578,6 +5757,7 @@ mod tests {
             let page = Page {
                 at: usvg::Transform::from_scale(scale, scale),
                 edge: std::cell::Cell::new(None),
+                soft: None,
             };
             for k in 2..240 {
                 let blur = k as f32 * 0.05;
