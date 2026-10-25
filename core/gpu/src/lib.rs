@@ -8630,18 +8630,15 @@ mod tests {
                 "after {what}: {over} interior pixels off by more than a \
                  fifth, the worst {in_worst:.4} at {at:?}"
             );
-            // A command that sends an effect past the page's edge has
-            // this backend draw the whole page on a surface with room
-            // round it, and a page drawn with room is not quite the page
-            // drawn without: the CPU's is the same to the bit, and the
-            // GPU's moves by a mean of 0.0013 over the page — a few layers
-            // a ten-thousandth each, nothing an edge would show (worst
-            // 0.006 on an interior). The fixture's filters that make an
-            // edge of every edge take that to 0.00275 on interiors after
-            // the one command here that gives the page room (a shadow on
-            // the photograph). Written down to be found (PLAN, the GPU
-            // item); held to 0.003 meanwhile, against 0.0002 on the page
-            // with no room.
+            // One command here sits above the old 0.002: a shadow put on
+            // the photograph, which wears a colour overlay, reaching past
+            // the page's edge. The page holds interiors to 0.0002 without
+            // it and 0.0007 with it and none of the fixture's filters;
+            // with the filters that make an edge of every edge it is
+            // 0.00275, worst 0.008 on any interior. Not yet run down
+            // (PLAN, the GPU item); held to 0.003 meanwhile. It is not the
+            // room the shadow gives the page: a page drawn with room is
+            // the page without now (`a_page_drawn_with_room_is_the_page_without`).
             assert!(
                 in_mean < 0.003,
                 "after {what}: interiors mean {in_mean:.5}, worst \
@@ -14225,6 +14222,138 @@ mod tests {
             "and inside it, half inverted: {:?}",
             weighed.get(10, 20)
         );
+    }
+
+    /// A page drawn with room round it — which this backend gives the
+    /// whole page when any layer's effect runs past its edge — is the page
+    /// drawn without, to the precision of a half float: an ellipse, a
+    /// rounded rectangle, a rectangle, an ellipse in a gradient and a
+    /// path, each with room of twelve to fifteen pixels against none. An
+    /// ellipse's rim and a rounded corner came out a tenth different at
+    /// odd room and not at even, since their coverage read the screen
+    /// derivative of a curved distance, which this device takes once for
+    /// each block of two by two pixels — and an odd shift of the page
+    /// moves every pixel to another place in its block. The fixture,
+    /// grown by a column of filters that make an edge of every edge,
+    /// showed it as a page a ten-thousandth off wherever a shadow ran
+    /// past the edge, while the CPU's page was the same to the bit.
+    #[test]
+    fn a_page_drawn_with_room_is_the_page_without() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let ink = |r: f32, g: f32, b: f32| AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let kinds: Vec<(&str, VectorShape, bool)> = vec![
+            ("ellipse", VectorShape::Ellipse { rx: 6.0, ry: 4.5 }, false),
+            (
+                "rect",
+                VectorShape::Rect {
+                    width: 9.3,
+                    height: 6.1,
+                    radius: 0.0,
+                },
+                false,
+            ),
+            (
+                "rounded rect",
+                VectorShape::Rect {
+                    width: 9.3,
+                    height: 6.1,
+                    radius: 2.0,
+                },
+                false,
+            ),
+            (
+                "ellipse in a gradient",
+                VectorShape::Ellipse { rx: 6.0, ry: 4.5 },
+                true,
+            ),
+            (
+                "path",
+                VectorShape::Path {
+                    points: vec![[0.0, 0.0], [9.0, 2.0], [4.0, 8.0]],
+                    handles: vec![[0.0; 4]; 3],
+                    closed: true,
+                    smooth: false,
+                    subpaths: vec![],
+                },
+                false,
+            ),
+        ];
+        for (what, shape, graded) in kinds {
+            let page = |room: f32| {
+                let mut doc = Document::new(80, 60, ColorMode::Rgb);
+                let mut shown = filled("shape", shape.clone(), ink(0.9, 0.2, 0.1));
+                if graded {
+                    if let NodeKind::Vector { gradient, .. } = &mut shown.kind {
+                        *gradient = Some(chitrakar_doc::Gradient::Conic {
+                            center: [0.5, 0.5],
+                            angle: 30.0,
+                            stops: vec![
+                                chitrakar_doc::GradientStop {
+                                    offset: 0.0,
+                                    color: ink(0.0, 0.0, 1.0),
+                                },
+                                chitrakar_doc::GradientStop {
+                                    offset: 1.0,
+                                    color: ink(1.0, 1.0, 0.0),
+                                },
+                            ],
+                        });
+                    }
+                }
+                add(&mut doc, shown, Transform::translation(54.3, 1.7));
+                if room > 0.0 {
+                    // A shape off the page whose shadow reaches out by
+                    // `room`: it draws nothing on the page, and gives it
+                    // room.
+                    let mut far = filled(
+                        "far",
+                        VectorShape::Rect {
+                            width: 2.0,
+                            height: 2.0,
+                            radius: 0.0,
+                        },
+                        ink(0.0, 0.0, 0.0),
+                    );
+                    far.effects = vec![chitrakar_doc::Effect::DropShadow {
+                        dx: room,
+                        dy: 0.0,
+                        blur: 0.0,
+                        color: ink(0.0, 0.0, 0.0),
+                        opacity: 0.5,
+                        spread: 0.0,
+                    }];
+                    add(&mut doc, far, Transform::translation(-40.0, 20.0));
+                }
+                doc
+            };
+            let none = gpu.render(&page(0.0)).unwrap();
+            assert_eq!(
+                chitrakar_render::render(&page(13.0)).unwrap().pixels,
+                chitrakar_render::render(&page(0.0)).unwrap().pixels,
+                "{what}: the reference's page is the same with room"
+            );
+            for room in [12.0, 13.0, 14.0, 15.0] {
+                let roomy = gpu.render(&page(room)).unwrap();
+                let worst = roomy
+                    .pixels
+                    .iter()
+                    .zip(&none.pixels)
+                    .map(|(p, q)| {
+                        (p.r - q.r)
+                            .abs()
+                            .max((p.g - q.g).abs())
+                            .max((p.b - q.b).abs())
+                            .max((p.a - q.a).abs())
+                    })
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    worst < 0.002,
+                    "{what}, room of {room}: {worst:.4} from the page without"
+                );
+            }
+        }
     }
 
     /// A blur is the layer's own surface run through the box passes

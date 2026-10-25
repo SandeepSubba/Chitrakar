@@ -144,6 +144,58 @@ fn edge(d: f32) -> f32 {
     return clamp(half_plane(d / len, g / len), 0.0, 1.0);
 }
 
+// The same, with the distance's gradient in the shape's own space given
+// (`n`) and carried onto the screen by how that space moves across it
+// (`dx`, `dy`, the screen derivatives of the shape's own position). Not
+// the screen derivative of the distance itself: a device may take that
+// once for a block of two by two pixels, and a curved edge's distance
+// changes within one — so an ellipse's rim came out a tenth different
+// depending on where the page landed on the surface, odd pixels of room
+// round it against even ones (`a_page_drawn_with_room_is_the_page_without`).
+// The shape's own position is linear on the screen, so its derivative
+// is the same however it is taken, and the gradient is exact.
+fn edge_along(d: f32, n: vec2f, dx: vec2f, dy: vec2f) -> f32 {
+    let g = vec2f(dot(n, dx), dot(n, dy));
+    let len = max(length(g), 1e-6);
+    return clamp(half_plane(d / len, g / len), 0.0, 1.0);
+}
+
+// Which way a rounded rectangle's distance grows at `p`, in its own
+// space: away from the nearest straight side, or from the corner's
+// centre where the corner is an arc.
+fn rect_normal(p: vec2f, size: vec2f, r: f32) -> vec2f {
+    let half = size * 0.5;
+    let off = p - half;
+    let s = select(vec2f(-1.0, -1.0), vec2f(1.0, 1.0), off >= vec2f(0.0, 0.0));
+    let q = abs(off) - (half - vec2f(r, r));
+    if q.x > 0.0 && q.y > 0.0 {
+        return normalize(q) * s;
+    }
+    return select(vec2f(0.0, s.y), vec2f(s.x, 0.0), q.x > q.y);
+}
+
+// And an ellipse's: the gradient of its first-order distance
+// (`ellipse_distance`, the implicit function `f` over its own gradient
+// `g`), exactly — `g/|g| − f·Hg/|g|³`, `H` the implicit function's
+// Hessian. On the rim it is the rim's normal; off it, on a squashed
+// ellipse, it is not, and the normal alone drew a thin one two thirds
+// of a pixel fatter than the reference.
+fn ellipse_normal(p: vec2f, c: vec2f, r: vec2f) -> vec2f {
+    let k = (p - c) / r;
+    let f = dot(k, k) - 1.0;
+    let g = 2.0 * vec2f(k.x / r.x, k.y / r.y);
+    let h = 2.0 * vec2f(1.0 / (r.x * r.x), 1.0 / (r.y * r.y));
+    let len = max(length(g), 1e-12);
+    // Where the distance is held (eight pixels either side of the rim,
+    // and the singular middle with it), it does not change at all, and
+    // so neither does it here: a middle read through the exact gradient
+    // came out half covered in a solid disc.
+    if abs(f / len) >= 8.0 {
+        return vec2f(0.0, 0.0);
+    }
+    return g / len - f * (h * g) / (len * len * len);
+}
+
 // How fast a quantity changes over one screen pixel, in the direction it
 // changes fastest: the length of its screen-space gradient.
 //
@@ -202,6 +254,8 @@ fn coverage(in: VsOut) -> f32 {
     let ellipse = in.params.w - select(0.0, 2.0, band) > 0.5;
     let shrink = in.grad.x;
     let grow = in.grad.y;
+    let dx = dpdx(in.local);
+    let dy = dpdy(in.local);
 
     let plain = select(
         rect_distance(in.local, size, in.params.z),
@@ -219,6 +273,17 @@ fn coverage(in: VsOut) -> f32 {
         ellipse,
     );
     let shrunk = r - vec2f(shrink, shrink);
+    let n_plain = select(
+        rect_normal(in.local, size, in.params.z),
+        ellipse_normal(in.local, r, r),
+        ellipse,
+    );
+    let n_outer = select(n_plain, ellipse_normal(in.local, r, grown), ellipse);
+    let n_inner = select(
+        n_plain,
+        ellipse_normal(in.local, r, max(shrunk, vec2f(1e-6, 1e-6))),
+        ellipse,
+    );
     let inner = select(
         plain + shrink,
         select(ellipse_distance(in.local, r, max(shrunk, vec2f(1e-6, 1e-6))), 1e9, shrunk.x <= 0.0 || shrunk.y <= 0.0),
@@ -254,14 +319,14 @@ fn coverage(in: VsOut) -> f32 {
     let gone = shrunk.x <= 0.0 || shrunk.y <= 0.0;
     let round_off = q.x > 0.0 && q.y > 0.0 && grow > 1.0;
     let square_band = clamp(
-        select(box_cover(q - vec2f(grow, grow)), edge(plain - grow), round_off)
+        select(box_cover(q - vec2f(grow, grow)), edge_along(plain - grow, n_plain, dx, dy), round_off)
             - select(box_cover(q + vec2f(shrink, shrink)), 0.0, gone),
         0.0,
         1.0,
     );
-    let solid = select(edge(plain), box_area(in.local - r, r), sharp);
+    let solid = select(edge_along(plain, n_plain, dx, dy), box_area(in.local - r, r), sharp);
     let banded = select(
-        clamp(edge(outer) - edge(inner), 0.0, 1.0),
+        clamp(edge_along(outer, n_outer, dx, dy) - edge_along(inner, n_inner, dx, dy), 0.0, 1.0),
         square_band,
         sharp,
     );
