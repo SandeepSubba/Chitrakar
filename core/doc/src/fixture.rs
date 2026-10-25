@@ -2154,6 +2154,57 @@ pub fn everything() -> Fixture {
         })
         .unwrap();
     }
+    // Every blend mode the page did not hold. Three of fifteen stood
+    // here — Multiply, Soft light and Hue — so the file, the clipboard,
+    // the wire, undo and the readers outside were only ever asked about
+    // those; the random pages draw the rest, and nothing else does. A
+    // strip of small squares along the bottom, each in one mode and a
+    // colour of its own, over what is already there, so every one of them
+    // meets something.
+    for (k, blend) in [
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let t = k as f32 / 11.0;
+        let mut node = Node::vector(
+            &format!("blend {k}"),
+            VectorShape::Rect {
+                width: 4.5,
+                height: 5.0,
+                radius: 0.0,
+            },
+        );
+        if let NodeKind::Vector { fill, .. } = &mut node.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.9 - 0.7 * t,
+                g: 0.3 + 0.5 * (t * 3.0).sin().abs(),
+                b: 0.15 + 0.8 * t,
+                a: 1.0,
+            });
+        }
+        node.blend = blend;
+        node.transform = Transform::translation(14.0 + 5.25 * k as f32, 54.0);
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(node),
+        })
+        .unwrap();
+    }
     // A colour lookup, gently warm and at half strength, over the whole
     // page: an adjustment whose numbers are not in the document at all
     // but in a resource beside it, so every audit that carries a layer
