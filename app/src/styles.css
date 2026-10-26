@@ -608,6 +608,21 @@ body {
   font-weight: 600;
 }
 
+/* A button with nothing to do yet — Replace all with nothing found —
+   is faded where it stands rather than turned the browser's grey. */
+.mask-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.mask-button:disabled:hover {
+  background: none;
+}
+
+.mask-button.primary:disabled:hover {
+  background: var(--accent);
+}
+
 /* Align controls: a strip of icon buttons that appears only with a
    multi-selection, since neither word means anything for one layer. */
 .align-bar {
@@ -2593,6 +2608,15 @@ body {
   white-space: nowrap;
 }
 
+/* A field's unit in the windows that write it bare (Repeat, Canvas
+   size), as quiet as a hint and as wide as the widest unit, so the
+   fields line up whether a row has one or not. */
+.modal .row > .unit {
+  min-width: 1.6rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
 /* A unit after a field, as wide as the widest of them, so the fields
    above and below one another line up. */
 .modal .row .hint.unit {
@@ -2648,9 +2672,9 @@ body {
 .palette-caption {
   flex-basis: 100%;
   margin-top: 0.25rem;
-  font-size: 0.52rem;
+  font-size: 0.5rem;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
   text-align: center;
   color: var(--muted);
@@ -3031,6 +3055,10 @@ button.fold:hover {
 
 .about-facts dd {
   margin: 0;
+  /* The source's address is one long word; it breaks rather than
+     running past the window's edge. */
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 

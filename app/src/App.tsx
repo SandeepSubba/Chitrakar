@@ -12811,8 +12811,8 @@ function FindReplaceDialog({
               : `${found.matches} found in ${found.layers} ${found.layers === 1 ? "layer" : "layers"}.`}
         </p>
         <div className="modal-actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className="primary" disabled={found.matches === 0} onClick={go}>
+          <button className="mask-button" onClick={onCancel}>Cancel</button>
+          <button className="mask-button primary" disabled={found.matches === 0} onClick={go}>
             Replace all
           </button>
         </div>
@@ -12946,7 +12946,7 @@ function RepeatDialog({
         {field("scale", "Scale", "%", 1, 10000)}
         {field("px", "Turn about across", "px")}
         {field("py", "Turn about down", "px")}
-        <p className="modal-note">
+        <p className="modal-aside">
           Each copy is one step on from the one before: moved, turned about
           the point that far from the middle of what is picked, and scaled
           about that middle. A row is a move; a ring is a turn about a
@@ -13057,7 +13057,7 @@ function TraceDialog({
             aria-label="Trace smoothing"
           />
         </label>
-        <p className="modal-note">
+        <p className="modal-aside">
           The picture is said in this many flat colours, the commonest laid
           at the bottom and each one under everything above it, so no seam
           shows between them. Smoothing is how far, in the picture's
@@ -13152,7 +13152,7 @@ function FeatherDialog({
           />
           <span className="unit">px</span>
         </label>
-        <p className="modal-note">
+        <p className="modal-aside">
           Zero is the hard edge the marquee drew. Anything else softens
           the coverage over that many page pixels, so the region is
           neither wholly in nor wholly out across the band — which is
@@ -13250,7 +13250,7 @@ function StraightenDialog({
         >
           {levelling ? "Draw along it…" : "Draw a level line"}
         </button>
-        <p className="modal-note">
+        <p className="modal-aside">
           Drag along something that ought to be level — a horizon, a
           window, the edge of a table — and the angle follows from it.
           The page turns about its own middle and is cropped back to the
@@ -13357,7 +13357,7 @@ function ScalePageDialog({
         onPointerDown={(e) => e.stopPropagation()}
       >
         <h2>Scale the page</h2>
-        <p className="modal-note">
+        <p className="modal-aside">
           {shown(width)} × {shown(height)} {units} now. Everything on the
           page scales with it.
         </p>
@@ -13463,7 +13463,7 @@ function CanvasSizeDialog({
         onPointerDown={(e) => e.stopPropagation()}
       >
         <h2>Canvas size</h2>
-        <p className="modal-note">
+        <p className="modal-aside">
           {inUnits(width, units, dpi)} × {inUnits(height, units, dpi)} {units}{" "}
           now
         </p>
@@ -13488,7 +13488,7 @@ function CanvasSizeDialog({
             )),
           )}
         </div>
-        <p className="modal-note">
+        <p className="modal-aside">
           {bigger
             ? "The page grows around the point you pick."
             : "What falls outside the new page is still there — it is off the page, not gone."}

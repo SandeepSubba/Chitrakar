@@ -14532,6 +14532,61 @@ assert(
   assert(face <= 2, `the face's choice runs to the panel's edge (${face} short)`);
 }
 
+// 9ch. The windows that explain themselves do it quietly: amber is kept
+// for a window about to do something other than what was asked, and an
+// explanation is not that. Their fields line up whether a row has a
+// unit or not, their buttons are the app's, and nothing runs past
+// their edge.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(box.x + 40, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 160, box.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await pickTool("Move");
+  await page.locator(".panel ul.layer-list li[data-id]").first().click();
+  await menuClick("Layer", "Repeat");
+  const repeat = page.locator('[role=dialog][aria-label="Repeat"]');
+  await repeat.waitFor();
+  const look = await repeat.evaluate((d) => {
+    // The warning colour as the page computes it, so the two compare
+    // in one spelling.
+    const probe = document.createElement("span");
+    probe.style.color = "var(--note)";
+    d.appendChild(probe);
+    const note = getComputedStyle(probe).color;
+    probe.remove();
+    const p = d.querySelector(".modal-aside");
+    const lefts = [...d.querySelectorAll('input[type="number"]')].map((i) => Math.round(i.getBoundingClientRect().left));
+    return { explained: !!p, notAmber: p && getComputedStyle(p).color !== note, lefts };
+  });
+  assert(look.explained && look.notAmber, "Repeat explains itself quietly");
+  assert(new Set(look.lefts).size === 1, `and its fields line up (${look.lefts})`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await menuClick("Edit", "Find and replace");
+  const find = page.locator('[role=dialog]', { hasText: "Find and replace" });
+  await find.waitFor();
+  const cancelBg = await find.locator('button:text-is("Cancel")').evaluate((b) => getComputedStyle(b).backgroundColor);
+  assert(cancelBg === "rgba(0, 0, 0, 0)", `Find and replace's buttons are the app's (${cancelBg})`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await menuClick("Help", "About");
+  const about = page.locator('[role=dialog][aria-label="About Chitrakar"]');
+  await about.waitFor();
+  const inside = await about.evaluate((d) => {
+    const a = d.querySelector("a").getBoundingClientRect();
+    return a.right <= d.getBoundingClientRect().right;
+  });
+  assert(inside, "the source's address stays inside the About window");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a
