@@ -89,6 +89,81 @@
         "role": "Editor",
         "rank": "Alternate",
         "mimeType": "image/svg+xml"
+      },
+      {
+        "ext": [
+          "tif",
+          "tiff"
+        ],
+        "name": "TIFF image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/tiff"
+      },
+      {
+        "ext": [
+          "psd",
+          "psb"
+        ],
+        "name": "Photoshop document",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/vnd.adobe.photoshop"
+      },
+      {
+        "ext": [
+          "pdf"
+        ],
+        "name": "PDF document",
+        "role": "Viewer",
+        "rank": "Alternate",
+        "mimeType": "application/pdf"
+      },
+      {
+        "ext": [
+          "ai"
+        ],
+        "name": "Illustrator document",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "application/postscript"
+      },
+      {
+        "ext": [
+          "dng",
+          "cr2",
+          "cr3",
+          "nef",
+          "arw",
+          "raf",
+          "orf",
+          "rw2",
+          "pef",
+          "srw"
+        ],
+        "name": "Camera raw photograph",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/x-dcraw"
+      },
+      {
+        "ext": [
+          "heic",
+          "heif"
+        ],
+        "name": "HEIC image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/heic"
+      },
+      {
+        "ext": [
+          "avif"
+        ],
+        "name": "AVIF image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/avif"
       }
     ]
   }

@@ -9,7 +9,7 @@
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview",
     "test:e2e": "node e2e/smoke.mjs",
-    "test:unit": "node e2e/runs.test.mjs && node e2e/measure.test.mjs && node e2e/findReplace.test.mjs && node e2e/touch.test.mjs && node e2e/files.test.mjs && node e2e/spacing.test.mjs && node e2e/commands.test.mjs",
+    "test:unit": "node e2e/runs.test.mjs && node e2e/measure.test.mjs && node e2e/findReplace.test.mjs && node e2e/touch.test.mjs && node e2e/files.test.mjs && node e2e/spacing.test.mjs && node e2e/commands.test.mjs && node e2e/imports.test.mjs",
     "test": "npm run test:unit && npm run test:e2e"
   },
   "dependencies": {

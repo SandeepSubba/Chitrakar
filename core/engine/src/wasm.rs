@@ -1345,10 +1345,45 @@ impl WasmSession {
             .unwrap_or_default()
     }
 
-    /// Decode PNG/JPEG bytes and place them as a raster object (undoable).
+    /// Decode a picture — PNG, JPEG, TIFF, or a camera's raw file, told by
+    /// its name — and place it as a raster object (undoable).
     pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
         self.inner
             .place_image(bytes, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Bring a Photoshop file in as its layers (see `Session::place_psd`).
+    pub fn place_psd(&mut self, bytes: &[u8], name: &str) -> Result<f64, JsError> {
+        self.inner
+            .place_psd(bytes, name)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// What the last file brought in could not carry across, as a JSON
+    /// array of sentences.
+    pub fn import_notes(&self) -> String {
+        serde_json::to_string(self.inner.import_notes()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// Each page of a PDF's size in points, as JSON `[[w, h], ...]`.
+    pub fn pdf_page_sizes(&self, bytes: &[u8]) -> Result<String, JsError> {
+        let sizes = Session::pdf_page_sizes(bytes).map_err(to_js)?;
+        Ok(serde_json::to_string(&sizes).unwrap_or_else(|_| "[]".into()))
+    }
+
+    /// Bring one page of a PDF in as a picture drawn at `dpi`.
+    pub fn place_pdf(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        page: u32,
+        dpi: f32,
+    ) -> Result<f64, JsError> {
+        self.inner
+            .place_pdf(bytes, name, page as usize, dpi)
             .map(|id| id.0 as f64)
             .map_err(to_js)
     }

@@ -10117,6 +10117,59 @@ without reading anything else.*
   keys and out of all this: they are written on every frame of a drag,
   and a JSON blob rewritten sixty times a second to remember a drag is
   not a preference, it is a leak.
+- **Files from other programs** ✅. Place (and Open, and a drop, a
+  share, the shell's "Open with") takes what other editors write, each
+  by the road that keeps the most of it. `app/src/imports.ts` says which
+  road (`importKind`, by the first bytes, and by the name for a camera's
+  raw file, which is a TIFF inside whose first picture is the small
+  preview; unit-tested in `e2e/imports.test.mjs`).
+  **TIFF** is the engine's now (`core/codecs/src/tiff_import.rs`): 1 to
+  16 bits and float, grey, RGB, palette, YCbCr and CMYK, premultiplied
+  alpha undone, and its ICC profile honoured — an RGB one through the
+  same normalisation PNG and JPEG get, a CMYK one through `CmykCms`, so
+  a press file comes in as that press would print it.
+  **Photoshop (PSD, PSB)** comes in as its layers (`psd.rs`, written
+  here: the `psd` crate reads 8 bits only, gets CMYK wrong and panics,
+  and a panic in WASM is the engine gone). Pixel layers at their
+  offsets, groups as groups, opacity and fill, the blend modes the
+  renderer has, hidden layers hidden, clipping, layer masks as raster
+  masks; 1/8/16/32 bits, raw, RLE and ZIP with prediction; RGB, grey,
+  CMYK, Lab, indexed, bitmap, duotone. Opened into an empty page they
+  are the page's layers; placed on one, a group named for the file,
+  fitted. What it cannot keep — effects, adjustment layers, a shape
+  kept as a drawing, a blend mode it lacks — is said in one line across
+  the top (`Session::import_notes`), and Photoshop's own picture of the
+  file comes in beside the layers, hidden, as "As Photoshop drew it", so
+  the look is never lost. Checked against psd-tools' test files: where
+  nothing is lost the layers composite to within half a level of
+  Photoshop's own picture.
+  **PDF and Illustrator** (Illustrator 9 on saves a PDF inside its
+  `.ai`) come in as a page drawn by `hayro` at a resolution asked for in
+  a small window that says the size it will come to (up to 16384 px a
+  side) — pixels, not shapes: turning a PDF's drawing back into layers
+  is a different and much larger thing. The fourteen standard fonts
+  ship with hayro (Foxit's, BSD); an older PostScript `.ai` is told to
+  be saved again as PDF-compatible.
+  **Camera raw** (CR2, NEF, ARW, DNG, RAF, ORF, RW2, PEF and the other
+  formats rawloader reads, LGPL-2.1; not yet Canon's CR3, which says to
+  go through Adobe's DNG Converter) is developed by the engine
+  (`raw.rs`): black and white levels, the camera's white balance, a
+  same-colour demosaic, the camera's matrix to sRGB, an exposure that
+  puts the 99th percentile at white, and the camera's orientation.
+  Plain on purpose — an even starting point for the adjustments, not a
+  look; imagepipe was not used because it starts threads, which abort
+  in WASM. About 4.5 s for 24 megapixels natively, so a line across the
+  top says the file is being read while it is.
+  **HEIC and AVIF** go to the browser's decoder, which has AVIF
+  everywhere current and HEIC only on Apple's systems; a HEIC that
+  cannot be read says how to get a JPEG instead rather than what the
+  decoder said.
+  The price is size: the engine's WASM went from 2.9 to 4.8 MB
+  gzipped, about 60% of it the PDF renderer and 30% the raw decoder
+  (`twiggy`). The service worker keeps it after the first visit; a
+  separate module loaded on first use is the way down if it matters.
+  Smoke 9cm writes a TIFF, a Photoshop file and a two-page PDF byte by
+  byte and places, opens and reads back each.
 
 ---
 
@@ -10129,7 +10182,7 @@ without reading anything else.*
 | UI | **TypeScript + React** (webview) | One UI codebase across all platforms; responsive layout adapts desktop ⇄ tablet ⇄ phone. |
 | GPU rendering | **wgpu** (vectors via **vello**, raster ops via compute shaders) | Portable over Vulkan/Metal/DX12/GLES — and over WebGPU when the engine runs as WASM. |
 | Color management | **ICC-based CMS**: `lcms2` (battle-tested) with `moxcms` (pure Rust) evaluated as the WASM-friendly alternative | Correct RGB/CMYK conversions, monitor profiles, soft proofing. |
-| Codecs | `image`/`zune` crates (PNG, JPEG, TIFF), `resvg`/`usvg` (SVG import), custom exporters | Pure Rust ⇒ works on every target including WASM. |
+| Codecs | `image`/`zune` crates (PNG, JPEG), `tiff`, own PSD reader, `hayro` (PDF/AI pages), `rawloader` + own develop (camera raw), `resvg`/`usvg` (SVG import), custom exporters | Pure Rust ⇒ works on every target including WASM. |
 
 ### How the engine reaches the screen
 
@@ -10229,7 +10282,7 @@ chitrakar/
 │  ├─ render/             # the CPU renderer: the correctness reference
 │  ├─ gpu/                # the wgpu backend, validated against render/
 │  ├─ color/              # CMS wrapper, profiles, pixel formats
-│  ├─ codecs/             # import/export (PNG, JPEG, TIFF, SVG, PDF)
+│  ├─ codecs/             # import/export (PNG, JPEG, TIFF, SVG, PDF; PSD, raw in)
 │  └─ engine/             # public API: the one crate the shells embed
 │                         #   (cdylib for native, wasm-bindgen for WASM)
 ├─ app/                   # TypeScript UI (React) — tools, panels, canvas host

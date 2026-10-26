@@ -50,7 +50,59 @@
             ".webp",
             ".gif",
             ".bmp",
-            ".svg"
+            ".svg",
+            "image/tiff",
+            "image/avif",
+            "image/heic",
+            "image/heif",
+            "image/vnd.adobe.photoshop",
+            "application/pdf",
+            "application/postscript",
+            "image/x-dcraw",
+            ".tif",
+            ".tiff",
+            ".avif",
+            ".heic",
+            ".heif",
+            ".psd",
+            ".psb",
+            ".pdf",
+            ".ai",
+            ".3fr",
+            ".ari",
+            ".arw",
+            ".bay",
+            ".cap",
+            ".cr2",
+            ".cr3",
+            ".crw",
+            ".dcr",
+            ".dcs",
+            ".dng",
+            ".drf",
+            ".eip",
+            ".erf",
+            ".fff",
+            ".iiq",
+            ".k25",
+            ".kdc",
+            ".mdc",
+            ".mef",
+            ".mos",
+            ".mrw",
+            ".nef",
+            ".nrw",
+            ".orf",
+            ".pef",
+            ".ptx",
+            ".raf",
+            ".raw",
+            ".rw2",
+            ".rwl",
+            ".sr2",
+            ".srf",
+            ".srw",
+            ".x3f"
           ]
         }
       ]
@@ -81,6 +133,64 @@
         ],
         "image/svg+xml": [
           ".svg"
+        ],
+        "image/tiff": [
+          ".tif",
+          ".tiff"
+        ],
+        "image/avif": [
+          ".avif"
+        ],
+        "image/heic": [
+          ".heic",
+          ".heif"
+        ],
+        "image/vnd.adobe.photoshop": [
+          ".psd",
+          ".psb"
+        ],
+        "application/pdf": [
+          ".pdf"
+        ],
+        "application/postscript": [
+          ".ai"
+        ],
+        "image/x-dcraw": [
+          ".3fr",
+          ".ari",
+          ".arw",
+          ".bay",
+          ".cap",
+          ".cr2",
+          ".cr3",
+          ".crw",
+          ".dcr",
+          ".dcs",
+          ".dng",
+          ".drf",
+          ".eip",
+          ".erf",
+          ".fff",
+          ".iiq",
+          ".k25",
+          ".kdc",
+          ".mdc",
+          ".mef",
+          ".mos",
+          ".mrw",
+          ".nef",
+          ".nrw",
+          ".orf",
+          ".pef",
+          ".ptx",
+          ".raf",
+          ".raw",
+          ".rw2",
+          ".rwl",
+          ".sr2",
+          ".srf",
+          ".srw",
+          ".x3f"
         ]
       }
     }

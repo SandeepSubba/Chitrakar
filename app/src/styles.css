@@ -3889,3 +3889,14 @@ button.fold:hover {
     opacity: 0.6;
   }
 }
+
+/* Reading a slow file, and what one had that did not come across. */
+.recover.importing {
+  background: var(--panel);
+  color: var(--text);
+  border-bottom: 1px solid var(--accent);
+}
+.recover.import-notes span {
+  flex: 1;
+  min-width: 0;
+}

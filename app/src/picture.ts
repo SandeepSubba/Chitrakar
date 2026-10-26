@@ -1,7 +1,10 @@
 /** A picture in a form the engine reads.
  *
- * The engine reads PNG and JPEG itself, with their colour profiles.
- * Anything else a browser can show — WebP, GIF, BMP, AVIF — the browser
+ * The engine reads PNG, JPEG and TIFF itself, with their colour
+ * profiles (and a TIFF's 16 bits, and its CMYK); a Photoshop file, a
+ * PDF and a camera's raw file never come through here. Anything else a
+ * browser can show — WebP, GIF, BMP, AVIF, HEIC where the system has a
+ * decoder for it — the browser
  * draws and hands over as a PNG: every webview already carries those
  * decoders, and a WebP decoder in the engine would be six times the
  * weight of the WebP *encoder* it does carry for exporting one.
@@ -10,13 +13,17 @@
 const isPng = (b: Uint8Array) =>
   b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47;
 const isJpeg = (b: Uint8Array) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
+const isTiff = (b: Uint8Array) =>
+  b.length > 4 &&
+  ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2a && b[3] === 0) ||
+    (b[0] === 0x4d && b[1] === 0x4d && b[2] === 0 && b[3] === 0x2a));
 
 /** The bytes as they are when the engine reads them, else a PNG of what
  * the browser draws of them. Decided by what the bytes are rather than
  * what the file is called. A picture the browser cannot draw either
  * comes back as it was, so the engine's own refusal is what is said. */
 export async function enginePicture(bytes: Uint8Array, type: string): Promise<Uint8Array> {
-  if (isPng(bytes) || isJpeg(bytes)) return bytes;
+  if (isPng(bytes) || isJpeg(bytes) || isTiff(bytes)) return bytes;
   try {
     const bitmap = await createImageBitmap(new Blob([bytes as BlobPart], { type }), {
       premultiplyAlpha: "none",

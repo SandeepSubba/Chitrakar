@@ -52,6 +52,7 @@ import {
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
 import { enginePicture } from "./picture";
+import { importKind, OPEN_ACCEPT, PLACE_ACCEPT, PLACE_EXTENSIONS, unreadable } from "./imports";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import {
@@ -8145,10 +8146,26 @@ export function App() {
       forget(path);
       return;
     }
+    if (importKind(path, bytes.subarray(0, 1024)) !== "document") {
+      openForeign(new File([bytes as BlobPart], baseName(path), { type: imageType(path) ?? "" }));
+      return;
+    }
     if (openDocumentBytes(bytes, baseName(path))) {
       setDocPath(path);
       remember(path);
     }
+  };
+
+  /** Open something that is not a document of the editor's own — a
+   * Photoshop file, a PDF, a photograph: a new document, into which it
+   * is placed, and placing into an empty page gives the page its size.
+   * The place waits for the new session to be the one in hand. It has
+   * no file to save back to, so Save asks where, as a .chitra. */
+  const pendingOpen = useRef<File | null>(null);
+  const openForeign = (file: File) => {
+    pendingOpen.current = file;
+    newDocument(false);
+    setDocName(file.name.replace(/\.[a-z0-9]+$/i, "") || "untitled");
   };
 
   /** Open, the way the platform opens: the system's panel in the shell,
@@ -8160,7 +8177,10 @@ export function App() {
       return;
     }
     try {
-      const path = await chooseToOpen("Open", DOCUMENTS);
+      const path = await chooseToOpen("Open", [
+        { name: "Everything Chitrakar opens", extensions: ["chitra", ...PLACE_EXTENSIONS] },
+        ...DOCUMENTS,
+      ]);
       if (path) await openPath(path);
     } catch (err) {
       alert(`Open failed: ${err}`);
@@ -8191,46 +8211,125 @@ export function App() {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    file
-      .arrayBuffer()
-      .then((buf) => openDocumentBytes(new Uint8Array(buf), file.name));
+    file.arrayBuffer().then((buf) => {
+      const bytes = new Uint8Array(buf);
+      if (importKind(file.name, bytes.subarray(0, 1024), file.type) === "document") {
+        openDocumentBytes(bytes, file.name);
+      } else {
+        openForeign(file);
+      }
+    });
   };
 
-  /** Bring an image file in as a layer and pick it — whichever way it
-   * arrived: the file dialog, a drop on the canvas, or a paste. */
-  const placeImageFile = useCallback(
-    (file: File) => {
+  /** A file being read that takes a while — a camera's raw file is
+   * developed, a Photoshop file unpacked layer by layer — named in a
+   * line across the top while it is, so a pause is not taken for a
+   * hang. */
+  const [importing, setImporting] = useState<string | null>(null);
+  /** What a file had that did not come across as itself (a Photoshop
+   * file's effects, adjustments, drawn shapes), said once it is in. */
+  const [importNotes, setImportNotes] = useState<{ name: string; notes: string[] } | null>(null);
+  /** A PDF or Illustrator file waiting to be told which page, and at
+   * what resolution, it comes in as. */
+  const [pdfAsk, setPdfAsk] = useState<{
+    name: string;
+    bytes: Uint8Array;
+    sizes: [number, number][];
+  } | null>(null);
+
+  /** After it is placed: pick it, and frame the page if the page took
+   * the picture's size with it. */
+  const placed = useCallback(
+    (id: number, was: [number, number]) => {
       if (!session) return;
-      // An SVG comes in as shapes, anything else as pixels.
-      const vector = file.type === "image/svg+xml" || /\.svg$/i.test(file.name);
-      file
-        .arrayBuffer()
-        .then((buf) =>
-          vector ? new Uint8Array(buf) : enginePicture(new Uint8Array(buf), file.type),
-        )
-        .then((bytes) => {
-          try {
-            const was = [session.width, session.height];
-            const id = vector
-              ? session.place_svg(bytes, file.name || "Pasted drawing")
-              : session.place_image(bytes, file.name || "Pasted image");
-            setSelected(id);
-            setMultiSel([]);
-            refresh(session);
-            // A picture that took the page's size with it was a picture
-            // being opened, and the view was framed for the page that is
-            // gone: without this a photograph opens showing a corner of
-            // itself, which is the thing this was supposed to stop.
-            if (session.width !== was[0] || session.height !== was[1]) {
-              fitView();
-            }
-          } catch (err) {
-            alert(`Could not place image: ${err}`);
-          }
-        });
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+      // A picture that took the page's size with it was a picture
+      // being opened, and the view was framed for the page that is
+      // gone: without this a photograph opens showing a corner of
+      // itself, which is the thing this was supposed to stop.
+      if (session.width !== was[0] || session.height !== was[1]) {
+        fitView();
+      }
     },
     [session, refresh, fitView],
   );
+
+  /** Bring a file in as a layer and pick it — whichever way it arrived:
+   * the file dialog, a drop on the canvas, a share, or a paste. Which
+   * road it takes is `importKind`'s to say: an SVG comes in as shapes, a
+   * Photoshop file as its layers, a PDF as a page drawn at a resolution
+   * asked for, a camera's raw file developed, anything else as pixels. */
+  const placeImageFile = useCallback(
+    (file: File) => {
+      if (!session) return;
+      const name = file.name || "Pasted image";
+      file.arrayBuffer().then(async (buf) => {
+        const raw = new Uint8Array(buf);
+        const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
+        setImportNotes(null);
+        if (kind === "pdf") {
+          try {
+            const sizes = JSON.parse(session.pdf_page_sizes(raw)) as [number, number][];
+            setPdfAsk({ name, bytes: raw, sizes });
+          } catch (err) {
+            alert(`Could not open ${name}: ${err}`);
+          }
+          return;
+        }
+        // The engine works on the page's own thread, so the line has to
+        // be drawn before the reading starts or it is never seen.
+        const slow = kind === "raw" || kind === "psd" || raw.length > 24e6;
+        if (slow) {
+          setImporting(name);
+          await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+        }
+        try {
+          const was: [number, number] = [session.width, session.height];
+          let id: number;
+          if (kind === "svg") id = session.place_svg(raw, file.name || "Pasted drawing");
+          else if (kind === "psd") id = session.place_psd(raw, name);
+          else if (kind === "raw") id = session.place_image(raw, name);
+          else id = session.place_image(await enginePicture(raw, file.type), name);
+          placed(id, was);
+          if (kind === "psd") {
+            const notes = JSON.parse(session.import_notes()) as string[];
+            setImportNotes(notes.length > 0 ? { name, notes } : null);
+          }
+        } catch (err) {
+          alert(kind === "picture" ? unreadable(name, raw, err) : `Could not place ${name}: ${err}`);
+        } finally {
+          if (slow) setImporting(null);
+        }
+      });
+    },
+    [session, placed],
+  );
+
+  useEffect(() => {
+    const file = pendingOpen.current;
+    if (!file || !session) return;
+    pendingOpen.current = null;
+    placeImageFile(file);
+  }, [session, placeImageFile]);
+
+  /** The page asked for, drawn at the resolution asked for. */
+  const placePdf = async (page: number, dpi: number) => {
+    const ask = pdfAsk;
+    setPdfAsk(null);
+    if (!session || !ask) return;
+    setImporting(ask.name);
+    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    try {
+      const was: [number, number] = [session.width, session.height];
+      placed(session.place_pdf(ask.bytes, ask.name, page, dpi), was);
+    } catch (err) {
+      alert(`Could not place ${ask.name}: ${err}`);
+    } finally {
+      setImporting(null);
+    }
+  };
 
   const placeImage = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -8261,7 +8360,8 @@ export function App() {
       return;
     }
     for (const file of files) {
-      if (file.type.startsWith("image/")) placeImageFile(file);
+      const kind = importKind(file.name, undefined, file.type);
+      if (kind && kind !== "document") placeImageFile(file);
     }
   };
 
@@ -8277,8 +8377,9 @@ export function App() {
       return;
     }
     for (const path of paths) {
-      const type = imageType(path);
-      if (!type) continue;
+      const kind = importKind(baseName(path));
+      if (!kind || kind === "document") continue;
+      const type = imageType(path) ?? "";
       try {
         const bytes = await readPath(path);
         placeImageFile(new File([bytes as BlobPart], baseName(path), { type }));
@@ -9039,6 +9140,21 @@ export function App() {
 
   return (
     <div className="editor">
+      {importing && (
+        <div className="recover importing" role="status" aria-label="Reading">
+          <span>Reading {importing}…</span>
+        </div>
+      )}
+      {importNotes && (
+        <div className="recover import-notes" role="status" aria-label="Import notes">
+          <span>
+            {importNotes.name}: {importNotes.notes.join("; ")}
+          </span>
+          <button type="button" onClick={() => setImportNotes(null)}>
+            OK
+          </button>
+        </div>
+      )}
       {recoverable && (
         <div className="recover" role="status">
           <span>A draft from your last session is here.</span>
@@ -9439,14 +9555,14 @@ export function App() {
         <input
           ref={openInputRef}
           type="file"
-          accept=".chitra"
+          accept={OPEN_ACCEPT}
           onChange={openFile}
           hidden
         />
         <input
           ref={placeInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"
+          accept={PLACE_ACCEPT}
           onChange={placeImage}
           hidden
         />
@@ -9691,6 +9807,14 @@ export function App() {
             setLevelling(false);
             endGesture();
           }}
+        />
+      )}
+      {pdfAsk && (
+        <PdfDialog
+          name={pdfAsk.name}
+          sizes={pdfAsk.sizes}
+          onCancel={() => setPdfAsk(null)}
+          onPlace={placePdf}
         />
       )}
       {strokeOpen && (
@@ -12966,6 +13090,102 @@ function FindReplaceDialog({
           <button className="mask-button" onClick={onCancel}>Cancel</button>
           <button className="mask-button primary" disabled={found.matches === 0} onClick={go}>
             Replace all
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Which page of a PDF (or an Illustrator file) comes in, and at what
+ * resolution: a page is drawn, not unpicked into shapes, so what it is
+ * drawn at is the most detail it will ever have. The size it comes to
+ * is shown as the numbers are changed. */
+function PdfDialog({
+  name,
+  sizes,
+  onCancel,
+  onPlace,
+}: {
+  name: string;
+  sizes: [number, number][];
+  onCancel: () => void;
+  onPlace: (page: number, dpi: number) => void;
+}) {
+  const [page, setPage] = useState(1);
+  const [dpi, setDpi] = useState(150);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  const [w, h] = sizes[Math.min(sizes.length, Math.max(1, page)) - 1] ?? [0, 0];
+  // The renderer goes no further than 16384 pixels on a side.
+  const k = Math.min(dpi / 72, 16384 / Math.max(w, h, 1));
+  const [pw, ph] = [Math.round(w * k), Math.round(h * k)];
+  const ok = page >= 1 && page <= sizes.length && dpi > 0;
+  const go = () => ok && onPlace(page - 1, dpi);
+  const enter = (e: React.KeyboardEvent) => {
+    e.stopPropagation();
+    if (e.key === "Enter") go();
+  };
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Place PDF"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Place {name}</h2>
+        {sizes.length > 1 && (
+          <label className="row">
+            Page
+            <input
+              type="number"
+              min={1}
+              max={sizes.length}
+              step={1}
+              value={page}
+              onChange={(e) => setPage(Math.round(Number(e.target.value)) || 1)}
+              onKeyDown={enter}
+              aria-label="Page"
+            />
+            <span className="unit">of {sizes.length}</span>
+          </label>
+        )}
+        <label className="row">
+          Resolution
+          <input
+            type="number"
+            min={18}
+            max={1200}
+            step={1}
+            value={dpi}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) setDpi(v);
+            }}
+            onKeyDown={enter}
+            aria-label="Resolution"
+          />
+          <span className="unit">dpi</span>
+        </label>
+        <p className="modal-aside" role="status" aria-label="Page size">
+          {ok
+            ? `${(w / 72).toFixed(2)} × ${(h / 72).toFixed(2)} in, comes in at ${pw} × ${ph} px` +
+              (k < dpi / 72 ? " — as large as a page is drawn" : "")
+            : `A page from 1 to ${sizes.length}.`}
+        </p>
+        <p className="modal-aside">
+          The page comes in as a picture: its text and shapes are drawn, not kept as layers.
+        </p>
+        <div className="modal-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" disabled={!ok} onClick={go}>
+            Place
           </button>
         </div>
       </div>

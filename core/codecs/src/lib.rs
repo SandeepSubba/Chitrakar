@@ -8,11 +8,15 @@
 pub mod container;
 pub mod cube;
 pub mod pdf;
+pub mod pdf_import;
+pub mod psd;
+pub mod raw;
 mod strokes;
 mod subset;
 pub mod svg;
 pub mod svg_import;
 pub mod tiff_export;
+pub mod tiff_import;
 
 pub use container::{
     load_chitra, load_chitra_with_fonts, save_chitra, save_chitra_with_fonts, ContainerError,
@@ -39,6 +43,10 @@ pub enum CodecError {
     UnsupportedFormat(String),
     #[error("failed to encode image: {0}")]
     Encode(String),
+    /// A format the engine reads itself (TIFF, a camera's raw file, PSD,
+    /// PDF) saying what in it could not be read.
+    #[error("{0}")]
+    Format(String),
 }
 
 /// Decoded source image: original dimensions and 8-bit sRGB RGBA bytes.
@@ -64,6 +72,9 @@ impl SourceImage {
 /// profile is honored: pixels are normalized to sRGB at this edge, so the
 /// engine holds exactly one internal encoding.
 pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
+    if tiff_import::is_tiff(bytes) {
+        return tiff_import::decode_tiff(bytes);
+    }
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut decoder = reader.into_decoder()?;
     let icc = image::ImageDecoder::icc_profile(&mut decoder)
@@ -86,6 +97,21 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         height,
         rgba8,
     })
+}
+
+/// Decode a picture whose file name is known. A camera's raw file is told
+/// by its name — many are TIFFs inside, and read as one they give the
+/// small preview at their front — and anything else by its bytes; a TIFF
+/// that will not read as a picture is asked once more as a raw file, for
+/// a DNG that has lost its extension.
+pub fn decode_named(bytes: &[u8], name: &str) -> Result<SourceImage, CodecError> {
+    if raw::is_raw_name(name) {
+        return raw::decode_raw(bytes);
+    }
+    match decode(bytes) {
+        Err(e) if tiff_import::is_tiff(bytes) => raw::decode_raw(bytes).map_err(|_| e),
+        other => other,
+    }
 }
 
 /// An 8-bit picture — what a photograph almost always is — read straight

@@ -192,6 +192,11 @@ export function imageType(name: string): string | null {
     tif: "image/tiff",
     tiff: "image/tiff",
     bmp: "image/bmp",
+    avif: "image/avif",
+    heic: "image/heic",
+    heif: "image/heif",
+    psd: "image/vnd.adobe.photoshop",
+    pdf: "application/pdf",
   };
   return types[ext] ?? null;
 }

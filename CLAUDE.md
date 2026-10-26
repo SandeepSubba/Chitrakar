@@ -101,7 +101,8 @@ the naming in `src/files.ts`, which reads a file's name out of an
 Android `content://` address as well as a path — the shell opens and
 writes those through the fs plugin (`files::is_address`); and
 `app/e2e/spacing.test.mjs` over `src/spacing.ts`: the equal-spacing
-guides the Move tool catches after the edges and middles (smoke 9cb).
+guides the Move tool catches after the edges and middles (smoke 9cb);
+and `app/e2e/imports.test.mjs` over `src/imports.ts`.
 
 On a phone (under 640 wide or 500 tall) the menus are a drawer behind
 one Menus button and the bar is one row (smoke 11a); the suite's
@@ -241,6 +242,23 @@ where it is kept, so exporting moves neither the selection nor history). Above f
 are still menu rows and should stay that way: a frame's export multiple
 and its name are the *document's* (`export_scale`), which the window's
 own scale cannot express.
+
+## Getting other programs' files in
+
+`app/src/imports.ts` decides the road (`importKind`: by first bytes, and
+by name for a camera's raw file, which is a TIFF inside), read by Place,
+Open (a non-`.chitra` opens as a new document named after it), drops,
+shares and the shell's "Open with". The readers are the engine's, in
+`core/codecs`: `tiff_import.rs` (bits, CMYK, ICC), `psd.rs` (our own:
+layers, groups, masks, blend modes; what it cannot keep goes to
+`Session::import_notes` and Photoshop's composite comes in hidden beside
+the layers), `pdf_import.rs` (`hayro` draws a page at the dpi the
+`PdfDialog` asks for; PDF-compatible `.ai` too) and `raw.rs`
+(`rawloader` decodes, our own plain develop; imagepipe starts threads
+and would abort in WASM). HEIC/AVIF are the browser's to decode, and
+a HEIC that will not decode says how to get a JPEG. hayro ships Foxit's
+BSD standard fonts and rawloader is LGPL-2.1, which a GPL-3.0 project
+can carry. Smoke 9cm builds each file byte by byte.
 
 ## Measuring
 

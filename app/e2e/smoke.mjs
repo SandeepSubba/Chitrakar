@@ -1203,7 +1203,7 @@ const pngB64 = await page.evaluate(() => {
   g.fillRect(0, 0, 4, 4);
   return c.toDataURL("image/png").split(",")[1];
 });
-await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+await page.setInputFiles('input[accept^="image/*,"]', {
   name: "green.png",
   mimeType: "image/png",
   buffer: Buffer.from(pngB64, "base64"),
@@ -1242,7 +1242,7 @@ assert((await page.locator(".panel ul li", { hasText: "green.png" }).count()) ==
     "the browser made a WebP to place",
   );
   lastDialog = "";
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "blue.webp",
     mimeType: "image/webp",
     buffer: Buffer.from(webpB64, "base64"),
@@ -2908,7 +2908,7 @@ assert(
     await fresh.goto("http://localhost:8123/");
     await fresh.waitForSelector("#engine-canvas");
     await fresh.waitForTimeout(500);
-    await fresh.locator('input[accept=".chitra"]').setInputFiles(path);
+    await fresh.locator('input[accept^=".chitra,"]').setInputFiles(path);
     await fresh.waitForTimeout(600);
     await fresh.locator(".panel ul li", { hasText: "Text" }).click();
     await fresh.waitForTimeout(200);
@@ -5141,7 +5141,7 @@ assert(
   const mark = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <rect id="box" x="10" y="10" width="40" height="30" fill="#00aa00"/>
     <circle cx="80" cy="25" r="15" fill="#ff8800"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "mark.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(mark),
@@ -5168,7 +5168,7 @@ assert(
       <rect width="6" height="12" fill="#cc2020"/><rect x="6" width="6" height="12" fill="#2040cc"/>
     </pattern>
     <rect id="striped" x="12" y="12" width="60" height="40" fill="url(#p)"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "stripes.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(stripes),
@@ -5192,7 +5192,7 @@ assert(
     <linearGradient id="g"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#000000"/></linearGradient>
     <mask id="m"><rect x="10" y="10" width="100" height="40" fill="url(#g)"/></mask>
     <g id="fading" mask="url(#m)"><rect x="10" y="10" width="100" height="40" fill="#20a040"/></g></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "faded.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(fadingSvg),
@@ -5214,7 +5214,7 @@ assert(
   const halfGroup = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <g id="half" opacity="0.5"><rect x="10" y="10" width="50" height="40" fill="#d02020"/>
     <rect x="35" y="25" width="50" height="40" fill="#2040d0"/></g></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "half.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(halfGroup),
@@ -5235,7 +5235,7 @@ assert(
   const multiplied = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <rect x="10" y="10" width="60" height="40" fill="#ffc040"/>
     <circle id="dim" cx="40" cy="30" r="15" fill="#8080ff" style="mix-blend-mode:multiply"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "multiplied.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(multiplied),
@@ -5254,7 +5254,7 @@ assert(
   const shadowed = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
     <filter id="f" x="-50%" y="-50%" width="200%" height="200%"><feDropShadow dx="0" dy="6" stdDeviation="1" flood-color="#000000" flood-opacity="0.8"/></filter>
     <rect id="card" x="10" y="10" width="60" height="30" fill="#ffffff" filter="url(#f)"/></svg>`;
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "shadowed.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(shadowed),
@@ -5273,7 +5273,7 @@ assert(
     <defs><path id="g" d="M0,10 C10,0 20,20 30,1e30"/></defs>
     <text font-size="8"><textPath href="#g">Hello world</textPath></text></svg>`;
   lastDialog = "";
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "hostile.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(hostile),
@@ -5284,7 +5284,7 @@ assert(
       (await names()).join() === beforeSvg.join(),
     `a file past any drawing is refused, saying why, and places nothing (${lastDialog})`,
   );
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "shadowed.svg",
     mimeType: "image/svg+xml",
     buffer: Buffer.from(shadowed),
@@ -5810,7 +5810,7 @@ assert(
   ]);
   assert(png.suggestedFilename() === "blue-mark.png", `and so does the export (${png.suggestedFilename()})`);
   // Opening a file takes its name; a new document starts over.
-  await page.locator('input[accept=".chitra"]').setInputFiles({
+  await page.locator('input[accept^=".chitra,"]').setInputFiles({
     name: "logo.chitra",
     mimeType: "application/zip",
     buffer: await readFile(await saved.path()),
@@ -8034,7 +8034,7 @@ assert(
     g.fillRect(120, 30, 50, 60);
     return c.toDataURL("image/png").split(",")[1];
   });
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "sign.png",
     mimeType: "image/png",
     buffer: Buffer.from(png, "base64"),
@@ -9252,7 +9252,7 @@ assert(
     g.fillRect(0, 0, 200, 100);
     return c.toDataURL("image/png").split(",")[1];
   });
-  await page.setInputFiles('input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]', {
+  await page.setInputFiles('input[accept^="image/*,"]', {
     name: "sign.png",
     mimeType: "image/png",
     buffer: Buffer.from(png, "base64"),
@@ -12367,7 +12367,7 @@ assert(
     return c.toDataURL("image/png").split(",")[1];
   });
   await page.setInputFiles(
-    'input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]',
+    'input[accept^="image/*,"]',
     {
       name: "subject.png",
       mimeType: "image/png",
@@ -13124,7 +13124,7 @@ assert(
     return c.toDataURL("image/png").split(",")[1];
   });
   await page.setInputFiles(
-    'input[accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml"]',
+    'input[accept^="image/*,"]',
     {
       name: "photograph.png",
       mimeType: "image/png",
@@ -14749,6 +14749,177 @@ assert(
   await page.selectOption('select[aria-label="Units"]', "px");
   await page.click('.modal-actions .primary:text-is("Done")');
   await page.waitForTimeout(150);
+}
+
+// 9cm. Files from other programs come in as what they are: a TIFF as a
+// picture (read by the engine, not the browser), a Photoshop file as its
+// layers with what did not come across said in a line, a PDF as the
+// page asked for at the resolution asked for, File › Open of any of
+// them as a new document named after it — and a HEIC this browser
+// cannot decode says how to get it in rather than what the decoder said.
+// Every file is written here, byte by byte.
+{
+  const u16 = (v, le) => { const b = Buffer.alloc(2); le ? b.writeUInt16LE(v) : b.writeUInt16BE(v); return b; };
+  const u32 = (v, le) => { const b = Buffer.alloc(4); le ? b.writeUInt32LE(v) : b.writeUInt32BE(v); return b; };
+  const i32 = (v) => { const b = Buffer.alloc(4); b.writeInt32BE(v); return b; };
+  const fill = (w, h, rgba) => Buffer.concat(Array.from({ length: w * h }, () => Buffer.from(rgba)));
+  /** An uncompressed RGBA TIFF, little-endian, one strip. */
+  const tiff = (w, h, rgba) => {
+    const pixels = fill(w, h, rgba);
+    const entries = [
+      [256, 4, 1, w], [257, 4, 1, h], [258, 3, 4, 0 /* at bps */], [259, 3, 1, 1], [262, 3, 1, 2],
+      [273, 4, 1, 0 /* at pixels */], [277, 3, 1, 4], [278, 4, 1, h], [279, 4, 1, pixels.length], [338, 3, 1, 2],
+    ];
+    const ifdAt = 8;
+    const ifdLen = 2 + entries.length * 12 + 4;
+    const bpsAt = ifdAt + ifdLen;
+    const pixelsAt = bpsAt + 8;
+    const ifd = [u16(entries.length, true)];
+    for (const [tag, type, count, value] of entries) {
+      const v = tag === 258 ? bpsAt : tag === 273 ? pixelsAt : value;
+      const field = type === 3 && count === 1 ? Buffer.concat([u16(v, true), u16(0, true)]) : u32(v, true);
+      ifd.push(u16(tag, true), u16(type, true), u32(count, true), field);
+    }
+    ifd.push(u32(0, true));
+    return Buffer.concat([Buffer.from("II*\0"), u32(ifdAt, true), ...ifd, u16(8, true), u16(8, true), u16(8, true), u16(8, true), pixels]);
+  };
+  /** A Photoshop file of whole-colour layers, bottom first, raw
+   * channels; `effects` gives a layer an effects block, which the
+   * editor cannot keep and should say so. */
+  const psd = (w, h, layers, composite) => {
+    const records = [];
+    const data = [];
+    for (const l of layers) {
+      const [x0, y0, x1, y1] = l.rect;
+      const n = (x1 - x0) * (y1 - y0);
+      const chans = [[-1, l.rgba[3]], [0, l.rgba[0]], [1, l.rgba[1]], [2, l.rgba[2]]];
+      const name = Buffer.from(l.name);
+      let pascal = Buffer.concat([Buffer.from([name.length]), name]);
+      while (pascal.length % 4) pascal = Buffer.concat([pascal, Buffer.from([0])]);
+      const extra = Buffer.concat([
+        u32(0), u32(0), pascal,
+        ...(l.effects ? [Buffer.from("8BIMlfx2"), u32(4), u32(0)] : []),
+      ]);
+      records.push(
+        i32(y0), i32(x0), i32(y1), i32(x1), u16(4),
+        ...chans.flatMap(([id]) => { const b = Buffer.alloc(2); b.writeInt16BE(id); return [b, u32(2 + n)]; }),
+        Buffer.from("8BIMnorm"), Buffer.from([255, 0, 0, 0]), u32(extra.length), extra,
+      );
+      for (const [, v] of chans) data.push(u16(0), Buffer.alloc(n, v));
+    }
+    let info = Buffer.concat([u16(layers.length), ...records, ...data]);
+    if (info.length % 2) info = Buffer.concat([info, Buffer.from([0])]);
+    const layerInfo = Buffer.concat([u32(info.length), info, u32(0)]);
+    const planes = [0, 1, 2].map((c) => Buffer.from(Array.from({ length: w * h }, (_, i) => composite[i * 3 + c] ?? 0)));
+    return Buffer.concat([
+      Buffer.from("8BPS"), u16(1), Buffer.alloc(6), u16(3), u32(h), u32(w), u16(8), u16(3),
+      u32(0), u32(0), u32(layerInfo.length), layerInfo, u16(0), ...planes,
+    ]);
+  };
+  /** A PDF of pages, each [width, height, fill r g b] in points: a
+   * square of the colour from (20, 20) to (70, 70) up from the bottom. */
+  const pdf = (pages) => {
+    const objs = ["<< /Type /Catalog /Pages 2 0 R >>", `<< /Type /Pages /Kids [${pages.map((_, i) => `${3 + i * 2} 0 R`).join(" ")}] /Count ${pages.length} >>`];
+    pages.forEach(([w, h, r, g, b], i) => {
+      const content = `${r} ${g} ${b} rg 20 20 50 50 re f`;
+      objs.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${w} ${h}] /Contents ${4 + i * 2} 0 R >>`);
+      objs.push(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+    });
+    let out = "%PDF-1.4\n";
+    const at = [];
+    objs.forEach((o, i) => { at.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+    const xref = out.length;
+    out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` + at.map((o) => `${String(o).padStart(10, "0")} 00000 n \n`).join("");
+    out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return Buffer.from(out, "latin1");
+  };
+  const layerNames = () => page.locator(".panel ul li .layer-name").allTextContents();
+  const ratio = async () => {
+    const b = await page.locator("#engine-page").boundingBox();
+    return b.width / b.height;
+  };
+  const place = (name, buffer, mimeType = "") =>
+    page.setInputFiles('input[accept^="image/*,"]', { name, mimeType, buffer });
+
+  // A TIFF into an empty page opens it: the page is the picture's shape,
+  // and every corner of it is the picture's colour.
+  await newDocument(200, 150, "rgb");
+  await place("scan.tif", tiff(80, 20, [200, 30, 30, 255]), "image/tiff");
+  await page.waitForTimeout(500);
+  assert((await layerNames()).join() === "scan.tif", `the TIFF is one picture layer (${await layerNames()})`);
+  assert(Math.abs((await ratio()) - 4) < 0.05, `and the page took its shape (${(await ratio()).toFixed(2)})`);
+  for (const [x, y] of [[2, 2], [77, 17]]) {
+    const [r, g] = await canvasPixel(x, y);
+    assert(r > 170 && g < 70, `the TIFF's red reaches ${x},${y} (${r},${g})`);
+  }
+
+  // A Photoshop file onto a page already somebody's comes in as one group
+  // named after the file, its layers inside, and says what it could not
+  // keep; one undo takes it all back.
+  const before = await layerNames();
+  const ground = Array.from({ length: 40 * 30 }, () => [30, 60, 200]).flat();
+  await place(
+    "poster.psd",
+    psd(40, 30, [
+      { name: "Ground", rect: [0, 0, 40, 30], rgba: [30, 60, 200, 255] },
+      { name: "Mark", rect: [5, 5, 15, 15], rgba: [250, 220, 0, 255], effects: true },
+    ], ground),
+  );
+  await page.waitForTimeout(500);
+  const withPsd = await layerNames();
+  assert(withPsd[0] === "poster.psd" && withPsd.includes("Mark") && withPsd.includes("Ground"), `the file is a group of its layers (${withPsd})`);
+  const notes = page.locator('[role="status"][aria-label="Import notes"]');
+  assert((await notes.textContent()).includes('the effects on "Mark"'), `and says what did not come across (${await notes.textContent()})`);
+  await notes.locator("button").click();
+  assert((await notes.count()) === 0, "which goes when it has been read");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await layerNames()).join() === before.join(), "one undo takes the whole file back");
+
+  // File › Open of a Photoshop file: a new document of its size, named
+  // after it, with its layers at the top, the mark where the file put it.
+  await menuClick("File", "Open…");
+  await page.waitForTimeout(100);
+  await page.locator('input[accept^=".chitra,"]').setInputFiles({
+    name: "poster.psd",
+    mimeType: "image/vnd.adobe.photoshop",
+    buffer: psd(40, 30, [
+      { name: "Ground", rect: [0, 0, 40, 30], rgba: [30, 60, 200, 255] },
+      { name: "Mark", rect: [5, 5, 15, 15], rgba: [250, 220, 0, 255] },
+    ], ground),
+  });
+  await page.waitForTimeout(600);
+  assert((await layerNames()).join() === "Mark,Ground", `opened, it is its layers (${await layerNames()})`);
+  assert((await page.locator('input[aria-label="Document name"]').inputValue()) === "poster", "named after the file");
+  assert(Math.abs((await ratio()) - 4 / 3) < 0.05, `on a page its size (${(await ratio()).toFixed(2)})`);
+  const mark = await canvasPixel(10, 10);
+  const blue = await canvasPixel(30, 20);
+  assert(mark[0] > 200 && mark[2] < 60 && blue[2] > 150 && blue[0] < 80, `the mark where the file put it, over the ground (${mark}; ${blue})`);
+
+  // A PDF of two pages asks which, and at what resolution, and says the
+  // size it will come to; the second page at 144 dpi is twice its points.
+  await newDocument(200, 150, "rgb");
+  await place("leaflet.pdf", pdf([[200, 100, 1, 0, 0], [100, 100, 0, 0, 1]]), "application/pdf");
+  const ask = page.locator('[role="dialog"][aria-label="Place PDF"]');
+  await ask.waitFor();
+  await ask.locator('input[aria-label="Page"]').fill("2");
+  await ask.locator('input[aria-label="Resolution"]').fill("144");
+  const size = await ask.locator('[aria-label="Page size"]').textContent();
+  assert(size.includes("200 × 200 px"), `the size it comes to is said (${size})`);
+  await ask.locator('button:text-is("Place")').click();
+  await page.waitForTimeout(600);
+  assert((await layerNames()).join() === "leaflet.pdf — page 2", `the page asked for is the layer (${await layerNames()})`);
+  assert(Math.abs((await ratio()) - 1) < 0.05, "a square page for a square page");
+  // The square at 20–70 points up from the bottom, at 2 px a point.
+  const sq = await canvasPixel(90, 200 - 90);
+  assert(sq[2] > 200 && sq[0] < 40, `page 2's blue, the right way up (${sq})`);
+  assert((await canvasPixel(150, 20))[3] === 0, "and clear where the page draws nothing");
+
+  // A HEIC the browser has no decoder for: what to do about it.
+  lastDialog = "";
+  await place("IMG_0042.HEIC", Buffer.concat([u32(24), Buffer.from("ftypheic"), Buffer.alloc(64)]), "image/heic");
+  await page.waitForTimeout(500);
+  assert(lastDialog.includes("HEIC") && lastDialog.includes("JPEG"), `a HEIC says how to get it in (${lastDialog})`);
 }
 
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held

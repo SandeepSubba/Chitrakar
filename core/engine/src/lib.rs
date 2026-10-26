@@ -393,6 +393,10 @@ pub struct Session {
     /// undo hands back so a selection can follow the layer it brings back
     /// rather than being left pointing at nothing.
     last_touched: Option<NodeId>,
+    /// What the last file brought in could not carry across, in words —
+    /// a Photoshop file's adjustment layers, its effects — for the page
+    /// to say rather than leave somebody to find.
+    import_notes: Vec<String>,
     /// Soft-proofing (display-only): round-trip presented pixels through the
     /// document's press profile, optionally marking out-of-gamut pixels.
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
@@ -480,6 +484,7 @@ impl Session {
             painting: None,
             pixels_recomputed: 0,
             last_touched: None,
+            import_notes: Vec::new(),
             proof_cms: None,
             soft_proof: false,
             display_cms: None,
@@ -8761,8 +8766,50 @@ impl Session {
     }
 
     pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
-        let img =
-            chitrakar_codecs::decode(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let img = chitrakar_codecs::decode_named(bytes, name)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        self.place_picture(img, name)
+    }
+
+    /// The size of each page of a PDF (or an Illustrator file), in
+    /// points, so a page and a resolution can be asked for before any
+    /// page is drawn.
+    pub fn pdf_page_sizes(bytes: &[u8]) -> Result<Vec<(f32, f32)>, EngineError> {
+        chitrakar_codecs::pdf_import::pdf_page_sizes(bytes)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// Bring one page of a PDF (counted from 0) in as a picture drawn at
+    /// `dpi`, placed as any picture is — opening it, into an empty
+    /// document, at its own size. Named after the file and, for a file of
+    /// more than one page, the page.
+    pub fn place_pdf(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        page: usize,
+        dpi: f32,
+    ) -> Result<NodeId, EngineError> {
+        let pages = Self::pdf_page_sizes(bytes)?.len();
+        let img = chitrakar_codecs::pdf_import::render_pdf_page(bytes, page, dpi)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let label = if pages > 1 {
+            format!("{name} — page {}", page + 1)
+        } else {
+            name.to_string()
+        };
+        self.place_picture(img, &label)
+    }
+
+    /// A decoded picture, placed: into an empty document it is opened (the
+    /// page takes its size); onto a page already somebody's it is laid
+    /// down whole, in the middle, taken down to fit.
+    fn place_picture(
+        &mut self,
+        img: chitrakar_codecs::SourceImage,
+        name: &str,
+    ) -> Result<NodeId, EngineError> {
+        self.import_notes.clear();
         let (width, height) = (img.width, img.height);
         let resource_id = self.doc.add_resource(width, height, img.rgba8);
         let root = self.doc.root();
@@ -8866,6 +8913,78 @@ impl Session {
         cmds.extend(imported.into_commands(&mut self.doc, group, 0, first));
         self.apply_labeled(Command::Batch(cmds), Some(format!("Place {name}")))?;
         Ok(group)
+    }
+
+    /// Bring a Photoshop file (PSD or PSB) in as its layers, as one undo
+    /// step: each pixel layer at its place with its name, opacity,
+    /// visibility, blend mode, clipping and layer mask, in its groups.
+    /// Into an empty document it is the file being *opened* — the page
+    /// takes its size and the layers stand at the top of the stack, as
+    /// Photoshop showed them; onto a page already somebody's it is placed
+    /// as one group named after the file, taken down to fit and centred,
+    /// as a picture is. Returns the top layer's id when opening, the
+    /// group's when placing. What could not come across is kept for
+    /// `import_notes`, and Photoshop's own picture of the file then comes
+    /// in too, hidden, so nothing is silently different.
+    pub fn place_psd(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
+        let file = chitrakar_codecs::psd::read_psd(bytes)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        self.import_notes = file.lost.clone();
+        let (width, height) = (file.width, file.height);
+        let root = self.doc.root();
+        let index = self.doc.children_of(root)?.len();
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        let opening =
+            index == 0 && self.undo.is_empty() && chitrakar_doc::canvas_fits(width, height);
+        let first = self.doc.peek_next_id();
+        let mut cmds = Vec::new();
+        if opening {
+            if (width, height) != (pw, ph) {
+                cmds.push(Command::ResizeCanvas {
+                    width,
+                    height,
+                    dx: 0.0,
+                    dy: 0.0,
+                });
+            }
+            cmds.extend(file.into_commands(&mut self.doc, root, 0, first));
+        } else {
+            let fit = (pw as f32 / width as f32)
+                .min(ph as f32 / height as f32)
+                .min(1.0);
+            let mut group = Node::group(name);
+            group.transform = Transform {
+                a: fit,
+                d: fit,
+                e: (pw as f32 - width as f32 * fit) / 2.0,
+                f: (ph as f32 - height as f32 * fit) / 2.0,
+                ..Default::default()
+            };
+            cmds.push(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(group),
+            });
+            cmds.extend(file.into_commands(&mut self.doc, first, 0, NodeId(first.0 + 1)));
+        }
+        let label = if opening {
+            format!("Open {name}")
+        } else {
+            format!("Place {name}")
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        if opening {
+            // The top of the stack, which is what a person looks at first.
+            let top = self.doc.children_of(root)?.last().copied();
+            return top.ok_or_else(|| EngineError::BadCommand("the file held no layers".into()));
+        }
+        Ok(first)
+    }
+
+    /// What the last file brought in could not carry across, one line
+    /// each; empty when everything came.
+    pub fn import_notes(&self) -> &[String] {
+        &self.import_notes
     }
 
     /// Make a font available to every text block that names it, for the
@@ -9416,6 +9535,121 @@ pub fn shift_rows<T: Copy>(buf: &mut [T], w: usize, h: usize, dx: i64, dy: i64, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn psd_two_layers() -> Vec<u8> {
+        use chitrakar_codecs::psd::sample::{layer, write};
+        let solid = |w: usize, h: usize, px: [u8; 4]| px.repeat(w * h);
+        let mut top = layer("Dot", [2, 2, 4, 4], solid(2, 2, [255, 0, 0, 255]));
+        top.opacity = 128;
+        write(
+            8,
+            6,
+            &[
+                layer("Ground", [0, 0, 6, 8], solid(8, 6, [0, 0, 255, 255])),
+                top,
+            ],
+            &solid(8, 6, [0, 0, 0, 255]),
+        )
+    }
+
+    #[test]
+    fn a_photoshop_file_opens_as_its_layers_on_its_own_page() {
+        let mut s = Session::new(100, 100, ColorMode::Rgb);
+        let top = s.place_psd(&psd_two_layers(), "art.psd").unwrap();
+        assert_eq!(
+            (s.doc.meta.width, s.doc.meta.height),
+            (8, 6),
+            "the page takes the file's size"
+        );
+        let root = s.doc.root();
+        let names: Vec<String> = s
+            .doc
+            .children_of(root)
+            .unwrap()
+            .iter()
+            .map(|id| s.doc.node(*id).unwrap().name.clone())
+            .collect();
+        assert_eq!(
+            names,
+            ["Ground", "Dot"],
+            "bottom first, at the top of the stack"
+        );
+        let dot = s.doc.node(top).unwrap();
+        assert_eq!(dot.name, "Dot");
+        assert!((dot.opacity - 128.0 / 255.0).abs() < 1e-6);
+        assert!(s.import_notes().is_empty());
+        // One undo takes the whole file back.
+        assert!(s.undo().unwrap());
+        assert!(s.doc.children_of(root).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_photoshop_file_placed_on_a_page_is_one_group_fitted_to_it() {
+        let mut s = Session::new(4, 4, ColorMode::Rgb);
+        s.apply(Command::AddNode {
+            parent: s.doc.root(),
+            index: 0,
+            node: Box::new(Node::group("Already here")),
+        })
+        .unwrap();
+        let group = s.place_psd(&psd_two_layers(), "art.psd").unwrap();
+        let g = s.doc.node(group).unwrap();
+        assert_eq!(g.name, "art.psd");
+        assert_eq!(s.doc.children_of(group).unwrap().len(), 2);
+        assert!(
+            (g.transform.a - 0.5).abs() < 1e-6,
+            "8 wide taken down to the page's 4"
+        );
+        assert_eq!(
+            (s.doc.meta.width, s.doc.meta.height),
+            (4, 4),
+            "the page keeps its size"
+        );
+    }
+
+    #[test]
+    fn a_pdf_page_opens_at_the_resolution_asked() {
+        let px = vec![
+            chitrakar_color::LinearRgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0
+            };
+            30 * 20
+        ];
+        let pdf = chitrakar_codecs::export_pdf(&px, 30, 20, 72.0, None).unwrap();
+        assert_eq!(Session::pdf_page_sizes(&pdf).unwrap(), vec![(30.0, 20.0)]);
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        let id = s.place_pdf(&pdf, "page.pdf", 0, 144.0).unwrap();
+        assert_eq!((s.doc.meta.width, s.doc.meta.height), (60, 40));
+        assert_eq!(s.doc.node(id).unwrap().name, "page.pdf");
+        assert!(
+            s.place_pdf(&pdf, "page.pdf", 5, 72.0).is_err(),
+            "a page it does not have"
+        );
+    }
+
+    #[test]
+    fn a_tiff_places_as_a_picture_does() {
+        let mut out = std::io::Cursor::new(Vec::new());
+        tiff::encoder::TiffEncoder::new(&mut out)
+            .unwrap()
+            .write_image::<tiff::encoder::colortype::RGB8>(3, 2, &[9u8; 18])
+            .unwrap();
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        s.place_image(&out.into_inner(), "scan.tif").unwrap();
+        assert_eq!((s.doc.meta.width, s.doc.meta.height), (3, 2));
+    }
+
+    #[test]
+    fn a_file_named_as_a_cameras_raw_file_is_read_as_one() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        let err = s
+            .place_image(b"not really a raw file", "IMG_0001.CR2")
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("camera raw"), "{err:?}");
+    }
 
     /// How far apart two pages are, and where.
     pub(super) fn apart(a: &Surface, b: &Surface) -> (f32, u32, u32) {
