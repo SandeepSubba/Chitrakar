@@ -5371,7 +5371,7 @@ export function App() {
       },
     },
     blur: {
-      name: "Gaussian Blur",
+      name: "Gaussian blur",
       kind: { Filter: { GaussianBlur: { sigma: 4 } } },
     },
     pixelate: {
@@ -5387,11 +5387,11 @@ export function App() {
       kind: { Filter: { SurfaceBlur: { radius: 4, threshold: 0.15 } } },
     },
     motion: {
-      name: "Motion Blur",
+      name: "Motion blur",
       kind: { Filter: { MotionBlur: { distance: 20, degrees: 0 } } },
     },
     radial: {
-      name: "Radial Blur",
+      name: "Radial blur",
       kind: { Filter: { RadialBlur: { amount: 0.2, spin: false, center: [0.5, 0.5] } } },
     },
     noise: {
@@ -7407,6 +7407,9 @@ export function App() {
 
   /** The selected layer's visual box in document pixels, [x, y, w, h] —
    * what the geometry fields show and edit. */
+  /** The picked layer is one that works on the whole page under it. */
+  const wholePageLayer =
+    selectedLayer?.kind === "adjustment" || selectedLayer?.kind === "filter";
   const selBox = ((): [number, number, number, number] | null => {
     if (!session || selected === null) return null;
     const b = session.bounds_of(selected);
@@ -11507,7 +11510,7 @@ export function App() {
                   >
                     <Icon
                       name={collapsed.includes(l.id) ? "foldClosed" : "foldOpen"}
-                      size={11}
+                      size={13}
                     />
                   </button>
                 ) : (
@@ -11628,7 +11631,13 @@ export function App() {
               <li className="muted empty">Drag on the canvas to add shapes</li>
             )}
           </ul>
-          {selectionSet.length >= 1 && (
+          {/* Nothing to line up when every layer picked works on the
+              whole page wherever it is put. */}
+          {selectionSet.length >= 1 &&
+            selectionSet.some((id) => {
+              const k = layers.find((l) => l.id === id)?.kind;
+              return k !== "adjustment" && k !== "filter";
+            }) && (
             <div className="align-bar" role="group" aria-label="Align layers">
               {ALIGN_BUTTONS.map(([mode, icon, label]) => {
                 // With one layer picked the buttons say what it will be
@@ -11806,8 +11815,11 @@ export function App() {
                   ))}
                 </div>
               )}
-              {selBox && <h3 className="props-head">Position and size</h3>}
-              {selBox && (
+              {/* An adjustment or a filter acts on everything under it
+                  wherever it is put, so its box is the page's and the
+                  fields would only ever say 0, 0 and the page's size. */}
+              {selBox && !wholePageLayer && <h3 className="props-head">Position and size</h3>}
+              {selBox && !wholePageLayer && (
                 <div className="geometry" aria-label="Position and size">
                   {(
                     [
@@ -12572,6 +12584,7 @@ function NewDocDialog({
         onChange={(e) => set(Math.max(1, Math.round(Number(e.target.value))))}
         aria-label={label}
       />
+      <span className="hint unit">px</span>
     </label>
   );
 
@@ -12625,10 +12638,13 @@ function NewDocDialog({
             }
             aria-label="Resolution"
           />
-          <span className="hint">
-            dpi · {inUnits(madeW, "mm", dpi)} × {inUnits(madeH, "mm", dpi)} mm
-          </span>
+          <span className="hint unit">dpi</span>
         </label>
+        {/* What the resolution means on paper, on a line of its own: beside
+            the field it ran past the dialog's edge and lost its "mm". */}
+        <p className="modal-aside print-size" role="status">
+          Prints at {inUnits(madeW, "mm", dpi)} × {inUnits(madeH, "mm", dpi)} mm
+        </p>
         <label className="row">
           Colour
           <select
@@ -12639,6 +12655,7 @@ function NewDocDialog({
             <option value="rgb">RGB</option>
             <option value="cmyk">CMYK</option>
           </select>
+          <span className="hint unit" />
         </label>
         <div className="modal-actions">
           <button className="mask-button" onClick={onCancel}>

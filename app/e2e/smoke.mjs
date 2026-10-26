@@ -1737,7 +1737,7 @@ await page.selectOption('[aria-label="Add adjustment layer"]', "blur");
 await page.waitForTimeout(300);
 px = await canvasPixel(605, 505);
 assert(px[3] > 0, `blur bled past the rect corner (a=${px[3]})`);
-await page.locator(".panel ul li", { hasText: "Gaussian Blur" }).click();
+await page.locator(".panel ul li", { hasText: "Gaussian blur" }).click();
 await setSlider("Blur sigma", 14);
 px = await canvasPixel(618, 518); // farther out
 assert(px[3] > 0, `larger sigma reaches farther (a=${px[3]})`);
@@ -9452,7 +9452,7 @@ assert(
   // A fifth of its distance from the middle, ninety out: nine each way.
   assert((await bright(306, 150)) > 20, `zoomed, the dot streaks outward (${await bright(306, 150)})`);
   assert((await bright(296, 162)) < 10, "and not up or down");
-  await page.locator(".panel ul li", { hasText: "Radial Blur" }).click();
+  await page.locator(".panel ul li", { hasText: "Radial blur" }).click();
   await page.waitForTimeout(200);
   await page.locator('[aria-label="Radial blur kind"] button', { hasText: "Spin" }).click();
   await page.waitForTimeout(400);
@@ -13249,7 +13249,7 @@ assert(
   );
   // The millimetre reading under the resolution describes the document
   // that will exist, not the one that was asked for.
-  const mm = await dialog.locator(".hint").innerText();
+  const mm = await dialog.locator(".print-size").innerText();
   const wide = Number(mm.split("\u00d7")[0].replace(/[^0-9.]/g, ""));
   assert(
     Math.abs(wide - (8192 / 72) * 25.4) < 2,
@@ -14379,6 +14379,48 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9ce. Small things said properly: an adjustment works on the whole
+// page wherever it is, so it shows no position fields and no align
+// buttons; its own buttons are the panel's, not the browser's grey; the
+// Filter menu names its filters in one case; and the new-document
+// window says the printed size on a line of its own, inside it.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  await page.locator('select[aria-label="Add adjustment layer"]').selectOption({ label: "Curves" });
+  await page.waitForTimeout(250);
+  const heads = await page.locator(".layer-props .props-head").allTextContents();
+  assert(!heads.includes("Position and size"), `an adjustment has no position fields (${heads})`);
+  assert(heads.includes("Adjustment"), "and its own settings are headed Adjustment");
+  assert((await page.locator(".align-bar[aria-label='Align layers']").count()) === 0, "nor align buttons");
+  const auto = await page
+    .locator('.layer-props button[aria-label="Auto colour"]')
+    .evaluate((b) => getComputedStyle(b).backgroundColor);
+  assert(auto === "rgba(0, 0, 0, 0)", `Auto colour is dressed as the panel's buttons (${auto})`);
+  await page.keyboard.press("Escape");
+  await page.click('.menubar button:text-is("Filter")');
+  await page.waitForTimeout(150);
+  const filters = await page.locator(".menu-pop .menu-item .menu-item-label, .menu-pop .menu-item").allTextContents();
+  assert(
+    filters.some((t) => t.includes("Gaussian blur")) && !filters.some((t) => /\b[A-Z][a-z]+ Blur\b/.test(t)),
+    "the Filter menu names its blurs in one case",
+  );
+  await page.keyboard.press("Escape");
+  await page.click('.menubar button:text-is("File")');
+  await page.click('.menu-pop .menu-item:has-text("New document")');
+  await page.waitForSelector('[role=dialog][aria-label="New document"]');
+  const fit = await page.evaluate(() => {
+    const d = document.querySelector('[role=dialog][aria-label="New document"]');
+    const p = d.querySelector(".print-size");
+    const r = d.getBoundingClientRect();
+    const q = p.getBoundingClientRect();
+    return [p.textContent, q.right <= r.right && q.left >= r.left];
+  });
+  assert(fit[0].includes("mm") && fit[1], `the printed size is said inside the window (${fit[0]})`);
+  await page.click('[role=dialog][aria-label="New document"] button:text-is("Cancel")');
+  await page.waitForTimeout(150);
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a
@@ -15127,7 +15169,7 @@ assert(
 
   await page.selectOption('[aria-label="Add adjustment layer"]', "motion");
   await page.waitForTimeout(300);
-  await page.locator(".panel ul li", { hasText: "Motion Blur" }).click();
+  await page.locator(".panel ul li", { hasText: "Motion blur" }).click();
   await page.waitForTimeout(200);
   await setSlider("Distance", 60);
   await page.waitForTimeout(400);
@@ -15157,7 +15199,7 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(400);
   assert(
-    (await page.locator(".panel ul li", { hasText: "Motion Blur" }).count()) === 0,
+    (await page.locator(".panel ul li", { hasText: "Motion blur" }).count()) === 0,
     "and it undoes",
   );
 }
@@ -15981,8 +16023,8 @@ assert(
 
   await menuClick("Adjust", "Exposure");
   assert((await names()).includes("Exposure"), "the Adjust menu adds an adjustment layer");
-  await menuClick("Filter", "Gaussian Blur");
-  assert((await names()).includes("Gaussian Blur"), "and the Filter menu a filter layer");
+  await menuClick("Filter", "Gaussian blur");
+  assert((await names()).includes("Gaussian blur"), "and the Filter menu a filter layer");
   // Neither is offered "only on" itself: an adjustment has nothing of
   // its own to be scoped to.
   await page.click('.menu-label:text-is("Adjust")');

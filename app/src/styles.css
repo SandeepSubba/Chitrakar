@@ -2528,6 +2528,19 @@ body {
   white-space: nowrap;
 }
 
+/* A unit after a field, as wide as the widest of them, so the fields
+   above and below one another line up. */
+.modal .row .hint.unit {
+  min-width: 1.6rem;
+}
+
+/* The page's size on paper, under the resolution that decides it,
+   lined up with the fields. */
+.modal .print-size {
+  text-align: right;
+  margin-top: -0.25rem;
+}
+
 /* A dialog saying what it is about to do differently from what was
    asked. Not an error — nothing has gone wrong yet — so it reads as a
    remark, not an alarm. */
@@ -2628,13 +2641,15 @@ body {
 .fold {
   display: grid;
   place-items: center;
-  width: 0.85rem;
+  width: 1rem;
   height: 1.5rem;
   flex: none;
   border: none;
   background: none;
   padding: 0;
-  color: var(--muted);
+  /* Stronger than the muted grey it was, which on the dark panel left
+     a group's arrow all but invisible beside its eye. */
+  color: color-mix(in srgb, var(--text) 70%, transparent);
   cursor: pointer;
 }
 button.fold:hover {
@@ -2687,6 +2702,37 @@ button.fold:hover {
 .auto-levels {
   width: 100%;
   margin-bottom: 0.35rem;
+}
+
+/* A layer's own buttons that name no style of their own — Auto colour,
+   Reset curve, Load another .cube — dressed as the panel's other
+   buttons rather than as the browser's grey slabs. */
+.layer-props button:not([class]),
+.layer-props button.auto-levels {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+
+.layer-props button:not([class]):hover,
+.layer-props button.auto-levels:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.layer-props button:not([class]) {
+  align-self: flex-start;
+}
+
+/* Waiting for the click that answers it, over the rule above. */
+.layer-props button.auto-levels.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
 }
 
 /* Waiting for the click that answers it. */
