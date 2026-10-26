@@ -17,4 +17,7 @@ export default defineConfig({
   // Relative asset paths so the bundle works from Tauri's frontendDist.
   base: "./",
   clearScreen: false,
+  // The raw reader's worker loads its module with a dynamic import, which
+  // a worker bundled as a classic script cannot do.
+  worker: { format: "es" },
 });

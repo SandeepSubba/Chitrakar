@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build:wasm": "wasm-pack build ../core/engine --target web --release --out-dir ../../app/src/wasm-pkg && wasm-pack build ../core/pdfin --target web --release --out-dir ../../app/src/wasm-pdf",
+    "build:wasm": "wasm-pack build ../core/engine --target web --release --out-dir ../../app/src/wasm-pkg && wasm-pack build ../core/pdfin --target web --release --out-dir ../../app/src/wasm-pdf && npm run build:wasm-raw",
+    "build:wasm-raw": "cargo build --release --target wasm32-wasip1 -p chitrakar-raw-in && node -e \"require('fs').mkdirSync('src/wasm-raw',{recursive:true});require('fs').copyFileSync('../target/wasm32-wasip1/release/chitrakar_raw_in.wasm','src/wasm-raw/chitrakar_raw_in.wasm')\"",
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview",

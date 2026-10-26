@@ -78,11 +78,6 @@ fn bad(what: impl std::fmt::Display) -> CodecError {
 }
 
 impl RawPhoto {
-    /// Read a camera's raw file into a photograph to develop.
-    pub fn read(bytes: &[u8]) -> Result<RawPhoto, CodecError> {
-        crate::raw::read_photo(bytes)
-    }
-
     /// Keep a mosaic to develop.
     pub fn from_mosaic<T: Copy + Into<f32>>(m: &Mosaic<T>) -> Result<RawPhoto, CodecError> {
         let [top, right, bottom, left] = m.crops;
@@ -960,7 +955,15 @@ pub mod sample {
     /// `scene` gives each pixel's linear red, green and blue as a fraction
     /// of white; `neutral` is the camera's as-shot neutral (what a grey
     /// read as, green as one), and the sensor records the scene times it.
-    pub fn dng(
+    fn rggb(y: usize, x: usize) -> usize {
+        match (y % 2, x % 2) {
+            (0, 0) => 0,
+            (1, 1) => 2,
+            _ => 1,
+        }
+    }
+
+    fn mosaic(
         w: u32,
         h: u32,
         white: u16,
@@ -970,15 +973,64 @@ pub mod sample {
         let mut pixels = Vec::with_capacity((w * h * 2) as usize);
         for y in 0..h {
             for x in 0..w {
-                let c = match (y % 2, x % 2) {
-                    (0, 0) => 0,
-                    (1, 1) => 2,
-                    _ => 1,
-                };
+                let c = rggb(y as usize, x as usize);
                 let v = (scene(x, y)[c] * neutral[c]).clamp(0.0, 1.0) * white as f32;
                 pixels.extend_from_slice(&(v.round() as u16).to_le_bytes());
             }
         }
+        pixels
+    }
+
+    /// The same photograph as [`dng`], packed as the raw module hands it to
+    /// the engine (`crate::raw::unpack`), for tests that develop without
+    /// reading a file.
+    pub fn packed(
+        w: u32,
+        h: u32,
+        white: u16,
+        neutral: [f32; 3],
+        scene: impl Fn(u32, u32) -> [f32; 3],
+    ) -> Vec<u8> {
+        let mut out = b"CKRW".to_vec();
+        for v in [1u32, w, h, 1, 1] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let matrix = [
+            3.2405f32, -1.5371, -0.4985, -0.9693, 1.876, 0.0416, 0.0556, -0.204, 1.0572, 0.0, 0.0,
+            0.0,
+        ];
+        let floats = [0.0f32; 4]
+            .into_iter()
+            .chain([white as f32; 4])
+            .chain([
+                1.0 / neutral[0],
+                1.0 / neutral[1],
+                1.0 / neutral[2],
+                f32::NAN,
+            ])
+            .chain(matrix);
+        for v in floats {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&[0u8; 16]);
+        for row in 0..48 {
+            for col in 0..48 {
+                out.push(rggb(row, col) as u8);
+            }
+        }
+        out.push(0);
+        out.extend_from_slice(&mosaic(w, h, white, neutral, scene));
+        out
+    }
+
+    pub fn dng(
+        w: u32,
+        h: u32,
+        white: u16,
+        neutral: [f32; 3],
+        scene: impl Fn(u32, u32) -> [f32; 3],
+    ) -> Vec<u8> {
+        let pixels = mosaic(w, h, white, neutral, scene);
         // XYZ to linear sRGB, as rationals over 10000.
         let matrix: [i32; 9] = [32405, -15371, -4985, -9693, 18760, 416, 556, -2040, 10572];
         let mut extra: Vec<u8> = Vec::new();
@@ -1062,14 +1114,14 @@ mod tests {
     fn grey_card(neutral: [f32; 3]) -> RawPhoto {
         // Half the frame a mid grey, half a light grey, through a camera
         // whose light made grey read as `neutral`.
-        let dng = sample::dng(32, 16, 4095, neutral, |x, _| {
+        let dng = sample::packed(32, 16, 4095, neutral, |x, _| {
             if x < 16 {
                 [0.18; 3]
             } else {
                 [0.6; 3]
             }
         });
-        RawPhoto::read(&dng).unwrap()
+        crate::raw::unpack(&dng).unwrap()
     }
 
     fn px(img: &SourceImage, x: u32, y: u32) -> [u8; 3] {
@@ -1225,14 +1277,14 @@ mod tests {
             }) > base
         );
         // A shadow and a highlight either side of middle grey.
-        let dng = sample::dng(32, 16, 4095, [1.0; 3], |x, _| {
+        let dng = sample::packed(32, 16, 4095, [1.0; 3], |x, _| {
             if x < 16 {
                 [0.06; 3]
             } else {
                 [0.6; 3]
             }
         });
-        let two = RawPhoto::read(&dng).unwrap();
+        let two = crate::raw::unpack(&dng).unwrap();
         let flat = RawDevelop {
             contrast: -100.0,
             ..Default::default()
@@ -1253,8 +1305,8 @@ mod tests {
 
     #[test]
     fn saturation_to_nothing_is_grey() {
-        let dng = sample::dng(16, 16, 4095, [1.0; 3], |_, _| [0.4, 0.2, 0.1]);
-        let photo = RawPhoto::read(&dng).unwrap();
+        let dng = sample::packed(16, 16, 4095, [1.0; 3], |_, _| [0.4, 0.2, 0.1]);
+        let photo = crate::raw::unpack(&dng).unwrap();
         let img = photo.develop(&RawDevelop {
             saturation: -100.0,
             ..Default::default()
@@ -1266,14 +1318,14 @@ mod tests {
     #[test]
     fn auto_brings_a_dark_picture_up_and_a_bright_one_down() {
         // Most of the frame in deep shadow, a little light: Auto opens it up.
-        let dark = sample::dng(32, 32, 4095, [1.0; 3], |x, y| {
+        let dark = sample::packed(32, 32, 4095, [1.0; 3], |x, y| {
             if x < 6 && y < 6 {
                 [0.9; 3]
             } else {
                 [0.002; 3]
             }
         });
-        let photo = RawPhoto::read(&dark).unwrap();
+        let photo = crate::raw::unpack(&dark).unwrap();
         let s = auto_tone(&photo, &photo.preview(16), &RawDevelop::default());
         assert!(s.exposure > 0.5 && s.shadows > 0.0, "{s:?}");
         assert!(
@@ -1281,8 +1333,8 @@ mod tests {
             "and pulls the light it pushed past white back: {s:?}"
         );
         // All bright: brought down.
-        let bright = sample::dng(32, 32, 4095, [1.0; 3], |_, _| [0.9; 3]);
-        let photo = RawPhoto::read(&bright).unwrap();
+        let bright = sample::packed(32, 32, 4095, [1.0; 3], |_, _| [0.9; 3]);
+        let photo = crate::raw::unpack(&bright).unwrap();
         let s = auto_tone(
             &photo,
             &photo.preview(16),

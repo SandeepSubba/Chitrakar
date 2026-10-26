@@ -1,0 +1,24 @@
+[package]
+name = "chitrakar-raw-in"
+description = "Reading a camera's raw file to the sensor's values; its own WASM module, run in a worker and loaded only when one is opened"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# cdylib for its own WASI module (built by `npm run build:wasm`), rlib for
+# the engine's tests.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Hundreds of cameras' formats, Canon's CR3 among them, to the sensor's
+# mosaic: dnglab's reader, LGPL-2.1, which the engine's GPL-3.0 may take
+# in. A megabyte compressed, which is one reason this is a module of its
+# own; the other is that it leans on catching its own panics, which a
+# WASM module cannot, so it runs in a worker a bad file can only stop.
+rawler = "0.8"
+
+[dev-dependencies]
+chitrakar-codecs.workspace = true
+chitrakar-doc.workspace = true

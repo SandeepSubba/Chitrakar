@@ -1362,11 +1362,21 @@ impl WasmSession {
             .map_err(to_js)
     }
 
-    /// Read a camera's raw file to develop; JSON `{width, height,
+    /// Take a camera's raw file to develop: its mosaic as the raw module
+    /// (in its worker) packed it, and the file. JSON `{width, height,
     /// asShot: [kelvin, tint]}`. Kept until placed or `raw_close`.
-    pub fn raw_open(&mut self, bytes: &[u8], name: &str) -> Result<String, JsError> {
-        let info = self.inner.raw_open(bytes, name).map_err(to_js)?;
+    pub fn raw_open(&mut self, packed: &[u8], file: &[u8], name: &str) -> Result<String, JsError> {
+        let info = self.inner.raw_open(packed, file, name).map_err(to_js)?;
         serde_json::to_string(&info).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// The raw file a layer was developed from, for the raw module to read
+    /// again before `raw_open_layer`.
+    pub fn raw_original(&self, id: f64) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .raw_original(NodeId(id as u64))
+            .map(|(_, b)| b.to_vec())
+            .map_err(to_js)
     }
 
     /// Open the raw file a layer was developed from; JSON `{info,

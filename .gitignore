@@ -13,6 +13,8 @@ app/dist
 app/src/wasm-pkg/
 # The PDF reader's own module, loaded only when a PDF is opened
 app/src/wasm-pdf/
+# And the raw reader's, run in a worker when a raw file is opened
+app/src/wasm-raw/
 
 # Editors / OS
 .DS_Store

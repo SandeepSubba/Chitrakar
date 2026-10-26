@@ -1,5 +1,5 @@
 //! A camera's raw file, developed: what the sensor saw, before the camera
-//! made a JPEG of it. `rawloader` reads the file — hundreds of cameras'
+//! made a JPEG of it. `rawler` (dnglab's reader) reads the file — hundreds of cameras'
 //! formats, each with its own packing and compression — and this turns
 //! the mosaic it hands back into a picture, which is the half a raw
 //! developer does and the half `rawloader`'s companion (`imagepipe`)
@@ -36,7 +36,7 @@ pub fn is_raw_name(name: &str) -> bool {
         .is_some_and(|(_, ext)| RAW_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
-/// The sensor's picture as `rawloader` gives it, in the terms developing
+/// The sensor's picture as the reader gives it, in the terms developing
 /// it needs — so a mosaic can be made by hand in a test, without a file.
 pub struct Mosaic<'a, T: Copy + Into<f32>> {
     pub width: usize,
@@ -68,57 +68,122 @@ fn bad(what: impl std::fmt::Display) -> CodecError {
     CodecError::Format(format!("camera raw: {what}"))
 }
 
-/// Read and develop a camera's raw file, plainly.
-pub fn decode_raw(bytes: &[u8]) -> Result<SourceImage, CodecError> {
-    Ok(read_photo(bytes)?.develop(&chitrakar_doc::RawDevelop::default()))
+/// A camera's raw file is read by its own module (`core/rawin`), which
+/// hands the engine its mosaic packed (`unpack`), to be developed in the
+/// develop window; on its own, by name, it is not a picture the codecs
+/// can read.
+pub fn decode_raw(_bytes: &[u8]) -> Result<SourceImage, CodecError> {
+    Err(bad("opens in the develop window, which reads it"))
 }
 
-/// Read a camera's raw file into a photograph to develop.
-pub(crate) fn read_photo(bytes: &[u8]) -> Result<RawPhoto, CodecError> {
-    // Canon's CR3 is an ISO media file, not a TIFF, and the decoder has
-    // no reader for it: say what will work rather than what failed.
-    if bytes.len() >= 12 && &bytes[4..12] == b"ftypcrx " {
-        return Err(CodecError::Format(
-            "raw: a Canon CR3, which this editor cannot develop yet; Adobe's free DNG Converter \
-             turns it into a DNG, which it can"
-                .into(),
-        ));
+/// A mosaic as `chitrakar-raw-in` packs it (see that crate for the
+/// form), kept to be developed. Every length is checked against the
+/// bytes there are: the packing crosses from a worker, and a short or
+/// garbled one is an error rather than a read past the end.
+pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
+    const PATTERN: usize = 48;
+    struct Cursor<'a>(&'a [u8], usize);
+    impl<'a> Cursor<'a> {
+        fn take(&mut self, n: usize) -> Result<&'a [u8], CodecError> {
+            let got = self
+                .1
+                .checked_add(n)
+                .and_then(|end| self.0.get(self.1..end));
+            let got = got.ok_or_else(|| bad("the packed mosaic is shorter than it says"))?;
+            self.1 += n;
+            Ok(got)
+        }
+        fn u32s(&mut self, n: usize) -> Result<Vec<u32>, CodecError> {
+            Ok(self
+                .take(n * 4)?
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect())
+        }
     }
-    let raw = rawloader::decode(&mut std::io::Cursor::new(bytes)).map_err(bad)?;
-    let cfa = &raw.cfa;
-    let color_at = |row: usize, col: usize| cfa.color_at(row, col);
-    use rawloader::Orientation as O;
-    let orientation = match raw.orientation {
-        O::HorizontalFlip => 2,
-        O::Rotate180 => 3,
-        O::VerticalFlip => 4,
-        O::Transpose => 5,
-        O::Rotate90 => 6,
-        O::Transverse => 7,
-        O::Rotate270 => 8,
-        O::Normal | O::Unknown => 1,
-    };
-    let f = |v: [u16; 4]| v.map(|x| x as f32);
+    let mut cur = Cursor(packed, 0);
+    if cur.take(4)? != b"CKRW" {
+        return Err(bad("not a packed mosaic"));
+    }
+    let head = cur.u32s(5)?;
+    if head[0] != 1 {
+        return Err(bad(format!("a packed mosaic of version {}", head[0])));
+    }
+    let (width, height, cpp, orientation) = (
+        head[1] as usize,
+        head[2] as usize,
+        head[3] as usize,
+        head[4] as u8,
+    );
+    let floats: Vec<f32> = cur
+        .take(24 * 4)?
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let four = |i: usize| [floats[i], floats[i + 1], floats[i + 2], floats[i + 3]];
+    let (black, white, wb) = (four(0), four(4), four(8));
+    let mut xyz_to_cam = [[0f32; 3]; 4];
+    for (i, v) in floats[12..24].iter().enumerate() {
+        xyz_to_cam[i / 3][i % 3] = *v;
+    }
+    let crops = cur.u32s(4)?;
+    let crops = [
+        crops[0] as usize,
+        crops[1] as usize,
+        crops[2] as usize,
+        crops[3] as usize,
+    ];
+    let pattern = cur.take(PATTERN * PATTERN)?.to_vec();
+    let color_at =
+        |row: usize, col: usize| pattern[(row % PATTERN) * PATTERN + col % PATTERN] as usize;
+    let kind = cur.take(1)?[0];
+    let count = width
+        .checked_mul(height)
+        .and_then(|n| n.checked_mul(cpp))
+        .ok_or_else(|| bad("a sensor too big to be one"))?;
     macro_rules! with {
         ($data:expr) => {
             RawPhoto::from_mosaic(&Mosaic {
-                width: raw.width,
-                height: raw.height,
-                cpp: raw.cpp,
+                width,
+                height,
+                cpp,
                 data: $data,
                 color_at: &color_at,
-                black: f(raw.blacklevels),
-                white: f(raw.whitelevels),
-                wb: raw.wb_coeffs,
-                xyz_to_cam: raw.xyz_to_cam,
-                crops: raw.crops,
+                black,
+                white,
+                wb,
+                xyz_to_cam,
+                crops,
                 orientation,
             })
         };
     }
-    match &raw.data {
-        rawloader::RawImageData::Integer(v) => with!(v),
-        rawloader::RawImageData::Float(v) => with!(v),
+    match kind {
+        0 => {
+            let data: Vec<u16> = cur
+                .take(
+                    count
+                        .checked_mul(2)
+                        .ok_or_else(|| bad("a sensor too big to be one"))?,
+                )?
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            with!(&data)
+        }
+        1 => {
+            let data: Vec<f32> = cur
+                .take(
+                    count
+                        .checked_mul(4)
+                        .ok_or_else(|| bad("a sensor too big to be one"))?,
+                )?
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            with!(&data)
+        }
+        k => Err(bad(format!("samples of kind {k}"))),
     }
 }
 
@@ -318,7 +383,7 @@ mod tests {
 
     #[test]
     fn a_camera_matrix_keeps_white_white() {
-        // A real camera's numbers (a Canon's, from rawloader's tables).
+        // A real camera's numbers (a Canon's, from rawloader's tables, which rawler's agree with).
         let m = camera_to_srgb(&[
             [4716.0, 603.0, -830.0],
             [-7798.0, 15474.0, 2480.0],
@@ -337,40 +402,15 @@ mod tests {
     }
 
     #[test]
-    fn something_that_is_not_a_raw_file_is_refused() {
-        assert!(decode_raw(b"not a raw file at all").is_err());
-    }
-
-    /// A real camera's raw file, when one is named — none is committed
-    /// (they are tens of megabytes): `CHITRAKAR_TEST_RAW=/path/to/file.cr2`.
-    #[test]
-    fn a_cameras_raw_file_develops_into_a_photograph() {
-        let Ok(path) = std::env::var("CHITRAKAR_TEST_RAW") else {
-            return;
-        };
-        let img = decode_raw(&std::fs::read(path).unwrap()).unwrap();
-        assert!(img.width > 1000 && img.height > 1000);
-        let n = (img.width * img.height) as f64;
-        let mean: f64 = img
-            .rgba8
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|p| (p[0] as f64 + p[1] as f64 + p[2] as f64) / 3.0)
-            .sum::<f64>()
-            / n;
-        assert!(
-            (25.0..230.0).contains(&mean),
-            "a photograph, not black or white: {mean}"
-        );
-    }
-
-    #[test]
-    fn a_cr3_says_what_will_work() {
-        let mut cr3 = vec![0, 0, 0, 24];
-        cr3.extend_from_slice(b"ftypcrx ");
-        cr3.resize(64, 0);
-        let said = decode_raw(&cr3).err().unwrap().to_string();
-        assert!(said.contains("DNG Converter"), "{said}");
+    fn a_packed_mosaic_unpacks_and_a_short_one_is_refused() {
+        let packed = crate::develop::sample::packed(16, 8, 4095, [1.0; 3], |_, _| [0.3; 3]);
+        let photo = unpack(&packed).unwrap();
+        assert_eq!(photo.size(), (16, 8));
+        for cut in [0, 3, 10, 100, packed.len() - 1] {
+            assert!(unpack(&packed[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut wrong = packed.clone();
+        wrong[0] = b'X';
+        assert!(unpack(&wrong).is_err());
     }
 }

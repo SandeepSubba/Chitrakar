@@ -8819,47 +8819,57 @@ impl Session {
 
     // ---- Camera raw, developed ----
 
-    /// Read a camera's raw file to develop: kept until it is placed or the
-    /// window is closed, so each preview is the same photograph developed
-    /// again rather than the file read again. What the window needs to
-    /// start from is returned: the developed size and the camera's own
-    /// white balance as a temperature and tint.
-    pub fn raw_open(&mut self, bytes: &[u8], name: &str) -> Result<RawInfo, EngineError> {
-        let photo = RawPhoto::read(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+    /// Take a camera's raw file to develop: its mosaic as the raw module
+    /// read it (`packed`, see `chitrakar-raw-in`) and the file itself,
+    /// which the document keeps when the photograph is placed. Kept until
+    /// then or until the window is closed, so each preview is the same
+    /// photograph developed again rather than the file read again. What
+    /// the window starts from is returned: the developed size and the
+    /// camera's own white balance as a temperature and tint.
+    ///
+    /// The reading is not the engine's: the reader is a megabyte, and
+    /// leans on catching its own panics, which WebAssembly cannot do, so
+    /// in the browser it runs in a worker of its own.
+    pub fn raw_open(
+        &mut self,
+        packed: &[u8],
+        file: &[u8],
+        name: &str,
+    ) -> Result<RawInfo, EngineError> {
+        let photo = chitrakar_codecs::raw::unpack(packed)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
         let info = RawInfo::of(&photo);
         self.raw = Some(OpenRaw {
-            original: chitrakar_doc::content_id(0, 0, bytes),
+            original: chitrakar_doc::content_id(0, 0, file),
             name: name.to_string(),
-            bytes: Some(bytes.to_vec()),
+            bytes: Some(file.to_vec()),
             photo,
             preview: None,
         });
         Ok(info)
     }
 
+    /// The raw file a layer was developed from, and its name: for the
+    /// raw module to read again when the layer is to be developed again.
+    pub fn raw_original(&self, id: NodeId) -> Result<(String, std::sync::Arc<[u8]>), EngineError> {
+        let developed = self.developed(id)?;
+        let original = self.doc.original(&developed.original).ok_or_else(|| {
+            EngineError::BadCommand("the raw file is not in this document".into())
+        })?;
+        Ok((original.name.clone(), original.bytes.clone()))
+    }
+
     /// Open the raw file a layer was developed from, to develop it again:
     /// the window's starting point and the settings it was developed with.
+    /// The file has to have been read first (`raw_original`, read by the
+    /// raw module, then `raw_open`): the engine does not read raw files.
     pub fn raw_open_layer(&mut self, id: NodeId) -> Result<(RawInfo, RawDevelop), EngineError> {
         let developed = self.developed(id)?;
-        let fresh = self
+        let raw = self
             .raw
             .as_ref()
-            .is_none_or(|r| r.original != developed.original);
-        if fresh {
-            let original = self.doc.original(&developed.original).ok_or_else(|| {
-                EngineError::BadCommand("the raw file is not in this document".into())
-            })?;
-            let photo = RawPhoto::read(&original.bytes)
-                .map_err(|e| EngineError::BadCommand(e.to_string()))?;
-            self.raw = Some(OpenRaw {
-                original: developed.original.clone(),
-                name: original.name.clone(),
-                bytes: None,
-                photo,
-                preview: None,
-            });
-        }
-        let raw = self.raw.as_ref().expect("opened above");
+            .filter(|r| r.original == developed.original)
+            .ok_or_else(|| EngineError::BadCommand("the raw file has not been read".into()))?;
         Ok((RawInfo::of(&raw.photo), developed.settings))
     }
 
@@ -9896,6 +9906,13 @@ mod tests {
 
     /// A raw file of a grey card under a warm light: what the develop
     /// window is tried on.
+    /// The grey card read as the raw module reads it: packed, and the file.
+    fn read_card(s: &mut Session) -> RawInfo {
+        let file = grey_card_dng();
+        let packed = chitrakar_raw_in::read(&file).unwrap();
+        s.raw_open(&packed, &file, "card.dng").unwrap()
+    }
+
     fn grey_card_dng() -> Vec<u8> {
         chitrakar_codecs::develop::sample::dng(40, 20, 4095, [0.8, 1.0, 0.6], |x, _| {
             if x < 20 {
@@ -9916,7 +9933,7 @@ mod tests {
     #[test]
     fn a_raw_file_opens_developed_and_keeps_the_file_and_the_settings() {
         let mut s = Session::new(10, 10, ColorMode::Rgb);
-        let info = s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        let info = read_card(&mut s);
         assert_eq!((info.width, info.height), (40, 20));
         let preview = s.raw_preview(&RawDevelop::default(), 20).unwrap();
         assert_eq!((preview.width, preview.height), (20, 10));
@@ -9944,12 +9961,19 @@ mod tests {
     #[test]
     fn developing_again_changes_the_picture_and_nothing_else_in_one_step() {
         let mut s = Session::new(10, 10, ColorMode::Rgb);
-        s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        read_card(&mut s);
         let id = s.place_raw(&RawDevelop::default()).unwrap();
         s.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
         let before = picture_of(&s, id);
         s.raw_close();
-        // Opened from the layer, with what it was developed with.
+        // Opened from the layer, with what it was developed with — once the
+        // file the document kept has been read again, as the page has the
+        // raw module do.
+        assert!(s.raw_open_layer(id).is_err(), "not before it is read");
+        let (name, file) = s.raw_original(id).unwrap();
+        assert_eq!(name, "card.dng");
+        s.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file, &name)
+            .unwrap();
         let (info, was) = s.raw_open_layer(id).unwrap();
         assert_eq!((info.width, was), (40, RawDevelop::default()));
         let warm = RawDevelop {
@@ -9979,10 +10003,13 @@ mod tests {
     #[test]
     fn a_developed_picture_can_be_developed_again_after_saving() {
         let mut s = Session::new(10, 10, ColorMode::Rgb);
-        s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        read_card(&mut s);
         let id = s.place_raw(&RawDevelop::default()).unwrap();
         let bytes = s.save().unwrap();
         let mut t = Session::load(&bytes).unwrap();
+        let (name, file) = t.raw_original(id).unwrap();
+        t.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file, &name)
+            .unwrap();
         let (_, was) = t.raw_open_layer(id).unwrap();
         assert_eq!(was, RawDevelop::default());
         t.redevelop(
@@ -10003,7 +10030,7 @@ mod tests {
     #[test]
     fn picking_grey_in_the_preview_neutralises_the_light() {
         let mut s = Session::new(10, 10, ColorMode::Rgb);
-        s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        read_card(&mut s);
         // Off the camera's balance, then picked back to grey.
         let cast = RawDevelop {
             white: Some([3000.0, 0.0]),

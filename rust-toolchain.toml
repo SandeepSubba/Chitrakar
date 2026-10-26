@@ -5,4 +5,6 @@
 [toolchain]
 channel = "1.94.1"
 components = ["rustfmt", "clippy"]
-targets = ["wasm32-unknown-unknown"]
+# wasm32-wasip1 is the raw reader's: its CR3 decoder asks for the clock,
+# which only WASI's standard library can answer in a browser.
+targets = ["wasm32-unknown-unknown", "wasm32-wasip1"]

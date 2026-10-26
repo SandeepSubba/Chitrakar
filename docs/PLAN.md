@@ -10150,14 +10150,31 @@ without reading anything else.*
   is a different and much larger thing. The fourteen standard fonts
   ship with hayro (Foxit's, BSD); an older PostScript `.ai` is told to
   be saved again as PDF-compatible.
-  **Camera raw** (CR2, NEF, ARW, DNG, RAF, ORF, RW2, PEF and the other
-  formats rawloader reads, LGPL-2.1; not yet Canon's CR3, which says to
-  go through Adobe's DNG Converter) is developed by the engine
-  (`raw.rs`): black and white levels, the camera's white balance, a
-  same-colour demosaic, the camera's matrix to sRGB, an exposure that
-  puts the 99th percentile at white, and the camera's orientation.
-  imagepipe was not used because it starts threads, which abort in
-  WASM.
+  **Camera raw** (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, PEF and the
+  other formats `rawler` — dnglab's reader, LGPL-2.1 — reads) is
+  developed by the engine (`develop.rs`): black and white levels, the
+  camera's white balance, a demosaic, the camera's matrix to sRGB, an
+  exposure that puts the 99th percentile at white, and the camera's
+  orientation. imagepipe was not used because it starts threads, which
+  abort in WASM.
+  The reading is not the engine's. It was rawloader in the engine at
+  first, which could not read Canon's CR3; rawler can, but is a
+  megabyte compressed and leans on catching its own panics, which
+  WebAssembly cannot do — one panic stops the module it happens in. So
+  it is its own crate (`core/rawin`, `chitrakar-raw-in`), run in a
+  worker (`app/src/rawWorker.ts`, managed by `src/raw.ts`) fetched the
+  first time a raw file is opened, handing the engine the sensor's
+  values packed (`raw::unpack`; `Session::raw_open(packed, file,
+  name)`); a failure retires the worker and the next file gets a new
+  one. It is built for WASI (`wasm32-wasip1`, `npm run build:wasm-raw`)
+  rather than with wasm-bindgen, because the CR3 decoder times itself
+  with `Instant::now()`, which panics on `wasm32-unknown-unknown` and on
+  WASI asks the host — the worker is the host, seven functions, and
+  keeps what the module writes to stderr so a panic can say what it
+  was ("capacity overflow" on a damaged ARW). Develop again reads the
+  file the document kept the same way (`raw_original`). Twelve damaged
+  ARWs in a row then a good CR3 all behave; the engine is 3.1 MB
+  gzipped with the raw module 1.4 MB beside it, fetched when needed.
   **The develop window** ✅ is where a raw file opens: the photograph
   beside its settings, developed again as each moves. What is there is
   what needs the sensor's own values (`core/codecs/src/develop.rs`,
@@ -10248,7 +10265,7 @@ without reading anything else.*
 | UI | **TypeScript + React** (webview) | One UI codebase across all platforms; responsive layout adapts desktop ⇄ tablet ⇄ phone. |
 | GPU rendering | **wgpu** (vectors via **vello**, raster ops via compute shaders) | Portable over Vulkan/Metal/DX12/GLES — and over WebGPU when the engine runs as WASM. |
 | Color management | **ICC-based CMS**: `lcms2` (battle-tested) with `moxcms` (pure Rust) evaluated as the WASM-friendly alternative | Correct RGB/CMYK conversions, monitor profiles, soft proofing. |
-| Codecs | `image`/`zune` crates (PNG, JPEG), `tiff`, own PSD reader, `hayro` (PDF/AI pages), `rawloader` + own develop (camera raw), `resvg`/`usvg` (SVG import), custom exporters | Pure Rust ⇒ works on every target including WASM. |
+| Codecs | `image`/`zune` crates (PNG, JPEG), `tiff`, own PSD reader, `hayro` (PDF/AI pages), `rawler` in a worker + own develop (camera raw), `resvg`/`usvg` (SVG import), custom exporters | Pure Rust ⇒ works on every target including WASM. |
 
 ### How the engine reaches the screen
 

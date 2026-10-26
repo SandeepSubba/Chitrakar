@@ -19,10 +19,6 @@ image-webp = "0.2"
 # don't build on wasm32; deflate alone is pure Rust.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tiff = "0.9"
-# Camera raw files: hundreds of cameras' formats, read to the sensor's
-# mosaic (LGPL-2.1, which the engine's GPL-3.0 may take in). Developed in
-# `raw.rs`, not by its companion `imagepipe`, which needs threads.
-rawloader = "0.37"
 # SVG import. Default features pull in system font discovery, which
 # wasm32 has no filesystem for; text needs only the bundled face.
 usvg = { version = "0.48", default-features = false, features = ["text"] }

@@ -37,7 +37,7 @@ const DIST = join(HERE, "..", "dist");
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const p = join(dir, e.name);
       if (e.isDirectory()) {
-        if (e.name !== "wasm-pkg" && e.name !== "wasm-pdf" && e.name !== "target" && e.name !== "node_modules") walk(p);
+        if (e.name !== "wasm-pkg" && e.name !== "wasm-pdf" && e.name !== "wasm-raw" && e.name !== "target" && e.name !== "node_modules") walk(p);
       } else if (/\.(rs|ts|tsx|css|toml)$/.test(e.name)) {
         const at = statSync(p).mtimeMs;
         if (at > newest.at) newest = { at, path: p };
@@ -14983,13 +14983,26 @@ assert(
   const settle = () => page.waitForTimeout(250);
   const layerNames = () => page.locator(".panel ul li .layer-name").allTextContents();
 
+  // The raw reader is a module of its own, run in a worker and fetched
+  // the first time a raw file is opened.
+  const rawFetched = () =>
+    page.evaluate(() => performance.getEntriesByType("resource").some((e) => e.name.includes("rawWorker")));
+  assert(!(await rawFetched()), "the raw reader is not loaded with the editor");
   await newDocument(200, 150, "rgb");
   // Cancelled, nothing comes in.
   await page.setInputFiles('input[accept^="image/*,"]', { name: "card.dng", mimeType: "", buffer: card });
   await win.waitFor();
+  assert(await rawFetched(), "and is, once one is");
   await win.locator('button:text-is("Cancel")').click();
   await settle();
   assert((await layerNames()).length === 0 && (await win.count()) === 0, "a develop cancelled brings nothing in");
+  // A damaged one says so, and the next one still reads: a reader that
+  // failed is replaced rather than used again.
+  lastDialog = "";
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "broken.dng", mimeType: "", buffer: card.subarray(0, 300) });
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  assert(lastDialog.includes("broken.dng") && (await win.count()) === 0, `a damaged raw file says so (${lastDialog})`);
 
   await page.setInputFiles('input[accept^="image/*,"]', { name: "card.dng", mimeType: "", buffer: card });
   await win.waitFor();

@@ -257,9 +257,13 @@ layers, groups, masks, blend modes; what it cannot keep goes to
 the layers), `core/pdfin` (its own WASM module, `chitrakar-pdf-in`,
 which `app/src/pdf.ts` fetches only when a PDF is first opened: `hayro`
 draws a page at the dpi the `PdfDialog` asks for, PDF-compatible `.ai`
-too, and the engine is handed the pixels by `place_rgba`) and `raw.rs`
-(`rawloader` decodes; imagepipe starts threads and would abort in
-WASM). A raw file opens in the develop window (`RawDevelopDialog`):
+too, and the engine is handed the pixels by `place_rgba`) and
+`core/rawin` (`rawler` reads every camera's format, CR3 included; built
+for WASI by `npm run build:wasm-raw` and run in a worker,
+`app/src/rawWorker.ts` + `src/raw.ts`, since rawler relies on catching
+its own panics and a WASM module cannot — the worker is retired on any
+failure; it hands the engine the mosaic packed, `raw::unpack`). A raw
+file opens in the develop window (`RawDevelopDialog`):
 `develop.rs` keeps the sensor's values (`RawPhoto`) and develops them
 with `RawDevelop` — white balance in kelvin and tint through the
 camera's matrix, exposure, highlights, shadows, whites, blacks,
@@ -270,7 +274,7 @@ block-averaged `RawPreview` for the sliders. Placed, the raw file is kept in the
 the picture (`RasterRef::develop`), so Develop again is a `SetKind`
 with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and
 a HEIC that will not decode says how to get a JPEG. hayro ships Foxit's
-BSD standard fonts and rawloader is LGPL-2.1, which a GPL-3.0 project
+BSD standard fonts and rawler is LGPL-2.1, which a GPL-3.0 project
 can carry. Smoke 9cm builds each file byte by byte.
 
 ## Measuring

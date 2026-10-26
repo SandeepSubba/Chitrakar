@@ -53,6 +53,7 @@ import {
 import { ExportDialog } from "./ExportDialog";
 import { enginePicture } from "./picture";
 import { pdfReader, unpackPage } from "./pdf";
+import { readRaw } from "./raw";
 import { importKind, OPEN_ACCEPT, PLACE_ACCEPT, PLACE_EXTENSIONS, unreadable } from "./imports";
 import {
   drawHistogram,
@@ -8378,10 +8379,13 @@ export function App() {
     setImporting(`Reading ${next.name}…`);
     await nextPaint();
     try {
-      const info = JSON.parse(session.raw_open(next.bytes, next.name)) as RawInfo;
+      const packed = await readRaw(next.bytes);
+      const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
       setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
     } catch (err) {
-      alert(`Could not open ${next.name}: ${err}`);
+      alert(
+        `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
+      );
       rawDone.current += 1;
       void openNextRaw();
     } finally {
@@ -8422,7 +8426,7 @@ export function App() {
       await nextPaint();
       try {
         const was: [number, number] = [session.width, session.height];
-        session.raw_open(next.bytes, next.name);
+        session.raw_open(await readRaw(next.bytes), next.bytes, next.name);
         placed(session.place_raw(json), was);
       } catch (err) {
         alert(`Could not develop ${next.name}: ${err}`);
@@ -8445,10 +8449,15 @@ export function App() {
   };
   /** Open the picked layer's raw file in the develop window again, with
    * the settings it was developed with. */
-  const developAgain = () => {
+  const developAgain = async () => {
     const layer = layers.find((l) => l.id === selected);
     if (!session || !layer?.developed) return;
+    // The file the document kept is read again by the raw module: the
+    // engine develops, it does not read raw files.
+    setImporting(`Reading ${layer.name}…`);
     try {
+      const file = session.raw_original(layer.id);
+      session.raw_open(await readRaw(file), file, layer.name);
       const got = JSON.parse(session.raw_open_layer(layer.id)) as {
         info: RawInfo;
         settings: Partial<RawSettings>;
@@ -8461,6 +8470,8 @@ export function App() {
       });
     } catch (err) {
       alert(`${err}`);
+    } finally {
+      setImporting(null);
     }
   };
 
