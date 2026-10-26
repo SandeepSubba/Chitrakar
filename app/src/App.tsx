@@ -8980,7 +8980,16 @@ export function App() {
           </button>
         </div>
       )}
-      <header className="topbar">
+      <header
+        className={
+          (!isTauri() || nativeMenuFailed) && !compact ? "topbar" : "topbar one-row"
+        }
+      >
+        {/* The menus' row: the menus, and the document's name and facts.
+            Where the menus are a drawer (a phone) or on the system's own
+            bar (the desktop app), there is no row of menus to sit under,
+            and the two rows are one (`one-row`). */}
+        <div className="topbar-menus">
         <span className="brand">Chitrakar</span>
         {/* The desktop shell puts these on the system menu bar, where a
             Mac app's menus belong; in a browser they are here. */}
@@ -9015,6 +9024,64 @@ export function App() {
           </nav>
         )}
 
+        {/* The name of what is open, at the end of the menus' row,
+            where an application's title sits. */}
+        <input
+          className="doc-name"
+          value={docName}
+          onChange={(e) => setDocName(e.target.value)}
+          onKeyDown={(e) => {
+            e.stopPropagation();
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+          spellCheck={false}
+          title="What this document is called; every save and export is named after it"
+          aria-label="Document name"
+        />
+        {/* A dot for work that has not been saved, where the name is. */}
+        {unsaved && (
+          <span
+            className="unsaved-dot"
+            title="This document has changes that have not been saved"
+            aria-label="Unsaved changes"
+          >
+            •
+          </span>
+        )}
+        <span className="doc-chip">
+          {hasIcc && (
+            <span className="icc-badge" title="A CMYK press profile is loaded">
+              ICC ✓
+            </span>
+          )}
+          {hasScreenIcc && (
+            <span
+              className="icc-badge"
+              title="What is shown is going through this screen's own profile"
+            >
+              Screen ✓
+            </span>
+          )}
+          {/* The facts about the document, in a span of their own so a
+              window with no room for them can drop them and keep the
+              badges, which say something the panel does not. */}
+          <span className="doc-facts">
+            {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
+            {units !== "px" && (
+              <>
+                {" "}
+                ({inUnits(docSize[0], units, docDpi)}×
+                {inUnits(docSize[1], units, docDpi)} {units})
+              </>
+            )}{" "}
+            · {docDpi} dpi
+          </span>
+        </span>
+      </div>
+      {/* The buttons, a row of their own under the menus, as every
+          editor of this kind has them: beside the Help menu they read as
+          one more menu that had lost its words. */}
+      <div className="topbar-tools" role="toolbar" aria-label="Toolbar">
         {/* The handful of things reached for constantly. All of them
             were in the menus and nowhere else, which is two presses and
             a read for something like zooming out — and the icons for
@@ -9239,57 +9306,6 @@ export function App() {
           </button>
         </div>
 
-        <input
-          className="doc-name"
-          value={docName}
-          onChange={(e) => setDocName(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation();
-            if (e.key === "Enter") e.currentTarget.blur();
-          }}
-          spellCheck={false}
-          title="What this document is called; every save and export is named after it"
-          aria-label="Document name"
-        />
-        {/* A dot for work that has not been saved, where the name is. */}
-        {unsaved && (
-          <span
-            className="unsaved-dot"
-            title="This document has changes that have not been saved"
-            aria-label="Unsaved changes"
-          >
-            •
-          </span>
-        )}
-        <span className="doc-chip">
-          {hasIcc && (
-            <span className="icc-badge" title="A CMYK press profile is loaded">
-              ICC ✓
-            </span>
-          )}
-          {hasScreenIcc && (
-            <span
-              className="icc-badge"
-              title="What is shown is going through this screen's own profile"
-            >
-              Screen ✓
-            </span>
-          )}
-          {/* The facts about the document, in a span of their own so a
-              window with no room for them can drop them and keep the
-              badges, which say something the panel does not. */}
-          <span className="doc-facts">
-            {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
-            {units !== "px" && (
-              <>
-                {" "}
-                ({inUnits(docSize[0], units, docDpi)}×
-                {inUnits(docSize[1], units, docDpi)} {units})
-              </>
-            )}{" "}
-            · {docDpi} dpi
-          </span>
-        </span>
         {/* The zoom is read and set in the same place: "show me this at
             four hundred percent" is a thing people say, and a wheel
             cannot answer it. Outside the chip beside it, since that chip
@@ -9377,6 +9393,7 @@ export function App() {
             <Icon name="layers" size={16} />
           </button>
         )}
+        </div>
       </header>
       {menuSheet && compact && <MenuSheet menus={menus} onClose={() => setMenuSheet(false)} />}
       {showKeys && (

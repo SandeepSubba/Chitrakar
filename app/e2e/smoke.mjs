@@ -16315,10 +16315,19 @@ assert(
       zoomBox && zoomBox.x + zoomBox.width <= width,
       `and the zoom field is inside it (${zoomBox && zoomBox.x + zoomBox.width} of ${width})`,
     );
-    const barBox = await page.locator(".topbar").boundingBox();
+    // Two rows, each one row tall: the menus, and under them the
+    // buttons — which had sat after Help on the menus' own row.
+    const menusRow = await page.locator(".topbar-menus").boundingBox();
+    const toolsRow = await page.locator(".topbar-tools").boundingBox();
     assert(
-      barBox.height < 48,
-      `and the bar is still one row tall (${barBox.height})`,
+      menusRow.height < 48 && toolsRow.height < 48,
+      `and each of the bar's rows is one row tall (${menusRow.height}, ${toolsRow.height})`,
+    );
+    const helpBox = await page.locator(".topbar .menu-label", { hasText: "Help" }).boundingBox();
+    const firstButton = await page.locator('.topbar-tools .chrome-group[aria-label="Document"] button').first().boundingBox();
+    assert(
+      firstButton.y >= helpBox.y + helpBox.height && firstButton.x < helpBox.x,
+      `the buttons sit under the menus, not after Help (${Math.round(firstButton.x)},${Math.round(firstButton.y)} against ${Math.round(helpBox.x)},${Math.round(helpBox.y)})`,
     );
     assert(
       (await page.locator(".topbar .menu-label").count()) === 9,

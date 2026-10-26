@@ -110,87 +110,109 @@ body {
    everything at rest is greyscale. */
 .topbar {
   display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Two rows, as an editor of this kind has them: the menus, with the
+   name of what is open at the far end where a title sits; and under
+   them the buttons. The buttons had sat on the menus' own row after
+   Help, where they read as one more menu that had lost its words. Each
+   row is one row tall; a row wider than the window would scroll the
+   whole page sideways and slide the canvas under the tool rail, so what
+   only informs gives way first (below), and the browser suite asks at
+   the widths a laptop is. */
+.topbar-menus,
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.25rem 0.7rem;
+  height: 2.4rem;
+}
+
+.topbar-tools {
+  gap: 0.4rem;
+  border-top: 1px solid var(--line);
+}
+
+/* A hairline between the groups of buttons, so a row of a dozen icons
+   reads as the four things they are. */
+.topbar-tools > .chrome-group + .chrome-group {
+  padding-left: 0.4rem;
+  border-left: 1px solid var(--line);
+}
+
+/* The name of what is open, at the menus' far end. */
+.topbar-menus .doc-name {
+  margin-left: auto;
+}
+
+/* Where there is no row of menus — a phone's drawer, the desktop app's
+   system bar — the two rows are one, as the bar always was there. */
+.topbar.one-row {
+  flex-direction: row;
   align-items: center;
   gap: 0.55rem;
   padding: 0.3rem 0.7rem;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  /* One row tall. A bar wider than the window scrolls the whole page
-     sideways, which slid the canvas under the tool rail; and a bar that
-     wraps never shrinks anything first, so what happens instead is
-     below: the document name gives up room, then the wordmark goes,
-     then the document's facts. The browser suite asks at the two widths
-     a laptop is, so the next thing added to the bar is told. */
   height: 2.6rem;
 }
 
-/* A laptop's window: nine menus and every group of buttons at once are
-   wider than 1440 with the wordmark on, so the wordmark is what goes —
-   the name over the door, which the window's own title bar says anyway.
-   Everything that can be pressed stays. */
-@media (max-width: 1520px) {
+.topbar.one-row .topbar-menus,
+.topbar.one-row .topbar-tools {
+  display: contents;
+}
+
+.topbar.one-row .topbar-menus .doc-name {
+  margin-left: 0;
+}
+
+/* The wordmark goes first — the name over the door, which the window's
+   own title bar says anyway — and then the facts about the document,
+   whose mode, size and resolution the panel's fields say too. The
+   badges beside them stay, since a profile being loaded is said nowhere
+   else on screen. Everything that can be pressed stays. */
+@media (max-width: 1180px) {
   .brand {
     display: none;
   }
 }
 
-/* Narrower still, the facts about the document go too: its mode, size
-   and resolution are in the panel's fields. The badges beside them stay,
-   since a profile being loaded is said nowhere else on screen. */
-@media (max-width: 1380px) {
+@media (max-width: 1060px) {
   .doc-facts {
     display: none;
   }
 }
 
-/* Narrower than that the bar ran out of things to give up, and from
-   1185 down to the phone layout at 900 the zoom field was pushed past
-   the window's edge, where nothing could reach it. The button groups go next, the ones whose every button is a
-   menu row anyway: the selection's first, then the zoom's (the field
-   stays, and so do ctrl+wheel and the View menu). */
-@media (max-width: 1220px) {
-  .topbar .chrome-group[aria-label="Selection"] {
+/* A window too narrow for every group in the buttons' row lets the
+   selection's go — each is a row of the Select menu — rather than
+   wrapping the zoom field onto a third line. */
+@media (max-width: 760px) {
+  .topbar-tools .chrome-group[aria-label="Selection"] {
     display: none;
   }
 }
 
-@media (max-width: 1060px) {
-  .topbar .chrome-group[aria-label="Zoom"] {
-    display: none;
-  }
+/* A larger interface (Preferences › Appearance) fills the rows sooner,
+   so it gives the same things up at a wider window, in proportion. */
+@media (max-width: 860px) {
+  :root[data-scale="large"] .topbar-tools .chrome-group[aria-label="Selection"] { display: none; }
 }
-
-/* A larger interface (Preferences › Appearance) fills the bar sooner, so
-   it gives the same things up at a wider window, in proportion. */
-@media (max-width: 1710px) {
+@media (max-width: 950px) {
+  :root[data-scale="larger"] .topbar-tools .chrome-group[aria-label="Selection"] { display: none; }
+}
+@media (max-width: 1330px) {
   :root[data-scale="large"] .brand { display: none; }
 }
-@media (max-width: 1555px) {
+@media (max-width: 1195px) {
   :root[data-scale="large"] .doc-facts { display: none; }
 }
-@media (max-width: 1375px) {
-  :root[data-scale="large"] .topbar .chrome-group[aria-label="Selection"] { display: none; }
-}
-@media (max-width: 1195px) {
-  :root[data-scale="large"] .topbar .chrome-group[aria-label="Zoom"] { display: none; }
-}
-@media (max-width: 1100px) {
-  :root[data-scale="large"] .topbar .chrome-group[aria-label="Document"] { display: none; }
-}
-@media (max-width: 1900px) {
+@media (max-width: 1475px) {
   :root[data-scale="larger"] .brand { display: none; }
 }
-@media (max-width: 1725px) {
-  :root[data-scale="larger"] .doc-facts { display: none; }
-}
-@media (max-width: 1525px) {
-  :root[data-scale="larger"] .topbar .chrome-group[aria-label="Selection"] { display: none; }
-}
 @media (max-width: 1325px) {
-  :root[data-scale="larger"] .topbar .chrome-group[aria-label="Zoom"] { display: none; }
-}
-@media (max-width: 1225px) {
-  :root[data-scale="larger"] .topbar .chrome-group[aria-label="Document"] { display: none; }
+  :root[data-scale="larger"] .doc-facts { display: none; }
 }
 
 .brand {
@@ -2121,15 +2143,13 @@ body {
      than the window makes the whole page slide sideways. Wrapping is the
      backstop for a window narrower still. */
   .brand,
-  .doc-chip,
-  /* The document and zoom buttons go the same way and for the same
-     reason: everything they do is still on the menus, and the bar has
-     to stay short enough to leave a canvas under it. */
-  .wide-only {
+  .doc-chip {
     display: none;
   }
 
-  .topbar {
+  .topbar-menus,
+  .topbar-tools,
+  .topbar.one-row {
     flex-wrap: wrap;
     /* And it grows to hold what it wrapped. The bar is one row tall by
        fixed height on a wide window, which is right while nothing wraps
@@ -2160,7 +2180,7 @@ body {
    the rulers go too, over a canvas a few hundred pixels across, where
    every pixel they hold is picture that cannot be seen. */
 @media (max-width: 640px), (max-height: 500px) {
-  .topbar {
+  .topbar.one-row {
     flex-wrap: nowrap;
     height: auto;
     min-height: 2.6rem;
