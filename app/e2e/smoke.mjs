@@ -364,7 +364,7 @@ const menuClick = async (menu, item) => {
 
 // 1. Empty document: canvas transparent, empty-state hint shown.
 assert((await canvasPixel(100, 100))[3] === 0, "empty doc renders transparent");
-assert(await page.isVisible("text=Drag on the canvas"), "empty layers hint");
+assert(await page.isVisible("text=No layers yet"), "empty layers hint");
 
 // 1b. Chrome: tools are glyphs, document actions live in menus, and a menu
 // closes the ways a menu is expected to.
@@ -14473,6 +14473,63 @@ assert(
   );
   await done.click();
   await page.waitForTimeout(150);
+}
+
+// 9cg. Said where it is needed: an empty page's panel names the ways
+// in, the rail's strips of swatches say what their "+" adds to, and a
+// name beside a choice keeps to one line rather than wrapping beside a
+// choice cut off at the panel's edge.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const empty = await page.locator(".panel li.empty").textContent();
+  assert(empty.includes("drag") && empty.includes("text tool") && empty.includes("picture"), `the empty panel names the ways in (${empty})`);
+  const box = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(box.x + 40, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 160, box.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await pickTool("Move");
+  await page.locator(".panel ul.layer-list li[data-id]").first().click();
+  await page.waitForTimeout(150);
+  const captions = await page.locator('nav[aria-label="Tools"] .palette-caption').allTextContents();
+  assert(
+    captions.includes("Palette") && captions.includes("Styles"),
+    `the rail's strips say what they are (${captions})`,
+  );
+  await page.selectOption('select[aria-label="Fill type"]', { index: 1 });
+  await page.waitForTimeout(200);
+  const spread = page.locator(".layer-props label.row", { has: page.locator('select[aria-label="Gradient spread"]') });
+  const h = (await spread.boundingBox()).height;
+  assert(h < 36, `"Past the ends" keeps to one line beside its choice (${h} high)`);
+  const fits = await spread.evaluate((row) => row.getBoundingClientRect().right <= row.parentElement.getBoundingClientRect().right + 1);
+  assert(fits, "and the choice stays inside the panel");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  // A text block: the alignment in force is the one marked, and the
+  // font's face takes the rest of its line.
+  await pickTool("Text");
+  await page.mouse.click(box.x + 300, box.y + 200);
+  await page.keyboard.press("Escape");
+  await pickTool("Move");
+  await page.locator(".panel ul.layer-list li[data-id]").first().click();
+  await page.waitForTimeout(200);
+  const looks = await page.evaluate(() =>
+    [...document.querySelectorAll('[aria-label="Text alignment"] button')].map((b) => getComputedStyle(b).color),
+  );
+  const accent = await page.evaluate(() => getComputedStyle(document.querySelector('[aria-label="Text alignment"] button.active')).color);
+  assert(
+    looks.filter((c) => c === accent).length === 1,
+    `only the alignment in force is marked (${looks})`,
+  );
+  const face = await page.evaluate(() => {
+    const sel = document.querySelector('select[aria-label="Font"]').getBoundingClientRect();
+    const row = document.querySelector(".font-row").getBoundingClientRect();
+    return Math.round(row.right - sel.right);
+  });
+  assert(face <= 2, `the face's choice runs to the panel's edge (${face} short)`);
 }
 
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held

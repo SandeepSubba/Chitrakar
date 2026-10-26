@@ -636,6 +636,14 @@ body {
   color: var(--text);
 }
 
+/* The one in force — a text block's alignment — marked as the active
+   tool is, not left looking like the others. */
+.align-bar button.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
 /* What the buttons line layers up with: a row of its own under them. */
 .align-bar .align-to {
   grid-column: 1 / -1;
@@ -824,8 +832,11 @@ body {
 }
 
 .panel li.empty {
-  padding: 0.5rem 0.2rem;
-  font-size: 0.8rem;
+  padding: 0.6rem 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
 }
 
 .layer-props {
@@ -933,6 +944,19 @@ body {
   flex-direction: row;
   align-items: center;
   gap: 0.4rem;
+}
+
+/* A name and a choice on one line: the name keeps to one line and the
+   choice takes the rest, shrinking before it pushes past the panel.
+   "Past the ends" had wrapped onto three lines beside a choice cut off
+   at the edge. */
+.layer-props label.row:has(> select) {
+  white-space: nowrap;
+}
+
+.layer-props label.row > select {
+  flex: 1;
+  min-width: 0;
 }
 
 .layer-props input[type="color"] {
@@ -2311,6 +2335,11 @@ body {
     flex-wrap: nowrap;
   }
 
+  /* Lying in a row, the swatches say what they are by where they sit. */
+  .toolbar .palette-caption {
+    display: none;
+  }
+
   /* The shape tools' flyout opens upward: below the rail is off the
      screen. */
   .tool-flyout {
@@ -2615,6 +2644,18 @@ body {
   flex-wrap: wrap;
   max-width: 7rem;
 }
+/* A word over a strip of swatches in the rail: what the "+" adds to. */
+.palette-caption {
+  flex-basis: 100%;
+  margin-top: 0.25rem;
+  font-size: 0.52rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--muted);
+}
+
 .palette .swatch {
   width: 1rem;
   height: 1rem;
@@ -2740,10 +2781,71 @@ button.fold:hover {
   margin-bottom: 0.35rem;
 }
 
-/* A layer's own buttons that name no style of their own — Auto colour,
-   Reset curve, Load another .cube — dressed as the panel's other
-   buttons rather than as the browser's grey slabs. */
-.layer-props button:not([class]),
+/* A text block's font: the name and the face on one line, the face
+   taking the rest of it, and the bold, italic and the rest on a line
+   under them. They had stood on three lines, the face's choice a
+   fixed width short of the panel's edge. */
+.layer-props .font-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.4rem;
+}
+
+.layer-props .font-row > label { order: 0; }
+.layer-props .font-row > select { order: 1; flex: 1; min-width: 0; }
+.layer-props .font-row::before {
+  content: "";
+  order: 2;
+  flex-basis: 100%;
+}
+.layer-props .font-row > button {
+  order: 3;
+  display: grid;
+  place-items: center;
+  min-width: 1.75rem;
+  height: 1.6rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.layer-props .font-row > button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.layer-props .font-row > button.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.layer-props .font-row > button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* And the path it runs along, beside its name. */
+.layer-props .along-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.layer-props .along-row > select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Auto levels and Auto colour dressed as the panel's other buttons
+   rather than as the browser's grey slabs. (Only these, by name: a
+   rule over every unnamed button in the panel also reached the
+   alignment and channel buttons, which have looks of their own.) */
 .layer-props button.auto-levels {
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -2755,13 +2857,8 @@ button.fold:hover {
   cursor: pointer;
 }
 
-.layer-props button:not([class]):hover,
 .layer-props button.auto-levels:hover {
   background: color-mix(in srgb, var(--text) 10%, transparent);
-}
-
-.layer-props button:not([class]) {
-  align-self: flex-start;
 }
 
 /* Waiting for the click that answers it, over the rule above. */

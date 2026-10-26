@@ -10104,6 +10104,10 @@ export function App() {
               out of the palette, and the layers that used it keep the
               colour they were drawn in. */}
           <div className="palette" role="group" aria-label="Palette">
+            {/* What the row is, said once: a lone "+" under the colour
+                in hand said nothing, and a second one under it for the
+                styles said less. */}
+            <span className="palette-caption">Palette</span>
             {swatches.map((sw, i) => (
               <button
                 key={i}
@@ -10181,6 +10185,7 @@ export function App() {
               says the name as well. */}
           {(styles.length > 0 || selected !== null) && (
             <div className="palette styles" role="group" aria-label="Styles">
+              <span className="palette-caption">Styles</span>
               {styles.map((st) => (
                 <button
                   key={st.name}
@@ -11656,7 +11661,14 @@ export function App() {
               </li>
             ))}
             {layers.length === 0 && (
-              <li className="muted empty">Drag on the canvas to add shapes</li>
+              <li className="muted empty">
+                {/* The three ways in, for a first look at an empty page:
+                    it said only the first. */}
+                <span>
+                  No layers yet. Pick a shape on the rail and drag on the
+                  page, type with the text tool, or drop a picture onto it.
+                </span>
+              </li>
             )}
           </ul>
           {/* Nothing to line up when every layer picked works on the
@@ -14121,6 +14133,7 @@ function CurveEditor({
       </svg>
       <button
         type="button"
+        className="mask-button curve-reset"
         onClick={() =>
           onEdit(
             [
@@ -14652,7 +14665,7 @@ function KindProps({
           <p className="muted" aria-label="Colour lookup table">
             {p.name || "A table"} — a grid of {p.size} a side
           </p>
-          <button type="button" onClick={onLoadLookup} aria-label="Load another table">
+          <button type="button" className="mask-button" onClick={onLoadLookup} aria-label="Load another table">
             Load another .cube…
           </button>
         </>
@@ -15327,7 +15340,7 @@ function KindProps({
         {/* A row of its own rather than one label around both controls:
             a label labels one control, and a toggle sharing it would be
             what the label points at. */}
-        <div className="row">
+        <div className="row font-row">
           <label htmlFor="text-font">Font</label>
           {(() => {
             // Bold always works: the family's "… Bold" cut when one is
@@ -15445,7 +15458,7 @@ function KindProps({
         </div>
         {/* A guide to run along: picking a shape copies its outline into
             the block, so the block stands alone afterwards. */}
-        <div className="row">
+        <div className="row along-row">
           <label htmlFor="text-along">Along</label>
           <select
             id="text-along"
@@ -15473,7 +15486,7 @@ function KindProps({
           Text: { ...t, width: v },
         }))}
         <label className="row">
-          Color
+          Colour
           <input
             type="color"
             value={colorToHex(t.fill)}
@@ -15718,7 +15731,7 @@ function KindProps({
                 }}
                 aria-label="Gradient spread"
               >
-                <option value="Pad">Carry the end colour on</option>
+                <option value="Pad">Hold the ends</option>
                 <option value="Reflect">Reflect</option>
                 <option value="Repeat">Repeat</option>
               </select>
