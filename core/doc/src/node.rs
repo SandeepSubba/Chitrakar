@@ -713,6 +713,10 @@ pub struct RawDevelop {
     pub blacks: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// Detail: an unsharp mask on the brightness, 0 to 150.
+    pub sharpen: f32,
+    /// Detail: edge-aware smoothing, colour hardest, 0 to 100.
+    pub noise: f32,
 }
 
 impl RasterRef {

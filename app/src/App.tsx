@@ -13312,6 +13312,16 @@ function RawDevelopDialog({
   const [clipped, setClipped] = useState<{ high: number; low: number }>({ high: 0, low: 0 });
   const canvas = useRef<HTMLCanvasElement>(null);
   const graph = useRef<HTMLCanvasElement>(null);
+  const loupe = useRef<HTMLCanvasElement>(null);
+  /** Where the square at its own size is taken, as fractions of the
+   * picture: the middle until the photograph is clicked. */
+  const [spot, setSpot] = useState<[number, number]>([0.5, 0.5]);
+  /** How the preview sits in its box, for the spot's mark. */
+  const [fit, setFit] = useState<{ ox: number; oy: number; w: number; h: number } | null>(null);
+  const LOUPE = 160;
+  /** The square's side in the photograph's own pixels: no bigger than
+   * the photograph. */
+  const square = Math.min(Math.round(LOUPE * devicePixelRatio), info.width, info.height);
   const white = s.white ?? info.asShot;
   const light = lightOf(s);
   useEffect(() => {
@@ -13354,9 +13364,32 @@ function RawDevelopDialog({
       c.width = w;
       c.height = h;
       c.getContext("2d")?.putImageData(new ImageData(pixels, w, h), 0, 0);
+      const k = Math.min(c.clientWidth / w, c.clientHeight / h);
+      setFit({ ox: (c.clientWidth - w * k) / 2, oy: (c.clientHeight - h * k) / 2, w: w * k, h: h * k });
     });
     return () => cancelAnimationFrame(frame);
   }, [s, session, before, showClip]);
+  // The square at its own size: Detail is judged here, since a preview
+  // made smaller shows neither sharpening nor noise.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const c = loupe.current;
+      if (!c) return;
+      const size = Math.round(LOUPE * devicePixelRatio);
+      let out: Uint8Array;
+      try {
+        out = session.raw_square(JSON.stringify(before ? RAW_DEFAULTS : s), spot[0], spot[1], size);
+      } catch {
+        return;
+      }
+      const view = new DataView(out.buffer, out.byteOffset, 8);
+      const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+      c.width = w;
+      c.height = h;
+      c.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4), w, h), 0, 0);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [s, session, before, spot]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
   const row = (label: string, k: Exclude<keyof RawSettings, "white">, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
@@ -13373,13 +13406,17 @@ function RawDevelopDialog({
     </label>
   );
   const pick = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!picking) return;
     const c = e.currentTarget;
     const r = c.getBoundingClientRect();
     // The picture is fitted inside the canvas box, its proportions kept.
     const k = Math.min(r.width / c.width, r.height / c.height);
     const [ox, oy] = [(r.width - c.width * k) / 2, (r.height - c.height * k) / 2];
     const [x, y] = [Math.floor((e.clientX - r.left - ox) / k), Math.floor((e.clientY - r.top - oy) / k)];
+    if (!picking) {
+      // A click elsewhere is where to look at its own size.
+      if (x >= 0 && y >= 0 && x < c.width && y < c.height) setSpot([(x + 0.5) / c.width, (y + 0.5) / c.height]);
+      return;
+    }
     setPicking(false);
     const got = session.raw_white_at(x, y);
     if (got) setS((o) => ({ ...o, white: JSON.parse(got) as [number, number] }));
@@ -13406,13 +13443,27 @@ function RawDevelopDialog({
         </h2>
         <div className="develop-body">
           <div className="develop-picture">
-            <canvas
-              ref={canvas}
-              className={picking ? "picking" : undefined}
-              onPointerDown={pick}
-              aria-label="Developed picture"
-              data-before={before ? "" : undefined}
-            />
+            <div className="develop-frame">
+              <canvas
+                ref={canvas}
+                className={picking ? "picking" : undefined}
+                onPointerDown={pick}
+                aria-label="Developed picture"
+                data-before={before ? "" : undefined}
+              />
+              {fit && (
+                <span
+                  className="develop-spot"
+                  aria-hidden
+                  style={{
+                    left: fit.ox + spot[0] * fit.w,
+                    top: fit.oy + spot[1] * fit.h,
+                    width: Math.max(6, (square * fit.w) / info.width),
+                    height: Math.max(6, (square * fit.w) / info.width),
+                  }}
+                />
+              )}
+            </div>
             <p className="modal-aside">
               {info.width} × {info.height} px
               {before ? " — before" : picking ? " — click something that should be grey" : ""}
@@ -13502,6 +13553,16 @@ function RawDevelopDialog({
             <h3 className="props-head">Colour</h3>
             {row("Vibrance", "vibrance", -100, 100, 1)}
             {row("Saturation", "saturation", -100, 100, 1)}
+            <h3 className="props-head">Detail</h3>
+            <canvas
+              ref={loupe}
+              className="develop-loupe"
+              style={{ width: LOUPE, height: LOUPE }}
+              aria-label="At its own size"
+              title="The photograph at its own size, where it was last clicked: sharpening and noise show here"
+            />
+            {row("Sharpening", "sharpen", 0, 150, 1)}
+            {row("Noise reduction", "noise", 0, 100, 1)}
           </div>
         </div>
         <div className="modal-actions">

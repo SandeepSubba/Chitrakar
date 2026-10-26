@@ -15,6 +15,10 @@ export type RawSettings = {
   blacks: number;
   vibrance: number;
   saturation: number;
+  /** Detail: unsharp mask on the brightness, 0 to 150. */
+  sharpen: number;
+  /** Detail: edge-aware smoothing, 0 to 100. */
+  noise: number;
 };
 
 /** What the develop window starts from: the size and the camera's own
@@ -30,6 +34,8 @@ export const RAW_DEFAULTS: RawSettings = {
   blacks: 0,
   vibrance: 0,
   saturation: 0,
+  sharpen: 0,
+  noise: 0,
 };
 
 /** Lightroom's names for a light, and what they are. */

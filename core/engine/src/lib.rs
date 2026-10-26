@@ -8955,6 +8955,25 @@ impl Session {
         )
     }
 
+    /// A square of the open raw file at its own size, developed in full
+    /// with `settings` — Detail and all — centred at (`fx`, `fy`),
+    /// fractions of the picture across and down.
+    pub fn raw_square(
+        &self,
+        settings: &RawDevelop,
+        fx: f32,
+        fy: f32,
+        size: u32,
+    ) -> Result<SourceImage, EngineError> {
+        let raw = self
+            .raw
+            .as_ref()
+            .ok_or_else(|| EngineError::BadCommand("no raw file is open".into()))?;
+        Ok(raw
+            .photo
+            .develop_square(settings, fx, fy, size.clamp(8, 1024)))
+    }
+
     /// Settings worked out from the open raw file, as a raw developer's
     /// Auto, from `settings` (whose white balance and colour are kept).
     pub fn raw_auto(&mut self, settings: &RawDevelop) -> Result<RawDevelop, EngineError> {

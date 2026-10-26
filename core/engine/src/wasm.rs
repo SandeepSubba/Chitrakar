@@ -1392,6 +1392,27 @@ impl WasmSession {
         Ok(out)
     }
 
+    /// A square of the open raw file at its own size, developed in full
+    /// (Detail and all), centred at fractions (`fx`, `fy`) of the picture:
+    /// width and height as two little-endian u32s, then RGBA.
+    pub fn raw_square(
+        &self,
+        settings: &str,
+        fx: f32,
+        fy: f32,
+        size: u32,
+    ) -> Result<Vec<u8>, JsError> {
+        let img = self
+            .inner
+            .raw_square(&raw_settings(settings)?, fx, fy, size)
+            .map_err(to_js)?;
+        let mut out = Vec::with_capacity(8 + img.rgba8.len());
+        out.extend_from_slice(&img.width.to_le_bytes());
+        out.extend_from_slice(&img.height.to_le_bytes());
+        out.extend_from_slice(&img.rgba8);
+        Ok(out)
+    }
+
     /// The white balance, JSON `[kelvin, tint]`, that makes a point of the
     /// last preview grey; undefined where it cannot.
     pub fn raw_white_at(&self, x: u32, y: u32) -> Option<String> {

@@ -15060,6 +15060,29 @@ assert(
   const ev = Number(await win.locator('input[aria-label="Exposure"]').inputValue());
   assert(ev < 1, `Auto takes the exposure back down (${ev})`);
   assert((await win.locator('select[aria-label="Light"]').inputValue()) === "Custom", "and leaves the light alone");
+  // Detail is judged at the photograph's own size: the square follows a
+  // click on the photograph, and sharpening changes what is in it.
+  const loupe = win.locator('canvas[aria-label="At its own size"]');
+  const loupePixels = () =>
+    loupe.evaluate((c) => Array.from(c.getContext("2d").getImageData(0, 0, c.width, c.height).data));
+  const unsharp = await loupePixels();
+  assert(unsharp.length > 0 && (await loupe.evaluate((c) => c.width)) === 32, "the square at its own size, as big as the photograph allows");
+  await win.locator('input[aria-label="Sharpening"]').fill("150");
+  await settle();
+  const sharp = await loupePixels();
+  assert(sharp.some((v, i) => v !== unsharp[i]), "sharpening shows in the square");
+  const spot = win.locator(".develop-spot");
+  const before9 = await spot.boundingBox();
+  const pic = await win.locator('canvas[aria-label="Developed picture"]').boundingBox();
+  await page.mouse.click(pic.x + pic.width * 0.5 + 40, pic.y + pic.height * 0.5);
+  await settle();
+  const after9 = await spot.boundingBox();
+  assert(after9.x > before9.x + 20, `a click moves where the square is taken (${before9.x} to ${after9.x})`);
+  assert(
+    after9.x >= pic.x && after9.x + after9.width <= pic.x + pic.width + 1,
+    `and its mark is on the photograph, the square's size (${after9.width.toFixed(0)} wide)`,
+  );
+  await win.locator('input[aria-label="Sharpening"]').fill("0");
   await win.locator('input[aria-label="Exposure"]').fill("-1");
   await win.locator('input[aria-label="Temperature"]').fill("800");
   await settle();

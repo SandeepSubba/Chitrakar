@@ -10204,6 +10204,21 @@ without reading anything else.*
   a run of photographs taken under one light. Before this, the engine
   held one open raw file, so a drop of three opened the last and the
   others vanished without a word.
+  **Detail** (`develop::detail`, settings `sharpen` and `noise`):
+  noise reduction treats the two kinds differently — colour noise is
+  blotches, and the eye reads colour coarsely, so the colour-difference
+  channels get a tent blur (two running-sum boxes, as cheap at radius
+  four as one) wider as the slider rises; brightness noise is grain, so
+  luma gets an edge-aware three-by-three average whose likeness weights
+  are tabled. Sharpening is an unsharp mask of radius one on luma alone,
+  so edges get no coloured halo. Worked in bands of 128 rows with the
+  rows its filters reach either side (a test holds the seams invisible),
+  so 24 megapixels cost a band of working space; 2 s natively, the whole
+  place about 6.5 s in the browser (a first version with a five-by-five
+  bilateral and two exponentials a neighbour took 26). Since a preview
+  made smaller shows neither, the window has a square of the photograph
+  at its own size, developed in full (`RawPhoto::develop_square`), taken
+  where the photograph was last clicked and marked there.
   **HEIC and AVIF** go to the browser's decoder, which has AVIF
   everywhere current and HEIC only on Apple's systems; a HEIC that
   cannot be read says how to get a JPEG instead rather than what the

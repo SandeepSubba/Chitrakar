@@ -4058,3 +4058,27 @@ button.fold:hover {
   font-weight: 400;
   color: var(--muted);
 }
+.develop-frame {
+  position: relative;
+}
+.develop-frame canvas {
+  display: block;
+}
+.develop-spot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: 1px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.develop-loupe {
+  align-self: center;
+  background: var(--bg);
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+.develop-settings {
+  max-height: min(70vh, 40rem);
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}

@@ -312,7 +312,61 @@ impl RawPhoto {
                     .copy_from_slice(&[c[0], c[1], c[2], 255]);
             }
         }
+        let upright = detail(&upright, w, h, s.sharpen, s.noise).unwrap_or(upright);
         let (width, height, rgba8) = orient(upright, w, h, self.orientation);
+        SourceImage {
+            width: width as u32,
+            height: height as u32,
+            rgba8,
+        }
+    }
+
+    /// A square of the photograph at its own size — one sensor site a
+    /// pixel — developed in full, Detail and all: what sharpening and
+    /// noise reduction are judged on, since a preview made smaller shows
+    /// neither. Centred at (`fx`, `fy`), fractions of the developed
+    /// picture across and down, and held inside it.
+    pub fn develop_square(&self, s: &RawDevelop, fx: f32, fy: f32, size: u32) -> SourceImage {
+        let look = Look::new(self, s);
+        let (uw, uh) = self.size();
+        let size = (size as usize).min(self.width).min(self.height).max(1);
+        let f = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.5
+            }
+        };
+        let (ux, uy) = (
+            ((f(fx) * uw as f32) as usize).min(uw as usize - 1),
+            ((f(fy) * uh as f32) as usize).min(uh as usize - 1),
+        );
+        let (cx, cy) = unturn(ux, uy, self.width, self.height, self.orientation);
+        // The square on the sensor, and three sites round it for Detail.
+        let x0 = cx.saturating_sub(size / 2).min(self.width - size);
+        let y0 = cy.saturating_sub(size / 2).min(self.height - size);
+        const M: usize = 3;
+        let (mx0, my0) = (x0.saturating_sub(M), y0.saturating_sub(M));
+        let (mx1, my1) = (
+            (x0 + size + M).min(self.width),
+            (y0 + size + M).min(self.height),
+        );
+        let (mw, mh) = (mx1 - mx0, my1 - my0);
+        let mut px = vec![0u8; mw * mh * 4];
+        for y in 0..mh {
+            for x in 0..mw {
+                let c = look.finish(self.demosaic_at(my0 + y, mx0 + x, &look.wb));
+                px[(y * mw + x) * 4..(y * mw + x) * 4 + 4]
+                    .copy_from_slice(&[c[0], c[1], c[2], 255]);
+            }
+        }
+        let px = detail(&px, mw, mh, s.sharpen, s.noise).unwrap_or(px);
+        let mut square = Vec::with_capacity(size * size * 4);
+        for y in (y0 - my0)..(y0 - my0 + size) {
+            let from = (y * mw + (x0 - mx0)) * 4;
+            square.extend_from_slice(&px[from..from + size * 4]);
+        }
+        let (width, height, rgba8) = orient(square, size, size, self.orientation);
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -438,6 +492,165 @@ impl RawPhoto {
     }
 }
 
+/// Sharpening and noise reduction on a developed picture: what a raw
+/// developer's Detail panel does, after the tone and colour. Worked in a
+/// luma and two colour-difference channels, since a raw file's noise is
+/// mostly colour blotches that can be smoothed hard without the picture
+/// going soft, and sharpening wants the brightness alone — sharpen the
+/// colour too and every edge gets a coloured halo.
+///
+/// - Noise reduction (0 to 100) does the two kinds differently. Colour
+///   noise is blotches several pixels across, and the eye reads colour at
+///   a fraction of the resolution it reads brightness, so the colour is
+///   blurred outright — a box blur run twice (a tent), wider as the slider
+///   goes up, costing the same however wide. Brightness noise is grain,
+///   and blurring it would blur the picture, so it is an edge-aware
+///   average of the three by three round each pixel: neighbours count by
+///   how alike in brightness they are, so an edge stays where it is and
+///   grain is averaged away.
+/// - Sharpening (0 to 150) is an unsharp mask of radius one on the
+///   brightness, after the smoothing.
+///
+/// Done in bands of rows, each read with the rows either side its filters
+/// reach, so a 24-megapixel photograph costs a band's worth of working
+/// space rather than three more copies of itself.
+pub fn detail(rgba: &[u8], w: usize, h: usize, sharpen: f32, noise: f32) -> Option<Vec<u8>> {
+    let sharpen = if sharpen.is_finite() {
+        sharpen.clamp(0.0, 150.0) / 100.0
+    } else {
+        0.0
+    };
+    let noise = if noise.is_finite() {
+        noise.clamp(0.0, 100.0) / 100.0
+    } else {
+        0.0
+    };
+    if (sharpen == 0.0 && noise == 0.0) || w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return None;
+    }
+    const BAND: usize = 128;
+    // How far the colour blur reaches: a tent of two boxes of this radius.
+    let radius = if noise > 0.0 {
+        1 + (noise * 3.0).round() as usize
+    } else {
+        0
+    };
+    let reach = 2 * radius + 2;
+    let mut out = rgba[..w * h * 4].to_vec();
+    // The likeness weights for brightness, tabled at a quarter of a level.
+    let range = 2.0 + noise * 14.0;
+    let like: Vec<f32> = (0..1024)
+        .map(|i| {
+            let d = i as f32 / 4.0;
+            (-(d * d) / (2.0 * range * range)).exp()
+        })
+        .collect();
+    for top in (0..h).step_by(BAND) {
+        let bottom = (top + BAND).min(h);
+        let (r0, r1) = (top.saturating_sub(reach), (bottom + reach).min(h));
+        let rows = r1 - r0;
+        let n = rows * w;
+        let (mut y, mut cb, mut cr) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
+        for i in 0..n {
+            let p = &rgba[(r0 * w + i) * 4..(r0 * w + i) * 4 + 3];
+            let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+            let l = 0.299 * r + 0.587 * g + 0.114 * b;
+            y[i] = l;
+            cb[i] = b - l;
+            cr[i] = r - l;
+        }
+        if noise > 0.0 {
+            for ch in [&mut cb, &mut cr] {
+                let blurred = tent(ch, w, rows, radius);
+                for (v, b) in ch.iter_mut().zip(blurred) {
+                    *v += (b - *v) * noise.sqrt();
+                }
+            }
+            let src = y.clone();
+            for ly in 0..rows {
+                let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
+                for x in 0..w {
+                    let (left, right) = (x.saturating_sub(1), (x + 1).min(w - 1));
+                    let c = src[ly * w + x];
+                    let (mut sum, mut weight) = (0f32, 0f32);
+                    for (yy, ky) in [(up, 0.5f32), (ly, 1.0), (down, 0.5)] {
+                        let row = &src[yy * w..yy * w + w];
+                        for (xx, kx) in [(left, 0.5f32), (x, 1.0), (right, 0.5)] {
+                            let v = row[xx];
+                            let k = ky * kx * like[(((v - c).abs() * 4.0) as usize).min(1023)];
+                            sum += k * v;
+                            weight += k;
+                        }
+                    }
+                    y[ly * w + x] = c + (sum / weight - c) * noise;
+                }
+            }
+        }
+        for py in top..bottom {
+            let ly = py - r0;
+            let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
+            for px in 0..w {
+                let c = ly * w + px;
+                let mut l = y[c];
+                if sharpen > 0.0 {
+                    let (left, right) = (px.saturating_sub(1), (px + 1).min(w - 1));
+                    let mut blur = 0f32;
+                    for (yy, ky) in [(up, 0.25f32), (ly, 0.5), (down, 0.25)] {
+                        let row = &y[yy * w..yy * w + w];
+                        blur += ky * (0.25 * row[left] + 0.5 * row[px] + 0.25 * row[right]);
+                    }
+                    l += (l - blur) * sharpen * 2.0;
+                }
+                let (b, r) = (cb[c] + l, cr[c] + l);
+                let g = (l - 0.299 * r - 0.114 * b) / 0.587;
+                let o = &mut out[(py * w + px) * 4..(py * w + px) * 4 + 3];
+                o[0] = r.round().clamp(0.0, 255.0) as u8;
+                o[1] = g.round().clamp(0.0, 255.0) as u8;
+                o[2] = b.round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// A box blur of `radius` run twice each way over a `w` by `h` channel —
+/// a tent, near enough a gaussian — with the edges held. A running sum,
+/// so as cheap at radius four as at one.
+fn tent(src: &[f32], w: usize, h: usize, radius: usize) -> Vec<f32> {
+    let run = |line: &mut [f32], scratch: &mut Vec<f32>| {
+        let n = line.len();
+        scratch.clear();
+        scratch.extend_from_slice(line);
+        let at = |i: isize| scratch[i.clamp(0, n as isize - 1) as usize];
+        let r = radius as isize;
+        let k = 1.0 / (2 * r + 1) as f32;
+        let mut sum: f32 = (-r..=r).map(at).sum();
+        for (i, v) in line.iter_mut().enumerate() {
+            *v = sum * k;
+            let i = i as isize;
+            sum += at(i + r + 1) - at(i - r);
+        }
+    };
+    let mut out = src.to_vec();
+    let mut scratch = Vec::new();
+    for _ in 0..2 {
+        for row in out.chunks_mut(w) {
+            run(row, &mut scratch);
+        }
+        let mut column = vec![0f32; h];
+        for x in 0..w {
+            for y in 0..h {
+                column[y] = out[y * w + x];
+            }
+            run(&mut column, &mut scratch);
+            for y in 0..h {
+                out[y * w + x] = column[y];
+            }
+        }
+    }
+    out
+}
+
 /// Settings worked out from the picture, as a raw developer's Auto: the
 /// exposure that puts its log-average brightness at middle grey (within
 /// two stops), highlights pulled down by how far past white that leaves
@@ -523,17 +736,22 @@ impl RawPreview {
         if x >= ow || y >= oh {
             return None;
         }
-        // The inverse of `orient`'s placing.
-        Some(match o {
-            2 => (w - 1 - x, y),
-            3 => (w - 1 - x, h - 1 - y),
-            4 => (x, h - 1 - y),
-            5 => (y, x),
-            6 => (y, h - 1 - x),
-            7 => (w - 1 - y, h - 1 - x),
-            8 => (w - 1 - y, x),
-            _ => (x, y),
-        })
+        Some(unturn(x, y, w, h, o))
+    }
+}
+
+/// Where a point of a picture turned upright by `orient` was before the
+/// turn, in a `w` by `h` picture as it was: `orient`'s placing undone.
+fn unturn(x: usize, y: usize, w: usize, h: usize, o: u8) -> (usize, usize) {
+    match o {
+        2 => (w - 1 - x, y),
+        3 => (w - 1 - x, h - 1 - y),
+        4 => (x, h - 1 - y),
+        5 => (y, x),
+        6 => (y, h - 1 - x),
+        7 => (w - 1 - y, h - 1 - x),
+        8 => (w - 1 - y, x),
+        _ => (x, y),
     }
 }
 
@@ -1080,6 +1298,137 @@ mod tests {
             (Some([5000.0, 3.0]), 20.0),
             "colour is kept"
         );
+    }
+
+    /// A grey of `level` with noise of `spread` levels, and a hard edge
+    /// down the middle of it.
+    fn noisy(level: u8, spread: u8) -> Vec<u8> {
+        let mut seed = 7u32;
+        let mut out = Vec::new();
+        for _y in 0..40 {
+            for x in 0..40 {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                let jitter = (seed >> 16) as i32 % (spread as i32 * 2 + 1) - spread as i32;
+                let base = if x < 20 {
+                    level as i32
+                } else {
+                    level as i32 + 80
+                };
+                let v = (base + jitter).clamp(0, 255) as u8;
+                // Colour noise too: the channels jitter apart.
+                out.extend_from_slice(&[v, (base - jitter / 2).clamp(0, 255) as u8, v, 255]);
+            }
+        }
+        out
+    }
+
+    fn spread_of(px: &[u8], x0: usize, x1: usize) -> f32 {
+        let vals: Vec<f32> = (5..35)
+            .flat_map(|y| (x0..x1).map(move |x| (y, x)))
+            .map(|(y, x)| px[(y * 40 + x) * 4 + 1] as f32)
+            .collect();
+        let mean = vals.iter().sum::<f32>() / vals.len() as f32;
+        (vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / vals.len() as f32).sqrt()
+    }
+
+    #[test]
+    fn noise_reduction_smooths_grain_and_keeps_the_edge() {
+        let px = noisy(80, 12);
+        let smooth = detail(&px, 40, 40, 0.0, 80.0).unwrap();
+        assert!(
+            spread_of(&smooth, 3, 16) < spread_of(&px, 3, 16) * 0.6,
+            "grain smoothed"
+        );
+        // Across the edge it is still an edge: the two sides as far apart.
+        let side = |p: &[u8], x: usize| {
+            (5..35).map(|y| p[(y * 40 + x) * 4 + 1] as f32).sum::<f32>() / 30.0
+        };
+        assert!(
+            side(&smooth, 22) - side(&smooth, 17) > 70.0,
+            "the edge kept"
+        );
+        assert!(
+            detail(&px, 40, 40, 0.0, 0.0).is_none(),
+            "nothing asked, nothing done"
+        );
+    }
+
+    #[test]
+    fn sharpening_steepens_an_edge_and_leaves_flat_alone() {
+        let mut px = Vec::new();
+        for _y in 0..40 {
+            for x in 0..40 {
+                let v = if x < 20 { 80 } else { 160 };
+                px.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let sharp = detail(&px, 40, 40, 100.0, 0.0).unwrap();
+        let at = |x: usize| sharp[(20 * 40 + x) * 4 + 1];
+        assert!(
+            at(19) < 80 && at(20) > 160,
+            "an overshoot either side of the edge: {} {}",
+            at(19),
+            at(20)
+        );
+        assert_eq!((at(5), at(35)), (80, 160), "flat ground untouched");
+        // Grey stays grey: only the brightness is sharpened.
+        let p = &sharp[(20 * 40 + 20) * 4..(20 * 40 + 20) * 4 + 3];
+        assert!(
+            p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1,
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn detail_in_bands_is_detail_all_at_once() {
+        // Taller than a band: the seams must not show.
+        let (w, h) = (24usize, 300usize);
+        let mut seed = 3u32;
+        let px: Vec<u8> = (0..w * h * 4)
+            .map(|i| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                if i % 4 == 3 {
+                    255
+                } else {
+                    (seed >> 24) as u8
+                }
+            })
+            .collect();
+        let whole = detail(&px, w, h, 80.0, 60.0).unwrap();
+        // Rows either side of the first seam, worked out on their own.
+        let piece = &px[(100 * w * 4)..(160 * w * 4)];
+        let part = detail(piece, w, 60, 80.0, 60.0).unwrap();
+        for y in 10..50 {
+            for x in 0..w * 4 {
+                assert_eq!(
+                    whole[(100 + y) * w * 4 + x],
+                    part[y * w * 4 + x],
+                    "row {}",
+                    100 + y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_square_at_its_own_size_is_the_develop_there() {
+        let photo = grey_card([0.8, 1.0, 0.6]);
+        let s = RawDevelop {
+            exposure: 0.5,
+            ..Default::default()
+        };
+        let full = photo.develop(&s);
+        let sq = photo.develop_square(&s, 0.75, 0.5, 8);
+        assert_eq!((sq.width, sq.height), (8, 8));
+        // Centred on (24, 8): its top left is (20, 4).
+        for (x, y) in [(0, 0), (7, 7), (3, 4)] {
+            let a = &full.rgba8[(((4 + y) * 32 + 20 + x) * 4) as usize..][..4];
+            let b = &sq.rgba8[((y * 8 + x) * 4) as usize..][..4];
+            assert_eq!(a, b, "at {x},{y}");
+        }
+        // Held inside the picture at the corner.
+        let corner = photo.develop_square(&s, 1.0, 1.0, 8);
+        assert_eq!((corner.width, corner.height), (8, 8));
     }
 
     #[test]
