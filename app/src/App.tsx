@@ -11132,7 +11132,7 @@ export function App() {
               aria-label="Add adjustment layer"
             >
               <option value="" disabled>
-                +FX
+                + Adjust
               </option>
               <optgroup label="Over everything below">
                 {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
@@ -11155,78 +11155,81 @@ export function App() {
                   </optgroup>
                 )}
             </select>
-            <button
-              onClick={() => reorderSelected(1)}
-              // Enabled when something picked would actually move —
-              // asked of the same working-out that does the moving, so
-              // the button cannot say yes and then do nothing.
-              disabled={reorderCommands(1).length === 0}
-              title="Raise layer"
-              aria-label="Raise layer"
-            >
-              <Icon name="raise" size={16} />
-            </button>
-            <button
-              onClick={() => reorderSelected(-1)}
-              disabled={reorderCommands(-1).length === 0}
-              title="Lower layer"
-              aria-label="Lower layer"
-            >
-              <Icon name="lower" size={16} />
-            </button>
-            <button
-              onClick={groupSelection}
-              disabled={selectionSet.length === 0}
-              title="Group selected layers (ctrl-click to select several)"
-              aria-label="Group selected layers (ctrl-click to select several)"
-            >
-              <Icon name="group" size={16} />
-            </button>
-            <button
-              onClick={ungroupSelection}
-              disabled={selectedLayer?.kind !== "group"}
-              title="Ungroup selected group"
-              aria-label="Ungroup selected group"
-            >
-              <Icon name="ungroup" size={16} />
-            </button>
-            <button
-              onClick={clipSelection}
-              disabled={!clippable}
-              aria-pressed={selectedLayer?.clipped ?? false}
-              title="Clip to the layer below (Ctrl+Alt+G)"
-              aria-label="Clip to the layer below"
-            >
-              <Icon name="clip" size={16} />
-            </button>
-            <button
-              onClick={instanceSelected}
-              disabled={selected === null}
-              title="Make a live copy: it follows this layer"
-              aria-label="Make a live copy"
-            >
-              <Icon name="instance" size={16} />
-            </button>
-            <button
-              onClick={duplicateSelected}
-              disabled={selected === null}
-              title="Duplicate layer (Ctrl+D)"
-              aria-label="Duplicate layer"
-            >
-              <Icon name="duplicate" size={16} />
-            </button>
-            <button
-              onClick={deleteSelected}
-              disabled={selected === null}
-              title="Delete selected layer (Del)"
-              aria-label="Delete selected layer"
-            >
-              <Icon name="trash" size={16} />
-            </button>
+            <div className="panel-head-actions">
+              <button
+                onClick={() => reorderSelected(1)}
+                // Enabled when something picked would actually move —
+                // asked of the same working-out that does the moving, so
+                // the button cannot say yes and then do nothing.
+                disabled={reorderCommands(1).length === 0}
+                title="Raise layer"
+                aria-label="Raise layer"
+              >
+                <Icon name="raise" size={16} />
+              </button>
+              <button
+                onClick={() => reorderSelected(-1)}
+                disabled={reorderCommands(-1).length === 0}
+                title="Lower layer"
+                aria-label="Lower layer"
+              >
+                <Icon name="lower" size={16} />
+              </button>
+              <button
+                onClick={groupSelection}
+                disabled={selectionSet.length === 0}
+                title="Group selected layers (ctrl-click to select several)"
+                aria-label="Group selected layers (ctrl-click to select several)"
+              >
+                <Icon name="group" size={16} />
+              </button>
+              <button
+                onClick={ungroupSelection}
+                disabled={selectedLayer?.kind !== "group"}
+                title="Ungroup selected group"
+                aria-label="Ungroup selected group"
+              >
+                <Icon name="ungroup" size={16} />
+              </button>
+              <button
+                onClick={clipSelection}
+                disabled={!clippable}
+                aria-pressed={selectedLayer?.clipped ?? false}
+                title="Clip to the layer below (Ctrl+Alt+G)"
+                aria-label="Clip to the layer below"
+              >
+                <Icon name="clip" size={16} />
+              </button>
+              <button
+                onClick={instanceSelected}
+                disabled={selected === null}
+                title="Make a live copy: it follows this layer"
+                aria-label="Make a live copy"
+              >
+                <Icon name="instance" size={16} />
+              </button>
+              <button
+                onClick={duplicateSelected}
+                disabled={selected === null}
+                title="Duplicate layer (Ctrl+D)"
+                aria-label="Duplicate layer"
+              >
+                <Icon name="duplicate" size={16} />
+              </button>
+              <button
+                onClick={deleteSelected}
+                disabled={selected === null}
+                title="Delete selected layer (Del)"
+                aria-label="Delete selected layer"
+              >
+                <Icon name="trash" size={16} />
+              </button>
+            </div>
           </div>
           {/* Layer comps: states of the page kept by name. The one the
               page is showing now is marked; a press shows another. */}
           <div className="palette comps" role="group" aria-label="Layer comps">
+            <span className="palette-label">Comps</span>
             {comps.map((c) => (
               <button
                 key={c.name}
@@ -11249,592 +11252,6 @@ export function App() {
               +
             </button>
           </div>
-          {selectionSet.length >= 1 && (
-            <div className="align-bar" role="group" aria-label="Align layers">
-              {ALIGN_BUTTONS.map(([mode, icon, label]) => {
-                // With one layer picked the buttons say what it will be
-                // lined up with, since there is no other layer on screen
-                // to make that obvious.
-                const spread = mode.startsWith("distribute");
-                const alone = selectionSet.length < 2;
-                const title = spread
-                  ? prefs.alignTo === "page" && !alone
-                    ? `${label}, the outermost to the ${alignGround()}'s edges`
-                    : label
-                  : alone || prefs.alignTo === "page"
-                    ? `${label} to the ${alignGround()}`
-                    : prefs.alignTo === "key"
-                      ? `${label} to the layer with the handles`
-                      : label;
-                return (
-                  <button
-                    key={mode}
-                    onClick={() => alignSelection(mode)}
-                    disabled={spread && alone}
-                    title={title}
-                    aria-label={label}
-                  >
-                    <Icon name={icon} size={16} />
-                  </button>
-                );
-              })}
-              {/* What they line up with. One layer alone always goes to
-                  what it sits in, so the choice waits for two. */}
-              {selectionSet.length >= 2 && (
-                <select
-                  className="align-to"
-                  aria-label="Align to"
-                  title="What the buttons line layers up with"
-                  value={prefs.alignTo}
-                  onChange={(e) => setPrefs({ alignTo: e.target.value as AlignTo })}
-                >
-                  <option value="selection">To each other</option>
-                  <option value="key">To the key layer</option>
-                  <option value="page">To the {alignGround()}</option>
-                </select>
-              )}
-            </div>
-          )}
-          {selectionSet.length >= 2 && (
-            <div
-              className="align-bar combine-bar"
-              role="group"
-              aria-label="Combine shapes"
-            >
-              {BOOLEAN_BUTTONS.map(([op, icon, label]) => (
-                <button
-                  key={op}
-                  onClick={() => combineSelection(op)}
-                  title={label}
-                  aria-label={label}
-                >
-                  <Icon name={icon} size={16} />
-                </button>
-              ))}
-            </div>
-          )}
-          {selectedLayer && (
-            <div className="layer-props">
-              {/* A layer following a kept style says which, and can be
-                  let go of it: kept again, the style's look comes here
-                  too, which is the point of following one and the
-                  surprise if it was forgotten. */}
-              {selectedLayer.style && (
-                <div className="row copy-of">
-                  <span>Follows the style {selectedLayer.style}</span>
-                  <button
-                    type="button"
-                    onClick={() => run({ SetStyleLink: { id: selectedLayer.id, style: null } })}
-                    aria-label="Detach from the style"
-                    title="Keep this look, but stop following the style"
-                  >
-                    Detach
-                  </button>
-                </div>
-              )}
-              {/* A live copy says what it follows, and takes you there:
-                  what the copy draws is not in the copy, so the panel has
-                  to point at where it is. */}
-              {selectedLayer.copies !== 0 && (
-                <div className="row copy-of">
-                  <span>
-                    Follows{" "}
-                    {layers.find((l) => l.id === selectedLayer.copies)?.name ??
-                      "a layer that is gone"}
-                  </span>
-                  <button
-                    type="button"
-                    disabled={
-                      !layers.some((l) => l.id === selectedLayer.copies)
-                    }
-                    onClick={() => {
-                      setSelected(selectedLayer.copies);
-                      setMultiSel([]);
-                    }}
-                    aria-label="Go to the original"
-                  >
-                    Go to it
-                  </button>
-                </div>
-              )}
-              {/* What a copy can differ in: the original's layers, each
-                  with a way to give this copy one of its own instead. */}
-              {selectedLayer.copies !== 0 && overridable.length > 0 && (
-                <div className="overrides" aria-label="Follows the original in">
-                  {overridable.map((row, i) => (
-                    <label key={i} className="row">
-                      <span>{row.name}</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (!session || selected === null) return;
-                          try {
-                            if (row.own) session.clear_override(selected, i);
-                            else session.override_child(selected, i);
-                            refresh(session);
-                          } catch (err) {
-                            alert(`Copy: ${err}`);
-                          }
-                        }}
-                        aria-label={
-                          row.own
-                            ? `Follow the original's ${row.name} again`
-                            : `Give this copy its own ${row.name}`
-                        }
-                      >
-                        {row.own ? "Follow again" : "Make it its own"}
-                      </button>
-                    </label>
-                  ))}
-                </div>
-              )}
-              {/* Inside a frame, what the layer does when that frame is
-                  given a new size — the reason a frame can be resized at
-                  all rather than only ever drawn at the size it was made
-                  with. */}
-              {inFrame && (
-                <div className="pinning" aria-label="Pinned to">
-                  {(
-                    [
-                      ["x", "Across"],
-                      ["y", "Down"],
-                    ] as const
-                  ).map(([axis, label]) => (
-                    <label key={axis}>
-                      {label}
-                      <select
-                        value={selectedLayer.pinned[axis]}
-                        onChange={(e) =>
-                          run({
-                            SetPinning: {
-                              id: selectedLayer.id,
-                              pinned: {
-                                ...selectedLayer.pinned,
-                                [axis]: e.target.value as Pin,
-                              },
-                            },
-                          })
-                        }
-                        aria-label={`Pinned ${label.toLowerCase()}`}
-                      >
-                        {PINS[axis].map(([value, name]) => (
-                          <option key={value} value={value}>
-                            {name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ))}
-                </div>
-              )}
-              {selBox && (
-                <div className="geometry" aria-label="Position and size">
-                  {(
-                    [
-                      ["x", "X", selBox[0]],
-                      ["y", "Y", selBox[1]],
-                      ["w", "W", selBox[2]],
-                      ["h", "H", selBox[3]],
-                    ] as const
-                  ).map(([field, label, value]) => (
-                    <label key={field}>
-                      {label}
-                      <input
-                        type="number"
-                        step={units === "px" ? "1" : "0.01"}
-                        // Keyed by the value so a committed edit re-reads
-                        // from the document rather than keeping a stale
-                        // draft: the box moves for reasons other than this
-                        // field (a drag, an undo, an align). Shown and
-                        // read in the chosen units.
-                        key={`${field}${units}${Math.round(value * 100)}`}
-                        defaultValue={inUnits(value, units, docDpi)}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === "Enter") e.currentTarget.blur();
-                        }}
-                        onBlur={(e) => {
-                          const v = Number(e.currentTarget.value);
-                          if (Number.isFinite(v))
-                            setGeometry(field, v / perPixel(units, docDpi));
-                        }}
-                        aria-label={
-                          field === "w" || field === "h"
-                            ? `${label} size`
-                            : `${label} position`
-                        }
-                      />
-                    </label>
-                  ))}
-                  {/* The two sides tied together, or not: typing a
-                      width with them tied takes the height with it, the
-                      way a dragged corner does. */}
-                  <button
-                    className={keepRatio ? "ratio-lock on" : "ratio-lock"}
-                    onClick={() => setKeepRatio((on) => !on)}
-                    aria-pressed={keepRatio}
-                    aria-label="Keep the proportions"
-                    title={
-                      keepRatio
-                        ? "The sides are tied: typing one changes the other"
-                        : "The sides are free: typing one leaves the other"
-                    }
-                  >
-                    {keepRatio ? "⛓" : "⛓̸"}
-                  </button>
-                  {/* The angle the knob above the selection drags, said
-                      as a number: some things have to be at forty-five
-                      degrees exactly, and a knob cannot promise that. */}
-                  <label key="angle">
-                    R
-                    <input
-                      type="number"
-                      step="0.1"
-                      key={`r${Math.round(selAngle() * 10)}`}
-                      defaultValue={Math.round(selAngle() * 10) / 10}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") e.currentTarget.blur();
-                      }}
-                      onBlur={(e) => {
-                        const v = Number(e.currentTarget.value);
-                        if (Number.isFinite(v)) setAngle(v);
-                      }}
-                      aria-label="Angle"
-                      title="Degrees clockwise"
-                    />
-                  </label>
-                  {/* The lean, said as a number: how far the layer's
-                      sides lean off its own upright, which a side held
-                      with Ctrl drags by eye. */}
-                  <label key="skew">
-                    Sk
-                    <input
-                      type="number"
-                      step="0.1"
-                      key={`k${Math.round(selSkew() * 10)}`}
-                      defaultValue={Math.round(selSkew() * 10) / 10}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") e.currentTarget.blur();
-                      }}
-                      onBlur={(e) => {
-                        const v = Number(e.currentTarget.value);
-                        if (Number.isFinite(v)) setSkew(v);
-                      }}
-                      aria-label="Skew"
-                      title="Degrees the sides lean, from -85 to 85"
-                    />
-                  </label>
-                </div>
-              )}
-              <label>
-                Opacity{" "}
-                {Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={opacityDraft ?? selectedLayer.opacity}
-                  onChange={(e) => setOpacityDraft(Number(e.target.value))}
-                  onPointerUp={commitOpacity}
-                  onKeyUp={commitOpacity}
-                  onBlur={commitOpacity}
-                  aria-label="Layer opacity"
-                />
-              </label>
-              <label>
-                Blend
-                <select
-                  value={selectedLayer.blend}
-                  onChange={(e) =>
-                    setBlendOfSelection(e.target.value as BlendMode)
-                  }
-                  aria-label="Blend mode"
-                >
-                  {BLEND_GROUPS.map(([label, modes]) =>
-                    label === "" ? (
-                      modes.map((m) => (
-                        <option key={m} value={m}>
-                          {BLEND_NAMES[m] ?? m}
-                        </option>
-                      ))
-                    ) : (
-                      <optgroup key={label} label={label}>
-                        {modes.map((m) => (
-                          <option key={m} value={m}>
-                            {BLEND_NAMES[m] ?? m}
-                          </option>
-                        ))}
-                      </optgroup>
-                    ),
-                  )}
-                </select>
-              </label>
-              {selectedKind && (
-                <KindProps
-                  kind={selectedKind}
-                  bins={histogram}
-                  dpi={docDpi}
-                  onFrameSize={(w, h) =>
-                    selected !== null && resizeFrame(selected, w, h, 0, 0, false)
-                  }
-                  onEdit={setKind}
-                  onGestureEnd={endGesture}
-                  onAutoLevels={autoLevels}
-                  onPickNeutral={() => setPickingNeutral((on) => !on)}
-                  pickingNeutral={pickingNeutral}
-                  onAutoColour={autoColour}
-                  onRoundCorners={roundCorners}
-                  onLoadLookup={() => {
-                    lookupFor.current = "replace";
-                    lookupInputRef.current?.click();
-                  }}
-                  cmyk={cmyk}
-                  fonts={fontNames}
-                  shapes={layers
-                    .filter(
-                      (l) => l.kind === "vector" && l.id !== selectedLayer.id,
-                    )
-                    .map((l) => ({ id: l.id, name: l.name }))}
-                  onAlong={(shape) => {
-                    if (!session || !selectedLayer) return;
-                    if (shape === null) {
-                      if (
-                        selectedKind &&
-                        typeof selectedKind === "object" &&
-                        "Text" in selectedKind
-                      ) {
-                        setKind(
-                          { Text: { ...selectedKind.Text, along: null } },
-                          false,
-                        );
-                      }
-                      return;
-                    }
-                    try {
-                      session.text_along(selectedLayer.id, shape);
-                      refresh(session);
-                    } catch (err) {
-                      alert(`Text on path: ${err}`);
-                    }
-                  }}
-                />
-              )}
-              <div className="effects">
-                {selectedEffects.map((effect, at) => {
-                  const kind = effectKind(effect);
-                  const body = effectBody(effect) as Record<string, number>;
-                  return (
-                    <div className="effect" key={`${kind}${at}`}>
-                      <div className="row effect-head">
-                        <span>{effectTitle(effect)}</span>
-                        {EFFECT_COLORS[kind].map(([field, called]) => (
-                          <input
-                            key={field}
-                            type="color"
-                            value={colorToHex(
-                              (effect as never)[kind][field] as AuthoredColor,
-                            )}
-                            onChange={(e) =>
-                              tuneEffect(at, {
-                                [field]: cmyk
-                                  ? hexToCmykColor(e.target.value)
-                                  : hexColor(e.target.value),
-                              })
-                            }
-                            title={`${EFFECT_LABELS[kind]} ${called}`}
-                            aria-label={`${EFFECT_LABELS[kind]} ${called}`}
-                          />
-                        ))}
-                        {/* Order matters: an outline under a drop shadow
-                            is not the same picture as one over it. */}
-                        <button
-                          className="mask-button"
-                          disabled={at === 0}
-                          aria-label={`Move ${EFFECT_LABELS[kind]} down`}
-                          onClick={() => setEffects(swapEffects(at, at - 1))}
-                        >
-                          <Icon name="lower" size={14} />
-                        </button>
-                        <button
-                          className="mask-button"
-                          disabled={at === selectedEffects.length - 1}
-                          aria-label={`Move ${EFFECT_LABELS[kind]} up`}
-                          onClick={() => setEffects(swapEffects(at, at + 1))}
-                        >
-                          <Icon name="raise" size={14} />
-                        </button>
-                        <button
-                          className="mask-button"
-                          aria-label={`Remove ${EFFECT_LABELS[kind]}`}
-                          onClick={() =>
-                            setEffects(
-                              selectedEffects.filter((_, i) => i !== at),
-                            )
-                          }
-                        >
-                          Remove
-                        </button>
-                      </div>
-                      {EFFECT_FIELDS[kind].map(
-                        ([field, label, min, max, step]) => {
-                          const derived = EFFECT_DERIVED[kind]?.[field];
-                          const shown = derived ? derived.read(body) : (body[field] ?? 0);
-                          return (
-                          <label key={field}>
-                            {label} {shown.toFixed(2)}
-                            <input
-                              type="range"
-                              min={min}
-                              max={max}
-                              step={step}
-                              value={shown}
-                              onChange={(e) =>
-                                tuneEffect(
-                                  at,
-                                  derived
-                                    ? derived.write(Number(e.target.value))
-                                    : { [field]: Number(e.target.value) },
-                                  true,
-                                )
-                              }
-                              onPointerUp={endGesture}
-                              onKeyUp={endGesture}
-                              onBlur={endGesture}
-                              aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
-                            />
-                          </label>
-                          );
-                        },
-                      )}
-                    </div>
-                  );
-                })}
-                <label className="row">
-                  Add effect
-                  <select
-                    value=""
-                    onChange={(e) => {
-                      const kind = e.target.value as EffectKind;
-                      if (!kind) return;
-                      e.target.value = "";
-                      const ink = (hex: string) =>
-                        cmyk ? hexToCmykColor(hex) : hexColor(hex);
-                      setEffects([
-                        ...selectedEffects,
-                        newEffect(kind, ink("#000000"), ink("#ffe08a"), ink("#ffffff")),
-                      ]);
-                    }}
-                    aria-label="Add effect"
-                  >
-                    <option value="">Choose…</option>
-                    {(Object.keys(EFFECT_LABELS) as EffectKind[]).map((k) => (
-                      <option key={k} value={k}>
-                        {EFFECT_LABELS[k]}
-                      </option>
-                    ))}
-                    {Object.entries(EFFECT_PRESETS).map(([k, name]) => (
-                      <option key={k} value={k}>
-                        {name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              {selectedMask === null ? (
-                <div className="row mask-row">
-                  <button
-                    className="mask-button"
-                    onClick={() => addMask("ellipse")}
-                  >
-                    Ellipse mask
-                  </button>
-                  <button
-                    className="mask-button"
-                    onClick={() => addMask("rect")}
-                  >
-                    Rect mask
-                  </button>
-                  {selectedKind &&
-                    typeof selectedKind === "object" &&
-                    "Vector" in selectedKind && (
-                      <button
-                        className="mask-button"
-                        onClick={maskWithSelectedShape}
-                      >
-                        Mask below
-                      </button>
-                    )}
-                </div>
-              ) : (
-                <label className="row">
-                  <input
-                    type="checkbox"
-                    checked={selectedMask.invert}
-                    onChange={(e) =>
-                      run({
-                        SetMask: {
-                          id: selectedLayer.id,
-                          mask: { ...selectedMask!, invert: e.target.checked },
-                        },
-                      })
-                    }
-                    aria-label="Invert mask"
-                  />
-                  Invert mask
-                  <button
-                    className="mask-button"
-                    onClick={() =>
-                      run({ SetMask: { id: selectedLayer.id, mask: null } })
-                    }
-                  >
-                    Remove
-                  </button>
-                </label>
-              )}
-              {/* How far the mask's edge is softened over. A region
-                  picked out of a photograph almost never wants the edge
-                  the marquee drew, and a layer masked into another wants
-                  to be let into it rather than stamped on it. Dragged,
-                  so it previews as one history entry like every other
-                  slider here. */}
-              {selectedMask !== null && (
-                <label className="row">
-                  Feather
-                  <input
-                    type="range"
-                    min={0}
-                    max={40}
-                    step={0.5}
-                    value={selectedMask.feather ?? 0}
-                    aria-label="Mask feather"
-                    onChange={(e) =>
-                      preview({
-                        SetMask: {
-                          id: selectedLayer.id,
-                          mask: {
-                            ...selectedMask!,
-                            feather: Number(e.target.value),
-                          },
-                        },
-                      })
-                    }
-                    onPointerUp={() => {
-                      if (session?.commit_preview()) refresh(session);
-                    }}
-                    onBlur={() => {
-                      if (session?.commit_preview()) refresh(session);
-                    }}
-                  />
-                  <span className="num">
-                    {Math.round(selectedMask.feather ?? 0)}
-                  </span>
-                </label>
-              )}
-            </div>
-          )}
           {/* Finding a layer by name or by kind. */}
           <div className="layer-search" role="search">
             <input
@@ -11869,7 +11286,7 @@ export function App() {
           {searching && found.size === 0 && (
             <p className="layer-search-none">No layer matches.</p>
           )}
-          <ul ref={layerListRef}>
+          <ul ref={layerListRef} className="layer-list">
             {panelRows.map((l) => (
               <li
                 key={l.id}
@@ -12054,6 +11471,596 @@ export function App() {
               <li className="muted empty">Drag on the canvas to add shapes</li>
             )}
           </ul>
+          {selectionSet.length >= 1 && (
+            <div className="align-bar" role="group" aria-label="Align layers">
+              {ALIGN_BUTTONS.map(([mode, icon, label]) => {
+                // With one layer picked the buttons say what it will be
+                // lined up with, since there is no other layer on screen
+                // to make that obvious.
+                const spread = mode.startsWith("distribute");
+                const alone = selectionSet.length < 2;
+                const title = spread
+                  ? prefs.alignTo === "page" && !alone
+                    ? `${label}, the outermost to the ${alignGround()}'s edges`
+                    : label
+                  : alone || prefs.alignTo === "page"
+                    ? `${label} to the ${alignGround()}`
+                    : prefs.alignTo === "key"
+                      ? `${label} to the layer with the handles`
+                      : label;
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => alignSelection(mode)}
+                    disabled={spread && alone}
+                    title={title}
+                    aria-label={label}
+                  >
+                    <Icon name={icon} size={16} />
+                  </button>
+                );
+              })}
+              {/* What they line up with. One layer alone always goes to
+                  what it sits in, so the choice waits for two. */}
+              {selectionSet.length >= 2 && (
+                <select
+                  className="align-to"
+                  aria-label="Align to"
+                  title="What the buttons line layers up with"
+                  value={prefs.alignTo}
+                  onChange={(e) => setPrefs({ alignTo: e.target.value as AlignTo })}
+                >
+                  <option value="selection">To each other</option>
+                  <option value="key">To the key layer</option>
+                  <option value="page">To the {alignGround()}</option>
+                </select>
+              )}
+            </div>
+          )}
+          {selectionSet.length >= 2 && (
+            <div
+              className="align-bar combine-bar"
+              role="group"
+              aria-label="Combine shapes"
+            >
+              {BOOLEAN_BUTTONS.map(([op, icon, label]) => (
+                <button
+                  key={op}
+                  onClick={() => combineSelection(op)}
+                  title={label}
+                  aria-label={label}
+                >
+                  <Icon name={icon} size={16} />
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedLayer && (
+            <div className="layer-props">
+              {/* A layer following a kept style says which, and can be
+                  let go of it: kept again, the style's look comes here
+                  too, which is the point of following one and the
+                  surprise if it was forgotten. */}
+              {selectedLayer.style && (
+                <div className="row copy-of">
+                  <span>Follows the style {selectedLayer.style}</span>
+                  <button
+                    type="button"
+                    onClick={() => run({ SetStyleLink: { id: selectedLayer.id, style: null } })}
+                    aria-label="Detach from the style"
+                    title="Keep this look, but stop following the style"
+                  >
+                    Detach
+                  </button>
+                </div>
+              )}
+              {/* A live copy says what it follows, and takes you there:
+                  what the copy draws is not in the copy, so the panel has
+                  to point at where it is. */}
+              {selectedLayer.copies !== 0 && (
+                <div className="row copy-of">
+                  <span>
+                    Follows{" "}
+                    {layers.find((l) => l.id === selectedLayer.copies)?.name ??
+                      "a layer that is gone"}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      !layers.some((l) => l.id === selectedLayer.copies)
+                    }
+                    onClick={() => {
+                      setSelected(selectedLayer.copies);
+                      setMultiSel([]);
+                    }}
+                    aria-label="Go to the original"
+                  >
+                    Go to it
+                  </button>
+                </div>
+              )}
+              {/* What a copy can differ in: the original's layers, each
+                  with a way to give this copy one of its own instead. */}
+              {selectedLayer.copies !== 0 && overridable.length > 0 && (
+                <div className="overrides" aria-label="Follows the original in">
+                  {overridable.map((row, i) => (
+                    <label key={i} className="row">
+                      <span>{row.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!session || selected === null) return;
+                          try {
+                            if (row.own) session.clear_override(selected, i);
+                            else session.override_child(selected, i);
+                            refresh(session);
+                          } catch (err) {
+                            alert(`Copy: ${err}`);
+                          }
+                        }}
+                        aria-label={
+                          row.own
+                            ? `Follow the original's ${row.name} again`
+                            : `Give this copy its own ${row.name}`
+                        }
+                      >
+                        {row.own ? "Follow again" : "Make it its own"}
+                      </button>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {/* Inside a frame, what the layer does when that frame is
+                  given a new size — the reason a frame can be resized at
+                  all rather than only ever drawn at the size it was made
+                  with. */}
+              {inFrame && (
+                <div className="pinning" aria-label="Pinned to">
+                  {(
+                    [
+                      ["x", "Across"],
+                      ["y", "Down"],
+                    ] as const
+                  ).map(([axis, label]) => (
+                    <label key={axis}>
+                      {label}
+                      <select
+                        value={selectedLayer.pinned[axis]}
+                        onChange={(e) =>
+                          run({
+                            SetPinning: {
+                              id: selectedLayer.id,
+                              pinned: {
+                                ...selectedLayer.pinned,
+                                [axis]: e.target.value as Pin,
+                              },
+                            },
+                          })
+                        }
+                        aria-label={`Pinned ${label.toLowerCase()}`}
+                      >
+                        {PINS[axis].map(([value, name]) => (
+                          <option key={value} value={value}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {selBox && <h3 className="props-head">Position and size</h3>}
+              {selBox && (
+                <div className="geometry" aria-label="Position and size">
+                  {(
+                    [
+                      ["x", "X", selBox[0]],
+                      ["y", "Y", selBox[1]],
+                      ["w", "W", selBox[2]],
+                      ["h", "H", selBox[3]],
+                    ] as const
+                  ).map(([field, label, value]) => (
+                    <label key={field} className={`geo-${field}`}>
+                      {label}
+                      <input
+                        type="number"
+                        step={units === "px" ? "1" : "0.01"}
+                        // Keyed by the value so a committed edit re-reads
+                        // from the document rather than keeping a stale
+                        // draft: the box moves for reasons other than this
+                        // field (a drag, an undo, an align). Shown and
+                        // read in the chosen units.
+                        key={`${field}${units}${Math.round(value * 100)}`}
+                        defaultValue={inUnits(value, units, docDpi)}
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === "Enter") e.currentTarget.blur();
+                        }}
+                        onBlur={(e) => {
+                          const v = Number(e.currentTarget.value);
+                          if (Number.isFinite(v))
+                            setGeometry(field, v / perPixel(units, docDpi));
+                        }}
+                        aria-label={
+                          field === "w" || field === "h"
+                            ? `${label} size`
+                            : `${label} position`
+                        }
+                      />
+                    </label>
+                  ))}
+                  {/* The two sides tied together, or not: typing a
+                      width with them tied takes the height with it, the
+                      way a dragged corner does. */}
+                  <button
+                    className={keepRatio ? "ratio-lock on" : "ratio-lock"}
+                    onClick={() => setKeepRatio((on) => !on)}
+                    aria-pressed={keepRatio}
+                    aria-label="Keep the proportions"
+                    title={
+                      keepRatio
+                        ? "The sides are tied: typing one changes the other"
+                        : "The sides are free: typing one leaves the other"
+                    }
+                  >
+                    {keepRatio ? "⛓" : "⛓̸"}
+                  </button>
+                  {/* The angle the knob above the selection drags, said
+                      as a number: some things have to be at forty-five
+                      degrees exactly, and a knob cannot promise that. */}
+                  <label key="angle" className="geo-r">
+                    R
+                    <input
+                      type="number"
+                      step="0.1"
+                      key={`r${Math.round(selAngle() * 10)}`}
+                      defaultValue={Math.round(selAngle() * 10) / 10}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      onBlur={(e) => {
+                        const v = Number(e.currentTarget.value);
+                        if (Number.isFinite(v)) setAngle(v);
+                      }}
+                      aria-label="Angle"
+                      title="Degrees clockwise"
+                    />
+                  </label>
+                  {/* The lean, said as a number: how far the layer's
+                      sides lean off its own upright, which a side held
+                      with Ctrl drags by eye. */}
+                  <label key="skew" className="geo-sk">
+                    Sk
+                    <input
+                      type="number"
+                      step="0.1"
+                      key={`k${Math.round(selSkew() * 10)}`}
+                      defaultValue={Math.round(selSkew() * 10) / 10}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === "Enter") e.currentTarget.blur();
+                      }}
+                      onBlur={(e) => {
+                        const v = Number(e.currentTarget.value);
+                        if (Number.isFinite(v)) setSkew(v);
+                      }}
+                      aria-label="Skew"
+                      title="Degrees the sides lean, from -85 to 85"
+                    />
+                  </label>
+                </div>
+              )}
+              <h3 className="props-head">Appearance</h3>
+              <label>
+                Opacity{" "}
+                {Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={opacityDraft ?? selectedLayer.opacity}
+                  onChange={(e) => setOpacityDraft(Number(e.target.value))}
+                  onPointerUp={commitOpacity}
+                  onKeyUp={commitOpacity}
+                  onBlur={commitOpacity}
+                  aria-label="Layer opacity"
+                />
+              </label>
+              <label>
+                Blend
+                <select
+                  value={selectedLayer.blend}
+                  onChange={(e) =>
+                    setBlendOfSelection(e.target.value as BlendMode)
+                  }
+                  aria-label="Blend mode"
+                >
+                  {BLEND_GROUPS.map(([label, modes]) =>
+                    label === "" ? (
+                      modes.map((m) => (
+                        <option key={m} value={m}>
+                          {BLEND_NAMES[m] ?? m}
+                        </option>
+                      ))
+                    ) : (
+                      <optgroup key={label} label={label}>
+                        {modes.map((m) => (
+                          <option key={m} value={m}>
+                            {BLEND_NAMES[m] ?? m}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ),
+                  )}
+                </select>
+              </label>
+              {selectedKind && (
+                <KindProps
+                  kind={selectedKind}
+                  bins={histogram}
+                  dpi={docDpi}
+                  onFrameSize={(w, h) =>
+                    selected !== null && resizeFrame(selected, w, h, 0, 0, false)
+                  }
+                  onEdit={setKind}
+                  onGestureEnd={endGesture}
+                  onAutoLevels={autoLevels}
+                  onPickNeutral={() => setPickingNeutral((on) => !on)}
+                  pickingNeutral={pickingNeutral}
+                  onAutoColour={autoColour}
+                  onRoundCorners={roundCorners}
+                  onLoadLookup={() => {
+                    lookupFor.current = "replace";
+                    lookupInputRef.current?.click();
+                  }}
+                  cmyk={cmyk}
+                  fonts={fontNames}
+                  shapes={layers
+                    .filter(
+                      (l) => l.kind === "vector" && l.id !== selectedLayer.id,
+                    )
+                    .map((l) => ({ id: l.id, name: l.name }))}
+                  onAlong={(shape) => {
+                    if (!session || !selectedLayer) return;
+                    if (shape === null) {
+                      if (
+                        selectedKind &&
+                        typeof selectedKind === "object" &&
+                        "Text" in selectedKind
+                      ) {
+                        setKind(
+                          { Text: { ...selectedKind.Text, along: null } },
+                          false,
+                        );
+                      }
+                      return;
+                    }
+                    try {
+                      session.text_along(selectedLayer.id, shape);
+                      refresh(session);
+                    } catch (err) {
+                      alert(`Text on path: ${err}`);
+                    }
+                  }}
+                />
+              )}
+              <h3 className="props-head">Effects</h3>
+              <div className="effects">
+                {selectedEffects.map((effect, at) => {
+                  const kind = effectKind(effect);
+                  const body = effectBody(effect) as Record<string, number>;
+                  return (
+                    <div className="effect" key={`${kind}${at}`}>
+                      <div className="row effect-head">
+                        <span>{effectTitle(effect)}</span>
+                        {EFFECT_COLORS[kind].map(([field, called]) => (
+                          <input
+                            key={field}
+                            type="color"
+                            value={colorToHex(
+                              (effect as never)[kind][field] as AuthoredColor,
+                            )}
+                            onChange={(e) =>
+                              tuneEffect(at, {
+                                [field]: cmyk
+                                  ? hexToCmykColor(e.target.value)
+                                  : hexColor(e.target.value),
+                              })
+                            }
+                            title={`${EFFECT_LABELS[kind]} ${called}`}
+                            aria-label={`${EFFECT_LABELS[kind]} ${called}`}
+                          />
+                        ))}
+                        {/* Order matters: an outline under a drop shadow
+                            is not the same picture as one over it. */}
+                        <button
+                          className="mask-button"
+                          disabled={at === 0}
+                          aria-label={`Move ${EFFECT_LABELS[kind]} down`}
+                          onClick={() => setEffects(swapEffects(at, at - 1))}
+                        >
+                          <Icon name="lower" size={14} />
+                        </button>
+                        <button
+                          className="mask-button"
+                          disabled={at === selectedEffects.length - 1}
+                          aria-label={`Move ${EFFECT_LABELS[kind]} up`}
+                          onClick={() => setEffects(swapEffects(at, at + 1))}
+                        >
+                          <Icon name="raise" size={14} />
+                        </button>
+                        <button
+                          className="mask-button"
+                          aria-label={`Remove ${EFFECT_LABELS[kind]}`}
+                          onClick={() =>
+                            setEffects(
+                              selectedEffects.filter((_, i) => i !== at),
+                            )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      {EFFECT_FIELDS[kind].map(
+                        ([field, label, min, max, step]) => {
+                          const derived = EFFECT_DERIVED[kind]?.[field];
+                          const shown = derived ? derived.read(body) : (body[field] ?? 0);
+                          return (
+                          <label key={field}>
+                            {label} {shown.toFixed(2)}
+                            <input
+                              type="range"
+                              min={min}
+                              max={max}
+                              step={step}
+                              value={shown}
+                              onChange={(e) =>
+                                tuneEffect(
+                                  at,
+                                  derived
+                                    ? derived.write(Number(e.target.value))
+                                    : { [field]: Number(e.target.value) },
+                                  true,
+                                )
+                              }
+                              onPointerUp={endGesture}
+                              onKeyUp={endGesture}
+                              onBlur={endGesture}
+                              aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
+                            />
+                          </label>
+                          );
+                        },
+                      )}
+                    </div>
+                  );
+                })}
+                <label className="row">
+                  Add effect
+                  <select
+                    value=""
+                    onChange={(e) => {
+                      const kind = e.target.value as EffectKind;
+                      if (!kind) return;
+                      e.target.value = "";
+                      const ink = (hex: string) =>
+                        cmyk ? hexToCmykColor(hex) : hexColor(hex);
+                      setEffects([
+                        ...selectedEffects,
+                        newEffect(kind, ink("#000000"), ink("#ffe08a"), ink("#ffffff")),
+                      ]);
+                    }}
+                    aria-label="Add effect"
+                  >
+                    <option value="">Choose…</option>
+                    {(Object.keys(EFFECT_LABELS) as EffectKind[]).map((k) => (
+                      <option key={k} value={k}>
+                        {EFFECT_LABELS[k]}
+                      </option>
+                    ))}
+                    {Object.entries(EFFECT_PRESETS).map(([k, name]) => (
+                      <option key={k} value={k}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <h3 className="props-head">Mask</h3>
+              {selectedMask === null ? (
+                <div className="row mask-row">
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("ellipse")}
+                  >
+                    Ellipse mask
+                  </button>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("rect")}
+                  >
+                    Rect mask
+                  </button>
+                  {selectedKind &&
+                    typeof selectedKind === "object" &&
+                    "Vector" in selectedKind && (
+                      <button
+                        className="mask-button"
+                        onClick={maskWithSelectedShape}
+                      >
+                        Mask below
+                      </button>
+                    )}
+                </div>
+              ) : (
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={selectedMask.invert}
+                    onChange={(e) =>
+                      run({
+                        SetMask: {
+                          id: selectedLayer.id,
+                          mask: { ...selectedMask!, invert: e.target.checked },
+                        },
+                      })
+                    }
+                    aria-label="Invert mask"
+                  />
+                  Invert mask
+                  <button
+                    className="mask-button"
+                    onClick={() =>
+                      run({ SetMask: { id: selectedLayer.id, mask: null } })
+                    }
+                  >
+                    Remove
+                  </button>
+                </label>
+              )}
+              {/* How far the mask's edge is softened over. A region
+                  picked out of a photograph almost never wants the edge
+                  the marquee drew, and a layer masked into another wants
+                  to be let into it rather than stamped on it. Dragged,
+                  so it previews as one history entry like every other
+                  slider here. */}
+              {selectedMask !== null && (
+                <label className="row">
+                  Feather
+                  <input
+                    type="range"
+                    min={0}
+                    max={40}
+                    step={0.5}
+                    value={selectedMask.feather ?? 0}
+                    aria-label="Mask feather"
+                    onChange={(e) =>
+                      preview({
+                        SetMask: {
+                          id: selectedLayer.id,
+                          mask: {
+                            ...selectedMask!,
+                            feather: Number(e.target.value),
+                          },
+                        },
+                      })
+                    }
+                    onPointerUp={() => {
+                      if (session?.commit_preview()) refresh(session);
+                    }}
+                    onBlur={() => {
+                      if (session?.commit_preview()) refresh(session);
+                    }}
+                  />
+                  <span className="num">
+                    {Math.round(selectedMask.feather ?? 0)}
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
           {(history.past.length > 0 || history.future.length > 0) && (
             <div className="history" aria-label="History">
               <h2>History</h2>

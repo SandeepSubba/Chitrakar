@@ -14258,6 +14258,58 @@ assert(
   assert(Math.abs(free - 183) < 1.5, `and nothing is caught (${free})`);
 }
 
+// 9cc. The layers panel keeps its list still: a layer picked opens its
+// settings under the list, not above it, so the row just pressed stays
+// under the pointer. The settings come in labelled parts, and a position
+// with decimals fits its field rather than being cut to "383.(".
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [box.x + (x / 600) * box.width, box.y + (y / 300) * box.height];
+  for (const [x, y] of [[40, 40], [300, 120]]) {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x, y));
+    await page.mouse.down();
+    await page.mouse.move(...at(x + 120, y + 80), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+  }
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  const props = page.locator(".layer-props");
+  assert((await props.count()) === 0, "nothing picked, no settings shown");
+  const row = page.locator(".panel ul.layer-list li[data-id]").nth(1);
+  const before = await row.boundingBox();
+  await row.click();
+  await page.waitForTimeout(200);
+  assert(await props.isVisible(), "picked, its settings show");
+  const after = await row.boundingBox();
+  assert(
+    Math.abs(after.y - before.y) < 1,
+    `the row picked stays where it was pressed (${before.y} then ${after.y})`,
+  );
+  assert(
+    await page.evaluate(() => {
+      const list = document.querySelector(".panel ul.layer-list");
+      const settings = document.querySelector(".layer-props");
+      return !!(list.compareDocumentPosition(settings) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }),
+    "the settings come after the list, in reading order as on screen",
+  );
+  const heads = await page.locator(".layer-props .props-head").allTextContents();
+  for (const h of ["Position and size", "Appearance", "Effects", "Mask"])
+    assert(heads.includes(h), `the settings have a part headed ${h} (${heads})`);
+  const x = page.locator('input[aria-label="X position"]');
+  await x.fill("383.25");
+  await x.press("Enter");
+  await page.waitForTimeout(150);
+  const fits = await x.evaluate((el) => el.scrollWidth <= el.clientWidth);
+  assert(fits && (await x.inputValue()) === "383.25", `383.25 fits its field (${await x.inputValue()})`);
+  await page.keyboard.press("Escape");
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a
@@ -14287,7 +14339,9 @@ assert(
     await tp.waitForTimeout(250);
   }
   await tp.keyboard.press("Escape");
-  const panel = tp.locator(".panel");
+  // The list scrolls in its own room (9cc), so the settings under it
+  // stay a short way off however many layers there are.
+  const panel = tp.locator(".panel ul.layer-list");
   const overflows = await panel.evaluate((e) => e.scrollHeight > e.clientHeight + 100);
   assert(overflows, "more layers than the panel shows");
   const names = () => tp.locator(".panel ul li .layer-name").allTextContents();
