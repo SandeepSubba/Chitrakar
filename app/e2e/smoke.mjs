@@ -14077,10 +14077,10 @@ assert(
 }
 
 // 11h. On a phone the rail lies along the bottom, and what it carries
-// beside its tools — the palette, a paint tool's width and edge — lies
-// down with it: in a row, so the rail is as tall as a tool rather than
-// as tall as a column of swatches. Picking a paint tool brings its
-// width and edge into sight at the rail's far end.
+// beside its tools — the palette — lies down with it: in a row, so the
+// rail is as tall as a tool rather than as tall as a column of swatches.
+// Picking a paint tool brings its width and edge into sight, in the
+// strip of tool options over the canvas.
 {
   const phone = await browser.newContext({
     viewport: { width: 390, height: 844 },
@@ -14098,10 +14098,13 @@ assert(
   await pp.waitForTimeout(400);
   const r = await rail.boundingBox();
   assert(r.height < 72, `the rail is as tall as a tool, palette and all (${r.height.toFixed(0)})`);
+  // Its settings are in the strip over the top of the canvas, named,
+  // rather than squeezed into the rail; on a phone the strip scrolls
+  // sideways and starts with them.
   for (const label of ["Paint width", "Brush softness"]) {
-    const b = await pp.locator(`.toolbar [aria-label="${label}"]`).boundingBox();
+    const b = await pp.locator(`.tool-options [aria-label="${label}"]`).boundingBox();
     assert(
-      b && b.x >= 0 && b.x + b.width <= 390 && b.y >= r.y && b.y + b.height <= r.y + r.height,
+      b && b.x >= 0 && b.x + b.width <= 390 && b.y >= 0 && b.y + b.height <= r.y,
       `picking the paint tool brings its ${label.toLowerCase()} into sight (${b && [b.x, b.width].map(Math.round)})`,
     );
   }

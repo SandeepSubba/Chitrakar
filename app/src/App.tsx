@@ -10104,8 +10104,81 @@ export function App() {
               )}
             </div>
           )}
-          {(painting || cloning) && (
-            <>
+        </nav>
+        <main
+          className={`canvas-host${
+            painting || cloning
+              ? " painting"
+              : tool === "Hand"
+                ? " handing"
+                : tool === "Zoom"
+                  ? " zooming"
+                  : tool === "Gradient"
+                    ? " grading"
+                    : tool === "Fill"
+                      ? " filling"
+                      : ""
+          }`}
+          ref={hostRef}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={onHostDrop}
+          onPointerDown={onHostPointerDown}
+          onPointerMove={onHostPointerMove}
+          onPointerUp={onHostPointerUp}
+          onPointerCancel={onHostPointerCancel}
+          onContextMenu={onCanvasContextMenu}
+          onPointerLeave={() => setBrushAt(null)}
+        >
+          {/* What the tool in hand can be told, said in words at the top
+              of the canvas. It had been squeezed into the foot of the
+              rail as a bare number and an unlabelled slider, two and a
+              half rem wide. A press here never reaches the canvas. */}
+          {(painting || cloning || tool === "Brush") && (
+            <div
+              className="tool-options"
+              role="toolbar"
+              aria-label="Tool options"
+              onPointerDown={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.stopPropagation()}
+            >
+              {(painting || cloning) && (
+                <>
+                  <label className="tool-option">
+                    Width
+                    <input
+                      type="number"
+                      min={1}
+                      max={200}
+                      value={paintSize}
+                      onChange={(e) =>
+                        setPaintSize(
+                          Math.max(1, Math.min(200, Number(e.target.value))),
+                        )
+                      }
+                      title="Brush width"
+                      aria-label="Paint width"
+                      className="brush-size"
+                    />
+                    px
+                  </label>
+                  <label className="tool-option">
+                    Softness
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={Math.round(paintSoftness * 100)}
+                      onChange={(e) => setPaintSoftness(Number(e.target.value) / 100)}
+                      title="How soft the brush's edge is"
+                      aria-label="Brush softness"
+                      className="paint-softness"
+                    />
+                    <span className="tool-option-value">
+                      {Math.round(paintSoftness * 100)}%
+                    </span>
+                  </label>
+                  <span className="tool-option-sep" />
+                  <span className="tool-option-name">Brushes</span>
               {/* The brushes kept by name: a press takes one up, alt
                   forgets it, and the + keeps the numbers in hand under
                   the next free name. A chip is drawn as the brush it
@@ -10161,71 +10234,28 @@ export function App() {
                   +
                 </button>
               </div>
-              <input
-                type="number"
-                min={1}
-                max={200}
-                value={paintSize}
-                onChange={(e) =>
-                  setPaintSize(
-                    Math.max(1, Math.min(200, Number(e.target.value))),
-                  )
-                }
-                title="Brush width"
-                aria-label="Paint width"
-                className="brush-size"
-              />
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={Math.round(paintSoftness * 100)}
-                onChange={(e) => setPaintSoftness(Number(e.target.value) / 100)}
-                title="How soft the brush's edge is"
-                aria-label="Brush softness"
-                className="paint-softness"
-              />
-            </>
+                </>
+              )}
+              {tool === "Brush" && (
+                <label className="tool-option">
+                  Width
+                  <input
+                    type="number"
+                    min={1}
+                    max={64}
+                    value={brushSize}
+                    onChange={(e) =>
+                      setBrushSize(Math.max(1, Math.min(64, Number(e.target.value))))
+                    }
+                    title="Brush width"
+                    aria-label="Brush width"
+                    className="brush-size"
+                  />
+                  px
+                </label>
+              )}
+            </div>
           )}
-          {tool === "Brush" && (
-            <input
-              type="number"
-              min={1}
-              max={64}
-              value={brushSize}
-              onChange={(e) =>
-                setBrushSize(Math.max(1, Math.min(64, Number(e.target.value))))
-              }
-              title="Brush width"
-              aria-label="Brush width"
-              className="brush-size"
-            />
-          )}
-        </nav>
-        <main
-          className={`canvas-host${
-            painting || cloning
-              ? " painting"
-              : tool === "Hand"
-                ? " handing"
-                : tool === "Zoom"
-                  ? " zooming"
-                  : tool === "Gradient"
-                    ? " grading"
-                    : tool === "Fill"
-                      ? " filling"
-                      : ""
-          }`}
-          ref={hostRef}
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={onHostDrop}
-          onPointerDown={onHostPointerDown}
-          onPointerMove={onHostPointerMove}
-          onPointerUp={onHostPointerUp}
-          onPointerCancel={onHostPointerCancel}
-          onContextMenu={onCanvasContextMenu}
-          onPointerLeave={() => setBrushAt(null)}
-        >
           {/* Rulers along the top and left edges, marked in document
               units and following the view. Dragging out of one places a
               guide; dropping a guide back on one throws it away. */}

@@ -606,28 +606,68 @@ body {
   margin-top: 0.2rem;
 }
 
-.brush-size {
-  /* As wide as a tool, border and all, so the rail is as wide with a
-     paint tool in hand as without. */
-  box-sizing: border-box;
-  width: 2.4rem;
-  margin-top: 0.3rem;
+/* What the tool in hand can be told: a strip at the top left of the
+   canvas, under the rulers, with its settings named. It floats over
+   the canvas rather than taking a row from it, so picking a paint tool
+   does not move the page under the pointer. */
+.tool-options {
+  position: absolute;
+  top: 26px;
+  left: 26px;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  max-width: calc(100% - 52px);
+  overflow-x: auto;
+  padding: 0.3rem 0.6rem;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: none;
-  color: var(--text);
-  font-size: 0.72rem;
-  padding: 0.2rem 0.15rem;
-  text-align: center;
+  border-radius: 9px;
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 0.75rem;
+  color: var(--muted);
 }
 
-/* The paint brush's edge, from hard to all fade. Narrow, because it
-   shares the tool rail with the size and the eraser. */
+.tool-option {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.tool-option-value {
+  min-width: 2.2rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-option-sep {
+  align-self: stretch;
+  width: 1px;
+  background: var(--border);
+}
+
+.tool-options .palette {
+  max-width: none;
+  flex-wrap: nowrap;
+}
+
+.brush-size {
+  box-sizing: border-box;
+  width: 3.2rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.3rem;
+}
+
 .paint-softness {
-  width: 2.4rem;
-  /* Chromium gives a range input two pixels of margin either side,
-     which made it the widest thing on the rail by four. */
-  margin: 0.35rem 0 0;
+  width: 6rem;
+  margin: 0;
   accent-color: var(--accent);
 }
 
@@ -2233,15 +2273,6 @@ body {
   .toolbar .palette {
     max-width: none;
     flex-wrap: nowrap;
-  }
-
-  .toolbar .brush-size {
-    margin: 0 0.15rem;
-  }
-
-  .toolbar .paint-softness {
-    width: 5rem;
-    margin: 0 0.3rem;
   }
 
   /* The shape tools' flyout opens upward: below the rail is off the
