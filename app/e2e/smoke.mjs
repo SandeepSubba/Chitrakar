@@ -14339,6 +14339,21 @@ assert(
     values.length > 1 && values.every((v) => !/\.\d*0%?$/.test(v)),
     `no slider says more places than it has (${values})`,
   );
+  // The typed fields are dressed as the choices beside them, not as
+  // the browser's own white boxes.
+  const dress = await page.evaluate(() => {
+    const look = (sel) => {
+      const cs = getComputedStyle(document.querySelector(sel));
+      return `${cs.backgroundColor} ${cs.borderTopColor} ${cs.borderTopLeftRadius}`;
+    };
+    return [look('.layer-props input[aria-label="X position"]'), look('.layer-props select[aria-label="Blend mode"]')];
+  });
+  assert(dress[0] === dress[1], `a position field looks like the blend choice (${dress})`);
+  const kindDress = await page.evaluate(() => {
+    const look = (sel) => getComputedStyle(document.querySelector(sel)).backgroundColor;
+    return [look('.layer-search select'), look('.layer-search input')];
+  });
+  assert(kindDress[0] === kindDress[1], `the kind choice looks like the find field (${kindDress})`);
   await page.keyboard.press("Escape");
   await page.keyboard.press("Control+Comma");
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');

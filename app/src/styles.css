@@ -832,6 +832,27 @@ body {
   padding: 0.2rem;
 }
 
+/* The typed fields dressed as the choices beside them: they were the
+   browser's own, white and grey-edged with square corners in either
+   theme, under a Blend that was not. */
+.layer-props input[type="number"],
+.layer-props input[type="text"] {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.3rem;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.layer-props input[type="number"]:focus-visible,
+.layer-props input[type="text"]:focus-visible,
+.layer-props select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: -1px;
+}
+
 .layer-props .row {
   flex-direction: row;
   align-items: center;
@@ -1715,9 +1736,18 @@ body {
   font-size: 0.78rem;
 }
 
+/* The kind beside it dressed as the field is, not as the browser's
+   default control — black-edged on white in the light theme, beside a
+   grey field. */
 .layer-search select {
   flex: none;
   max-width: 6rem;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
   font-size: 0.75rem;
 }
 
