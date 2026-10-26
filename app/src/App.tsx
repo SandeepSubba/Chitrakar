@@ -1107,6 +1107,53 @@ const sub = (
   label: string,
   entries: MenuEntry[],
 ): MenuEntry => ({ kind: "sub", id, icon, label, entries });
+/** The menu rows that a command in `commands.ts` runs: they show and
+ * are rebound as that command, so the Keys page does not offer them a
+ * second time among the other rows. */
+const COMMAND_ROWS = new Set([
+  "new", "open", "save", "save-as", "export", "export-png", "undo", "redo",
+  "cut", "copy", "paste", "duplicate", "copy-style", "paste-style",
+  "find-replace", "select-all", "pick-inverse", "bring-front", "send-back",
+  "group", "ungroup", "clip", "zoom-in", "zoom-out", "actual-size", "fit",
+  "prefs", "keys",
+]);
+
+/** Rows that stand for something of this document's or this person's —
+ * a recent file, a kept style — rather than a command: they come and
+ * go, so a chord given one would wander to whatever took its place. */
+const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("style-");
+
+/** Write each row's own chord, the one a person gave it, beside it —
+ * after whatever the row already says (a tick, "Del"). */
+function markMenuKeys(entries: MenuEntry[], menuOf: Record<string, string>) {
+  for (const e of entries) {
+    if (e.kind === "item" && menuOf[e.id]) {
+      const chord = chordLabel(menuOf[e.id]);
+      e.hint = e.hint ? `${e.hint}  ${chord}` : chord;
+    } else if (e.kind === "sub") {
+      markMenuKeys(e.entries, menuOf);
+    }
+  }
+}
+
+/** Every row of the menus a person may give a chord of their own, with
+ * the way to it: "Layer › Arrange › Bring forward". */
+function keyableRows(menus: MenuSpec[]): { id: string; path: string; label: string }[] {
+  const out: { id: string; path: string; label: string }[] = [];
+  const seen = new Set<string>();
+  const walk = (entries: MenuEntry[], path: string) => {
+    for (const e of entries) {
+      if (e.kind === "sub") walk(e.entries, `${path} › ${e.label}`);
+      else if (e.kind === "item" && !COMMAND_ROWS.has(e.id) && !passingRow(e.id) && !seen.has(e.id)) {
+        seen.add(e.id);
+        out.push({ id: e.id, path, label: e.label });
+      }
+    }
+  };
+  for (const m of menus) walk(m.entries, m.label);
+  return out;
+}
+
 /** Which menu is open, and what the eight of them are called. */
 type MenuId =
   | "file"
@@ -1480,7 +1527,10 @@ export function App() {
   const TOOL_HINT = keys.hint;
   /** The command chords as they stand, and what a menu row writes for
    * one: the person's rebindings over what each shipped with. */
-  const chords = useMemo(() => boundChords(prefs.commandKeys), [prefs.commandKeys]);
+  const chords = useMemo(
+    () => boundChords(prefs.commandKeys, prefs.menuKeys),
+    [prefs.commandKeys, prefs.menuKeys],
+  );
   const hint = useCallback(
     (id: CommandId) => {
       const chord = chords.of[id];
@@ -2546,21 +2596,31 @@ export function App() {
         else undo();
       }
       // The zoom keys every editor has: in, out, the whole page, and the
-      // page's own pixels one for one. "+" is where "=" is on a keyboard
-      // that has not been asked for shift, so both mean the same thing.
-      if ((e.metaKey || e.ctrlKey) && !typing) {
-        const zooms: Record<string, () => void> = {
-          "=": () => zoomBy(1.25),
-          "+": () => zoomBy(1.25),
-          "-": () => zoomBy(0.8),
-          _: () => zoomBy(0.8),
-          "0": fitView,
-          "1": () => zoomTo(1),
+      // page's own pixels one for one — off the same table, so they can
+      // be rebound. With shift, "=" is "+" and "-" is "_", and a hand
+      // reaching for "+" means zoom in: while zoom in and out keep their
+      // shipped chords and nothing else has the shifted ones, those
+      // mean the same.
+      if (!typing) {
+        const pressed = chordFromEvent(e);
+        const alternate =
+          !chords.byChord[pressed] && !chords.menuByChord[pressed]
+            ? pressed === "mod+shift+=" && chords.of["zoom-in"] === "mod+="
+              ? "zoom-in"
+              : pressed === "mod+shift+-" && chords.of["zoom-out"] === "mod+-"
+                ? "zoom-out"
+                : null
+            : null;
+        const zoom: Partial<Record<CommandId, () => void>> = {
+          "zoom-in": () => zoomBy(1.25),
+          "zoom-out": () => zoomBy(0.8),
+          "zoom-fit": fitView,
+          "zoom-actual": () => zoomTo(1),
         };
-        const zoom = zooms[e.key];
-        if (zoom) {
+        const run = zoom[(fired ?? alternate) as CommandId];
+        if (run) {
           e.preventDefault();
-          zoom();
+          run();
         }
       }
       // Escape cancels whatever is in flight; with nothing in flight it
@@ -2594,8 +2654,14 @@ export function App() {
         e.preventDefault();
         pickInverse();
       }
-      // "?" opens the sheet of shortcuts, and closes it again.
-      if (!typing && e.key === "?") {
+      // "?" opens the sheet of shortcuts, and closes it again — by its
+      // chord, or by "?" wherever a keyboard puts it while the chord is
+      // still the one it shipped with.
+      if (
+        !typing &&
+        (fired === "keys-sheet" ||
+          (e.key === "?" && chords.of["keys-sheet"] === "shift+/" && !chords.menuByChord[chordFromEvent(e)]))
+      ) {
         e.preventDefault();
         setShowKeys((open) => !open);
       }
@@ -8726,10 +8792,10 @@ export function App() {
       label: "View",
       entries: [
         // Zoom first, together and in the order a hand thinks of them.
-        item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), "Ctrl++"),
-        item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), "Ctrl+-"),
-        item("actual-size", "actualSize", "Actual size", () => zoomTo(1), "Ctrl+1"),
-        item("fit", "fit", "Fit document to window", fitView, "Ctrl+0"),
+        item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), hint("zoom-in")),
+        item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), hint("zoom-out")),
+        item("actual-size", "actualSize", "Actual size", () => zoomTo(1), hint("zoom-actual")),
+        item("fit", "fit", "Fit document to window", fitView, hint("zoom-fit")),
         item("zoom-selection", "selectAll", "Zoom to selection", zoomToSelection),
         SEP,
         ...(["px", "mm", "in"] as Units[]).map((u) =>
@@ -8781,7 +8847,7 @@ export function App() {
         // row beside it opens the same window on the page that decides
         // which tools are on the rail.
         item("tools", "brush", "Tools on the rail…", () => openPrefs("tools")),
-        item("prefs", "units", "Preferences…", () => openPrefs("general"), "Ctrl+,"),
+        item("prefs", "units", "Preferences…", () => openPrefs("general"), hint("preferences")),
       ],
     },
     {
@@ -8791,7 +8857,7 @@ export function App() {
       id: "help",
       label: "Help",
       entries: [
-        item("keys", "text", "Keys and gestures", () => setShowKeys(true), "?"),
+        item("keys", "text", "Keys and gestures", () => setShowKeys(true), hint("keys-sheet")),
         SEP,
         item("about", "check", "About Chitrakar…", () => setShowAbout(true)),
       ],
@@ -8803,8 +8869,32 @@ export function App() {
   // down under the pointer, so it is rebuilt only when what it shows
   // changes — and the rows call back through a ref, since the menu
   // outlives the render that built it.
+  markMenuKeys(
+    menus.flatMap((m) => m.entries),
+    chords.menuOf,
+  );
   const menusRef = useRef(menus);
   menusRef.current = menus;
+  // A chord a person gave a menu row runs that row, from wherever the
+  // row is in the menus — the same lookup the system menu bar uses —
+  // and not while a field has the caret, like every chord but undo.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTextEntry(e.target) || e.target instanceof HTMLSelectElement) return;
+      const row = chords.menuByChord[chordFromEvent(e)];
+      if (!row) return;
+      for (const m of menusRef.current) {
+        const entry = findEntry(m.entries, row);
+        if (entry) {
+          e.preventDefault();
+          entry.run();
+          return;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chords]);
   const menuShape = menuSignature(menus);
   // If the system bar will not take the menu, the one in the window comes
   // back: an app with no menu at all is worse than an app with two.
@@ -9260,7 +9350,16 @@ export function App() {
         )}
       </header>
       {menuSheet && compact && <MenuSheet menus={menus} onClose={() => setMenuSheet(false)} />}
-      {showKeys && <KeysDialog hint={TOOL_HINT} onClose={() => setShowKeys(false)} />}
+      {showKeys && (
+        <KeysDialog
+          hint={TOOL_HINT}
+          chordOf={chords.of}
+          own={keyableRows(menus)
+            .filter((r) => chords.menuOf[r.id])
+            .map((r) => [chordLabel(chords.menuOf[r.id]), `${r.path} › ${r.label}`])}
+          onClose={() => setShowKeys(false)}
+        />
+      )}
       {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
       {contextAt && (
         <div
@@ -9289,14 +9388,14 @@ export function App() {
               <MenuItem
                 icon="raise"
                 onClick={() => orderSelected(true)}
-                hint="Ctrl+Shift+]"
+                hint={hint("to-front")}
               >
                 Bring to front
               </MenuItem>
               <MenuItem
                 icon="lower"
                 onClick={() => orderSelected(false)}
-                hint="Ctrl+Shift+["
+                hint={hint("to-back")}
               >
                 Send to back
               </MenuItem>
@@ -9346,10 +9445,10 @@ export function App() {
               <MenuItem icon="paste" onClick={pasteClipboard} hint={hint("paste")}>
                 Paste
               </MenuItem>
-              <MenuItem icon="selectAll" onClick={selectAll} hint="Ctrl+A">
+              <MenuItem icon="selectAll" onClick={selectAll} hint={hint("select-all")}>
                 Select all
               </MenuItem>
-              <MenuItem icon="fit" onClick={fitView} hint="Ctrl+0">
+              <MenuItem icon="fit" onClick={fitView} hint={hint("zoom-fit")}>
                 Fit document to window
               </MenuItem>
             </>
@@ -9496,6 +9595,7 @@ export function App() {
       {prefsOpen && (
         <PreferencesDialog
           initialGroup={prefsGroup}
+          menuRows={keyableRows(menus)}
           prefs={prefs}
           setPrefs={setPrefs}
           resetPrefs={resetPrefs}
@@ -12163,8 +12263,22 @@ function topLevelCount(layers: LayerInfo[]): number {
 /** The sheet of keys. The tool rows are written from the keys as they
  * stand rather than as they were shipped, so a rebound tool is listed
  * under the key it now answers to; a tool with no key left says so. */
-const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => {
+const keyHelp = (
+  hint: Record<Tool, string>,
+  /** A command's chord as it stands, rebindings and all. */
+  chordOf: Record<CommandId, string>,
+  /** The menu rows a person gave chords of their own: label and chord. */
+  own: [string, string][] = [],
+): [string, [string, string][]][] => {
   const k = (t: Tool) => hint[t] || "(no key)";
+  // A command's chord as it reads, or "(no key)" for one given none;
+  // "?" is written as itself, not as the shift it takes on one keyboard.
+  const c = (id: CommandId) => {
+    const chord = chordOf[id];
+    if (!chord) return "(no key)";
+    return chord === "shift+/" ? "?" : chordLabel(chord);
+  };
+  const cs = (...ids: CommandId[]) => ids.map(c).join(", ");
   const shifted = (t: Tool) => (hint[t] ? `Shift+${hint[t]}` : "(no key)");
   return [
     [
@@ -12230,8 +12344,8 @@ const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => 
       ["Wheel", "Zoom about the cursor"],
       ["Space-drag, middle-drag", "Pan"],
       ["Drag out of a ruler", "Place a guide; drop it back to remove it"],
-      ["Ctrl++, Ctrl+-", "Zoom in, out"],
-      ["Ctrl+0, Ctrl+1", "Fit the page to the window, actual size"],
+      [cs("zoom-in", "zoom-out"), "Zoom in, out"],
+      [cs("zoom-fit", "zoom-actual"), "Fit the page to the window, actual size"],
       [
         "Alt-click a layer's eye",
         "Show that layer on its own; again for the page back. Looking, not an edit: nothing is remembered by the file",
@@ -12241,23 +12355,23 @@ const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => 
   [
     "The document",
     [
-      ["Ctrl+Z, Ctrl+Shift+Z", "Undo, redo"],
-      ["Ctrl+C, Ctrl+X, Ctrl+V", "Copy, cut, paste"],
-      ["Ctrl+D", "Duplicate"],
-      ["Ctrl+G, Ctrl+Shift+G", "Group, ungroup"],
-      ["Ctrl+S", "Save"],
-      ["Ctrl+E", "Export a PNG"],
-      ["Ctrl+Shift+E", "Export window — any format, any size"],
-      ["Ctrl+,", "Preferences"],
-      ["Ctrl+Alt+C / V", "Copy, paste a layer's look"],
-      ["Ctrl+Alt+G", "Clip to the layer below"],
-      ["Ctrl+Shift+], Ctrl+Shift+[", "Bring to the front, send to the back"],
+      [cs("undo", "redo"), "Undo, redo"],
+      [cs("copy", "cut", "paste"), "Copy, cut, paste"],
+      [c("duplicate"), "Duplicate"],
+      [cs("group", "ungroup"), "Group, ungroup"],
+      [c("save"), "Save"],
+      [c("export"), "Export a PNG"],
+      [c("export-window"), "Export window — any format, any size"],
+      [c("preferences"), "Preferences"],
+      [cs("copy-style", "paste-style"), "Copy, paste a layer's look"],
+      [c("clip"), "Clip to the layer below"],
+      [cs("to-front", "to-back"), "Bring to the front, send to the back"],
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
-      ["Ctrl+A", "Select all — the page with a marquee in hand, else every layer"],
+      [c("select-all"), "Select all — the page with a marquee in hand, else every layer"],
       ["M", "Pick a region out of the page (shift+M for the ellipse, the lasso and the wand)"],
       ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
-      ["Ctrl+Shift+I", "Pick out the rest instead"],
+      [c("pick-inverse"), "Pick out the rest instead"],
       [
         "Click a kept region",
         "Pick it out again; shift adds it, alt takes it away, both keep the overlap, ctrl-click forgets it",
@@ -12276,11 +12390,12 @@ const keyHelp = (hint: Record<Tool, string>): [string, [string, string][]][] => 
       // never passes them on, so in a tab this sheet would be promising
       // something that does not happen.
       ...(isTauri()
-        ? ([["Ctrl+N, Ctrl+O", "New document, open one"]] as [string, string][])
+        ? ([[cs("new", "open"), "New document, open one"]] as [string, string][])
         : []),
-      ["?", "This sheet"],
+      [c("keys-sheet"), "This sheet"],
     ],
   ],
+  ...(own.length > 0 ? ([["Your keys", own]] as [string, [string, string][]][]) : []),
   ];
 };
 
@@ -12352,12 +12467,16 @@ function AboutDialog({ onClose }: { onClose: () => void }) {
 
 function KeysDialog({
   hint,
+  chordOf,
+  own,
   onClose,
 }: {
   hint: Record<Tool, string>;
+  chordOf: Record<CommandId, string>;
+  own: [string, string][];
   onClose: () => void;
 }) {
-  const KEY_HELP = keyHelp(hint);
+  const KEY_HELP = keyHelp(hint, chordOf, own);
   return (
     <div className="modal-scrim" onPointerDown={onClose}>
       <div

@@ -17252,6 +17252,120 @@ assert(
   await page.waitForTimeout(200);
 }
 
+// 9bx2. Any menu row can be given a chord of its own, not only the
+// commands that ship with one: found on the Keys page by name, given a
+// chord as a command is, and then run by it, written beside it in the
+// menu, and listed under "Your keys" on the keys sheet. A letter alone
+// is a tool's and is refused. Delete leaves a command with no chord at
+// all; the zoom keys and "?" are commands too.
+{
+  const chordOf = (label) => page.locator(`button[aria-label="${label} chord"]`);
+  await newDocument(400, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(box.x + 40, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 160, box.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await pickTool("Move");
+  await page.locator(".panel ul.layer-list li[data-id]").first().click();
+  await page.waitForTimeout(150);
+
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Keys")');
+  await page.waitForTimeout(150);
+  await page.fill('input[aria-label="Find a command"]', "hide");
+  const hide = chordOf("Hide");
+  assert((await hide.count()) === 1, "Layer › Hide is on the Keys page, found by name");
+  assert((await hide.textContent()) === "none", `and ships with no chord (${await hide.textContent()})`);
+  await hide.click();
+  await page.keyboard.press("k");
+  await page.waitForTimeout(100);
+  assert(
+    (await hide.textContent()) === "press…" && (await page.isVisible('.prefs-pane .modal-note')),
+    "a letter on its own is refused, said why, and the button keeps waiting",
+  );
+  await page.keyboard.press("Control+Alt+H");
+  await page.waitForTimeout(150);
+  assert((await hide.textContent()) === "Ctrl+Alt+H", `the chord pressed is the row's (${await hide.textContent()})`);
+  // Delete leaves a command with none, and nothing then runs it.
+  await page.fill('input[aria-label="Find a command"]', "");
+  await chordOf("Zoom in").click();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(100);
+  assert((await chordOf("Zoom in").textContent()) === "none", "Delete leaves zoom in with no chord");
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+
+  const name = page.locator(".panel ul.layer-list li[data-id] .layer-name").first();
+  assert(!(await name.getAttribute("class")).includes("muted"), "the layer shows to begin with");
+  await page.keyboard.press("Control+Alt+h");
+  await page.waitForTimeout(200);
+  assert((await name.getAttribute("class")).includes("muted"), "the row's chord hides the picked layer");
+  await page.click('.menubar button:text-is("Layer")');
+  await page.waitForTimeout(150);
+  const row = page.locator(".menu-pop .menu-item", { hasText: "Show" }).first();
+  assert(
+    (await row.locator(".menu-item-hint").textContent()) === "Ctrl+Alt+H",
+    `the menu writes it beside the row (${await row.locator(".menu-item-hint").textContent()})`,
+  );
+  // Closed by a click rather than Escape, which would let go of the
+  // layer too.
+  await page.click('.menubar button:text-is("Layer")');
+  await page.waitForTimeout(100);
+  await page.keyboard.press("Control+Alt+h");
+  await page.waitForTimeout(200);
+  assert(!(await name.getAttribute("class")).includes("muted"), "and pressed again, shows it");
+
+  const zoomField = page.locator(".zoom-field input");
+  const zoomBefore = await zoomField.inputValue();
+  await page.keyboard.press("Control+=");
+  await page.waitForTimeout(200);
+  assert((await zoomField.inputValue()) === zoomBefore, "zoom in, given no chord, is not run by its old one");
+
+  await page.keyboard.press("?");
+  await page.waitForSelector('[role=dialog][aria-label="Keys and gestures"]');
+  const sheet = await page.textContent('[role=dialog][aria-label="Keys and gestures"]');
+  assert(
+    sheet.includes("Your keys") && sheet.includes("Ctrl+Alt+H") && sheet.includes("Layer › Hide"),
+    "the keys sheet lists the row's chord under Your keys",
+  );
+  assert(sheet.includes("(no key), Ctrl+-"), "and says zoom in has no key");
+  await page.click('[aria-label="Keys and gestures"] >> text=Close');
+  await page.waitForTimeout(100);
+  const stored = await page.evaluate(() => {
+    const p = JSON.parse(localStorage.getItem("chitrakar:prefs"));
+    return [p.menuKeys, p.commandKeys];
+  });
+  assert(
+    JSON.stringify(stored) === JSON.stringify([{ hide: "mod+alt+h" }, { "zoom-in": "" }]),
+    `kept as the row's id and a command given none (${JSON.stringify(stored)})`,
+  );
+
+  // Back to how they shipped, for whoever comes next.
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Keys")');
+  await chordOf("Zoom in").click();
+  await page.keyboard.press("Backspace");
+  await page.fill('input[aria-label="Find a command"]', "hide");
+  await chordOf("Hide").click();
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(150);
+  assert(
+    (await chordOf("Hide").textContent()) === "none" && (await chordOf("Zoom in").textContent()) === "Ctrl+=",
+    "Backspace puts each back: the row to none, zoom in to its own",
+  );
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Control+=");
+  await page.waitForTimeout(200);
+  assert((await zoomField.inputValue()) !== zoomBefore, "and zoom in answers to its chord again");
+}
+
 // 9by. Slices: every region kept by name comes out as its own file, in
 // one press, named for the region. A slice is a region the document
 // already keeps, so nothing new is written down for it — and the set

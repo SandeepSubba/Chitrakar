@@ -31,9 +31,10 @@ import {
   boundChords,
   chordFromEvent,
   chordLabel,
-  isChord,
+  claimable,
+  giveChord,
+  restoreChord,
   type CommandId,
-  type CommandKeys,
 } from "./commands";
 import { DEFAULTS, type ExportFormat, type FingerDoes, type Prefs, type Theme, type Units } from "./prefs";
 import {
@@ -104,9 +105,13 @@ export function PreferencesDialog({
   onLoadScreenIcc,
   onDisplayP3,
   onClearScreenIcc,
+  menuRows = [],
   onClose,
 }: {
   initialGroup?: PrefGroup;
+  /** Every menu row a person may give a chord of their own, with the
+   * way to it through the menus. */
+  menuRows?: { id: string; path: string; label: string }[];
   prefs: Prefs;
   setPrefs: (p: Partial<Prefs>) => void;
   resetPrefs: () => void;
@@ -132,12 +137,23 @@ export function PreferencesDialog({
    * to be pressed for it. */
   const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
   const [listening, setListening] = useState<Tool | null>(null);
-  /** The chords as they stand, and which command is waiting for one. */
-  const chords = useMemo(() => boundChords(prefs.commandKeys), [prefs.commandKeys]);
-  const [catching, setCatching] = useState<CommandId | null>(null);
+  /** The chords as they stand, and which command or menu row is
+   * waiting for one: `cmd:<id>` or `row:<id>`. */
+  const chords = useMemo(
+    () => boundChords(prefs.commandKeys, prefs.menuKeys),
+    [prefs.commandKeys, prefs.menuKeys],
+  );
+  const [catching, setCatching] = useState<string | null>(null);
+  /** Why the last chord pressed was not taken, said under the list. */
+  const [refused, setRefused] = useState<string | null>(null);
+  /** Words to find a menu row by. */
+  const [rowQuery, setRowQuery] = useState("");
   useEffect(() => {
     if (!catching) return;
-    const command = catching;
+    const command = catching.startsWith("cmd:") ? (catching.slice(4) as CommandId) : null;
+    const target: { command: CommandId } | { row: string } = command
+      ? { command }
+      : { row: catching.slice(4) };
     // Ahead of everyone else, so the chord pressed is caught rather than
     // obeyed: this window is reached by one of the chords being rebound.
     const key = (e: KeyboardEvent) => {
@@ -149,38 +165,37 @@ export function PreferencesDialog({
       }
       // A modifier on its own is the start of a chord, not a chord.
       if (["Control", "Meta", "Alt", "Shift"].includes(e.key)) return;
-      const next: CommandKeys = { ...prefs.commandKeys };
-      if (e.key === "Backspace" || e.key === "Delete") {
-        // Back to what it shipped with, taking that chord back from any
-        // rebinding holding it.
-        delete next[command];
-        const shipped = COMMANDS.find((c) => c.id === command)?.chord;
-        for (const id of Object.keys(next) as CommandId[]) {
-          if (next[id] === shipped) delete next[id];
-        }
+      let next;
+      if (e.key === "Backspace") {
+        // Back to what it shipped with — a command's chord, taken back
+        // from whoever holds it now; a menu row ships with none.
+        next = command
+          ? restoreChord(command, prefs.commandKeys, prefs.menuKeys)
+          : giveChord(target, "", prefs.commandKeys, prefs.menuKeys);
+      } else if (e.key === "Delete") {
+        // No chord at all.
+        next = giveChord(target, "", prefs.commandKeys, prefs.menuKeys);
       } else {
         const pressed = chordFromEvent(e);
-        if (!isChord(pressed)) return;
-        // A chord another command holds changes hands: that command
-        // takes the one this had, so the swap leaves nothing unreachable.
-        const holder = chords.byChord[pressed];
-        const had = chords.of[command];
-        if (holder && holder !== command) {
-          if (had) next[holder] = had;
-          else delete next[holder];
+        if (!claimable(pressed)) {
+          // A letter on its own is a tool's, a bracket the brush's: say
+          // so and keep listening rather than taking it.
+          setRefused(
+            pressed
+              ? `${chordLabel(pressed)} on its own belongs to the tools — hold Ctrl or Alt with it.`
+              : "That key cannot be given; try a letter, a digit or a sign with Ctrl or Alt.",
+          );
+          return;
         }
-        next[command] = pressed;
+        next = giveChord(target, pressed, prefs.commandKeys, prefs.menuKeys);
       }
-      for (const id of Object.keys(next) as CommandId[]) {
-        const shipped = COMMANDS.find((c) => c.id === id)?.chord;
-        if (next[id] === shipped) delete next[id];
-      }
-      setPrefs({ commandKeys: next });
+      setRefused(null);
+      setPrefs({ commandKeys: next.commandKeys, menuKeys: next.menuKeys });
       setCatching(null);
     };
     window.addEventListener("keydown", key, true);
     return () => window.removeEventListener("keydown", key, true);
-  }, [catching, chords, prefs.commandKeys, setPrefs]);
+  }, [catching, prefs.commandKeys, prefs.menuKeys, setPrefs]);
   useEffect(() => {
     if (!listening) return;
     const tool = listening;
@@ -273,6 +288,33 @@ export function PreferencesDialog({
       />
       <span>{label}</span>
       {hint && <span className="hint">{hint}</span>}
+    </label>
+  );
+
+  /** One command or menu row and the button that takes a chord for it. */
+  const chordRow = (key: string, label: string, chord: string, path?: string) => (
+    <label className="row prefs-check prefs-tool" key={key}>
+      <span>
+        {label}
+        {path && <span className="prefs-path"> · {path}</span>}
+      </span>
+      <button
+        type="button"
+        className={catching === key ? "prefs-key listening" : "prefs-key"}
+        aria-label={`${label} chord`}
+        title={
+          catching === key
+            ? "Press the keys for it; Escape leaves it as it is"
+            : `The chord that runs ${label}: press to change it`
+        }
+        onClick={(e) => {
+          e.preventDefault();
+          setRefused(null);
+          setCatching(catching === key ? null : key);
+        }}
+      >
+        {catching === key ? "press…" : chord ? chordLabel(chord) : "none"}
+      </button>
     </label>
   );
 
@@ -381,40 +423,45 @@ export function PreferencesDialog({
                 <p className="modal-aside">
                   What each command answers to. Press the chord shown
                   beside one and then the keys you want; a chord another
-                  command holds changes hands, and Backspace puts one
-                  back to what it shipped with. The tools' own keys are
-                  on the Tools page.
+                  command holds changes hands. Backspace puts one back to
+                  what it shipped with and Delete leaves it with none.
+                  The tools' own keys are on the Tools page.
                 </p>
+                {refused && <p className="modal-note">{refused}</p>}
                 {COMMAND_GROUPS.map((section) => (
                   <div className="prefs-tools prefs-chords" key={section} role="group">
                     <span className="prefs-chord-group">{section}</span>
-                    {COMMANDS.filter((c) => c.group === section).map((c) => (
-                      <label className="row prefs-check prefs-tool" key={c.id}>
-                        <span>{c.label}</span>
-                        <button
-                          type="button"
-                          className={catching === c.id ? "prefs-key listening" : "prefs-key"}
-                          aria-label={`${c.label} chord`}
-                          title={
-                            catching === c.id
-                              ? "Press the keys for it; Escape leaves it as it is"
-                              : `The chord that runs ${c.label}: press to change it`
-                          }
-                          onClick={(e) => {
-                            e.preventDefault();
-                            setCatching(catching === c.id ? null : c.id);
-                          }}
-                        >
-                          {catching === c.id
-                            ? "press…"
-                            : chords.of[c.id]
-                              ? chordLabel(chords.of[c.id])
-                              : "none"}
-                        </button>
-                      </label>
-                    ))}
+                    {COMMANDS.filter((c) => c.group === section).map((c) =>
+                      chordRow(`cmd:${c.id}`, c.label, chords.of[c.id]),
+                    )}
                   </div>
                 ))}
+                {menuRows.length > 0 && (
+                  <div
+                    className="prefs-tools prefs-chords"
+                    role="group"
+                    aria-label="Everything else in the menus"
+                  >
+                    <span className="prefs-chord-group">Everything else in the menus</span>
+                    <input
+                      type="search"
+                      className="prefs-find"
+                      placeholder="Find a command"
+                      aria-label="Find a command"
+                      value={rowQuery}
+                      onChange={(e) => setRowQuery(e.target.value)}
+                      onKeyDown={(e) => e.stopPropagation()}
+                    />
+                    {menuRows
+                      .filter((r) => {
+                        const q = rowQuery.trim().toLowerCase();
+                        return !q || `${r.path} ${r.label}`.toLowerCase().includes(q);
+                      })
+                      .map((r) =>
+                        chordRow(`row:${r.id}`, r.label, chords.menuOf[r.id] ?? "", r.path),
+                      )}
+                  </div>
+                )}
               </>
             )}
 

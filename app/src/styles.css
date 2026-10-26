@@ -3225,6 +3225,11 @@ button.fold:hover {
   flex-direction: column;
   gap: 0.5rem;
   min-height: 11rem;
+  /* A long page — the keys, every row of every menu — scrolls in its
+     own room, so the rail and the window's buttons stay put. */
+  max-height: calc(100vh - 10rem);
+  overflow-y: auto;
+  padding-right: 0.25rem;
 }
 
 /* A setting is three columns — what it is, the control, and a remark —
@@ -3312,6 +3317,29 @@ button.fold:hover {
 
 .prefs-chords .prefs-key {
   min-width: 6.5rem;
+}
+
+/* Where a menu row is found, after its name and quieter. */
+.prefs-path {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* Finding one row among every menu's: held at the top of the pane
+   while the rows go by under it. */
+.prefs-find {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 0 0 4px var(--panel);
+  margin: 0.15rem 0 0.3rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
 }
 
 .prefs-tools .prefs-key {

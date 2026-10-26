@@ -19,7 +19,7 @@
  * document and goes through a `Command`.
  */
 
-import { COMMANDS, isChord, type CommandKeys } from "./commands";
+import { COMMANDS, claimable, isChord, type CommandKeys, type MenuKeys } from "./commands";
 import { useCallback, useEffect, useState } from "react";
 import { ALWAYS_SHOWN, KEYED_TOOLS, TOOL_KEYS, type Tool, type ToolKeys, isTool } from "./tools";
 
@@ -128,6 +128,8 @@ export type Prefs = {
   /** The command chords rebound: what each named command answers to
    * instead of the chord it shipped with. Only what differs is kept. */
   commandKeys: CommandKeys;
+  /** Chords given to menu rows that ship with none, by the row's id. */
+  menuKeys: MenuKeys;
   /** Which of the bar's groups of buttons are shown. Everything on them
    * is on a menu as well, so a group put away costs nothing but reach. */
   barDocument: boolean;
@@ -193,6 +195,7 @@ export const DEFAULTS: Prefs = {
   hiddenTools: [],
   toolKeys: {},
   commandKeys: {},
+  menuKeys: {},
   exportSetups: [],
   recent: [],
   recentColors: [],
@@ -299,10 +302,29 @@ export function clamp(p: Prefs): Prefs {
       const seen = new Set<string>();
       for (const [id, chord] of Object.entries(raw as Record<string, unknown>)) {
         const known = COMMANDS.find((c) => c.id === id);
+        // An empty chord is a command given none, on purpose.
+        if (known && chord === "") {
+          out[known.id] = "";
+          continue;
+        }
         if (!known || !isChord(chord) || seen.has(chord)) continue;
         if (known.chord === chord) continue;
         seen.add(chord);
         out[known.id] = chord;
+      }
+      return out;
+    })(),
+    // Rows by id, a chord each that a row may take, each chord once.
+    menuKeys: (() => {
+      const out: MenuKeys = {};
+      const raw = p.menuKeys;
+      if (!raw || typeof raw !== "object") return out;
+      const seen = new Set<string>();
+      for (const [row, chord] of Object.entries(raw as Record<string, unknown>)) {
+        if (typeof chord !== "string" || !claimable(chord) || seen.has(chord)) continue;
+        if (!row || row.length > 80) continue;
+        seen.add(chord);
+        out[row] = chord;
       }
       return out;
     })(),
