@@ -3356,6 +3356,31 @@ button.fold:hover {
   margin-left: auto;
 }
 
+/* The sizes and what they come to: on one line where there is room,
+   and where there is not (a phone) the pixels go under the buttons
+   rather than past the window's edge. */
+.export-scale-row {
+  flex-wrap: wrap;
+}
+
+.export-scale-row .hint {
+  margin-left: auto;
+}
+
+/* On a phone the picture stacks over the settings: it stands in the
+   middle of the window rather than at its left, and the settings take
+   the whole width under it. */
+@media (max-width: 640px) {
+  .export-preview {
+    flex: 1 1 100%;
+    align-items: center;
+  }
+
+  .export-preview figcaption {
+    text-align: center;
+  }
+}
+
 .export-scales .preset:disabled,
 .export-formats .preset:disabled {
   opacity: 0.4;

@@ -637,7 +637,7 @@ export function ExportDialog({
           ) : null}
         </label>
 
-        <div className="row" role="group" aria-label="Scale">
+        <div className="row export-scale-row" role="group" aria-label="Scale">
           <span>Size</span>
           <div className="export-scales">
             {SCALES.map((s) => (

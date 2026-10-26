@@ -14739,6 +14739,33 @@ assert(
   await ctx.close();
 }
 
+// 11j2. The export window on a phone: the picture stands in the middle
+// over the settings, and what the sizes come to goes under their
+// buttons rather than past the window's edge ("1280 × 72" and nothing).
+{
+  const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const pp = await phone.newPage();
+  await pp.goto("http://localhost:8123/");
+  await pp.waitForSelector("#engine-canvas");
+  await pp.waitForTimeout(600);
+  await pp.tap('button[aria-label="Menus"]');
+  await pp.tap('.sheet-menu-label:text-is("File")');
+  await pp.locator(".menu-sheet button.menu-item", { hasText: "Export…" }).first().tap();
+  const dialog = pp.locator('[role=dialog][aria-label="Export"]');
+  await dialog.waitFor();
+  await pp.waitForTimeout(400);
+  const fit = await dialog.evaluate((d) => {
+    const r = d.getBoundingClientRect();
+    const past = [...d.querySelectorAll("*")].filter((e) => e.getBoundingClientRect().right > r.right + 1).length;
+    const pic = d.querySelector(".export-preview img, .export-preview > span").getBoundingClientRect();
+    const middle = Math.abs((pic.left + pic.right) / 2 - (r.left + r.right) / 2);
+    return [past, Math.round(middle)];
+  });
+  assert(fit[0] === 0, `nothing in the export window runs past its edge on a phone (${fit[0]})`);
+  assert(fit[1] <= 4, `and the picture stands in its middle (${fit[1]} off)`);
+  await phone.close();
+}
+
 // 11k. A page the size of a phone's photograph costs what the screen
 // shows of it, not what it would take to draw the whole of it. The first
 // frame of a new document was drawn before the document had been given
