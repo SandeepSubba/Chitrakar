@@ -96,6 +96,7 @@ fn reading_and_saving_a_photograph_hold_one_copy_of_it() {
                 width: w,
                 height: h,
                 corners: None,
+                develop: None,
             },
         )),
     })

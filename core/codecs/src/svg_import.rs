@@ -139,6 +139,7 @@ impl Gathered {
                         width: pic.width,
                         height: pic.height,
                         corners: None,
+                        develop: None,
                     },
                 );
                 node.transform = pic.transform;
@@ -3105,6 +3106,7 @@ mod tests {
                 width: pic.width,
                 height: pic.height,
                 corners: None,
+                develop: None,
             },
         );
         raster.transform = pic.transform;

@@ -14922,6 +14922,143 @@ assert(
   assert(lastDialog.includes("HEIC") && lastDialog.includes("JPEG"), `a HEIC says how to get it in (${lastDialog})`);
 }
 
+// 9cn. A camera's raw file opens in the develop window: the photograph
+// beside its settings, developed again as they move, then placed with
+// the file kept in the document — so Develop again… reopens it with the
+// settings it had, and one undo takes the new development back. The raw
+// file is a DNG written here: a grey card under a warm light, whose
+// camera sees in sRGB's own primaries.
+{
+  const dng = (w, h, neutral, scene) => {
+    const le16 = (v) => { const b = Buffer.alloc(2); b.writeUInt16LE(v); return b; };
+    const le32 = (v) => { const b = Buffer.alloc(4); b.writeUInt32LE(v >>> 0); return b; };
+    const pixels = Buffer.alloc(w * h * 2);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const c = y % 2 === 0 ? (x % 2 === 0 ? 0 : 1) : x % 2 === 0 ? 1 : 2;
+        const v = Math.round(Math.min(1, Math.max(0, scene(x, y)[c] * neutral[c])) * 4095);
+        pixels.writeUInt16LE(v, (y * w + x) * 2);
+      }
+    const matrix = [32405, -15371, -4985, -9693, 18760, 416, 556, -2040, 10572];
+    const entries = [
+      [254, 4, 1, le32(0)], [256, 4, 1, le32(w)], [257, 4, 1, le32(h)], [258, 3, 1, le16(16)],
+      [259, 3, 1, le16(1)], [262, 3, 1, le16(32803)], [271, 2, 10, Buffer.from("Chitrakar\0")],
+      [272, 2, 5, Buffer.from("Test\0")], [273, 4, 1, le32(0)], [274, 3, 1, le16(1)], [277, 3, 1, le16(1)],
+      [278, 4, 1, le32(h)], [279, 4, 1, le32(w * h * 2)],
+      [33421, 3, 2, Buffer.concat([le16(2), le16(2)])], [33422, 1, 4, Buffer.from([0, 1, 1, 2])],
+      [50706, 1, 4, Buffer.from([1, 4, 0, 0])], [50717, 4, 1, le32(4095)],
+      [50721, 10, 9, Buffer.concat(matrix.flatMap((v) => { const b = Buffer.alloc(8); b.writeInt32LE(v, 0); b.writeInt32LE(10000, 4); return [b]; }))],
+      [50728, 5, 3, Buffer.concat(neutral.map((v) => Buffer.concat([le32(Math.round(v * 1e6)), le32(1e6)])))],
+    ];
+    const extraAt = 8 + 2 + entries.length * 12 + 4;
+    let extra = Buffer.alloc(0);
+    const ifd = [le16(entries.length)];
+    for (const [tag, kind, count, value] of entries) {
+      let field = value;
+      if (value.length > 4) {
+        field = le32(extraAt + extra.length);
+        extra = Buffer.concat([extra, value, Buffer.alloc(value.length % 2)]);
+      } else field = Buffer.concat([value, Buffer.alloc(4 - value.length)]);
+      ifd.push(le16(tag), le16(kind), le32(count), field);
+    }
+    ifd.push(le32(0));
+    const head = Buffer.concat([Buffer.from("II*\0"), le32(8), ...ifd]);
+    head.writeUInt32LE(extraAt + extra.length, 8 + 2 + 8 * 12 + 8); // the strip's offset
+    return Buffer.concat([head, extra, pixels]);
+  };
+  const card = dng(64, 32, [0.8, 1.0, 0.6], (x) => (x < 32 ? [0.18, 0.18, 0.18] : [0.6, 0.6, 0.6]));
+  const win = page.locator('[role="dialog"][aria-label="Develop"]');
+  /** A pixel of the window's photograph, by fraction across and down. */
+  const previewAt = (fx, fy) =>
+    win.locator('canvas[aria-label="Developed picture"]').evaluate((c, [fx, fy]) => {
+      const x = Math.floor(c.width * fx), y = Math.floor(c.height * fy);
+      return Array.from(c.getContext("2d").getImageData(x, y, 1, 1).data);
+    }, [fx, fy]);
+  const settle = () => page.waitForTimeout(250);
+  const layerNames = () => page.locator(".panel ul li .layer-name").allTextContents();
+
+  await newDocument(200, 150, "rgb");
+  // Cancelled, nothing comes in.
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "card.dng", mimeType: "", buffer: card });
+  await win.waitFor();
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+  assert((await layerNames()).length === 0 && (await win.count()) === 0, "a develop cancelled brings nothing in");
+
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "card.dng", mimeType: "", buffer: card });
+  await win.waitFor();
+  await settle();
+  const asShot = await previewAt(0.25, 0.5);
+  assert(
+    Math.abs(asShot[0] - asShot[1]) <= 4 && Math.abs(asShot[1] - asShot[2]) <= 4 && asShot[0] > 40,
+    `as shot, the camera's balance makes the card grey (${asShot})`,
+  );
+  assert((await win.locator('select[aria-label="Light"]').inputValue()) === "As shot", "starting from the camera's own light");
+  // Warmer: the temperature to correct for raised.
+  await win.locator('input[aria-label="Temperature"]').fill("800");
+  await settle();
+  const warm = await previewAt(0.25, 0.5);
+  assert(warm[0] > warm[2] + 15, `a higher temperature develops warmer (${warm})`);
+  assert((await win.locator('select[aria-label="Light"]').inputValue()) === "Custom", "and the light is said to be one's own");
+  // A stop down is darker.
+  await win.locator('input[aria-label="Exposure"]').fill("-1");
+  await settle();
+  const darker = await previewAt(0.25, 0.5);
+  assert(darker[1] < warm[1] - 15, `a stop down develops darker (${warm} to ${darker})`);
+  // Picking the grey card puts it back to grey.
+  await win.locator('button:text-is("Pick grey")').click();
+  const box = await win.locator('canvas[aria-label="Developed picture"]').boundingBox();
+  const size = await win.locator('canvas[aria-label="Developed picture"]').evaluate((c) => [c.width, c.height]);
+  const k = Math.min(box.width / size[0], box.height / size[1]);
+  await page.mouse.click(
+    box.x + (box.width - size[0] * k) / 2 + size[0] * k * 0.25,
+    box.y + (box.height - size[1] * k) / 2 + size[1] * k * 0.5,
+  );
+  await settle();
+  const picked = await previewAt(0.25, 0.5);
+  assert(
+    Math.abs(picked[0] - picked[2]) <= 4 && Math.abs(picked[0] - picked[1]) <= 4,
+    `picking the card makes it grey again (${picked})`,
+  );
+  await win.locator('input[aria-label="Temperature"]').fill("800");
+  await settle();
+  await win.locator('button:text-is("Place")').click();
+  await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  assert((await layerNames()).join() === "card.dng", `placed, it is one picture (${await layerNames()})`);
+  const placedWarm = await canvasPixel(16, 16);
+  assert(placedWarm[0] > placedWarm[2] + 15, `developed in full as the window showed it (${placedWarm})`);
+  const again = page.locator('button.develop-again');
+  assert(await again.isVisible(), "a developed picture offers to be developed again");
+
+  // Develop again… opens with what it was developed with.
+  await again.click();
+  await win.waitFor();
+  assert(
+    (await win.locator('input[aria-label="Exposure"]').inputValue()) === "-1" &&
+      (await win.locator('select[aria-label="Light"]').inputValue()) === "Custom",
+    "developing again starts from the settings it had",
+  );
+  await win.locator('input[aria-label="Temperature"]').fill("150");
+  await settle();
+  await win.locator('button:text-is("Develop")').click();
+  await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  const cool = await canvasPixel(16, 16);
+  assert(cool[2] > cool[0] + 15, `developed again, cooler (${cool})`);
+  assert((await layerNames()).join() === "card.dng", "the same layer, not another");
+  assert((await page.locator(".history").innerText()).includes("Develop"), "history says it was developed");
+  await page.keyboard.press("Control+z");
+  await settle();
+  const back = await canvasPixel(16, 16);
+  assert(back[0] > back[2] + 15, `one undo takes the new development back (${back})`);
+  // From the Layer menu too.
+  await (await menuItem("Layer", "Develop again…")).click();
+  await win.waitFor();
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a

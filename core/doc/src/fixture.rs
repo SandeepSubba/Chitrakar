@@ -591,6 +591,7 @@ pub fn everything() -> Fixture {
                 width: 8,
                 height: 8,
                 corners: None,
+                develop: None,
             },
         )),
     })
@@ -1711,6 +1712,7 @@ pub fn everything() -> Fixture {
                 width: 8,
                 height: 8,
                 corners: None,
+                develop: None,
             },
         )),
     })
@@ -1963,6 +1965,9 @@ pub fn everything() -> Fixture {
     // one, so a file, a clipboard, an exporter and the second renderer
     // are each asked to carry the corners rather than six numbers. Its
     // edit moves the corners, which moves every pixel of it and its box.
+    // It says it was developed from a camera's raw file, which the
+    // document keeps, so the file and the settings travel with it.
+    let original = doc.add_original("IMG_0001.DNG", b"II*\0 a raw file".to_vec());
     doc.apply(Command::AddNode {
         parent: root,
         index: doc.children_of(root).unwrap().len(),
@@ -1973,6 +1978,16 @@ pub fn everything() -> Fixture {
                 width: 8,
                 height: 8,
                 corners: Some([[0.0, 0.0], [11.0, 1.0], [7.0, 11.0], [-3.0, 7.0]]),
+                develop: Some(crate::Developed {
+                    original,
+                    settings: crate::RawDevelop {
+                        white: Some([4800.0, 12.0]),
+                        exposure: 0.5,
+                        highlights: -40.0,
+                        vibrance: 20.0,
+                        ..Default::default()
+                    },
+                }),
             },
         )),
     })
@@ -3109,6 +3124,7 @@ impl Rng {
                         width,
                         height,
                         corners,
+                        develop: None,
                     },
                 ))
             }

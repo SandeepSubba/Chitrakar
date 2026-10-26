@@ -677,6 +677,42 @@ pub struct RasterRef {
     /// the corners were not there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corners: Option<[[f32; 2]; 4]>,
+    /// The camera's raw file this picture was developed from, and how —
+    /// so it can be developed again. `None` for every other picture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub develop: Option<Developed>,
+}
+
+/// A picture developed from a camera's raw file: the file, kept in the
+/// document's originals by its content id, and the settings it was
+/// developed with. Developing again makes a new picture and points the
+/// layer at it; the raw file is never changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Developed {
+    pub original: String,
+    pub settings: RawDevelop,
+}
+
+/// How a camera's raw file is developed — what can only be done before it
+/// is pixels. Every value at zero (and no white balance) is the plain
+/// development: the camera's own balance, the brightest hundredth at
+/// white. The tone settings run -100 to 100, as Lightroom's do.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RawDevelop {
+    /// The light's temperature in kelvin and a tint (green minus,
+    /// magenta plus, -150 to 150); `None` is as the camera saw it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub white: Option<[f32; 2]>,
+    /// In stops, on top of the plain development's own exposure.
+    pub exposure: f32,
+    pub contrast: f32,
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+    pub vibrance: f32,
+    pub saturation: f32,
 }
 
 impl RasterRef {
@@ -3185,6 +3221,7 @@ mod projective_tests {
             width: 40,
             height: 20,
             corners: Some(q),
+            develop: None,
         };
         let (x, y) = r.projective().unwrap().apply(40.0, 20.0).unwrap();
         assert!((x - 80.0).abs() < 1e-6 && (y - 70.0).abs() < 1e-6);

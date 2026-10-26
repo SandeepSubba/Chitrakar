@@ -14,9 +14,12 @@ pub mod wasm;
 
 use serde::Serialize;
 
+pub use chitrakar_codecs::develop::{RawPhoto, RawPreview};
+use chitrakar_codecs::SourceImage;
 pub use chitrakar_color::ColorMode;
 pub use chitrakar_doc::{
-    Command, Document, History, Node, NodeId, NodeKind, Transform, VectorShape,
+    Command, Developed, Document, History, Node, NodeId, NodeKind, RawDevelop, Transform,
+    VectorShape,
 };
 
 /// How far a duplicate or a paste is nudged from its original, in document
@@ -397,6 +400,8 @@ pub struct Session {
     /// a Photoshop file's adjustment layers, its effects — for the page
     /// to say rather than leave somebody to find.
     import_notes: Vec<String>,
+    /// A camera's raw file open in the develop window.
+    raw: Option<OpenRaw>,
     /// Soft-proofing (display-only): round-trip presented pixels through the
     /// document's press profile, optionally marking out-of-gamut pixels.
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
@@ -485,6 +490,7 @@ impl Session {
             pixels_recomputed: 0,
             last_touched: None,
             import_notes: Vec::new(),
+            raw: None,
             proof_cms: None,
             soft_proof: false,
             display_cms: None,
@@ -1329,6 +1335,7 @@ impl Session {
                 width: w,
                 height: h,
                 corners: None,
+                develop: None,
             },
         );
         picture.transform = Transform {
@@ -8612,6 +8619,7 @@ impl Session {
                     Some(chitrakar_doc::MaskKind::Painted { .. })
                 ),
                 has_effects: !node.effects.is_empty(),
+                developed: matches!(&node.kind, NodeKind::Raster(r) if r.develop.is_some()),
                 copies: match node.kind {
                     NodeKind::Instance { of, .. } => of.0,
                     _ => 0,
@@ -8809,6 +8817,157 @@ impl Session {
         img: chitrakar_codecs::SourceImage,
         name: &str,
     ) -> Result<NodeId, EngineError> {
+        self.place_developed(img, name, None)
+    }
+
+    // ---- Camera raw, developed ----
+
+    /// Read a camera's raw file to develop: kept until it is placed or the
+    /// window is closed, so each preview is the same photograph developed
+    /// again rather than the file read again. What the window needs to
+    /// start from is returned: the developed size and the camera's own
+    /// white balance as a temperature and tint.
+    pub fn raw_open(&mut self, bytes: &[u8], name: &str) -> Result<RawInfo, EngineError> {
+        let photo = RawPhoto::read(bytes).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        let info = RawInfo::of(&photo);
+        self.raw = Some(OpenRaw {
+            original: chitrakar_doc::content_id(0, 0, bytes),
+            name: name.to_string(),
+            bytes: Some(bytes.to_vec()),
+            photo,
+            preview: None,
+        });
+        Ok(info)
+    }
+
+    /// Open the raw file a layer was developed from, to develop it again:
+    /// the window's starting point and the settings it was developed with.
+    pub fn raw_open_layer(&mut self, id: NodeId) -> Result<(RawInfo, RawDevelop), EngineError> {
+        let developed = self.developed(id)?;
+        let fresh = self
+            .raw
+            .as_ref()
+            .is_none_or(|r| r.original != developed.original);
+        if fresh {
+            let original = self.doc.original(&developed.original).ok_or_else(|| {
+                EngineError::BadCommand("the raw file is not in this document".into())
+            })?;
+            let photo = RawPhoto::read(&original.bytes)
+                .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+            self.raw = Some(OpenRaw {
+                original: developed.original.clone(),
+                name: original.name.clone(),
+                bytes: None,
+                photo,
+                preview: None,
+            });
+        }
+        let raw = self.raw.as_ref().expect("opened above");
+        Ok((RawInfo::of(&raw.photo), developed.settings))
+    }
+
+    /// How a layer was developed, if it came from a raw file.
+    fn developed(&self, id: NodeId) -> Result<Developed, EngineError> {
+        match &self.doc.node(id)?.kind {
+            NodeKind::Raster(r) => r.develop.clone().ok_or_else(|| {
+                EngineError::BadCommand("this picture did not come from a raw file".into())
+            }),
+            _ => Err(EngineError::BadCommand(
+                "only a picture is developed".into(),
+            )),
+        }
+    }
+
+    /// The open raw file developed with `settings`, small: its longer side
+    /// about `longest`. The smaller photograph is made once per size.
+    pub fn raw_preview(
+        &mut self,
+        settings: &RawDevelop,
+        longest: u32,
+    ) -> Result<SourceImage, EngineError> {
+        let raw = self
+            .raw
+            .as_mut()
+            .ok_or_else(|| EngineError::BadCommand("no raw file is open".into()))?;
+        if raw.preview.as_ref().is_none_or(|(at, _)| *at != longest) {
+            raw.preview = Some((longest, raw.photo.preview(longest)));
+        }
+        let (_, preview) = raw.preview.as_ref().expect("made above");
+        Ok(preview.develop(&raw.photo, settings))
+    }
+
+    /// The white balance that makes the point (`x`, `y`) of the last
+    /// preview grey.
+    pub fn raw_white_at(&self, x: u32, y: u32) -> Option<[f32; 2]> {
+        let raw = self.raw.as_ref()?;
+        let (_, preview) = raw.preview.as_ref()?;
+        raw.photo.white_at(preview, x, y)
+    }
+
+    /// Develop the open raw file in full and place it, as a picture is
+    /// placed; the file goes into the document beside it, so it can be
+    /// developed again.
+    pub fn place_raw(&mut self, settings: &RawDevelop) -> Result<NodeId, EngineError> {
+        let raw = self
+            .raw
+            .as_ref()
+            .ok_or_else(|| EngineError::BadCommand("no raw file is open".into()))?;
+        let img = raw.photo.develop(settings);
+        let name = raw.name.clone();
+        let original = match &raw.bytes {
+            Some(bytes) => self.doc.add_original(&name, bytes.clone()),
+            None => raw.original.clone(),
+        };
+        self.place_developed(
+            img,
+            &name,
+            Some(Developed {
+                original,
+                settings: *settings,
+            }),
+        )
+    }
+
+    /// Develop a layer's raw file again with new settings: its picture
+    /// changes and nothing else — where it is, its size on the page, its
+    /// corners, mask and effects — in one step of history.
+    pub fn redevelop(&mut self, id: NodeId, settings: &RawDevelop) -> Result<(), EngineError> {
+        let developed = self.developed(id)?;
+        self.raw_open_layer(id)?;
+        let raw = self.raw.as_ref().expect("opened above");
+        let img = raw.photo.develop(settings);
+        let NodeKind::Raster(old) = &self.doc.node(id)?.kind else {
+            unreachable!("developed() said it is a picture");
+        };
+        let mut new = old.clone();
+        new.resource_id = self.doc.add_resource(img.width, img.height, img.rgba8);
+        (new.width, new.height) = (img.width, img.height);
+        new.develop = Some(Developed {
+            original: developed.original,
+            settings: *settings,
+        });
+        self.apply_labeled(
+            Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Raster(new)),
+            },
+            Some("Develop".into()),
+        )
+    }
+
+    /// Let the open raw file go.
+    pub fn raw_close(&mut self) {
+        self.raw = None;
+    }
+
+    /// [`Session::place_picture`], saying where the picture was developed
+    /// from when it was.
+    fn place_developed(
+        &mut self,
+        img: chitrakar_codecs::SourceImage,
+        name: &str,
+        develop: Option<Developed>,
+    ) -> Result<NodeId, EngineError> {
         self.import_notes.clear();
         let (width, height) = (img.width, img.height);
         let resource_id = self.doc.add_resource(width, height, img.rgba8);
@@ -8822,6 +8981,7 @@ impl Session {
                 width,
                 height,
                 corners: None,
+                develop,
             },
         );
         let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
@@ -9446,6 +9606,43 @@ fn cubic_at(a: [f32; 2], ha: [f32; 4], b: [f32; 2], hb: [f32; 4], t: f32) -> [f3
     ]
 }
 
+/// A camera's raw file open in the develop window.
+struct OpenRaw {
+    /// The file's content id, which is its id among the document's
+    /// originals once it is placed.
+    original: String,
+    name: String,
+    /// The file, until it is placed; a layer's own raw file is already in
+    /// the document and is not held twice.
+    bytes: Option<Vec<u8>>,
+    photo: RawPhoto,
+    /// The smaller photograph the window develops as a slider moves, and
+    /// the size it was made for.
+    preview: Option<(u32, RawPreview)>,
+}
+
+/// What the develop window starts from.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawInfo {
+    /// The developed size, after the camera's orientation.
+    pub width: u32,
+    pub height: u32,
+    /// The camera's own white balance, as a temperature and tint.
+    pub as_shot: [f32; 2],
+}
+
+impl RawInfo {
+    fn of(photo: &RawPhoto) -> RawInfo {
+        let (width, height) = photo.size();
+        RawInfo {
+            width,
+            height,
+            as_shot: photo.as_shot_white(),
+        }
+    }
+}
+
 /// One row of the UI layers panel. `parent`/`index`/`sibling_count` describe
 /// the node's slot in its group (painter's order: index 0 = bottom) so the
 /// UI can issue reorder commands without mirroring the tree.
@@ -9462,6 +9659,9 @@ pub struct LayerInfo {
     /// whether the brush paints the layer or the mask over it.
     pub painted_mask: bool,
     pub has_effects: bool,
+    /// A picture developed from a camera's raw file the document keeps,
+    /// which can be developed again.
+    pub developed: bool,
     /// The layer this one is a live copy of, or 0 when it is not a copy.
     pub copies: u64,
     pub locked: bool,
@@ -9649,6 +9849,140 @@ mod tests {
             .place_image(b"not really a raw file", "IMG_0001.CR2")
             .unwrap_err();
         assert!(format!("{err:?}").contains("camera raw"), "{err:?}");
+    }
+
+    /// A raw file of a grey card under a warm light: what the develop
+    /// window is tried on.
+    fn grey_card_dng() -> Vec<u8> {
+        chitrakar_codecs::develop::sample::dng(40, 20, 4095, [0.8, 1.0, 0.6], |x, _| {
+            if x < 20 {
+                [0.18; 3]
+            } else {
+                [0.6; 3]
+            }
+        })
+    }
+
+    fn picture_of(s: &Session, id: NodeId) -> chitrakar_doc::RasterRef {
+        match &s.doc.node(id).unwrap().kind {
+            NodeKind::Raster(r) => r.clone(),
+            other => panic!("not a picture: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_raw_file_opens_developed_and_keeps_the_file_and_the_settings() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        let info = s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        assert_eq!((info.width, info.height), (40, 20));
+        let preview = s.raw_preview(&RawDevelop::default(), 20).unwrap();
+        assert_eq!((preview.width, preview.height), (20, 10));
+        let settings = RawDevelop {
+            exposure: -0.5,
+            ..Default::default()
+        };
+        let id = s.place_raw(&settings).unwrap();
+        // Opened, as a photograph into an empty page is.
+        assert_eq!((s.doc.meta.width, s.doc.meta.height), (40, 20));
+        let r = picture_of(&s, id);
+        let developed = r.develop.expect("it says where it came from");
+        assert_eq!(developed.settings, settings);
+        let original = s
+            .doc
+            .original(&developed.original)
+            .expect("the file is kept");
+        assert_eq!(
+            (original.name.as_str(), original.bytes.len()),
+            ("card.dng", grey_card_dng().len())
+        );
+        assert!(s.layers().iter().any(|l| l.id == id.0 && l.developed));
+    }
+
+    #[test]
+    fn developing_again_changes_the_picture_and_nothing_else_in_one_step() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        let id = s.place_raw(&RawDevelop::default()).unwrap();
+        s.apply(Command::SetOpacity { id, opacity: 0.5 }).unwrap();
+        let before = picture_of(&s, id);
+        s.raw_close();
+        // Opened from the layer, with what it was developed with.
+        let (info, was) = s.raw_open_layer(id).unwrap();
+        assert_eq!((info.width, was), (40, RawDevelop::default()));
+        let warm = RawDevelop {
+            white: Some([info.as_shot[0] * 1.5, info.as_shot[1]]),
+            ..Default::default()
+        };
+        s.redevelop(id, &warm).unwrap();
+        let after = picture_of(&s, id);
+        assert_ne!(after.resource_id, before.resource_id, "a new picture");
+        assert_eq!(after.develop.as_ref().unwrap().settings, warm);
+        assert_eq!(
+            s.doc.node(id).unwrap().opacity,
+            0.5,
+            "and nothing else moved"
+        );
+        let px = |r: &chitrakar_doc::RasterRef| {
+            let res = s.doc.resource(&r.resource_id).unwrap();
+            let i = (10 * res.width as usize + 10) * 4;
+            [res.rgba8[i], res.rgba8[i + 1], res.rgba8[i + 2]]
+        };
+        let (b, a) = (px(&before), px(&after));
+        assert!(a[0] > b[0] && a[2] < b[2], "warmer: {b:?} to {a:?}");
+        s.undo().unwrap();
+        assert_eq!(picture_of(&s, id), before, "one undo puts it back");
+    }
+
+    #[test]
+    fn a_developed_picture_can_be_developed_again_after_saving() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        let id = s.place_raw(&RawDevelop::default()).unwrap();
+        let bytes = s.save().unwrap();
+        let mut t = Session::load(&bytes).unwrap();
+        let (_, was) = t.raw_open_layer(id).unwrap();
+        assert_eq!(was, RawDevelop::default());
+        t.redevelop(
+            id,
+            &RawDevelop {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // A picture not from a raw file says so rather than failing late.
+        let png = chitrakar_codecs::encode_png(2, 2, &[255; 16]).unwrap();
+        let plain = t.place_image(&png, "dot.png").unwrap();
+        assert!(t.raw_open_layer(plain).is_err());
+        assert!(!t.layers().iter().any(|l| l.id == plain.0 && l.developed));
+    }
+
+    #[test]
+    fn picking_grey_in_the_preview_neutralises_the_light() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        s.raw_open(&grey_card_dng(), "card.dng").unwrap();
+        // Off the camera's balance, then picked back to grey.
+        let cast = RawDevelop {
+            white: Some([3000.0, 0.0]),
+            ..Default::default()
+        };
+        s.raw_preview(&cast, 20).unwrap();
+        let white = s.raw_white_at(5, 5).unwrap();
+        let img = s
+            .raw_preview(
+                &RawDevelop {
+                    white: Some(white),
+                    ..Default::default()
+                },
+                20,
+            )
+            .unwrap();
+        let i = (5 * img.width as usize + 5) * 4;
+        let p = &img.rgba8[i..i + 3];
+        assert!(
+            p[0].abs_diff(p[1]) <= 3 && p[1].abs_diff(p[2]) <= 3,
+            "{white:?} gives {p:?}"
+        );
     }
 
     /// How far apart two pages are, and where.
@@ -19491,6 +19825,7 @@ mod tests {
                 width: iw,
                 height: ih,
                 corners: None,
+                develop: None,
             },
         );
         let photo = session.doc.peek_next_id();
@@ -19584,6 +19919,7 @@ mod tests {
                         width: iw,
                         height: ih,
                         corners: None,
+                        develop: None,
                     },
                 )),
             })

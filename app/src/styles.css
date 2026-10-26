@@ -3900,3 +3900,96 @@ button.fold:hover {
   flex: 1;
   min-width: 0;
 }
+
+/* The develop window: the photograph beside its settings, as wide as
+   the window allows; on a phone, the photograph above them. */
+.modal.develop {
+  width: min(64rem, calc(100vw - 2rem));
+}
+.develop-body {
+  display: flex;
+  gap: 1rem;
+  min-height: 0;
+}
+.develop-picture {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.develop-picture canvas {
+  width: 100%;
+  height: min(60vh, 34rem);
+  object-fit: contain;
+  background: var(--bg);
+  border-radius: 6px;
+}
+.develop-picture canvas.picking {
+  cursor: crosshair;
+}
+.develop-settings {
+  width: 15rem;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.develop-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.8rem;
+}
+.develop-settings input[type="range"] {
+  width: 100%;
+}
+.develop-settings .props-head {
+  margin: 0.45rem 0 0;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--line, var(--border));
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+.develop-settings .props-head:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.develop-light {
+  display: flex;
+  gap: 0.4rem;
+}
+.develop-light select {
+  flex: 1;
+}
+.develop-light button.on {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+@media (max-width: 640px) {
+  .develop-body {
+    flex-direction: column;
+  }
+  .develop-settings {
+    width: auto;
+  }
+  .develop-picture canvas {
+    height: 40vh;
+  }
+}
+.develop-again {
+  align-self: flex-start;
+}
+.develop-settings .slider-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.develop-settings .slider-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}

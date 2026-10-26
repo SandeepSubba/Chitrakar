@@ -12,11 +12,11 @@ mod node;
 
 pub use node::{
     bevel_light, bevel_shares, conic_turn, convex, focal_offset, focal_ramp, invert_axes,
-    round_corners, spread_gain, stroke_align, Adjustment, BevelLight, BlendMode, Effect, Filter,
-    Gradient, GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke, Pin,
-    Pinning, Projective, RasterRef, Rounded, Spread, Stroke, StrokeAlign, StrokeCap, StrokeJoin,
-    StyleRun, TextAlign, TextList, TextSpec, Transform, VectorShape, BASELINE_MOST,
-    BEVEL_DEPTH_MOST, LUMA, MARKER_LENGTH, MARKER_REACH, MITER_LIMIT, SPREAD_MOST,
+    round_corners, spread_gain, stroke_align, Adjustment, BevelLight, BlendMode, Developed, Effect,
+    Filter, Gradient, GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke,
+    Pin, Pinning, Projective, RasterRef, RawDevelop, Rounded, Spread, Stroke, StrokeAlign,
+    StrokeCap, StrokeJoin, StyleRun, TextAlign, TextList, TextSpec, Transform, VectorShape,
+    BASELINE_MOST, BEVEL_DEPTH_MOST, LUMA, MARKER_LENGTH, MARKER_REACH, MITER_LIMIT, SPREAD_MOST,
 };
 
 use chitrakar_color::ColorMode;
@@ -248,6 +248,22 @@ pub struct Document {
     /// additive like the regions.
     #[serde(default)]
     comps: Vec<LayerComp>,
+    /// Files a picture was made from and can be made from again — a
+    /// camera's raw file, kept so it can be developed again with other
+    /// settings ([`Developed`]). Content-addressed and immutable, like the
+    /// resources; the bytes live beside the manifest in the container.
+    /// Additive, and left out of the manifest when there are none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    originals: BTreeMap<String, Original>,
+}
+
+/// A file kept as it came, for a picture to be made from again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Original {
+    /// The file's own name, which says its format and what to call it.
+    pub name: String,
+    #[serde(skip)]
+    pub bytes: std::sync::Arc<[u8]>,
 }
 
 /// Which of a document's colours a command can have left disagreeing
@@ -449,6 +465,7 @@ impl Document {
             regions: Vec::new(),
             comps: Vec::new(),
             selection: None,
+            originals: BTreeMap::new(),
         }
     }
 
@@ -485,6 +502,40 @@ impl Document {
             rgba8,
         });
         id
+    }
+
+    /// Keep a file as it came, returning its content id. Like
+    /// [`Document::add_resource`], not a command: the store is immutable,
+    /// and only a layer pointing into it is document state.
+    pub fn add_original(&mut self, name: &str, bytes: Vec<u8>) -> String {
+        let id = content_id(0, 0, &bytes);
+        self.originals
+            .entry(id.clone())
+            .or_insert_with(|| Original {
+                name: name.to_string(),
+                bytes: bytes.into(),
+            });
+        id
+    }
+
+    pub fn original(&self, id: &str) -> Option<&Original> {
+        self.originals.get(id).filter(|o| !o.bytes.is_empty())
+    }
+
+    pub fn originals(&self) -> impl Iterator<Item = (&String, &Original)> {
+        self.originals.iter()
+    }
+
+    /// Re-attach a kept file's bytes to the entry the manifest named,
+    /// when they are the bytes it names.
+    pub fn restore_original_bytes(&mut self, id: &str, bytes: Vec<u8>) -> bool {
+        match self.originals.get_mut(id) {
+            Some(o) if content_id(0, 0, &bytes) == id => {
+                o.bytes = bytes.into();
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn resource(&self, id: &str) -> Option<&Resource> {

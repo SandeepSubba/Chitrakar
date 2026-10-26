@@ -605,6 +605,9 @@ export interface LayerInfo {
   has_mask: boolean;
   painted_mask: boolean;
   has_effects: boolean;
+  /** A picture developed from a camera's raw file the document keeps:
+   * Layer › Develop again… opens it. */
+  developed: boolean;
   /** Cannot be picked or moved on the canvas. */
   locked: boolean;
   /** Shows only where the layer below it does, and goes when it goes. */

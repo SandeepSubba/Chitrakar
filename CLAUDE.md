@@ -254,8 +254,16 @@ layers, groups, masks, blend modes; what it cannot keep goes to
 `Session::import_notes` and Photoshop's composite comes in hidden beside
 the layers), `pdf_import.rs` (`hayro` draws a page at the dpi the
 `PdfDialog` asks for; PDF-compatible `.ai` too) and `raw.rs`
-(`rawloader` decodes, our own plain develop; imagepipe starts threads
-and would abort in WASM). HEIC/AVIF are the browser's to decode, and
+(`rawloader` decodes; imagepipe starts threads and would abort in
+WASM). A raw file opens in the develop window (`RawDevelopDialog`):
+`develop.rs` keeps the sensor's values (`RawPhoto`) and develops them
+with `RawDevelop` — white balance in kelvin and tint through the
+camera's matrix, exposure, highlights, shadows, whites, blacks,
+contrast, vibrance, saturation — with a block-averaged `RawPreview`
+for the sliders. Placed, the raw file is kept in the document
+(`Document::originals`, `originals/` in the zip) and the settings on
+the picture (`RasterRef::develop`), so Develop again is a `SetKind`
+with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and
 a HEIC that will not decode says how to get a JPEG. hayro ships Foxit's
 BSD standard fonts and rawloader is LGPL-2.1, which a GPL-3.0 project
 can carry. Smoke 9cm builds each file byte by byte.

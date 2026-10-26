@@ -10156,10 +10156,34 @@ without reading anything else.*
   (`raw.rs`): black and white levels, the camera's white balance, a
   same-colour demosaic, the camera's matrix to sRGB, an exposure that
   puts the 99th percentile at white, and the camera's orientation.
-  Plain on purpose — an even starting point for the adjustments, not a
-  look; imagepipe was not used because it starts threads, which abort
-  in WASM. About 4.5 s for 24 megapixels natively, so a line across the
-  top says the file is being read while it is.
+  imagepipe was not used because it starts threads, which abort in
+  WASM.
+  **The develop window** ✅ is where a raw file opens: the photograph
+  beside its settings, developed again as each moves. What is there is
+  what needs the sensor's own values (`core/codecs/src/develop.rs`,
+  settings `RawDevelop` in the document): white balance as a light's
+  temperature in kelvin and a tint — the colour of a black body at that
+  temperature (Kim's approximation of the Planckian locus) carried into
+  the camera's colours through its matrix, the gains being what make it
+  neutral, and the camera's own balance read back the same way so the
+  sliders start where the camera was; Lightroom's named lights; a
+  "Pick grey" that neutralises whatever is clicked; exposure in stops
+  over the plain development's own; highlights pulled down roll off
+  above the middle and bring what was past white back under it;
+  shadows, whites, blacks, contrast (an S about 18% grey) on brightness
+  alone, so a curve does not shift a hue; vibrance and saturation. A
+  colour past white goes to white by losing its colour rather than a
+  channel. The preview is the same arithmetic over blocks of photosites
+  averaged a colour at a time — no demosaic, the curve tabled — 34 ms a
+  frame natively for a 21-megapixel Canon file, opened in 1.7 s and
+  developed in full in about 4 s in the browser. Placing keeps the raw
+  file in the document (`Document::originals`, `originals/<id>` in the
+  `.chitra`, content-addressed and checked on open) and the settings on
+  the picture (`RasterRef::develop`), so Layer › Develop again… (or the
+  panel's button) reopens it as it was, and developing again is one
+  `SetKind` — a new picture, everything else about the layer kept, one
+  undo. Smoke 9cn writes a DNG of a grey card under a warm light byte by
+  byte and drives all of it.
   **HEIC and AVIF** go to the browser's decoder, which has AVIF
   everywhere current and HEIC only on Apple's systems; a HEIC that
   cannot be read says how to get a JPEG instead rather than what the

@@ -23599,6 +23599,7 @@ mod tests {
                     width: W,
                     height: H,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -23773,6 +23774,7 @@ mod tests {
                     width: W,
                     height: H,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -24012,6 +24014,7 @@ mod tests {
                         width: W,
                         height: H,
                         corners: None,
+                        develop: None,
                     },
                 )),
             })
@@ -24998,6 +25001,7 @@ mod tests {
                     width: W,
                     height: W,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -25903,6 +25907,7 @@ mod tests {
                     width: w,
                     height: h,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -28263,6 +28268,7 @@ mod tests {
                     // across at the near end and by forty at the far, and
                     // down it by more than two everywhere.
                     corners: Some([[n * 0.45, 0.0], [n * 0.55, 0.0], [n, n], [0.0, n]]),
+                    develop: None,
                 },
             )),
         })
@@ -28330,6 +28336,7 @@ mod tests {
                     width: N,
                     height: N,
                     corners: Some([[n * 0.375, 0.0], [n * 0.625, 0.0], [n, n], [0.0, n]]),
+                    develop: None,
                 },
             )),
         })
@@ -28406,6 +28413,7 @@ mod tests {
                             width: N,
                             height: N,
                             corners,
+                            develop: None,
                         },
                     )),
                 })
@@ -28468,6 +28476,7 @@ mod tests {
                         width: w,
                         height: h,
                         corners,
+                        develop: None,
                     },
                 )),
             })
@@ -28648,6 +28657,7 @@ mod tests {
                         width: N,
                         height: N,
                         corners: None,
+                        develop: None,
                     },
                 )),
             })
@@ -28911,6 +28921,7 @@ mod tests {
                     width: N,
                     height: 61,
                     corners: None,
+                    develop: None,
                 },
             );
             node.opacity = opacity;
@@ -29155,6 +29166,7 @@ mod tests {
                     width: N,
                     height: N,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -29246,6 +29258,7 @@ mod tests {
                     width: N,
                     height: N,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -29298,6 +29311,7 @@ mod tests {
                     width: 2,
                     height: 1,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -29372,6 +29386,7 @@ mod tests {
                     width: w,
                     height: h,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -29426,6 +29441,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -29615,6 +29631,7 @@ mod tests {
             width: 2,
             height: 2,
             corners: None,
+            develop: None,
         };
         doc.apply(Command::AddNode {
             parent: root,

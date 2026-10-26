@@ -586,6 +586,12 @@ function kindHead(kind: NodeKind | null | undefined): string | null {
   if ("Vector" in kind) return "Shape";
   return null;
 }
+/** Wait for the page to be drawn: what the engine does next holds the
+ * page's thread, so a line saying it is about to happen has to be on
+ * screen first. */
+const nextPaint = () =>
+  new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)));
+
 /** A slider's name with its value at the far end of the line, said with
  * no more places than it has: 48 rather than 48.00, 0.5 rather than
  * 0.50. In figures of one width, so the value does not shift as it is
@@ -8280,17 +8286,30 @@ export function App() {
         }
         // The engine works on the page's own thread, so the line has to
         // be drawn before the reading starts or it is never seen.
-        const slow = kind === "raw" || kind === "psd" || raw.length > 24e6;
+        // A camera's raw file goes to the develop window, read first.
+        if (kind === "raw") {
+          setImporting(`Reading ${name}…`);
+          await nextPaint();
+          try {
+            const info = JSON.parse(session.raw_open(raw, name)) as RawInfo;
+            setDeveloping({ name, info, initial: RAW_DEFAULTS, layer: null });
+          } catch (err) {
+            alert(`Could not open ${name}: ${err}`);
+          } finally {
+            setImporting(null);
+          }
+          return;
+        }
+        const slow = kind === "psd" || raw.length > 24e6;
         if (slow) {
-          setImporting(name);
-          await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+          setImporting(`Reading ${name}…`);
+          await nextPaint();
         }
         try {
           const was: [number, number] = [session.width, session.height];
           let id: number;
           if (kind === "svg") id = session.place_svg(raw, file.name || "Pasted drawing");
           else if (kind === "psd") id = session.place_psd(raw, name);
-          else if (kind === "raw") id = session.place_image(raw, name);
           else id = session.place_image(await enginePicture(raw, file.type), name);
           placed(id, was);
           if (kind === "psd") {
@@ -8314,13 +8333,70 @@ export function App() {
     placeImageFile(file);
   }, [session, placeImageFile]);
 
+  /** A camera's raw file in the develop window: being placed (`layer`
+   * null) or developed again (the layer it is). */
+  const [developing, setDeveloping] = useState<{
+    name: string;
+    info: RawInfo;
+    initial: RawSettings;
+    layer: number | null;
+  } | null>(null);
+
+  /** The window's settings, developed in full: placed, or given to the
+   * layer as its new picture in one step of history. */
+  const finishDevelop = async (settings: RawSettings) => {
+    const d = developing;
+    setDeveloping(null);
+    if (!session || !d) return;
+    setImporting(`Developing ${d.name}…`);
+    await nextPaint();
+    try {
+      const was: [number, number] = [session.width, session.height];
+      if (d.layer === null) {
+        placed(session.place_raw(JSON.stringify(settings)), was);
+      } else {
+        session.redevelop(d.layer, JSON.stringify(settings));
+        refresh(session);
+      }
+    } catch (err) {
+      alert(`Could not develop ${d.name}: ${err}`);
+    } finally {
+      session.raw_close();
+      setImporting(null);
+    }
+  };
+  const cancelDevelop = () => {
+    setDeveloping(null);
+    session?.raw_close();
+  };
+  /** Open the picked layer's raw file in the develop window again, with
+   * the settings it was developed with. */
+  const developAgain = () => {
+    const layer = layers.find((l) => l.id === selected);
+    if (!session || !layer?.developed) return;
+    try {
+      const got = JSON.parse(session.raw_open_layer(layer.id)) as {
+        info: RawInfo;
+        settings: Partial<RawSettings>;
+      };
+      setDeveloping({
+        name: layer.name,
+        info: got.info,
+        initial: { ...RAW_DEFAULTS, ...got.settings },
+        layer: layer.id,
+      });
+    } catch (err) {
+      alert(`${err}`);
+    }
+  };
+
   /** The page asked for, drawn at the resolution asked for. */
   const placePdf = async (page: number, dpi: number) => {
     const ask = pdfAsk;
     setPdfAsk(null);
     if (!session || !ask) return;
-    setImporting(ask.name);
-    await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    setImporting(`Reading ${ask.name}…`);
+    await nextPaint();
     try {
       const was: [number, number] = [session.width, session.height];
       placed(session.place_pdf(ask.bytes, ask.name, page, dpi), was);
@@ -8882,6 +8958,9 @@ export function App() {
         item("text-to-shapes", "text", "Turn the text into shapes", textToShapes),
         item("merge-layers", "image", "Merge into a picture", mergeLayers),
         item("square-corners", "image", "Put the picture's corners back", squareCorners),
+        ...(selectedLayer?.developed
+          ? [item("develop-again", "image", "Develop again…", developAgain)]
+          : []),
         item("trace-picture", "image", "Trace into shapes…", tracePicture),
         SEP,
         item("group", "group", "Group", groupSelection, hint("group")),
@@ -9142,7 +9221,7 @@ export function App() {
     <div className="editor">
       {importing && (
         <div className="recover importing" role="status" aria-label="Reading">
-          <span>Reading {importing}…</span>
+          <span>{importing}</span>
         </div>
       )}
       {importNotes && (
@@ -9807,6 +9886,17 @@ export function App() {
             setLevelling(false);
             endGesture();
           }}
+        />
+      )}
+      {developing && session && (
+        <RawDevelopDialog
+          session={session}
+          name={developing.name}
+          info={developing.info}
+          initial={developing.initial}
+          action={developing.layer === null ? "Place" : "Develop"}
+          onCancel={cancelDevelop}
+          onDone={finishDevelop}
         />
       )}
       {pdfAsk && (
@@ -12224,6 +12314,19 @@ export function App() {
                   </label>
                 </div>
               )}
+              {selectedLayer.developed && (
+                <>
+                  <h3 className="props-head">Camera raw</h3>
+                  <button
+                    type="button"
+                    className="mask-button develop-again"
+                    onClick={developAgain}
+                    title="Develop the raw file this picture came from again, with other settings"
+                  >
+                    Develop again…
+                  </button>
+                </>
+              )}
               <h3 className="props-head">Appearance</h3>
               <label>
                 <SliderHead
@@ -13090,6 +13193,231 @@ function FindReplaceDialog({
           <button className="mask-button" onClick={onCancel}>Cancel</button>
           <button className="mask-button primary" disabled={found.matches === 0} onClick={go}>
             Replace all
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** How a camera's raw file is developed: what can only be done before
+ * it is pixels — the light's colour, the exposure, how the highlights
+ * roll off — with the photograph beside the settings, developed again
+ * as each one moves (a smaller copy, the same arithmetic). Opened when
+ * a raw file is placed or opened, and again from Layer › Develop again…
+ * on a layer that came from one: the file is kept in the document, so
+ * this is never a choice made once. */
+type RawSettings = {
+  /** Kelvin and tint; absent for the camera's own. */
+  white?: [number, number];
+  exposure: number;
+  contrast: number;
+  highlights: number;
+  shadows: number;
+  whites: number;
+  blacks: number;
+  vibrance: number;
+  saturation: number;
+};
+/** What the develop window starts from: the size and the camera's own
+ * white balance as a temperature and tint. */
+type RawInfo = { width: number; height: number; asShot: [number, number] };
+const RAW_DEFAULTS: RawSettings = {
+  exposure: 0,
+  contrast: 0,
+  highlights: 0,
+  shadows: 0,
+  whites: 0,
+  blacks: 0,
+  vibrance: 0,
+  saturation: 0,
+};
+/** Lightroom's names for a light, and what they are. */
+const LIGHTS: [string, [number, number] | null][] = [
+  ["As shot", null],
+  ["Daylight", [5500, 0]],
+  ["Cloudy", [6500, 0]],
+  ["Shade", [7500, 0]],
+  ["Tungsten", [2850, 0]],
+  ["Fluorescent", [3800, 20]],
+  ["Flash", [5500, 0]],
+];
+/** Temperature rides its slider in mireds (a million over kelvin), where
+ * a step is a step of colour: 2000 K and 2500 K are as far apart as
+ * 5000 K and 10000 K. */
+const MIRED_WARM = 1e6 / 2000;
+const MIRED_COOL = 1e6 / 25000;
+const toPos = (k: number) => ((MIRED_WARM - 1e6 / k) / (MIRED_WARM - MIRED_COOL)) * 1000;
+const fromPos = (p: number) => Math.round(1e6 / (MIRED_WARM - (p / 1000) * (MIRED_WARM - MIRED_COOL)) / 50) * 50;
+
+function RawDevelopDialog({
+  session,
+  name,
+  info,
+  initial,
+  action,
+  onCancel,
+  onDone,
+}: {
+  session: WasmSession;
+  name: string;
+  info: RawInfo;
+  initial: RawSettings;
+  action: string;
+  onCancel: () => void;
+  onDone: (s: RawSettings) => void;
+}) {
+  const [s, setS] = useState<RawSettings>(initial);
+  const [picking, setPicking] = useState(false);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  const white = s.white ?? info.asShot;
+  const light = s.white
+    ? (LIGHTS.find(([, w]) => w && w[0] === s.white![0] && w[1] === s.white![1])?.[0] ?? "Custom")
+    : "As shot";
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  // Developed again on every change, at most once a frame.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const c = canvas.current;
+      if (!c) return;
+      const longest = Math.min(1600, Math.round(Math.max(c.clientWidth, c.clientHeight) * devicePixelRatio) || 1000);
+      let out: Uint8Array;
+      try {
+        out = session.raw_preview(JSON.stringify(s), longest);
+      } catch {
+        return;
+      }
+      const view = new DataView(out.buffer, out.byteOffset, 8);
+      const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+      c.width = w;
+      c.height = h;
+      c.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4), w, h), 0, 0);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [s, session]);
+  const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
+  const row = (label: string, k: Exclude<keyof RawSettings, "white">, min: number, max: number, step: number, unit = "") => (
+    <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
+      <SliderHead label={label} value={s[k]} unit={unit} />
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={s[k]}
+        onChange={(e) => set(k, Number(e.target.value))}
+        aria-label={label}
+      />
+    </label>
+  );
+  const pick = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!picking) return;
+    const c = e.currentTarget;
+    const r = c.getBoundingClientRect();
+    // The picture is fitted inside the canvas box, its proportions kept.
+    const k = Math.min(r.width / c.width, r.height / c.height);
+    const [ox, oy] = [(r.width - c.width * k) / 2, (r.height - c.height * k) / 2];
+    const [x, y] = [Math.floor((e.clientX - r.left - ox) / k), Math.floor((e.clientY - r.top - oy) / k)];
+    setPicking(false);
+    const got = session.raw_white_at(x, y);
+    if (got) setS((o) => ({ ...o, white: JSON.parse(got) as [number, number] }));
+  };
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal develop"
+        role="dialog"
+        aria-label="Develop"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Develop {name}</h2>
+        <div className="develop-body">
+          <div className="develop-picture">
+            <canvas
+              ref={canvas}
+              className={picking ? "picking" : undefined}
+              onPointerDown={pick}
+              aria-label="Developed picture"
+            />
+            <p className="modal-aside">
+              {info.width} × {info.height} px
+              {picking ? " — click something that should be grey" : ""}
+            </p>
+          </div>
+          <div className="develop-settings">
+            <h3 className="props-head">White balance</h3>
+            <div className="develop-light">
+              <select
+                value={light}
+                onChange={(e) => {
+                  const w = LIGHTS.find(([n]) => n === e.target.value)?.[1];
+                  setS((o) => ({ ...o, white: w ?? (e.target.value === "Custom" ? white : undefined) }));
+                }}
+                aria-label="Light"
+              >
+                {LIGHTS.map(([n]) => (
+                  <option key={n}>{n}</option>
+                ))}
+                {light === "Custom" && <option>Custom</option>}
+              </select>
+              <button
+                type="button"
+                className={picking ? "on" : undefined}
+                aria-pressed={picking}
+                onClick={() => setPicking((p) => !p)}
+                title="Click something in the picture that should be grey"
+              >
+                Pick grey
+              </button>
+            </div>
+            <label>
+              <SliderHead label="Temperature" value={white[0]} unit=" K" />
+              <input
+                type="range"
+                min={0}
+                max={1000}
+                step={1}
+                value={toPos(white[0])}
+                onChange={(e) => setS((o) => ({ ...o, white: [fromPos(Number(e.target.value)), white[1]] }))}
+                aria-label="Temperature"
+              />
+            </label>
+            <label>
+              <SliderHead label="Tint" value={Math.round(white[1])} />
+              <input
+                type="range"
+                min={-150}
+                max={150}
+                step={1}
+                value={white[1]}
+                onChange={(e) => setS((o) => ({ ...o, white: [white[0], Number(e.target.value)] }))}
+                aria-label="Tint"
+              />
+            </label>
+            <h3 className="props-head">Tone</h3>
+            {row("Exposure", "exposure", -5, 5, 0.05, " EV")}
+            {row("Contrast", "contrast", -100, 100, 1)}
+            {row("Highlights", "highlights", -100, 100, 1)}
+            {row("Shadows", "shadows", -100, 100, 1)}
+            {row("Whites", "whites", -100, 100, 1)}
+            {row("Blacks", "blacks", -100, 100, 1)}
+            <h3 className="props-head">Colour</h3>
+            {row("Vibrance", "vibrance", -100, 100, 1)}
+            {row("Saturation", "saturation", -100, 100, 1)}
+          </div>
+        </div>
+        <div className="modal-actions">
+          <button onClick={() => setS(RAW_DEFAULTS)}>Reset</button>
+          <span className="spacer" />
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" onClick={() => onDone(s)}>
+            {action}
           </button>
         </div>
       </div>

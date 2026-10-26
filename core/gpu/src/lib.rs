@@ -11782,6 +11782,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -11834,6 +11835,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -11900,6 +11902,7 @@ mod tests {
                     width: w,
                     height: h,
                     corners: None,
+                    develop: None,
                 },
             );
             node.opacity = opacity;
@@ -13055,6 +13058,7 @@ mod tests {
                     width: w,
                     height: h,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -13152,6 +13156,7 @@ mod tests {
                     width: MAX_TEXTURE + 1,
                     height: 1,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -17678,6 +17683,7 @@ mod tests {
                     width: w,
                     height: h,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -17782,6 +17788,7 @@ mod tests {
                     width: w,
                     height: h,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -19459,6 +19466,7 @@ mod tests {
                                 width: 10,
                                 height: 8,
                                 corners: None,
+                                develop: None,
                             },
                         ))
                     }
@@ -19654,6 +19662,7 @@ mod tests {
                             width: 20,
                             height: 16,
                             corners: None,
+                            develop: None,
                         },
                     ))
                 }
@@ -19779,6 +19788,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     corners: None,
+                    develop: None,
                 },
             )),
             Transform {
@@ -20985,6 +20995,7 @@ mod tests {
                         width: pw,
                         height: ph,
                         corners,
+                        develop: None,
                     },
                 )),
                 at,

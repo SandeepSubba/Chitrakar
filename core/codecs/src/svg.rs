@@ -2277,6 +2277,7 @@ mod tests {
                     width: 20,
                     height: 20,
                     corners: Some([[0.0, 0.0], [40.0, 0.0], [30.0, 20.0], [10.0, 20.0]]),
+                    develop: None,
                 },
             )),
         })
@@ -3493,6 +3494,7 @@ mod tests {
                     width: 1,
                     height: 1,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -4452,6 +4454,7 @@ mod tests {
                     width: 2,
                     height: 1,
                     corners: None,
+                    develop: None,
                 },
             ),
             [0.0, 0.0],

@@ -1032,6 +1032,7 @@ impl PsdFile {
                             width: p.width,
                             height: p.height,
                             corners: None,
+                            develop: None,
                         },
                     );
                     node.transform = Transform::translation(p.left as f32, p.top as f32);
@@ -1072,6 +1073,7 @@ impl PsdFile {
                         width: self.width,
                         height: self.height,
                         corners: None,
+                        develop: None,
                     },
                 );
                 node.visible = false;

@@ -1362,6 +1362,64 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Read a camera's raw file to develop; JSON `{width, height,
+    /// asShot: [kelvin, tint]}`. Kept until placed or `raw_close`.
+    pub fn raw_open(&mut self, bytes: &[u8], name: &str) -> Result<String, JsError> {
+        let info = self.inner.raw_open(bytes, name).map_err(to_js)?;
+        serde_json::to_string(&info).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Open the raw file a layer was developed from; JSON `{info,
+    /// settings}`.
+    pub fn raw_open_layer(&mut self, id: f64) -> Result<String, JsError> {
+        let (info, settings) = self
+            .inner
+            .raw_open_layer(NodeId(id as u64))
+            .map_err(to_js)?;
+        serde_json::to_string(&serde_json::json!({ "info": info, "settings": settings }))
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// The open raw file developed with `settings` (JSON), small: eight
+    /// bytes of width and height (little-endian u32s), then RGBA.
+    pub fn raw_preview(&mut self, settings: &str, longest: u32) -> Result<Vec<u8>, JsError> {
+        let s = raw_settings(settings)?;
+        let img = self.inner.raw_preview(&s, longest).map_err(to_js)?;
+        let mut out = Vec::with_capacity(8 + img.rgba8.len());
+        out.extend_from_slice(&img.width.to_le_bytes());
+        out.extend_from_slice(&img.height.to_le_bytes());
+        out.extend_from_slice(&img.rgba8);
+        Ok(out)
+    }
+
+    /// The white balance, JSON `[kelvin, tint]`, that makes a point of the
+    /// last preview grey; undefined where it cannot.
+    pub fn raw_white_at(&self, x: u32, y: u32) -> Option<String> {
+        self.inner
+            .raw_white_at(x, y)
+            .and_then(|w| serde_json::to_string(&w).ok())
+    }
+
+    /// Develop the open raw file in full and place it; returns its id.
+    pub fn place_raw(&mut self, settings: &str) -> Result<f64, JsError> {
+        let s = raw_settings(settings)?;
+        self.inner
+            .place_raw(&s)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// Develop a layer's raw file again with new settings (one undo step).
+    pub fn redevelop(&mut self, id: f64, settings: &str) -> Result<(), JsError> {
+        let s = raw_settings(settings)?;
+        self.inner.redevelop(NodeId(id as u64), &s).map_err(to_js)
+    }
+
+    /// Let the open raw file go.
+    pub fn raw_close(&mut self) {
+        self.inner.raw_close();
+    }
+
     /// What the last file brought in could not carry across, as a JSON
     /// array of sentences.
     pub fn import_notes(&self) -> String {
@@ -1596,4 +1654,9 @@ pub fn display_p3_profile() -> Vec<u8> {
 #[wasm_bindgen]
 pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Develop settings from the page.
+fn raw_settings(json: &str) -> Result<crate::RawDevelop, JsError> {
+    serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))
 }

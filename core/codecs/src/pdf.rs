@@ -2894,6 +2894,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 corners: Some([[0.0, 0.0], [24.0, 2.0], [22.0, 24.0], [2.0, 22.0]]),
+                develop: None,
             },
         );
         picture.blend = BlendMode::Exclusion;
@@ -2946,6 +2947,7 @@ mod tests {
             width: 20,
             height: 20,
             corners: None,
+            develop: None,
         };
         doc.apply(chitrakar_doc::Command::AddNode {
             parent: root,
@@ -3476,6 +3478,7 @@ mod tests {
                     width: 2,
                     height: 1,
                     corners: None,
+                    develop: None,
                 },
             ),
             [0.0, 0.0],

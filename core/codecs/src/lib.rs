@@ -7,6 +7,7 @@
 
 pub mod container;
 pub mod cube;
+pub mod develop;
 pub mod pdf;
 pub mod pdf_import;
 pub mod psd;

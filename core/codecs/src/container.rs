@@ -126,6 +126,18 @@ pub fn save_chitra_with_fonts(
         )?;
         zip.write_all(&png)?;
     }
+    // The files pictures were made from, as they came: a camera's raw
+    // file is its own compression already.
+    for (id, original) in doc.originals() {
+        if original.bytes.is_empty() {
+            continue;
+        }
+        zip.start_file(
+            format!("{ORIGINALS}{id}"),
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )?;
+        zip.write_all(&original.bytes)?;
+    }
     if let Some(icc) = doc.cmyk_profile_bytes() {
         zip.start_file(CMYK_PROFILE_PATH, SimpleFileOptions::default())?;
         zip.write_all(icc)?;
@@ -134,6 +146,8 @@ pub fn save_chitra_with_fonts(
 }
 
 const CMYK_PROFILE_PATH: &str = "profiles/cmyk.icc";
+/// Where the files pictures were made from are kept, by content id.
+const ORIGINALS: &str = "originals/";
 
 /// Load a document from `.chitra` bytes, leaving any fonts it carries
 /// inside.
@@ -192,6 +206,16 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         });
     }
     let entries: Vec<String> = zip.file_names().map(String::from).collect();
+    for name in &entries {
+        let Some(id) = name.strip_prefix(ORIGINALS) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        zip.by_name(name)?.read_to_end(&mut bytes)?;
+        // Kept only when they are the bytes the manifest names: a file
+        // that has been tampered with is not developed from.
+        doc.restore_original_bytes(id, bytes);
+    }
     for name in entries {
         let Some(id) = name
             .strip_prefix("resources/")
@@ -279,6 +303,13 @@ mod tests {
                 resource.rgba8.len()
             ));
         }
+        for (id, original) in doc.originals() {
+            out.push_str(&format!(
+                "original {id} {:?} {} bytes\n",
+                original.name,
+                original.bytes.len()
+            ));
+        }
         walk(doc, doc.root(), &mut out);
         out
     }
@@ -320,6 +351,7 @@ mod tests {
                     width: 2,
                     height: 2,
                     corners: None,
+                    develop: None,
                 },
             )),
         })
@@ -955,7 +987,7 @@ mod tests {
         /// a node id, a node id, a content address. Taking a key out of
         /// one of them is not "a file from before this field existed", it
         /// is a file with a layer missing.
-        const KEYED_BY_DATA: &[&str] = &["nodes", "children", "resources"];
+        const KEYED_BY_DATA: &[&str] = &["nodes", "children", "resources", "originals"];
 
         /// Every (object path, key) pair worth removing. `named` is
         /// whether the object we are in is one whose keys are field
@@ -1205,6 +1237,8 @@ mod tests {
             "/document/nodes/*/kind/Vector/shape/Polygon:points",
             "/document/nodes/*/kind/Vector/shape/Polygon:rx",
             "/document/nodes/*/kind/Vector/shape/Polygon:ry",
+            "/document/nodes/*/kind/Raster/develop:original",
+            "/document/nodes/*/kind/Raster/develop:settings",
             "/document/nodes/*/kind/Raster:height",
             "/document/nodes/*/kind/Raster:resource_id",
             // A twirl cannot be missing how far it turns, and a mask that
@@ -1308,6 +1342,7 @@ mod tests {
             "/document/nodes/*:opacity",
             "/document/nodes/*:transform",
             "/document/nodes/*:visible",
+            "/document/originals/*:name",
             "/document/regions/*/mask/kind/Vector/shape/Rect:height",
             "/document/regions/*/mask/kind/Vector/shape/Rect:width",
             "/document/regions/*/mask/kind/Vector/transform:a",
@@ -1694,6 +1729,7 @@ mod tests {
                     width: 4,
                     height: 2,
                     corners: None,
+                    develop: None,
                 },
             )),
         })

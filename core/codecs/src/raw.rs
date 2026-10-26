@@ -18,6 +18,7 @@
 //! out is a starting point, as an import is — the picture's tone and
 //! colour are then the adjustment layers' to change, non-destructively.
 
+use crate::develop::RawPhoto;
 use crate::{CodecError, SourceImage};
 
 /// The extensions cameras write raw files under. A raw file is told by
@@ -67,8 +68,13 @@ fn bad(what: impl std::fmt::Display) -> CodecError {
     CodecError::Format(format!("camera raw: {what}"))
 }
 
-/// Read and develop a camera's raw file.
+/// Read and develop a camera's raw file, plainly.
 pub fn decode_raw(bytes: &[u8]) -> Result<SourceImage, CodecError> {
+    Ok(read_photo(bytes)?.develop(&chitrakar_doc::RawDevelop::default()))
+}
+
+/// Read a camera's raw file into a photograph to develop.
+pub(crate) fn read_photo(bytes: &[u8]) -> Result<RawPhoto, CodecError> {
     // Canon's CR3 is an ISO media file, not a TIFF, and the decoder has
     // no reader for it: say what will work rather than what failed.
     if bytes.len() >= 12 && &bytes[4..12] == b"ftypcrx " {
@@ -95,7 +101,7 @@ pub fn decode_raw(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let f = |v: [u16; 4]| v.map(|x| x as f32);
     macro_rules! with {
         ($data:expr) => {
-            develop(&Mosaic {
+            RawPhoto::from_mosaic(&Mosaic {
                 width: raw.width,
                 height: raw.height,
                 cpp: raw.cpp,
@@ -116,148 +122,16 @@ pub fn decode_raw(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     }
 }
 
-/// Develop a sensor's mosaic into 8-bit sRGB.
+/// Develop a sensor's mosaic into 8-bit sRGB, plainly.
 pub fn develop<T: Copy + Into<f32>>(m: &Mosaic<T>) -> Result<SourceImage, CodecError> {
-    let [top, right, bottom, left] = m.crops;
-    if m.cpp != 1 && m.cpp != 3 {
-        return Err(bad(format!("{} samples a photosite are not read", m.cpp)));
-    }
-    if m.width <= left + right || m.height <= top + bottom {
-        return Err(bad("cropped to nothing"));
-    }
-    if m.data.len() < m.width * m.height * m.cpp {
-        return Err(bad("fewer samples than the sensor is big"));
-    }
-    let (w, h) = (m.width - left - right, m.height - top - bottom);
-
-    // White balance, green as one; a missing or nonsense value is one.
-    let wb = {
-        let ok = |v: f32| v.is_finite() && v > 0.0;
-        let g = if ok(m.wb[1]) { m.wb[1] } else { 1.0 };
-        let one = |c: usize| if ok(m.wb[c]) { m.wb[c] / g } else { 1.0 };
-        [
-            one(0),
-            1.0,
-            one(2),
-            if ok(m.wb[3]) { m.wb[3] / g } else { 1.0 },
-        ]
-    };
-    let to_srgb = camera_to_srgb(&m.xyz_to_cam);
-    // A photosite's value with black off, white at one, balanced, and
-    // clipped: where the sensor clipped, every colour is one, and white
-    // through the matrix is white — rather than the green alone at one
-    // and red and blue past it, which develops magenta.
-    let site = |row: usize, col: usize, c: usize| -> f32 {
-        let at = (row * m.width + col) * m.cpp + if m.cpp == 3 { c } else { 0 };
-        let k = if m.cpp == 3 {
-            c
-        } else {
-            (m.color_at)(row, col)
-        };
-        let k = k.min(3);
-        let span = (m.white[k] - m.black[k]).max(1.0);
-        (((m.data[at].into() - m.black[k]) / span).max(0.0) * wb[k]).min(1.0)
-    };
-    // The three colours at a photosite: its own, and each missing one the
-    // average of that colour's photosites in the 3×3 round it — or, where
-    // there are none (X-Trans), the 5×5.
-    let rgb_at = |row: usize, col: usize| -> [f32; 3] {
-        if m.cpp == 3 {
-            return [site(row, col, 0), site(row, col, 1), site(row, col, 2)];
-        }
-        let own = (m.color_at)(row, col).min(3);
-        let own = if own == 3 { 1 } else { own };
-        let mut out = [0f32; 3];
-        for (c, slot) in out.iter_mut().enumerate() {
-            if c == own {
-                *slot = site(row, col, c);
-                continue;
-            }
-            for reach in [1isize, 2] {
-                let (mut sum, mut n) = (0f32, 0u32);
-                for dy in -reach..=reach {
-                    for dx in -reach..=reach {
-                        let (y, x) = (row as isize + dy, col as isize + dx);
-                        if y < top as isize
-                            || x < left as isize
-                            || y >= (m.height - bottom) as isize
-                            || x >= (m.width - right) as isize
-                        {
-                            continue;
-                        }
-                        let (y, x) = (y as usize, x as usize);
-                        let k = (m.color_at)(y, x).min(3);
-                        if (if k == 3 { 1 } else { k }) == c {
-                            sum += site(y, x, c);
-                            n += 1;
-                        }
-                    }
-                }
-                if n > 0 {
-                    *slot = sum / n as f32;
-                    break;
-                }
-            }
-        }
-        out
-    };
-    let linear = |row: usize, col: usize| -> [f32; 3] {
-        let c = rgb_at(row, col);
-        let mut o = [0f32; 3];
-        for (i, slot) in o.iter_mut().enumerate() {
-            *slot = to_srgb[i][0] * c[0] + to_srgb[i][1] * c[1] + to_srgb[i][2] * c[2];
-        }
-        o
-    };
-
-    // Exposure: the brightest hundredth of the picture at white, judged
-    // from every fourth photosite each way — dcraw's rule, and why a raw
-    // does not open as dark as the sensor recorded it. Never darker than
-    // the sensor recorded, and never more than four stops brighter.
-    let mut brightest: Vec<f32> = Vec::with_capacity((w / 4 + 1) * (h / 4 + 1));
-    for y in (top..m.height - bottom).step_by(4) {
-        for x in (left..m.width - right).step_by(4) {
-            let c = linear(y, x);
-            brightest.push(c[0].max(c[1]).max(c[2]));
-        }
-    }
-    let gain = if brightest.is_empty() {
-        1.0
-    } else {
-        let at = ((brightest.len() as f32) * 0.99) as usize;
-        let at = at.min(brightest.len() - 1);
-        let (_, p99, _) = brightest.select_nth_unstable_by(at, f32::total_cmp);
-        if *p99 > 1e-4 {
-            (1.0 / *p99).clamp(1.0, 16.0)
-        } else {
-            1.0
-        }
-    };
-
-    let mut upright = vec![0u8; w * h * 4];
-    for y in 0..h {
-        for x in 0..w {
-            let c = linear(y + top, x + left);
-            let px = &mut upright[(y * w + x) * 4..(y * w + x) * 4 + 4];
-            for i in 0..3 {
-                px[i] = chitrakar_color::linear_to_srgb8((c[i] * gain).clamp(0.0, 1.0));
-            }
-            px[3] = 255;
-        }
-    }
-    let (width, height, rgba8) = orient(upright, w, h, m.orientation);
-    Ok(SourceImage {
-        width: width as u32,
-        height: height as u32,
-        rgba8,
-    })
+    Ok(RawPhoto::from_mosaic(m)?.develop(&chitrakar_doc::RawDevelop::default()))
 }
 
 /// From the camera's colours to linear sRGB: the inverse of sRGB → XYZ →
 /// camera, each row of which is first made to sum to one so that a
 /// white-balanced white stays white (dcraw's `cam_xyz_coeff`). A camera
 /// with no matrix gets none.
-fn camera_to_srgb(xyz_to_cam: &[[f32; 3]; 4]) -> [[f32; 3]; 3] {
+pub(crate) fn camera_to_srgb(xyz_to_cam: &[[f32; 3]; 4]) -> [[f32; 3]; 3] {
     const SRGB_TO_XYZ: [[f32; 3]; 3] = [
         [0.412_456_4, 0.357_576_1, 0.180_437_5],
         [0.212_672_9, 0.715_152_2, 0.072_175_0],
@@ -307,7 +181,7 @@ fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
 }
 
 /// Turn and mirror a picture by its EXIF orientation number.
-fn orient(px: Vec<u8>, w: usize, h: usize, o: u8) -> (usize, usize, Vec<u8>) {
+pub(crate) fn orient(px: Vec<u8>, w: usize, h: usize, o: u8) -> (usize, usize, Vec<u8>) {
     if o <= 1 || o > 8 {
         return (w, h, px);
     }
