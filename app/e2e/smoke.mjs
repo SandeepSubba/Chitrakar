@@ -1968,7 +1968,7 @@ assert(
 
 // 8s. History panel: jump to the first edit and back to the newest.
 assert(await page.isVisible("text=History"), "history panel present");
-const firstEntry = page.locator(".history button").first();
+const firstEntry = page.locator(".history li:not(.history-start) button").first();
 assert(
   (await firstEntry.textContent()).includes("Add Rect 1"),
   "oldest entry is the first draw",
@@ -1984,6 +1984,20 @@ await page.waitForTimeout(300);
 assert(
   (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
   "jumped forward: full timeline restored",
+);
+// The first row is where the document began: every step back in one
+// press, and the newest row brings them all back again.
+await page.locator(".history li.history-start button").click();
+await page.waitForTimeout(300);
+assert(
+  (await page.locator(".panel ul.layer-list li[data-id]").count()) === 0,
+  "\"As it began\" takes every step back at once",
+);
+await page.locator(".history button").last().click();
+await page.waitForTimeout(300);
+assert(
+  (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
+  "and the newest step brings them all back",
 );
 
 // 8t. Anchor editing: drag the triangle's apex; one undo reverts it.
@@ -14360,6 +14374,13 @@ assert(
   await page.keyboard.press("Escape");
   await page.keyboard.press("Control+Comma");
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  // Every group is named outright — a phone shows only the icons — and
+  // no two wear the same icon.
+  const tabs = await page.locator(".prefs-tab").evaluateAll((all) =>
+    all.map((t) => [t.getAttribute("aria-label"), t.querySelector("svg")?.innerHTML]),
+  );
+  assert(tabs.every(([name]) => !!name), "every group of settings is named outright");
+  assert(new Set(tabs.map(([, svg]) => svg)).size === tabs.length, "and no two groups wear the same icon");
   for (const tab of ["General", "Appearance", "Guides & grid", "Selection", "Export"]) {
     await page.click(`.prefs-tab:has-text("${tab}")`);
     await page.waitForTimeout(100);
@@ -14667,6 +14688,35 @@ assert(
   assert(filterRows.length >= 18, `and every filter is there (${filterRows.length})`);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(100);
+}
+
+// 9ck. A long history keeps the step the document is at in sight, by
+// scrolling its own box and nothing around it.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(box.x + 40, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 100, box.y + 100, { steps: 3 });
+  await page.mouse.up();
+  await pickTool("Move");
+  await page.locator(".panel ul.layer-list li[data-id]").first().click();
+  for (let i = 0; i < 24; i++) {
+    await page.keyboard.press("ArrowRight");
+    await page.waitForTimeout(40);
+  }
+  await page.waitForTimeout(300);
+  const panelTop = await page.locator("aside.panel").evaluate((p) => p.scrollTop);
+  const seen = await page.locator(".history").evaluate((h) => {
+    const b = h.getBoundingClientRect();
+    const r = h.querySelector("button.current").getBoundingClientRect();
+    return [h.scrollHeight > h.clientHeight, r.top >= b.top - 1 && r.bottom <= b.bottom + 1];
+  });
+  assert(seen[0], "the history is longer than its box");
+  assert(seen[1], "and the newest step is in sight in it");
+  assert(panelTop === 0, `the panel around it was left where it was (${panelTop})`);
 }
 
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held

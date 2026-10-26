@@ -65,7 +65,7 @@ type Group = PrefGroup;
 
 const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "general", label: "General", icon: "units" },
-  { id: "appearance", label: "Appearance", icon: "eye" },
+  { id: "appearance", label: "Appearance", icon: "palette" },
   { id: "tools", label: "Tools", icon: "brush" },
   { id: "keys", label: "Keys", icon: "text" },
   { id: "guides", label: "Guides & grid", icon: "fit" },
@@ -397,6 +397,10 @@ export function PreferencesDialog({
                 key={g.id}
                 className={g.id === group ? "prefs-tab active" : "prefs-tab"}
                 aria-pressed={g.id === group}
+                // Named outright: on a phone the word beside the icon is
+                // put away, and a hidden word names nothing.
+                aria-label={g.label}
+                title={g.label}
                 onClick={() => setGroup(g.id)}
               >
                 <Icon name={g.icon} />

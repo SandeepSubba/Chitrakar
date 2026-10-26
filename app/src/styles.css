@@ -865,6 +865,21 @@ body {
   font-weight: 600;
 }
 
+/* Where the document began: set apart from the steps under it. */
+.history li.history-start button {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.history li.history-start button.current {
+  color: var(--accent);
+  font-style: normal;
+}
+
+.history li.history-start button:disabled {
+  cursor: default;
+}
+
 .history li.future button {
   color: var(--muted);
   font-style: italic;

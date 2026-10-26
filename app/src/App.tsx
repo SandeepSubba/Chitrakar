@@ -5747,6 +5747,10 @@ export function App() {
     timer?: number;
   } | null>(null);
   const layerListRef = useRef<HTMLUListElement>(null);
+  /** The history list, kept scrolled to the step the document is at:
+   * past a dozen steps the newest had gone under the list's foot, out
+   * of sight as it was taken. */
+  const historyListRef = useRef<HTMLOListElement>(null);
   /** When a drag last ended, so the click the release brings with it does
    * not also pick the row. Timed rather than a flag that waits to be
    * cleared: a drop can move the row out from under the pointer, and then
@@ -7644,6 +7648,21 @@ export function App() {
   }
   /** Whether there is work here that has not been saved. */
   const unsaved = history.past.length !== savedAt;
+  // The step the document is at stays in sight in the history list.
+  useEffect(() => {
+    // The list's own box is scrolled and nothing else: scrollIntoView
+    // scrolls every box around it as well, the panel among them, which
+    // moved a text block's settings under a hand that was picking out
+    // part of its text.
+    const list = historyListRef.current;
+    const box = list?.parentElement;
+    const row = list?.querySelector<HTMLElement>("button.current");
+    if (!box || !row) return;
+    const top = row.offsetTop - box.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+  }, [history.past.length, history.future.length]);
 
   const setKind = (kind: NodeKind, gesture: boolean) => {
     if (!selectedLayer) return;
@@ -12357,7 +12376,19 @@ export function App() {
           {(history.past.length > 0 || history.future.length > 0) && (
             <div className="history" aria-label="History">
               <h2>History</h2>
-              <ol>
+              <ol ref={historyListRef}>
+                {/* Where the document began, as the first row: every
+                    step back at once, in one press, which otherwise took
+                    as many presses as there were steps. */}
+                <li className="history-start">
+                  <button
+                    className={history.past.length === 0 ? "current" : undefined}
+                    onClick={() => jumpHistory(-history.past.length)}
+                    disabled={history.past.length === 0}
+                  >
+                    As it began
+                  </button>
+                </li>
                 {history.past.map((label, i) => (
                   <li key={`p${i}`}>
                     <button

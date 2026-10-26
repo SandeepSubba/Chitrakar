@@ -4,6 +4,7 @@
  * sprite sheet so the bundle stays a single file and nothing loads late. */
 
 export type IconName =
+  | "palette"
   | "move"
   | "hand"
   | "zoom"
@@ -394,6 +395,16 @@ const PATHS: Record<IconName, JSX.Element> = {
       <circle cx="11" cy="11" r="6" />
       <path d="M15.5 15.5L20 20" />
       <path d="M8.5 11h5" />
+    </>
+  ),
+  // A painter's palette, its thumb hole and three dabs: how the chrome
+  // looks, as distinct from how colour is managed (the eye below).
+  palette: (
+    <>
+      <path d="M12 3.5c-4.9 0-8.5 3.6-8.5 8.2 0 4.4 3.6 8.8 8 8.8 1.4 0 2.1-.8 2.1-1.8 0-1.3-1.2-1.6-1.2-2.9 0-1 .8-1.7 1.9-1.7h2.2c2.3 0 4-1.6 4-4.1 0-3.7-3.8-6.5-8.5-6.5z" />
+      <circle cx="7.8" cy="11" r="1.1" />
+      <circle cx="10.5" cy="7.4" r="1.1" />
+      <circle cx="15" cy="8" r="1.1" />
     </>
   ),
   // Colour management
