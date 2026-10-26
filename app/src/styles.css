@@ -140,6 +140,23 @@ body {
   }
 }
 
+/* Narrower than that the bar ran out of things to give up, and from
+   1185 down to the phone layout at 900 the zoom field was pushed past
+   the window's edge, where nothing could reach it. The button groups go next, the ones whose every button is a
+   menu row anyway: the selection's first, then the zoom's (the field
+   stays, and so do ctrl+wheel and the View menu). */
+@media (max-width: 1220px) {
+  .topbar .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+
+@media (max-width: 1060px) {
+  .topbar .chrome-group[aria-label="Zoom"] {
+    display: none;
+  }
+}
+
 .brand {
   font-weight: 700;
   color: var(--accent);

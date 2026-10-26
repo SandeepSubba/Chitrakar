@@ -16070,7 +16070,10 @@ assert(
   // drag from the page's corner drew nothing. The bar gives things up
   // before that happens, and if it ever runs out of things to give up it
   // wraps rather than spills. Asked at the two widths a laptop is.
-  for (const width of [1440, 1366]) {
+  // Down to where the phone layout takes over, the zoom field at the
+  // bar's far end stays inside the window: from 1185 to 900 it used to
+  // be pushed past the edge.
+  for (const width of [1440, 1366, 1280, 1100, 1000, 920]) {
     await page.setViewportSize({ width, height: 800 });
     await page.waitForTimeout(300);
     const spill = await page.evaluate(() => [
@@ -16080,6 +16083,11 @@ assert(
     assert(
       spill[0] <= spill[1],
       `at ${width} the window holds the whole page (${spill[0]} of ${spill[1]})`,
+    );
+    const zoomBox = await page.locator(".topbar .zoom-field").boundingBox();
+    assert(
+      zoomBox && zoomBox.x + zoomBox.width <= width,
+      `and the zoom field is inside it (${zoomBox && zoomBox.x + zoomBox.width} of ${width})`,
     );
     const barBox = await page.locator(".topbar").boundingBox();
     assert(
