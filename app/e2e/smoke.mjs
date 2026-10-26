@@ -14719,6 +14719,38 @@ assert(
   assert(panelTop === 0, `the panel around it was left where it was (${panelTop})`);
 }
 
+// 9cl. Where the pointer is on the page, read out in the buttons' row
+// in the units the rulers read in, and cleared when it leaves.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  const readout = page.locator(".cursor-readout");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.waitForTimeout(100);
+  const mid = await readout.textContent();
+  const [x, y] = mid.split(",").map((t) => parseFloat(t));
+  assert(Math.abs(x - 300) <= 1 && Math.abs(y - 150) <= 1 && mid.endsWith(" px"), `the page's middle reads as its middle (${mid})`);
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.selectOption('select[aria-label="Units"]', "mm");
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(150);
+  await page.mouse.move(box.x + box.width / 2 + 1, box.y + box.height / 2);
+  await page.waitForTimeout(100);
+  const inMm = await readout.textContent();
+  assert(inMm.endsWith(" mm") && Math.abs(parseFloat(inMm) - (300 / 72) * 25.4) < 1, `and in millimetres when the rulers are (${inMm})`);
+  await page.mouse.move(box.x - 30, box.y + 10);
+  await page.mouse.move(5, 5);
+  await page.waitForTimeout(100);
+  assert((await readout.textContent()) === "", "off the canvas, it says nothing");
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.selectOption('select[aria-label="Units"]', "px");
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(150);
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a

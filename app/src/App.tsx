@@ -1641,6 +1641,8 @@ export function App() {
   const pasteSeen = useRef(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
+  /** The pointer's place on the page, shown in the buttons' row. */
+  const readoutRef = useRef<HTMLSpanElement>(null);
   const imgDataRef = useRef<ImageData | null>(null);
   /** Where a draft frame is laid before it is stretched over the canvas. */
   const draftCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -2880,6 +2882,36 @@ export function App() {
       (e.clientY - rect.top - view.y) / view.zoom,
     ];
   };
+
+  // The pointer's place on the page, read out as it moves over the
+  // canvas and cleared when it leaves. Re-bound when the view or the
+  // units change, so the numbers are always the page's in those units.
+  useEffect(() => {
+    const host = hostRef.current;
+    const out = readoutRef.current;
+    if (!host || !out) return;
+    const places = units === "px" ? 0 : units === "mm" ? 1 : 2;
+    const move = (e: PointerEvent) => {
+      if (!canvasRef.current) return;
+      const [x, y] = docPoint(e);
+      // Rounded first, so a hair left of the edge reads 0 and not -0.
+      const say = (v: number) => {
+        const t = (v * perPixel(units, docDpi)).toFixed(places);
+        return /^-0(\.0*)?$/.test(t) ? t.slice(1) : t;
+      };
+      out.textContent = `${say(x)}, ${say(y)} ${units}`;
+    };
+    const leave = () => {
+      out.textContent = "";
+    };
+    host.addEventListener("pointermove", move);
+    host.addEventListener("pointerleave", leave);
+    return () => {
+      host.removeEventListener("pointermove", move);
+      host.removeEventListener("pointerleave", leave);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, units, docDpi]);
 
   /** Invert an affine, or null when it collapses space. */
   const inverseOf = (t: Transform) => {
@@ -9292,6 +9324,17 @@ export function App() {
         )}
 
         <span className="spacer" />
+        {/* Where the pointer is on the page, in the units the rulers
+            read in: what a ruler can only be squinted at for. Written
+            straight into the element on every move rather than through
+            the editor's state, which would redraw the whole chrome as
+            often as a mouse reports. */}
+        <span
+          className="cursor-readout"
+          ref={readoutRef}
+          aria-label="Pointer position"
+          title="Where the pointer is on the page, measured from its top-left corner"
+        />
 
         {/* The picture as it was before the work. The question a
             photograph asks every few minutes, and the only way to ask
