@@ -14310,6 +14310,57 @@ assert(
   await page.keyboard.press("Escape");
 }
 
+// 9cd. Said in full: a slider's value sits at the end of its line with
+// no more places than it has (48, not 48.00), a layer's own settings are
+// headed by what it is, and no remark in Preferences is cut off at the
+// window's edge ("the windows and panels; the pa").
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(box.x + 40, box.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 160, box.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  await pickTool("Move");
+  await page.locator(".panel ul.layer-list li[data-id]").first().click();
+  await page.waitForTimeout(200);
+  const heads = await page.locator(".layer-props .props-head").allTextContents();
+  assert(heads.includes("Shape"), `a shape's own settings are headed Shape (${heads})`);
+  const opacity = await page
+    .locator(".layer-props label", { has: page.locator('input[aria-label="Layer opacity"]') })
+    .locator(".slider-value")
+    .textContent();
+  assert(opacity === "100%", `opacity reads 100% at the end of its line (${opacity})`);
+  const values = await page.locator(".layer-props .slider-value").allTextContents();
+  assert(
+    values.length > 1 && values.every((v) => !/\.\d*0%?$/.test(v)),
+    `no slider says more places than it has (${values})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  for (const tab of ["General", "Guides & grid", "Selection", "Export"]) {
+    await page.click(`.prefs-tab:has-text("${tab}")`);
+    await page.waitForTimeout(100);
+    const cut = await page.evaluate(() => {
+      const pane = document.querySelector(".prefs-pane");
+      const out = [];
+      if (pane.scrollWidth > pane.clientWidth + 1) out.push("the pane scrolls sideways");
+      const edge = pane.getBoundingClientRect().right + 1;
+      for (const el of pane.querySelectorAll(".hint, select, input"))
+        if (el.getBoundingClientRect().right > edge || el.scrollWidth > el.clientWidth + 1)
+          out.push(el.textContent || el.getAttribute("aria-label"));
+      return out;
+    });
+    assert(cut.length === 0, `${tab}: nothing cut off at the edge (${cut})`);
+  }
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(150);
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a

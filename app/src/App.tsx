@@ -574,6 +574,33 @@ const UNIT_TICKS: Record<Units, number[]> = {
   mm: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000],
   in: [0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100],
 };
+/** The heading over a layer's own settings — what makes it the kind of
+ * layer it is — or none for a kind that has none of its own. */
+function kindHead(kind: NodeKind | null | undefined): string | null {
+  if (!kind || typeof kind !== "object") return null;
+  if ("Adjustment" in kind) return "Adjustment";
+  if ("Filter" in kind) return "Filter";
+  if ("Text" in kind) return "Text";
+  if ("Artboard" in kind) return "Frame";
+  if ("Vector" in kind) return "Shape";
+  return null;
+}
+/** A slider's name with its value at the far end of the line, said with
+ * no more places than it has: 48 rather than 48.00, 0.5 rather than
+ * 0.50. In figures of one width, so the value does not shift as it is
+ * dragged. */
+function SliderHead({ label, value, unit = "" }: { label: string; value: number; unit?: string }) {
+  const shown = Math.round(value * 100) / 100;
+  return (
+    <span className="slider-head">
+      <span>{label}</span>
+      <span className="slider-value">
+        {Object.is(shown, -0) ? 0 : shown}
+        {unit}
+      </span>
+    </span>
+  );
+}
 /** A length in the unit, trimmed to what the unit can tell apart. */
 function inUnits(px: number, units: Units, dpi: number): number {
   const v = px * perPixel(units, dpi);
@@ -11753,8 +11780,11 @@ export function App() {
               )}
               <h3 className="props-head">Appearance</h3>
               <label>
-                Opacity{" "}
-                {Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%
+                <SliderHead
+                  label="Opacity"
+                  value={Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}
+                  unit="%"
+                />
                 <input
                   type="range"
                   min={0}
@@ -11796,6 +11826,9 @@ export function App() {
                   )}
                 </select>
               </label>
+              {kindHead(selectedKind) && (
+                <h3 className="props-head">{kindHead(selectedKind)}</h3>
+              )}
               {selectedKind && (
                 <KindProps
                   kind={selectedKind}
@@ -11909,7 +11942,7 @@ export function App() {
                           const shown = derived ? derived.read(body) : (body[field] ?? 0);
                           return (
                           <label key={field}>
-                            {label} {shown.toFixed(2)}
+                            <SliderHead label={label} value={shown} />
                             <input
                               type="range"
                               min={min}
@@ -14212,7 +14245,7 @@ function KindProps({
     set: (v: number) => NodeKind,
   ) => (
     <label key={label}>
-      {label} {value.toFixed(2)}
+      <SliderHead label={label} value={value} />
       <input
         type="range"
         min={min}

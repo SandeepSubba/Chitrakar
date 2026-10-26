@@ -588,7 +588,10 @@ export function ExportDialog({
               setPrefs({ exportSetups: [...prefs.exportSetups, kept] });
             }}
           >
-            +
+            {/* Said in words until there is a setup beside it to say
+                what the row is for; a bare + above the formats said
+                nothing. */}
+            {prefs.exportSetups.length === 0 ? "+ Keep these settings" : "+"}
           </button>
         </div>
 

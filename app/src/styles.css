@@ -36,6 +36,12 @@
   color-scheme: dark;
 }
 
+/* Ticks, sliders and radio dots in the app's own accent rather than the
+   browser's blue, in either theme. */
+:root {
+  accent-color: var(--accent);
+}
+
 :root[data-theme="light"] {
   --bg: #f2f2f5;
   --panel: #ffffff;
@@ -771,6 +777,17 @@ body {
 .layer-props .mask-row .mask-button {
   margin: 0;
   white-space: nowrap;
+}
+
+.layer-props .slider-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.layer-props .slider-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .layer-props label {
@@ -3069,7 +3086,7 @@ button.fold:hover {
 }
 
 .prefs-modal {
-  width: min(34rem, calc(100vw - 2rem));
+  width: min(42rem, calc(100vw - 2rem));
 }
 
 .prefs-body {
@@ -3130,6 +3147,37 @@ button.fold:hover {
   flex-direction: column;
   gap: 0.5rem;
   min-height: 11rem;
+}
+
+/* A setting is three columns — what it is, the control, and a remark —
+   so the controls line up down the page, and a remark too long for its
+   column wraps under itself rather than being cut at the window's edge
+   ("the windows and panels; the pa"). A choice is as wide as its
+   longest option, not a fixed seven rem that cut "As the system". */
+.prefs-pane label.row:not(.prefs-check) {
+  display: grid;
+  grid-template-columns: 8.5rem auto minmax(0, 1fr);
+  column-gap: 0.6rem;
+}
+
+.prefs-pane label.row:not(.prefs-check) > select,
+.prefs-pane label.row:not(.prefs-check) > input {
+  margin-left: 0;
+  width: auto;
+  max-width: 100%;
+}
+
+.prefs-pane label.row:not(.prefs-check) > input[type="number"] {
+  width: 5.5rem;
+}
+
+.prefs-pane label.row:not(.prefs-check) > input[type="range"] {
+  width: 9rem;
+}
+
+.prefs-pane .row .hint {
+  white-space: normal;
+  line-height: 1.3;
 }
 
 /* A checkbox reads left to right — the box, then what it means — which
@@ -3236,6 +3284,15 @@ button.fold:hover {
 
   .prefs-tab span {
     display: none;
+  }
+
+  /* No room for a third column: the remark goes under the control. */
+  .prefs-pane label.row:not(.prefs-check) {
+    grid-template-columns: 7rem minmax(0, 1fr);
+  }
+
+  .prefs-pane label.row:not(.prefs-check) > .hint {
+    grid-column: 2;
   }
 }
 
