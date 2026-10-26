@@ -10223,10 +10223,17 @@ without reading anything else.*
   everywhere current and HEIC only on Apple's systems; a HEIC that
   cannot be read says how to get a JPEG instead rather than what the
   decoder said.
-  The price is size: the engine's WASM went from 2.9 to 4.8 MB
+  The price was size: the engine's WASM went from 2.9 to 4.8 MB
   gzipped, about 60% of it the PDF renderer and 30% the raw decoder
-  (`twiggy`). The service worker keeps it after the first visit; a
-  separate module loaded on first use is the way down if it matters.
+  (`twiggy`). The PDF reader is now a module of its own
+  (`core/pdfin`, `chitrakar-pdf-in`, built by `npm run build:wasm` into
+  `app/src/wasm-pdf/`), fetched by `app/src/pdf.ts` the first time a PDF
+  or Illustrator file is opened and handing the engine pixels
+  (`Session::place_rendered`): the engine is 3.3 MB gzipped again, and
+  the PDF module 1.8 MB for the visits that open one. Smoke 9cm checks
+  it is not fetched until then. (Offline, a PDF can be opened only once
+  it has been opened online once, since the service worker keeps what a
+  visit fetched.)
   Smoke 9cm writes a TIFF, a Photoshop file and a two-page PDF byte by
   byte and places, opens and reads back each.
 

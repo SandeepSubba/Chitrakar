@@ -52,6 +52,7 @@ import {
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
 import { enginePicture } from "./picture";
+import { pdfReader, unpackPage } from "./pdf";
 import { importKind, OPEN_ACCEPT, PLACE_ACCEPT, PLACE_EXTENSIONS, unreadable } from "./imports";
 import {
   drawHistogram,
@@ -8288,11 +8289,16 @@ export function App() {
         const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
         setImportNotes(null);
         if (kind === "pdf") {
+          // The PDF reader is fetched the first time one is opened.
+          setImporting(`Reading ${name}…`);
           try {
-            const sizes = JSON.parse(session.pdf_page_sizes(raw)) as [number, number][];
+            const pdf = await pdfReader();
+            const sizes = JSON.parse(pdf.page_sizes(raw)) as [number, number][];
             setPdfAsk({ name, bytes: raw, sizes });
           } catch (err) {
             alert(`Could not open ${name}: ${err}`);
+          } finally {
+            setImporting(null);
           }
           return;
         }
@@ -8467,7 +8473,11 @@ export function App() {
     await nextPaint();
     try {
       const was: [number, number] = [session.width, session.height];
-      placed(session.place_pdf(ask.bytes, ask.name, page, dpi), was);
+      const pdf = await pdfReader();
+      const drawn = unpackPage(pdf.render_page(ask.bytes, page, dpi));
+      // Named after the file and, for a file of more than one page, the page.
+      const label = ask.sizes.length > 1 ? `${ask.name} — page ${page + 1}` : ask.name;
+      placed(session.place_rgba(drawn.width, drawn.height, drawn.rgba, label), was);
     } catch (err) {
       alert(`Could not place ${ask.name}: ${err}`);
     } finally {

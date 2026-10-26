@@ -203,7 +203,6 @@ dependencies = [
  "chitrakar-doc",
  "chitrakar-render",
  "flate2",
- "hayro",
  "image",
  "image-webp",
  "rawloader",
@@ -242,6 +241,7 @@ dependencies = [
  "chitrakar-codecs",
  "chitrakar-color",
  "chitrakar-doc",
+ "chitrakar-pdf-in",
  "chitrakar-render",
  "image-webp",
  "serde",
@@ -260,6 +260,17 @@ dependencies = [
  "chitrakar-render",
  "pollster",
  "wgpu",
+]
+
+[[package]]
+name = "chitrakar-pdf-in"
+version = "0.1.0"
+dependencies = [
+ "chitrakar-codecs",
+ "chitrakar-color",
+ "hayro",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]

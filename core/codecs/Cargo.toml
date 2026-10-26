@@ -23,10 +23,6 @@ tiff = "0.9"
 # mosaic (LGPL-2.1, which the engine's GPL-3.0 may take in). Developed in
 # `raw.rs`, not by its companion `imagepipe`, which needs threads.
 rawloader = "0.37"
-# Reading a PDF (and an Illustrator file, which is one inside): a page
-# drawn by a renderer in Rust that runs where the engine does. The
-# fourteen standard fonts come with it (Foxit's, BSD-licensed).
-hayro = { version = "0.8", features = ["embed-fonts"] }
 # SVG import. Default features pull in system font discovery, which
 # wasm32 has no filesystem for; text needs only the bundled face.
 usvg = { version = "0.48", default-features = false, features = ["text"] }

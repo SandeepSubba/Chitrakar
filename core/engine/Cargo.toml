@@ -32,3 +32,6 @@ wasm-bindgen = "0.2"
 chitrakar-doc = { workspace = true, features = ["fixture"] }
 image-webp = "0.2"
 tiff = "0.9"
+# The PDF reader is its own module; the tests draw a page with it and
+# hand the pixels over, as the page does.
+chitrakar-pdf-in.workspace = true

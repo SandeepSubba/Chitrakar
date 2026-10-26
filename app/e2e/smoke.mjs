@@ -37,7 +37,7 @@ const DIST = join(HERE, "..", "dist");
     for (const e of readdirSync(dir, { withFileTypes: true })) {
       const p = join(dir, e.name);
       if (e.isDirectory()) {
-        if (e.name !== "wasm-pkg" && e.name !== "target" && e.name !== "node_modules") walk(p);
+        if (e.name !== "wasm-pkg" && e.name !== "wasm-pdf" && e.name !== "target" && e.name !== "node_modules") walk(p);
       } else if (/\.(rs|ts|tsx|css|toml)$/.test(e.name)) {
         const at = statSync(p).mtimeMs;
         if (at > newest.at) newest = { at, path: p };
@@ -14898,10 +14898,16 @@ assert(
 
   // A PDF of two pages asks which, and at what resolution, and says the
   // size it will come to; the second page at 144 dpi is twice its points.
+  // The PDF reader is a module of its own, fetched the first time a PDF
+  // is opened rather than with the editor.
+  const pdfFetched = () =>
+    page.evaluate(() => performance.getEntriesByType("resource").some((e) => e.name.includes("chitrakar_pdf_in")));
+  assert(!(await pdfFetched()), "the PDF reader is not loaded with the editor");
   await newDocument(200, 150, "rgb");
   await place("leaflet.pdf", pdf([[200, 100, 1, 0, 0], [100, 100, 0, 0, 1]]), "application/pdf");
   const ask = page.locator('[role="dialog"][aria-label="Place PDF"]');
   await ask.waitFor();
+  assert(await pdfFetched(), "and is, once one is");
   await ask.locator('input[aria-label="Page"]').fill("2");
   await ask.locator('input[aria-label="Resolution"]').fill("144");
   const size = await ask.locator('[aria-label="Page size"]').textContent();

@@ -11,6 +11,8 @@ app/dist
 
 # Generated wasm-bindgen package (rebuilt by `npm run build:wasm`)
 app/src/wasm-pkg/
+# The PDF reader's own module, loaded only when a PDF is opened
+app/src/wasm-pdf/
 
 # Editors / OS
 .DS_Store

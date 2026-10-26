@@ -1457,22 +1457,17 @@ impl WasmSession {
         serde_json::to_string(self.inner.import_notes()).unwrap_or_else(|_| "[]".into())
     }
 
-    /// Each page of a PDF's size in points, as JSON `[[w, h], ...]`.
-    pub fn pdf_page_sizes(&self, bytes: &[u8]) -> Result<String, JsError> {
-        let sizes = Session::pdf_page_sizes(bytes).map_err(to_js)?;
-        Ok(serde_json::to_string(&sizes).unwrap_or_else(|_| "[]".into()))
-    }
-
-    /// Bring one page of a PDF in as a picture drawn at `dpi`.
-    pub fn place_pdf(
+    /// Pixels drawn elsewhere (a PDF's page, drawn by the PDF module)
+    /// placed as a picture: `width` by `height`, RGBA with straight alpha.
+    pub fn place_rgba(
         &mut self,
-        bytes: &[u8],
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
         name: &str,
-        page: u32,
-        dpi: f32,
     ) -> Result<f64, JsError> {
         self.inner
-            .place_pdf(bytes, name, page as usize, dpi)
+            .place_rendered(width, height, rgba, name)
             .map(|id| id.0 as f64)
             .map_err(to_js)
     }

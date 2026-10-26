@@ -254,8 +254,10 @@ shares and the shell's "Open with". The readers are the engine's, in
 `core/codecs`: `tiff_import.rs` (bits, CMYK, ICC), `psd.rs` (our own:
 layers, groups, masks, blend modes; what it cannot keep goes to
 `Session::import_notes` and Photoshop's composite comes in hidden beside
-the layers), `pdf_import.rs` (`hayro` draws a page at the dpi the
-`PdfDialog` asks for; PDF-compatible `.ai` too) and `raw.rs`
+the layers), `core/pdfin` (its own WASM module, `chitrakar-pdf-in`,
+which `app/src/pdf.ts` fetches only when a PDF is first opened: `hayro`
+draws a page at the dpi the `PdfDialog` asks for, PDF-compatible `.ai`
+too, and the engine is handed the pixels by `place_rgba`) and `raw.rs`
 (`rawloader` decodes; imagepipe starts threads and would abort in
 WASM). A raw file opens in the develop window (`RawDevelopDialog`):
 `develop.rs` keeps the sensor's values (`RawPhoto`) and develops them

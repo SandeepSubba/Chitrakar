@@ -15,7 +15,6 @@
 //! CFF versions, BSD-licensed — so a page that names one and does not
 //! carry it still has its text.
 
-use crate::{CodecError, SourceImage};
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
 use hayro::{render, PixmapSettings, RenderCache, RenderSettings};
@@ -31,11 +30,28 @@ pub fn is_pdf(b: &[u8]) -> bool {
     b.len() >= 5 && b[..b.len().min(1024)].windows(5).any(|w| w == b"%PDF-")
 }
 
-fn bad(what: impl std::fmt::Display) -> CodecError {
-    CodecError::Format(format!("PDF: {what}"))
+/// A page drawn: 8-bit sRGB with straight alpha.
+pub struct Page {
+    pub width: u32,
+    pub height: u32,
+    pub rgba8: Vec<u8>,
 }
 
-fn open(bytes: &[u8]) -> Result<Pdf, CodecError> {
+/// What went wrong, in words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfError(pub String);
+
+impl std::fmt::Display for PdfError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+fn bad(what: impl std::fmt::Display) -> PdfError {
+    PdfError(format!("PDF: {what}"))
+}
+
+fn open(bytes: &[u8]) -> Result<Pdf, PdfError> {
     if !is_pdf(bytes) {
         // An Illustrator file from before Illustrator 9 is PostScript.
         return Err(if bytes.starts_with(b"%!PS") {
@@ -51,7 +67,7 @@ fn open(bytes: &[u8]) -> Result<Pdf, CodecError> {
 }
 
 /// Each page's size, in points (72 to the inch), as it would be shown.
-pub fn pdf_page_sizes(bytes: &[u8]) -> Result<Vec<(f32, f32)>, CodecError> {
+pub fn pdf_page_sizes(bytes: &[u8]) -> Result<Vec<(f32, f32)>, PdfError> {
     let pdf = open(bytes)?;
     let sizes: Vec<(f32, f32)> = pdf.pages().iter().map(|p| p.render_dimensions()).collect();
     if sizes.is_empty() {
@@ -62,7 +78,7 @@ pub fn pdf_page_sizes(bytes: &[u8]) -> Result<Vec<(f32, f32)>, CodecError> {
 
 /// Draw one page (counted from 0) at `dpi`, as 8-bit sRGB with straight
 /// alpha — clear wherever the page draws nothing.
-pub fn render_pdf_page(bytes: &[u8], page: usize, dpi: f32) -> Result<SourceImage, CodecError> {
+pub fn render_pdf_page(bytes: &[u8], page: usize, dpi: f32) -> Result<Page, PdfError> {
     let pdf = open(bytes)?;
     let pages = pdf.pages();
     let p = pages
@@ -94,11 +110,37 @@ pub fn render_pdf_page(bytes: &[u8], page: usize, dpi: f32) -> Result<SourceImag
     );
     let (width, height) = (pixmap.width() as u32, pixmap.height() as u32);
     let rgba8 = pixmap.take_rgba8(hayro::vello_cpu::peniko::ImageAlphaType::Alpha);
-    Ok(SourceImage {
+    Ok(Page {
         width,
         height,
         rgba8,
     })
+}
+
+/// The module the page loads when a PDF is first opened.
+#[cfg(target_arch = "wasm32")]
+mod wasm {
+    use wasm_bindgen::prelude::*;
+
+    /// Each page's size in points, JSON `[[width, height], …]`.
+    #[wasm_bindgen]
+    pub fn page_sizes(bytes: &[u8]) -> Result<String, JsError> {
+        let sizes = super::pdf_page_sizes(bytes).map_err(|e| JsError::new(&e.0))?;
+        Ok(serde_json::to_string(&sizes).unwrap_or_else(|_| "[]".into()))
+    }
+
+    /// One page (counted from 0) drawn at `dpi`: width and height as two
+    /// little-endian u32s, then RGBA with straight alpha.
+    #[wasm_bindgen]
+    pub fn render_page(bytes: &[u8], page: u32, dpi: f32) -> Result<Vec<u8>, JsError> {
+        let p =
+            super::render_pdf_page(bytes, page as usize, dpi).map_err(|e| JsError::new(&e.0))?;
+        let mut out = Vec::with_capacity(8 + p.rgba8.len());
+        out.extend_from_slice(&p.width.to_le_bytes());
+        out.extend_from_slice(&p.height.to_le_bytes());
+        out.extend_from_slice(&p.rgba8);
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -192,7 +234,7 @@ mod tests {
                 }
             })
             .collect();
-        let bytes = crate::export_pdf(&pixels, 100, 50, 72.0, None).unwrap();
+        let bytes = chitrakar_codecs::export_pdf(&pixels, 100, 50, 72.0, None).unwrap();
         assert_eq!(pdf_page_sizes(&bytes).unwrap(), vec![(100.0, 50.0)]);
         let img = render_pdf_page(&bytes, 0, 72.0).unwrap();
         assert_eq!((img.width, img.height), (100, 50));

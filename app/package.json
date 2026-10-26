@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build:wasm": "wasm-pack build ../core/engine --target web --release --out-dir ../../app/src/wasm-pkg",
+    "build:wasm": "wasm-pack build ../core/engine --target web --release --out-dir ../../app/src/wasm-pkg && wasm-pack build ../core/pdfin --target web --release --out-dir ../../app/src/wasm-pdf",
     "dev": "npm run build:wasm && vite",
     "build": "npm run build:wasm && tsc --noEmit && vite build",
     "preview": "vite preview",

@@ -8779,34 +8779,31 @@ impl Session {
         self.place_picture(img, name)
     }
 
-    /// The size of each page of a PDF (or an Illustrator file), in
-    /// points, so a page and a resolution can be asked for before any
-    /// page is drawn.
-    pub fn pdf_page_sizes(bytes: &[u8]) -> Result<Vec<(f32, f32)>, EngineError> {
-        chitrakar_codecs::pdf_import::pdf_page_sizes(bytes)
-            .map_err(|e| EngineError::BadCommand(e.to_string()))
-    }
-
-    /// Bring one page of a PDF (counted from 0) in as a picture drawn at
-    /// `dpi`, placed as any picture is — opening it, into an empty
-    /// document, at its own size. Named after the file and, for a file of
-    /// more than one page, the page.
-    pub fn place_pdf(
+    /// Pixels drawn elsewhere — a PDF's page, drawn by the module the
+    /// page loads only when one is opened — placed as any picture is:
+    /// opening it, into an empty document, at its own size. 8-bit sRGB
+    /// with straight alpha, `width` by `height`.
+    pub fn place_rendered(
         &mut self,
-        bytes: &[u8],
+        width: u32,
+        height: u32,
+        rgba8: Vec<u8>,
         name: &str,
-        page: usize,
-        dpi: f32,
     ) -> Result<NodeId, EngineError> {
-        let pages = Self::pdf_page_sizes(bytes)?.len();
-        let img = chitrakar_codecs::pdf_import::render_pdf_page(bytes, page, dpi)
-            .map_err(|e| EngineError::BadCommand(e.to_string()))?;
-        let label = if pages > 1 {
-            format!("{name} — page {}", page + 1)
-        } else {
-            name.to_string()
-        };
-        self.place_picture(img, &label)
+        if width == 0 || height == 0 || rgba8.len() as u64 != width as u64 * height as u64 * 4 {
+            return Err(EngineError::BadCommand(format!(
+                "{} bytes are not a {width} by {height} picture",
+                rgba8.len()
+            )));
+        }
+        self.place_picture(
+            chitrakar_codecs::SourceImage {
+                width,
+                height,
+                rgba8,
+            },
+            name,
+        )
     }
 
     /// A decoded picture, placed: into an empty document it is opened (the
@@ -9854,14 +9851,25 @@ mod tests {
             30 * 20
         ];
         let pdf = chitrakar_codecs::export_pdf(&px, 30, 20, 72.0, None).unwrap();
-        assert_eq!(Session::pdf_page_sizes(&pdf).unwrap(), vec![(30.0, 20.0)]);
+        // Drawn by the PDF module, as the page has it do.
+        assert_eq!(
+            chitrakar_pdf_in::pdf_page_sizes(&pdf).unwrap(),
+            vec![(30.0, 20.0)]
+        );
+        let page = chitrakar_pdf_in::render_pdf_page(&pdf, 0, 144.0).unwrap();
         let mut s = Session::new(10, 10, ColorMode::Rgb);
-        let id = s.place_pdf(&pdf, "page.pdf", 0, 144.0).unwrap();
+        let id = s
+            .place_rendered(page.width, page.height, page.rgba8, "page.pdf")
+            .unwrap();
         assert_eq!((s.doc.meta.width, s.doc.meta.height), (60, 40));
         assert_eq!(s.doc.node(id).unwrap().name, "page.pdf");
         assert!(
-            s.place_pdf(&pdf, "page.pdf", 5, 72.0).is_err(),
+            chitrakar_pdf_in::render_pdf_page(&pdf, 5, 72.0).is_err(),
             "a page it does not have"
+        );
+        assert!(
+            s.place_rendered(3, 3, vec![0; 12], "short").is_err(),
+            "pixels that are not the size said"
         );
     }
 
