@@ -196,12 +196,18 @@ machine belongs in the document and goes through a `Command`. The
 panel's width and the toolbar's position deliberately stay on their own
 keys: they are written on every frame of a drag.
 
-`PreferencesDialog.tsx` (Ctrl+,) is a rail of eight groups over that
-object; its General page picks the theme (`prefs.theme`: system, dark
+`PreferencesDialog.tsx` (Ctrl+,) is a rail of nine groups over that
+object; its Appearance page picks the theme (`prefs.theme`: system, dark
 or light — every chrome colour is a token on `:root` in `styles.css`,
 the light set sits under `:root[data-theme="light"]`, and the app
 resolves "system" before setting the attribute; what is drawn over the
-picture keeps its own colours); its Tools page decides which tools are on the rail (a tool put
+picture keeps its own colours), an accent of the person's own
+(`prefs.accent`, laid on the root as `--accent` with `--on-accent`
+worked out by `onColour`), a colour for sliders and ticks
+(`prefs.sliderColor` → `--slider`, which `accent-color` reads; it
+follows the accent when unset) and the interface size (`prefs.uiScale`:
+the root font size, the panel's drawn width, and `data-scale` on the
+root so the bar gives things up at proportionally wider windows); its Tools page decides which tools are on the rail (a tool put
 away keeps its key and waits behind a "…" slot at the rail's end) and
 which button groups the bar shows; `prefs.brushes` is the brushes kept
 by name, shown as chips over the paint tools' row. `prefs.recentColors` is the

@@ -36,7 +36,7 @@ import {
   restoreChord,
   type CommandId,
 } from "./commands";
-import { DEFAULTS, type ExportFormat, type FingerDoes, type Prefs, type Theme, type Units } from "./prefs";
+import { DEFAULTS, UI_SCALES, type ExportFormat, type FingerDoes, type Prefs, type Theme, type Units } from "./prefs";
 import {
   ALWAYS_SHOWN,
   KEYED_TOOLS,
@@ -53,6 +53,7 @@ import {
 
 export type PrefGroup =
   | "general"
+  | "appearance"
   | "tools"
   | "keys"
   | "guides"
@@ -64,6 +65,7 @@ type Group = PrefGroup;
 
 const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "general", label: "General", icon: "units" },
+  { id: "appearance", label: "Appearance", icon: "eye" },
   { id: "tools", label: "Tools", icon: "brush" },
   { id: "keys", label: "Keys", icon: "text" },
   { id: "guides", label: "Guides & grid", icon: "fit" },
@@ -72,6 +74,26 @@ const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "new", label: "New documents", icon: "newDoc" },
   { id: "export", label: "Export", icon: "export" },
 ];
+
+/** Colours to reach for as an accent or for the sliders: chosen to
+ * read on both themes' panels. */
+const ACCENTS: [string, string][] = [
+  ["Blue", "#5b7cfa"],
+  ["Violet", "#9b72f2"],
+  ["Teal", "#1fa79b"],
+  ["Green", "#3fa35b"],
+  ["Amber", "#e0a530"],
+  ["Orange", "#ee7337"],
+  ["Rose", "#e0517c"],
+  ["Graphite", "#7d8494"],
+];
+
+const SCALE_NAMES: Record<number, string> = {
+  0.9: "Compact",
+  1: "Standard",
+  1.125: "Large",
+  1.25: "Larger",
+};
 
 const UNIT_NAMES: Record<Units, string> = {
   px: "Pixels",
@@ -291,6 +313,47 @@ export function PreferencesDialog({
     </label>
   );
 
+  /** The accent the theme in force has of its own, read off the
+   * stylesheet with the person's taken away for a moment — what the
+   * colour picker starts from when nothing is chosen. */
+  const themeAccent = useMemo(() => {
+    const root = document.documentElement;
+    const held = root.style.getPropertyValue("--accent");
+    root.style.removeProperty("--accent");
+    const own = getComputedStyle(root).getPropertyValue("--accent").trim();
+    if (held) root.style.setProperty("--accent", held);
+    return /^#[0-9a-f]{6}$/i.test(own) ? own : "#6c8cff";
+    // Read again when the theme changes under it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs.theme]);
+
+  /** A row of colours to choose from, the first being none of them:
+   * the theme's own, or the accent's. */
+  const swatchRow = (value: string, set: (c: string) => void, name: string, none: string) => (
+    <>
+      <button
+        type="button"
+        className={value === "" ? "prefs-swatch none active" : "prefs-swatch none"}
+        aria-pressed={value === ""}
+        aria-label={`${name}: ${none}`}
+        title={none}
+        onClick={() => set("")}
+      />
+      {ACCENTS.map(([label, hex]) => (
+        <button
+          key={hex}
+          type="button"
+          className={value === hex ? "prefs-swatch active" : "prefs-swatch"}
+          style={{ background: hex }}
+          aria-pressed={value === hex}
+          aria-label={`${name}: ${label}`}
+          title={label}
+          onClick={() => set(hex)}
+        />
+      ))}
+    </>
+  );
+
   /** One command or menu row and the button that takes a chord for it. */
   const chordRow = (key: string, label: string, chord: string, path?: string) => (
     <label className="row prefs-check prefs-tool" key={key}>
@@ -343,6 +406,84 @@ export function PreferencesDialog({
           </nav>
 
           <div className="prefs-pane">
+            {group === "appearance" && (
+              <>
+                <label className="row">
+                  Theme
+                  <select
+                    value={prefs.theme}
+                    onChange={(e) => setPrefs({ theme: e.target.value as Theme })}
+                    aria-label="Theme"
+                  >
+                    <option value="system">As the system</option>
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                  </select>
+                  <span className="hint">the windows and panels; the page is the page</span>
+                </label>
+                <div className="row prefs-colours" role="group" aria-label="Accent">
+                  <span className="prefs-colours-name">Accent</span>
+                  <div className="prefs-swatches">
+                    {swatchRow(prefs.accent, (c) => setPrefs({ accent: c }), "Accent", "The theme's own")}
+                    <input
+                      type="color"
+                      value={prefs.accent || themeAccent}
+                      onChange={(e) => setPrefs({ accent: e.target.value })}
+                      aria-label="Accent colour"
+                      title="Any colour"
+                    />
+                  </div>
+                </div>
+                <p className="modal-aside">
+                  The active tool, the picked layer, the buttons that say
+                  yes. What is drawn over the picture keeps its own white
+                  and black.
+                </p>
+                <div className="row prefs-colours" role="group" aria-label="Sliders and ticks">
+                  <span className="prefs-colours-name">Sliders and ticks</span>
+                  <div className="prefs-swatches">
+                    {swatchRow(
+                      prefs.sliderColor,
+                      (c) => setPrefs({ sliderColor: c }),
+                      "Slider colour",
+                      "The same as the accent",
+                    )}
+                    <input
+                      type="color"
+                      value={prefs.sliderColor || prefs.accent || themeAccent}
+                      onChange={(e) => setPrefs({ sliderColor: e.target.value })}
+                      aria-label="Slider colour"
+                      title="Any colour"
+                    />
+                  </div>
+                </div>
+                <label className="row">
+                  Interface size
+                  <select
+                    value={prefs.uiScale}
+                    onChange={(e) => setPrefs({ uiScale: Number(e.target.value) })}
+                    aria-label="Interface size"
+                  >
+                    {UI_SCALES.map((s) => (
+                      <option key={s} value={s}>
+                        {SCALE_NAMES[s] ?? `${Math.round(s * 100)}%`}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="hint">the menus, panels and windows; not the page</span>
+                </label>
+                {/* What the choices look like together, live. */}
+                <div className="prefs-preview" aria-label="Preview" role="group">
+                  <button type="button" className="mask-button primary" tabIndex={-1}>
+                    Done
+                  </button>
+                  <span className="prefs-preview-row">Picked layer</span>
+                  <input type="range" min={0} max={100} defaultValue={60} tabIndex={-1} aria-hidden />
+                  <input type="checkbox" defaultChecked tabIndex={-1} aria-hidden />
+                </div>
+              </>
+            )}
+
             {group === "general" && (
               <>
                 <label className="row">
@@ -361,19 +502,6 @@ export function PreferencesDialog({
                     ))}
                   </select>
                   <span className="hint">rulers and geometry fields</span>
-                </label>
-                <label className="row">
-                  Theme
-                  <select
-                    value={prefs.theme}
-                    onChange={(e) => setPrefs({ theme: e.target.value as Theme })}
-                    aria-label="Theme"
-                  >
-                    <option value="system">As the system</option>
-                    <option value="dark">Dark</option>
-                    <option value="light">Light</option>
-                  </select>
-                  <span className="hint">the windows and panels; the page is the page</span>
                 </label>
                 <label className="row">
                   One finger

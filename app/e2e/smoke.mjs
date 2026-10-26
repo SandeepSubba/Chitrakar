@@ -14360,7 +14360,7 @@ assert(
   await page.keyboard.press("Escape");
   await page.keyboard.press("Control+Comma");
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
-  for (const tab of ["General", "Guides & grid", "Selection", "Export"]) {
+  for (const tab of ["General", "Appearance", "Guides & grid", "Selection", "Export"]) {
     await page.click(`.prefs-tab:has-text("${tab}")`);
     await page.waitForTimeout(100);
     const cut = await page.evaluate(() => {
@@ -14418,6 +14418,60 @@ assert(
   });
   assert(fit[0].includes("mm") && fit[1], `the printed size is said inside the window (${fit[0]})`);
   await page.click('[role=dialog][aria-label="New document"] button:text-is("Cancel")');
+  await page.waitForTimeout(150);
+}
+
+// 9cf. The chrome's colours and size are the person's: an accent of
+// their own (with labels that read on it), a colour for the sliders and
+// ticks apart from it, and a larger or smaller interface — all on the
+// Appearance page, live, kept, and put back by choosing none.
+{
+  const root = (prop) =>
+    page.evaluate((p) => getComputedStyle(document.documentElement).getPropertyValue(p).trim(), prop);
+  const shippedAccent = await root("--accent");
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Appearance")');
+  await page.click('button[aria-label="Accent: Amber"]');
+  await page.waitForTimeout(100);
+  assert((await root("--accent")) === "#e0a530", `the accent is the one chosen (${await root("--accent")})`);
+  const done = page.locator('.modal-actions .primary:text-is("Done")');
+  const doneLook = await done.evaluate((b) => [getComputedStyle(b).backgroundColor, getComputedStyle(b).color]);
+  assert(
+    doneLook[0] === "rgb(224, 165, 48)" && doneLook[1] === "rgb(16, 16, 26)",
+    `a button that says yes wears it, with a label that reads on it (${doneLook})`,
+  );
+  const rangeColour = () =>
+    page.locator('.prefs-preview input[type="range"]').evaluate((r) => getComputedStyle(r).accentColor);
+  assert((await rangeColour()) === "rgb(224, 165, 48)", `sliders follow the accent to begin with (${await rangeColour()})`);
+  await page.click('button[aria-label="Slider colour: Teal"]');
+  await page.waitForTimeout(100);
+  assert((await rangeColour()) === "rgb(31, 167, 155)", `given their own, the sliders wear it (${await rangeColour()})`);
+  const panelBefore = (await page.locator("aside.panel").boundingBox()).width;
+  await page.selectOption('select[aria-label="Interface size"]', "1.25");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)) === "20px",
+    "a larger interface draws the chrome's text larger",
+  );
+  const panelAfter = (await page.locator("aside.panel").boundingBox()).width;
+  assert(Math.abs(panelAfter / panelBefore - 1.25) < 0.02, `and the panel with it (${panelBefore} -> ${panelAfter})`);
+  const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")));
+  assert(
+    kept.accent === "#e0a530" && kept.sliderColor === "#1fa79b" && kept.uiScale === 1.25,
+    `and all three are kept (${kept.accent}, ${kept.sliderColor}, ${kept.uiScale})`,
+  );
+  // Back to how it shipped: none chosen is the theme's own.
+  await page.click(`button[aria-label="Accent: The theme's own"]`);
+  await page.click('button[aria-label="Slider colour: The same as the accent"]');
+  await page.selectOption('select[aria-label="Interface size"]', "1");
+  await page.waitForTimeout(150);
+  assert((await root("--accent")) === shippedAccent, `none chosen, the theme's own accent is back (${await root("--accent")})`);
+  assert(
+    (await page.evaluate(() => document.documentElement.style.cssText)) === "",
+    `and nothing of the person's is left on the root (${await page.evaluate(() => document.documentElement.style.cssText)})`,
+  );
+  await done.click();
   await page.waitForTimeout(150);
 }
 
@@ -15949,7 +16003,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
   assert(
     (await page.locator(".prefs-tab").allTextContents()).join(",") ===
-      "General,Tools,Keys,Guides & grid,Selection,Colour,New documents,Export",
+      "General,Appearance,Tools,Keys,Guides & grid,Selection,Colour,New documents,Export",
     "the settings are grouped rather than listed",
   );
 
@@ -17061,6 +17115,7 @@ assert(
   );
   await page.keyboard.press("Control+Comma");
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Appearance")');
   await page.selectOption('select[aria-label="Theme"]', "light");
   await page.waitForTimeout(150);
   assert(
@@ -17091,6 +17146,7 @@ assert(
   // "As the system" follows the machine, live.
   await page.keyboard.press("Control+Comma");
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-tab:has-text("Appearance")');
   await page.selectOption('select[aria-label="Theme"]', "system");
   await page.waitForTimeout(150);
   assert((await theme()) === "dark", "as the system, on a dark machine, it is dark again");

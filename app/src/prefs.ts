@@ -75,6 +75,15 @@ export type Prefs = {
   /** The chrome's colours: the system's choice, or one of the two
    * outright. The page is the page under either. */
   theme: Theme;
+  /** The chrome's accent — the active tool, the picked layer, the
+   * buttons that say yes — as `#rrggbb`, or "" for the theme's own. */
+  accent: string;
+  /** What the sliders, ticks and radio dots are drawn in, or "" to
+   * follow the accent. */
+  sliderColor: string;
+  /** How large the chrome is drawn, as a share of the standard: its
+   * text and everything measured from it. The page is not scaled. */
+  uiScale: number;
   /** What one finger on the page does on a touch screen. About the
    * hand and the device, so here. */
   finger: FingerDoes;
@@ -172,6 +181,9 @@ export const withRecent = (recent: string[], path: string): string[] =>
 export const DEFAULTS: Prefs = {
   units: "px",
   theme: "system",
+  accent: "",
+  sliderColor: "",
+  uiScale: 1,
   finger: "auto",
   alignTo: "selection",
   gpuFrames: false,
@@ -212,6 +224,24 @@ export const DEFAULTS: Prefs = {
 };
 
 const KEY = "chitrakar:prefs";
+
+/** A colour as the colour pickers give it and the stylesheet takes it. */
+const HEX = /^#[0-9a-fA-F]{6}$/;
+
+/** What reads on a colour: near-black on a light one, white on a dark
+ * one, by its relative luminance — so a yellow accent's buttons do not
+ * carry white labels nobody can read. */
+export function onColour(hex: string): string {
+  const c = [1, 3, 5].map((i) => {
+    const v = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+  });
+  const lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  return lum > 0.25 ? "#10101a" : "#ffffff";
+}
+
+/** The sizes the chrome can be drawn at: compact, standard, large, larger. */
+export const UI_SCALES: readonly number[] = [0.9, 1, 1.125, 1.25];
 
 /** The keys this replaced. Read once, so that a grid and a unit chosen
  * before any of this existed are still there afterwards — a preferences
@@ -266,6 +296,10 @@ export function clamp(p: Prefs): Prefs {
         : "page",
     exportFormat: EXPORT_FORMATS.includes(p.exportFormat) ? p.exportFormat : "png",
     theme: p.theme === "dark" || p.theme === "light" ? p.theme : "system",
+    // A colour the stylesheet can take whole, or the theme's own.
+    accent: HEX.test(p.accent) ? p.accent.toLowerCase() : "",
+    sliderColor: HEX.test(p.sliderColor) ? p.sliderColor.toLowerCase() : "",
+    uiScale: UI_SCALES.includes(p.uiScale) ? p.uiScale : 1,
     finger: p.finger === "draw" || p.finger === "pan" ? p.finger : "auto",
     alignTo: p.alignTo === "page" || p.alignTo === "key" ? p.alignTo : "selection",
     grid: n(Math.round(p.grid), 0, 512, 0),

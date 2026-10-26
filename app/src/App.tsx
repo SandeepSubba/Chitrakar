@@ -9,7 +9,7 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
-import { usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
+import { onColour, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
 import {
   DOCUMENTS,
   baseName,
@@ -1396,7 +1396,9 @@ export function App() {
     const startX = e.clientX;
     const from = panelWidth;
     const move = (m: PointerEvent) =>
-      setPanelWidth(Math.max(180, Math.min(560, from + startX - m.clientX)));
+      setPanelWidth(
+        Math.max(180, Math.min(560, from + (startX - m.clientX) / prefs.uiScale)),
+      );
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
@@ -1554,6 +1556,30 @@ export function App() {
     system.addEventListener("change", apply);
     return () => system.removeEventListener("change", apply);
   }, [prefs.theme]);
+  // The person's own colours and size, laid over the theme on the root:
+  // an accent (and what reads on it), the sliders' and ticks' colour,
+  // and how large the chrome is drawn. Nothing set is nothing laid, so
+  // the theme's own show through.
+  useEffect(() => {
+    const root = document.documentElement.style;
+    if (prefs.accent) {
+      root.setProperty("--accent", prefs.accent);
+      root.setProperty("--on-accent", onColour(prefs.accent));
+    } else {
+      root.removeProperty("--accent");
+      root.removeProperty("--on-accent");
+    }
+    if (prefs.sliderColor) root.setProperty("--slider", prefs.sliderColor);
+    else root.removeProperty("--slider");
+    root.fontSize = prefs.uiScale === 1 ? "" : `${16 * prefs.uiScale}px`;
+    // Said on the root too, for the bar: what it gives up and when is
+    // decided by the window's width, which a larger interface fills
+    // sooner.
+    const scaleName =
+      prefs.uiScale < 1 ? "compact" : prefs.uiScale > 1.2 ? "larger" : prefs.uiScale > 1 ? "large" : "";
+    if (scaleName) document.documentElement.dataset.scale = scaleName;
+    else delete document.documentElement.dataset.scale;
+  }, [prefs.accent, prefs.sliderColor, prefs.uiScale]);
   /** Which tools are on the rail. Put away in Preferences is not gone:
    * the tool keeps its key and sits behind the slot at the rail's end.
    * The one tool that cannot be put away is the one that moves things. */
@@ -11253,7 +11279,9 @@ export function App() {
           aria-label="Layers"
           hidden={narrow && !panelOpen}
           style={{
-            width: panelWidth,
+            // Drawn at the interface's size, so a larger interface does
+            // not squeeze the same text into the same pixels.
+            width: Math.round(panelWidth * prefs.uiScale),
             // Only ever down: a sheet pulled up past its edge would come
             // away from the bottom of the screen.
             transform: sheetPull !== null && sheetPull > 0 ? `translateY(${sheetPull}px)` : undefined,
