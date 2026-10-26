@@ -14645,6 +14645,30 @@ assert(
   await page.keyboard.press("Escape");
 }
 
+// 9cj. The Adjust and Filter menus come in families with a line between
+// each, as Photoshop's and Affinity's do — eighteen rows of one mark in
+// one run had to be read top to bottom — and nothing is lost on the way.
+{
+  await page.click('.menubar button:text-is("Adjust")');
+  await page.waitForTimeout(150);
+  const adjustSeps = await page.locator(".menu-pop hr, .menu-pop .menu-sep").count();
+  const adjustRows = await page.locator(".menu-pop .menu-item").allTextContents();
+  assert(adjustSeps >= 2, `the Adjust menu is in families (${adjustSeps} lines)`);
+  assert(
+    adjustRows.some((t) => t.includes("Curves")) && adjustRows.some((t) => t.includes("Colour lookup")),
+    `and still holds every adjustment (${adjustRows.length} rows)`,
+  );
+  await page.keyboard.press("Escape");
+  await page.click('.menubar button:text-is("Filter")');
+  await page.waitForTimeout(150);
+  const filterRows = (await page.locator(".menu-pop .menu-item").allTextContents()).map((t) => t.trim());
+  const at = (name) => filterRows.findIndex((t) => t.startsWith(name));
+  assert(at("Reduce noise") === at("Noise") + 1, `reducing noise sits beside adding it (${filterRows})`);
+  assert(filterRows.length >= 18, `and every filter is there (${filterRows.length})`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(100);
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a

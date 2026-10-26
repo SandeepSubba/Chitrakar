@@ -1089,6 +1089,24 @@ const toTransform = (v: ArrayLike<number>): Transform => ({
   f: v[5],
 });
 
+/** The Adjust and Filter menus in families, in the order a hand reaches
+ * for them: tone before colour before the ones that remap a picture
+ * outright; blurs, then sharpening, noise, distortions and the stylised. */
+const PRESET_FAMILIES: Record<"Adjustment" | "Filter", string[][]> = {
+  Adjustment: [
+    ["exposure", "brightness-contrast", "levels", "curves", "shadows-highlights"],
+    ["hue-saturation", "vibrance", "white-balance", "colour-balance", "photo-filter", "channel-mixer", "black-and-white", "lookup"],
+    ["gradient-map", "colour-bands", "invert", "posterize", "threshold"],
+  ],
+  Filter: [
+    ["blur", "surface", "motion", "radial"],
+    ["sharpen", "high-pass"],
+    ["noise", "median"],
+    ["twirl", "pinch", "ripple", "lens"],
+    ["pixelate", "halftone", "oil-paint", "find-edges", "emboss", "vignette"],
+  ],
+};
+
 /** A line across a menu. */
 const SEP: MenuEntry = { kind: "sep" };
 /** A row in a menu. The id is what the native bar sends back when the
@@ -8460,16 +8478,31 @@ export function App() {
   const presetIs = (kind: NodeKind, what: "Adjustment" | "Filter") =>
     typeof kind === "object" && kind !== null && what in kind;
   const presetRows = (what: "Adjustment" | "Filter", icon: IconName) => {
-    const rows = Object.entries(ADJUSTMENT_PRESETS).filter(([, p]) =>
-      presetIs(p.kind, what),
-    );
-    // A colour lookup is a file to choose rather than numbers to start
-    // from, so it is a row of its own after the presets.
-    const lookup: [string, { name: string }][] =
-      what === "Adjustment" ? [["lookup", { name: "Colour lookup…" }]] : [];
-    const over = [...rows, ...lookup].map(([key, p]) =>
-      item(`${what}-${key}`, icon, p.name, () => addAdjustment(key)),
-    );
+    const presets: Record<string, { name: string }> = {
+      ...Object.fromEntries(
+        Object.entries(ADJUSTMENT_PRESETS).filter(([, p]) => presetIs(p.kind, what)),
+      ),
+      // A colour lookup is a file to choose rather than numbers to start
+      // from, so it is a row of its own among the colour adjustments.
+      ...(what === "Adjustment" ? { lookup: { name: "Colour lookup…" } } : {}),
+    };
+    // In families, a line between each, as Photoshop's and Affinity's
+    // menus have them: eighteen rows in one run, every one with the
+    // same mark, had to be read top to bottom to find anything. A
+    // preset no family names yet goes at the end, so a new one is never
+    // missing from the menu.
+    const families = PRESET_FAMILIES[what];
+    const named = new Set(families.flat());
+    const groups = [
+      ...families.map((f) => f.filter((key) => key in presets)),
+      Object.keys(presets).filter((key) => !named.has(key)),
+    ].filter((g) => g.length > 0);
+    const rows = (make: (key: string, name: string) => MenuEntry) =>
+      groups.flatMap((g, i) => [
+        ...(i > 0 ? [SEP] : []),
+        ...g.map((key) => make(key, presets[key].name)),
+      ]);
+    const over = rows((key, name) => item(`${what}-${key}`, icon, name, () => addAdjustment(key)));
     // The same list again, scoped to the picked layer — which the
     // engine does by grouping the two, a group being what isolates.
     // Not offered on an adjustment or a filter, which have nothing of
@@ -8484,10 +8517,8 @@ export function App() {
               `${what}-only`,
               icon,
               `Only on ${selectedLayer.name}`,
-              [...rows, ...lookup].map(([key, p]) =>
-                item(`${what}-only-${key}`, icon, p.name, () =>
-                  addAdjustment(`only:${key}`),
-                ),
+              rows((key, name) =>
+                item(`${what}-only-${key}`, icon, name, () => addAdjustment(`only:${key}`)),
               ),
             ),
           ]
