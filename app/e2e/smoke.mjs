@@ -15098,6 +15098,36 @@ assert(
   await win.waitFor();
   await win.locator('button:text-is("Cancel")').click();
   await settle();
+
+  // Several dropped together take their turns: the first can be
+  // skipped, and the rest placed with one set of settings.
+  await newDocument(200, 150, "rgb");
+  await page.evaluate((bytes) => {
+    const dt = new DataTransfer();
+    for (const n of ["a", "b", "c"]) dt.items.add(new File([new Uint8Array(bytes)], `${n}.dng`));
+    document.querySelector(".canvas-host").dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  }, [...card]);
+  await win.waitFor();
+  await settle();
+  const title = async () => (await win.locator("h2").innerText()).replace(/\s+/g, " ");
+  assert((await title()).includes("a.dng — 1 of 3"), `the first of three (${await title()})`);
+  await win.locator('button:text-is("Skip")').click();
+  await page.waitForFunction(() => document.querySelector('[role="dialog"][aria-label="Develop"] h2')?.textContent?.includes("b.dng"));
+  assert((await title()).includes("b.dng — 2 of 3"), `skipped, the next (${await title()})`);
+  await win.locator('input[aria-label="Exposure"]').fill("-1");
+  await win.locator('button:text-is("Place all 2")').click();
+  await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  assert((await layerNames()).join() === "c.dng,b.dng", `the rest placed, the skipped one not (${await layerNames()})`);
+  await page.locator(".panel ul li", { hasText: "c.dng" }).click();
+  await page.locator("button.develop-again").click();
+  await win.waitFor();
+  assert(
+    (await win.locator('input[aria-label="Exposure"]').inputValue()) === "-1" && !(await title()).includes(" of "),
+    "each with the settings they were placed with, and on its own",
+  );
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
 }
 
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held

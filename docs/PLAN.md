@@ -10198,6 +10198,12 @@ without reading anything else.*
   far past white that leaves the brightest hundredth, and lifts shadows
   by how much is left near black — white balance and colour left as
   they are. About 50 ms a slider move in the browser.
+  Several raw files dropped, shared or picked together take their turns
+  in the window ("2 of 3"): each can be skipped, and "Place all"
+  develops this one and every one still waiting with the same settings —
+  a run of photographs taken under one light. Before this, the engine
+  held one open raw file, so a drop of three opened the last and the
+  others vanished without a word.
   **HEIC and AVIF** go to the browser's decoder, which has AVIF
   everywhere current and HEIC only on Apple's systems; a HEIC that
   cannot be read says how to get a JPEG instead rather than what the

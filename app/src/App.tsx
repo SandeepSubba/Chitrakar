@@ -8298,18 +8298,12 @@ export function App() {
         }
         // The engine works on the page's own thread, so the line has to
         // be drawn before the reading starts or it is never seen.
-        // A camera's raw file goes to the develop window, read first.
+        // A camera's raw file goes to the develop window, one at a time:
+        // several dropped together wait their turn.
         if (kind === "raw") {
-          setImporting(`Reading ${name}…`);
-          await nextPaint();
-          try {
-            const info = JSON.parse(session.raw_open(raw, name)) as RawInfo;
-            setDeveloping({ name, info, initial: RAW_DEFAULTS, layer: null });
-          } catch (err) {
-            alert(`Could not open ${name}: ${err}`);
-          } finally {
-            setImporting(null);
-          }
+          rawQueue.current.push({ name, bytes: raw });
+          setRawWaiting(rawQueue.current.length);
+          if (!rawBusy.current) void openNextRaw();
           return;
         }
         const slow = kind === "psd" || raw.length > 24e6;
@@ -8356,30 +8350,92 @@ export function App() {
 
   /** The window's settings, developed in full: placed, or given to the
    * layer as its new picture in one step of history. */
-  const finishDevelop = async (settings: RawSettings) => {
+  /** Raw files waiting for the develop window, in the order they came,
+   * and whether it is in use — a ref, since several files arrive before
+   * any state has been set. */
+  const rawQueue = useRef<{ name: string; bytes: Uint8Array }[]>([]);
+  const rawBusy = useRef(false);
+  const [rawWaiting, setRawWaiting] = useState(0);
+  /** How many have gone through the window in this run, for "2 of 3". */
+  const rawDone = useRef(0);
+
+  /** The next raw file waiting, read and shown in the develop window. */
+  const openNextRaw = async () => {
+    const next = rawQueue.current.shift();
+    setRawWaiting(rawQueue.current.length);
+    if (!session || !next) {
+      rawBusy.current = false;
+      rawDone.current = 0;
+      return;
+    }
+    rawBusy.current = true;
+    setImporting(`Reading ${next.name}…`);
+    await nextPaint();
+    try {
+      const info = JSON.parse(session.raw_open(next.bytes, next.name)) as RawInfo;
+      setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
+    } catch (err) {
+      alert(`Could not open ${next.name}: ${err}`);
+      rawDone.current += 1;
+      void openNextRaw();
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  /** The window's settings, developed in full: placed, or given to the
+   * layer as its new picture in one step of history. With `all`, every
+   * raw file still waiting is placed with the same settings too — the
+   * same light and exposure for a run of photographs taken together. */
+  const finishDevelop = async (settings: RawSettings, all = false) => {
     const d = developing;
     setDeveloping(null);
     if (!session || !d) return;
-    setImporting(`Developing ${d.name}…`);
+    const json = JSON.stringify(settings);
+    const left = all ? rawQueue.current.splice(0) : [];
+    const total = rawDone.current + 1 + rawQueue.current.length + left.length;
+    const of = (n: number) => (total > 1 ? ` (${n} of ${total})` : "");
+    setImporting(`Developing ${d.name}${of(rawDone.current + 1)}…`);
     await nextPaint();
     try {
       const was: [number, number] = [session.width, session.height];
       if (d.layer === null) {
-        placed(session.place_raw(JSON.stringify(settings)), was);
+        placed(session.place_raw(json), was);
+        rawDone.current += 1;
       } else {
-        session.redevelop(d.layer, JSON.stringify(settings));
+        session.redevelop(d.layer, json);
         refresh(session);
       }
     } catch (err) {
       alert(`Could not develop ${d.name}: ${err}`);
     } finally {
       session.raw_close();
-      setImporting(null);
     }
+    for (const next of left) {
+      setImporting(`Developing ${next.name}${of(rawDone.current + 1)}…`);
+      await nextPaint();
+      try {
+        const was: [number, number] = [session.width, session.height];
+        session.raw_open(next.bytes, next.name);
+        placed(session.place_raw(json), was);
+      } catch (err) {
+        alert(`Could not develop ${next.name}: ${err}`);
+      } finally {
+        session.raw_close();
+        rawDone.current += 1;
+      }
+    }
+    setImporting(null);
+    if (d.layer === null) void openNextRaw();
   };
   const cancelDevelop = () => {
+    const d = developing;
     setDeveloping(null);
     session?.raw_close();
+    if (d?.layer === null) {
+      rawDone.current += 1;
+      void openNextRaw();
+    }
   };
   /** Open the picked layer's raw file in the develop window again, with
    * the settings it was developed with. */
@@ -9907,6 +9963,11 @@ export function App() {
           info={developing.info}
           initial={developing.initial}
           action={developing.layer === null ? "Place" : "Develop"}
+          count={
+            developing.layer === null && rawDone.current + 1 + rawWaiting > 1
+              ? [rawDone.current + 1, rawDone.current + 1 + rawWaiting]
+              : undefined
+          }
           onCancel={cancelDevelop}
           onDone={finishDevelop}
         />
@@ -13230,6 +13291,7 @@ function RawDevelopDialog({
   info,
   initial,
   action,
+  count,
   onCancel,
   onDone,
 }: {
@@ -13238,8 +13300,10 @@ function RawDevelopDialog({
   info: RawInfo;
   initial: RawSettings;
   action: string;
+  /** Which of how many raw files waiting this is, when more than one. */
+  count?: [number, number];
   onCancel: () => void;
-  onDone: (s: RawSettings) => void;
+  onDone: (s: RawSettings, all?: boolean) => void;
 }) {
   const [s, setS] = useState<RawSettings>(initial);
   const [picking, setPicking] = useState(false);
@@ -13336,7 +13400,10 @@ function RawDevelopDialog({
         aria-label="Develop"
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <h2>Develop {name}</h2>
+        <h2>
+          Develop {name}
+          {count && <span className="develop-count"> — {count[0]} of {count[1]}</span>}
+        </h2>
         <div className="develop-body">
           <div className="develop-picture">
             <canvas
@@ -13450,7 +13517,17 @@ function RawDevelopDialog({
             Before
           </button>
           <span className="spacer" />
-          <button onClick={onCancel}>Cancel</button>
+          <button onClick={onCancel} title={count ? "Leave this one out and go on to the next" : undefined}>
+            {count && count[0] < count[1] ? "Skip" : "Cancel"}
+          </button>
+          {count && count[0] < count[1] && (
+            <button
+              onClick={() => onDone(s, true)}
+              title="Place this and every raw file still waiting with these settings"
+            >
+              Place all {count[1] - count[0] + 1}
+            </button>
+          )}
           <button className="primary" onClick={() => onDone(s)}>
             {action}
           </button>

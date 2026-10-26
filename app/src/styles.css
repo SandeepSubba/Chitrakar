@@ -4054,3 +4054,7 @@ button.fold:hover {
   background: var(--accent);
   color: var(--on-accent, #fff);
 }
+.develop-count {
+  font-weight: 400;
+  color: var(--muted);
+}
