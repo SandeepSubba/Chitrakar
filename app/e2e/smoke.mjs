@@ -14587,6 +14587,64 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9ci. A right-click on a layer's row is the same question as one on
+// the layer on the canvas, and gets the same menu — picking the row
+// first, and with Rename… among what can be done. The bar's tooltips
+// say the chords as they stand, and the keyboard's place is drawn in
+// the accent.
+{
+  await newDocument(600, 300, "rgb");
+  await page.keyboard.press("Escape");
+  const box = await page.locator("#engine-page").boundingBox();
+  for (const x of [40, 300]) {
+    await pickTool("Rect");
+    await page.mouse.move(box.x + x, box.y + 40);
+    await page.mouse.down();
+    await page.mouse.move(box.x + x + 120, box.y + 120, { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(120);
+  }
+  await pickTool("Move");
+  await page.keyboard.press("Escape");
+  const rows = page.locator(".panel ul.layer-list li[data-id]");
+  await rows.nth(1).click({ button: "right" });
+  await page.waitForTimeout(200);
+  const menu = page.locator(".context-menu");
+  assert(await menu.isVisible(), "a right-click on a row opens the layer's menu");
+  assert(
+    (await rows.nth(1).getAttribute("class")).includes("selected"),
+    "and picks the row it was on",
+  );
+  await menu.locator(".menu-item", { hasText: "Rename" }).click();
+  await page.waitForTimeout(150);
+  const field = page.locator('input[aria-label="Layer name"]');
+  assert(await field.isVisible(), "Rename… opens the row's name for typing");
+  await field.fill("Badge");
+  await field.press("Enter");
+  await page.waitForTimeout(150);
+  assert(
+    (await rows.nth(1).locator(".layer-name").textContent()) === "Badge",
+    "and the name typed is the layer's",
+  );
+  const undoTip = await page.locator('.topbar-tools button[title^="Undo"]').getAttribute("title");
+  assert(undoTip === "Undo (Ctrl+Z)", `the bar's tooltips say the chord as it stands (${undoTip})`);
+  // The keyboard's place, in the accent.
+  await page.locator('.topbar-tools button[title^="Undo"]').focus();
+  await page.keyboard.press("Shift+Tab");
+  await page.keyboard.press("Tab");
+  const ring = await page.evaluate(() => {
+    const a = document.activeElement;
+    const probe = document.createElement("span");
+    probe.style.color = "var(--accent)";
+    document.body.appendChild(probe);
+    const accent = getComputedStyle(probe).color;
+    probe.remove();
+    return [getComputedStyle(a).outlineColor, accent];
+  });
+  assert(ring[0] === ring[1], `the keyboard's place is ringed in the accent (${ring})`);
+  await page.keyboard.press("Escape");
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a

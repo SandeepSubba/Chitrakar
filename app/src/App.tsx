@@ -939,7 +939,7 @@ const ROW_LIFT_MS = 350;
 /** Roughly how much room the right-click menu takes, which is what keeps
  * it inside the window. Wide enough for its longest line and tall enough
  * for the most items it ever shows. */
-const CONTEXT_MENU: [number, number] = [250, 330];
+const CONTEXT_MENU: [number, number] = [250, 380];
 
 /** What `snapAxis` answers when nothing is being snapped to. */
 const NO_SNAP = { delta: 0, guide: null as number | null };
@@ -1540,6 +1540,13 @@ export function App() {
     },
     [chords],
   );
+  /** A button's tooltip with its command's chord as it stands, so a
+   * chord changed on the Keys page is not contradicted by the button it
+   * runs: "Undo (Ctrl+Z)", or only "Undo" for a command given none. */
+  const tip = (label: string, id: CommandId) => {
+    const chord = hint(id);
+    return chord ? `${label} (${chord})` : label;
+  };
   // The theme, resolved to one of the two and put on the root for the
   // stylesheet: "system" follows the machine, and follows it *live*, so
   // a machine that goes dark at dusk takes the chrome with it.
@@ -9125,7 +9132,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={saveFile}
-            title="Save (Ctrl+S)"
+            title={tip("Save", "save")}
             aria-label="Save"
           >
             <Icon name="save" />
@@ -9165,7 +9172,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={pickInverse}
-            title="Pick out the rest instead (Ctrl+Shift+I)"
+            title={tip("Pick out the rest instead", "pick-inverse")}
             aria-label="Pick out the rest instead"
           >
             <Icon name="selectInverse" />
@@ -9202,7 +9209,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={() => zoomBy(0.8)}
-            title="Zoom out (Ctrl+-)"
+            title={tip("Zoom out", "zoom-out")}
             aria-label="Zoom out"
           >
             <Icon name="zoomOut" />
@@ -9210,7 +9217,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={fitView}
-            title="Fit document to window (Ctrl+0)"
+            title={tip("Fit document to window", "zoom-fit")}
             aria-label="Fit to window"
           >
             <Icon name="fit" />
@@ -9218,7 +9225,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={() => zoomTo(1)}
-            title="Actual size (Ctrl+1)"
+            title={tip("Actual size", "zoom-actual")}
             aria-label="Actual size"
           >
             <Icon name="actualSize" />
@@ -9226,7 +9233,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={() => zoomBy(1.25)}
-            title="Zoom in (Ctrl++)"
+            title={tip("Zoom in", "zoom-in")}
             aria-label="Zoom in"
           >
             <Icon name="zoomIn" />
@@ -9293,14 +9300,14 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={undo}
-            title="Undo (Ctrl+Z)"
+            title={tip("Undo", "undo")}
           >
             <Icon name="undo" />
           </button>
           <button
             className="chrome-button icon-only"
             onClick={redo}
-            title="Redo (Ctrl+Shift+Z)"
+            title={tip("Redo", "redo")}
           >
             <Icon name="redo" />
           </button>
@@ -9480,6 +9487,14 @@ export function App() {
               {selectedLayer?.kind === "group" && (
                 <MenuItem icon="ungroup" onClick={ungroupSelection}>
                   Ungroup
+                </MenuItem>
+              )}
+              {selectionSet.length === 1 && selectedLayer && (
+                <MenuItem
+                  icon="text"
+                  onClick={() => setRenaming({ id: selectedLayer.id, value: selectedLayer.name })}
+                >
+                  Rename…
                 </MenuItem>
               )}
               <MenuItem icon="trash" onClick={deleteSelected} hint="Del">
@@ -11405,7 +11420,7 @@ export function App() {
                 onClick={clipSelection}
                 disabled={!clippable}
                 aria-pressed={selectedLayer?.clipped ?? false}
-                title="Clip to the layer below (Ctrl+Alt+G)"
+                title={tip("Clip to the layer below", "clip")}
                 aria-label="Clip to the layer below"
               >
                 <Icon name="clip" size={16} />
@@ -11421,7 +11436,7 @@ export function App() {
               <button
                 onClick={duplicateSelected}
                 disabled={selected === null}
-                title="Duplicate layer (Ctrl+D)"
+                title={tip("Duplicate layer", "duplicate")}
                 aria-label="Duplicate layer"
               >
                 <Icon name="duplicate" size={16} />
@@ -11518,6 +11533,21 @@ export function App() {
                   .join(" ")}
                 style={{ paddingLeft: `${l.depth * 14 + 2}px` }}
                 onPointerDown={(e) => onRowPointerDown(e, l.id)}
+                // A right-click on a row is the same question as one on the
+                // layer on the canvas — what can be done with this — and
+                // gets the same menu: picking the row first when it is
+                // not already among the picked, as the canvas does.
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (!selectionSet.includes(l.id)) {
+                    setSelected(l.id);
+                    setMultiSel([]);
+                  }
+                  setContextAt([
+                    Math.max(8, Math.min(e.clientX, window.innerWidth - CONTEXT_MENU[0])),
+                    Math.max(8, Math.min(e.clientY, window.innerHeight - CONTEXT_MENU[1])),
+                  ]);
+                }}
                 onClick={(e) => {
                   if (Date.now() - layerDragDone.current < 300) return;
                   if (e.ctrlKey || e.metaKey || e.shiftKey) {

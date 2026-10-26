@@ -72,6 +72,16 @@
   box-sizing: border-box;
 }
 
+/* Where the keyboard is, in the app's own accent: the browser's ring is
+   black and white whatever the theme, and the accent is what says
+   "this one" everywhere else. Only for the keyboard — a click does not
+   draw it. The text typed on the page and the document's name keep
+   their own way of saying they have the caret. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 html,
 body {
   /* A drag down from the top of the page is not a reload. Android's
