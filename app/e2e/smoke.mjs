@@ -15020,6 +15020,47 @@ assert(
     Math.abs(picked[0] - picked[2]) <= 4 && Math.abs(picked[0] - picked[1]) <= 4,
     `picking the card makes it grey again (${picked})`,
   );
+  // Pushed three stops over, the light grey clips: the histogram's
+  // corner says so, and pressed paints it red over the photograph.
+  const clipHigh = win.locator('button[aria-label="Show clipped highlights"]');
+  await win.locator('input[aria-label="Exposure"]').fill("3");
+  await settle();
+  assert(await clipHigh.evaluate((b) => b.classList.contains("hit")), "the highlight corner lights when something clips");
+  await clipHigh.click();
+  await settle();
+  const red = await previewAt(0.75, 0.5);
+  assert(red[0] === 255 && red[1] === 0 && red[2] === 0, `clipped highlights shown red (${red})`);
+  await clipHigh.click();
+  await settle();
+  const histogramInk = await win.locator('canvas[aria-label="Histogram"]').evaluate((c) => {
+    const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+    return n;
+  });
+  assert(histogramInk > 20, `the histogram is drawn (${histogramInk} pixels)`);
+  // Before, held, is the plain development; let go, it is these settings.
+  const over = await previewAt(0.25, 0.5);
+  const beforeButton = win.locator('button:text-is("Before")');
+  const bb = await beforeButton.boundingBox();
+  await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+  await page.mouse.down();
+  await settle();
+  const plain = await previewAt(0.25, 0.5);
+  await page.mouse.up();
+  await settle();
+  assert(
+    Math.abs(plain[0] - asShot[0]) <= 3 && Math.abs(plain[2] - asShot[2]) <= 3,
+    `held, Before is the plain development (${plain} against ${asShot})`,
+  );
+  assert(JSON.stringify(await previewAt(0.25, 0.5)) === JSON.stringify(over), "and let go, it is the settings again");
+  // Auto brings three stops over back down, and keeps the white balance.
+  await win.locator('button:text-is("Auto")').click();
+  await settle();
+  const ev = Number(await win.locator('input[aria-label="Exposure"]').inputValue());
+  assert(ev < 1, `Auto takes the exposure back down (${ev})`);
+  assert((await win.locator('select[aria-label="Light"]').inputValue()) === "Custom", "and leaves the light alone");
+  await win.locator('input[aria-label="Exposure"]').fill("-1");
   await win.locator('input[aria-label="Temperature"]').fill("800");
   await settle();
   await win.locator('button:text-is("Place")').click();

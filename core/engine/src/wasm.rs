@@ -1415,6 +1415,16 @@ impl WasmSession {
         self.inner.redevelop(NodeId(id as u64), &s).map_err(to_js)
     }
 
+    /// Auto: the open raw file's tone worked out from it, from
+    /// `settings` (JSON, whose white balance and colour are kept).
+    pub fn raw_auto(&mut self, settings: &str) -> Result<String, JsError> {
+        let s = self
+            .inner
+            .raw_auto(&raw_settings(settings)?)
+            .map_err(to_js)?;
+        serde_json::to_string(&s).map_err(|e| JsError::new(&e.to_string()))
+    }
+
     /// Let the open raw file go.
     pub fn raw_close(&mut self) {
         self.inner.raw_close();

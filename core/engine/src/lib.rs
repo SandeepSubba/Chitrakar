@@ -8955,6 +8955,22 @@ impl Session {
         )
     }
 
+    /// Settings worked out from the open raw file, as a raw developer's
+    /// Auto, from `settings` (whose white balance and colour are kept).
+    pub fn raw_auto(&mut self, settings: &RawDevelop) -> Result<RawDevelop, EngineError> {
+        let raw = self
+            .raw
+            .as_mut()
+            .ok_or_else(|| EngineError::BadCommand("no raw file is open".into()))?;
+        if raw.preview.is_none() {
+            raw.preview = Some((512, raw.photo.preview(512)));
+        }
+        let (_, preview) = raw.preview.as_ref().expect("made above");
+        Ok(chitrakar_codecs::develop::auto_tone(
+            &raw.photo, preview, settings,
+        ))
+    }
+
     /// Let the open raw file go.
     pub fn raw_close(&mut self) {
         self.raw = None;

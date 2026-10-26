@@ -204,6 +204,9 @@ impl RawPhoto {
         if self.cpp == 3 {
             return [site(y, x, 0), site(y, x, 1), site(y, x, 2)];
         }
+        if self.bayer {
+            return self.malvar_at(y, x, wb);
+        }
         let own = self.color(y, x);
         let mut out = [0f32; 3];
         for (c, slot) in out.iter_mut().enumerate() {
@@ -237,6 +240,64 @@ impl RawPhoto {
             }
         }
         out
+    }
+
+    /// The three colours at a site of a Bayer sensor, by Malvar, He and
+    /// Cutler's demosaic (2004): each missing colour is its neighbours'
+    /// average corrected by how the site's own colour changes across
+    /// them — the green channel's detail lent to red and blue, which is
+    /// where a plain average loses it. Five by five, fixed weights, so it
+    /// costs little more than the average and is as sharp as methods
+    /// several times dearer. At the edges the sensor is mirrored two
+    /// sites over, which keeps each site's colour.
+    fn malvar_at(&self, y: usize, x: usize, wb: &[f32; 3]) -> [f32; 3] {
+        let (h, w) = (self.height as isize, self.width as isize);
+        let fold = |v: isize, n: isize| {
+            let v = if v < 0 { -v } else { v };
+            if v >= n {
+                (2 * (n - 1) - v).max(0)
+            } else {
+                v
+            }
+        };
+        let at = |dy: isize, dx: isize| -> f32 {
+            let (yy, xx) = (
+                fold(y as isize + dy, h) as usize,
+                fold(x as isize + dx, w) as usize,
+            );
+            (self.sample(yy, xx, 0) * wb[self.color(yy, xx)]).min(1.0)
+        };
+        let c0 = at(0, 0);
+        let cross1 = at(-1, 0) + at(1, 0) + at(0, -1) + at(0, 1);
+        let cross2 = at(-2, 0) + at(2, 0) + at(0, -2) + at(0, 2);
+        let diag1 = at(-1, -1) + at(-1, 1) + at(1, -1) + at(1, 1);
+        let own = self.color(y, x);
+        let clamp = |v: f32| v.clamp(0.0, 1.0);
+        if own == 1 {
+            // A green site: red and blue lie either side of it, one pair
+            // along its row and the other along its column.
+            let row = at(0, -1) + at(0, 1);
+            let col = at(-1, 0) + at(1, 0);
+            let row2 = at(0, -2) + at(0, 2);
+            let col2 = at(-2, 0) + at(2, 0);
+            let along_row = clamp((5.0 * c0 + 4.0 * row - diag1 - row2 + 0.5 * col2) / 8.0);
+            let along_col = clamp((5.0 * c0 + 4.0 * col - diag1 - col2 + 0.5 * row2) / 8.0);
+            let row_colour = self.color(y, fold(x as isize + 1, w) as usize);
+            return if row_colour == 0 {
+                [along_row, c0, along_col]
+            } else {
+                [along_col, c0, along_row]
+            };
+        }
+        // A red or a blue site: green from the cross, the other colour
+        // from the diagonals.
+        let g = clamp((4.0 * c0 + 2.0 * cross1 - cross2) / 8.0);
+        let other = clamp((6.0 * c0 + 2.0 * diag1 - 1.5 * cross2) / 8.0);
+        if own == 0 {
+            [c0, g, other]
+        } else {
+            [other, g, c0]
+        }
     }
 
     /// Develop the whole photograph.
@@ -374,6 +435,60 @@ impl RawPhoto {
             return None;
         }
         Some(self.white_of([sum[1] / sum[0], 1.0, sum[1] / sum[2]]))
+    }
+}
+
+/// Settings worked out from the picture, as a raw developer's Auto: the
+/// exposure that puts its log-average brightness at middle grey (within
+/// two stops), highlights pulled down by how far past white that leaves
+/// its brightest hundredth, and shadows lifted by how much of it is left
+/// near black. White balance and colour are kept as they are, since they
+/// say what the photograph is of rather than how it was exposed.
+pub fn auto_tone(photo: &RawPhoto, preview: &RawPreview, s: &RawDevelop) -> RawDevelop {
+    let look = Look::new(
+        photo,
+        &RawDevelop {
+            white: s.white,
+            ..Default::default()
+        },
+    );
+    let mut ys: Vec<f32> = preview
+        .cam
+        .iter()
+        .map(|c| {
+            let c = mul3(
+                &look.to_srgb,
+                [0, 1, 2].map(|k| (c[k] * look.wb[k]).min(1.0)),
+            );
+            luma(c.map(|v| (v * look.gain).max(0.0)))
+        })
+        .collect();
+    if ys.is_empty() {
+        return *s;
+    }
+    let key = (ys.iter().map(|y| (y + 1e-4).ln()).sum::<f32>() / ys.len() as f32).exp();
+    let ev = (0.18 / key).log2().clamp(-2.0, 2.0);
+    let k = 2f32.powf(ev);
+    let at = |ys: &mut Vec<f32>, q: f32| {
+        let i = ((ys.len() as f32 * q) as usize).min(ys.len() - 1);
+        *ys.select_nth_unstable_by(i, f32::total_cmp).1
+    };
+    let top = at(&mut ys, 0.99) * k;
+    let highlights = if top > 1.0 {
+        -(top.log2() * 60.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let dark = ys.iter().filter(|y| **y * k < 0.02).count() as f32 / ys.len() as f32;
+    let shadows = (dark * 150.0).clamp(0.0, 60.0);
+    RawDevelop {
+        exposure: (ev * 20.0).round() / 20.0,
+        highlights: highlights.round(),
+        shadows: shadows.round(),
+        contrast: 0.0,
+        whites: 0.0,
+        blacks: 0.0,
+        ..*s
     }
 }
 
@@ -928,6 +1043,43 @@ mod tests {
         });
         let [r, g, b] = px(&img, 8, 8);
         assert!(r.abs_diff(g) <= 1 && g.abs_diff(b) <= 1, "{r} {g} {b}");
+    }
+
+    #[test]
+    fn auto_brings_a_dark_picture_up_and_a_bright_one_down() {
+        // Most of the frame in deep shadow, a little light: Auto opens it up.
+        let dark = sample::dng(32, 32, 4095, [1.0; 3], |x, y| {
+            if x < 6 && y < 6 {
+                [0.9; 3]
+            } else {
+                [0.002; 3]
+            }
+        });
+        let photo = RawPhoto::read(&dark).unwrap();
+        let s = auto_tone(&photo, &photo.preview(16), &RawDevelop::default());
+        assert!(s.exposure > 0.5 && s.shadows > 0.0, "{s:?}");
+        assert!(
+            s.highlights < 0.0,
+            "and pulls the light it pushed past white back: {s:?}"
+        );
+        // All bright: brought down.
+        let bright = sample::dng(32, 32, 4095, [1.0; 3], |_, _| [0.9; 3]);
+        let photo = RawPhoto::read(&bright).unwrap();
+        let s = auto_tone(
+            &photo,
+            &photo.preview(16),
+            &RawDevelop {
+                white: Some([5000.0, 3.0]),
+                saturation: 20.0,
+                ..Default::default()
+            },
+        );
+        assert!(s.exposure < -0.5, "{s:?}");
+        assert_eq!(
+            (s.white, s.saturation),
+            (Some([5000.0, 3.0]), 20.0),
+            "colour is kept"
+        );
     }
 
     #[test]

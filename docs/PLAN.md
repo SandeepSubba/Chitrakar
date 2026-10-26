@@ -10184,6 +10184,20 @@ without reading anything else.*
   `SetKind` — a new picture, everything else about the layer kept, one
   undo. Smoke 9cn writes a DNG of a grey card under a warm light byte by
   byte and drives all of it.
+  Then: a Bayer sensor is demosaicked by Malvar, He and Cutler's method
+  (each missing colour corrected by how the site's own colour changes,
+  five by five) rather than averaged — visibly sharper on a real
+  Canon file and without the orange and blue fringes along black type,
+  at about the same cost; X-Trans keeps the wider average. Over the
+  settings sits the preview's histogram (`app/src/develop.ts`,
+  unit-tested in `e2e/develop.test.mjs`), its corners lit when
+  highlights or shadows clip and, pressed, painting them red and blue
+  over the photograph; Before, held (or backslash held), shows the
+  plain development; Auto (`develop::auto_tone`) puts the log-average
+  brightness at middle grey within two stops, pulls highlights by how
+  far past white that leaves the brightest hundredth, and lifts shadows
+  by how much is left near black — white balance and colour left as
+  they are. About 50 ms a slider move in the browser.
   **HEIC and AVIF** go to the browser's decoder, which has AVIF
   everywhere current and HEIC only on Apple's systems; a HEIC that
   cannot be read says how to get a JPEG instead rather than what the

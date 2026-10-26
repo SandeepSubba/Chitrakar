@@ -53,6 +53,18 @@ import {
 import { ExportDialog } from "./ExportDialog";
 import { enginePicture } from "./picture";
 import { importKind, OPEN_ACCEPT, PLACE_ACCEPT, PLACE_EXTENSIONS, unreadable } from "./imports";
+import {
+  drawHistogram,
+  histogram,
+  kelvinToSlider,
+  LIGHTS,
+  lightOf,
+  markClipping,
+  RAW_DEFAULTS,
+  type RawInfo,
+  type RawSettings,
+  sliderToKelvin,
+} from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import {
@@ -13206,50 +13218,12 @@ function FindReplaceDialog({
  * as each one moves (a smaller copy, the same arithmetic). Opened when
  * a raw file is placed or opened, and again from Layer › Develop again…
  * on a layer that came from one: the file is kept in the document, so
- * this is never a choice made once. */
-type RawSettings = {
-  /** Kelvin and tint; absent for the camera's own. */
-  white?: [number, number];
-  exposure: number;
-  contrast: number;
-  highlights: number;
-  shadows: number;
-  whites: number;
-  blacks: number;
-  vibrance: number;
-  saturation: number;
-};
-/** What the develop window starts from: the size and the camera's own
- * white balance as a temperature and tint. */
-type RawInfo = { width: number; height: number; asShot: [number, number] };
-const RAW_DEFAULTS: RawSettings = {
-  exposure: 0,
-  contrast: 0,
-  highlights: 0,
-  shadows: 0,
-  whites: 0,
-  blacks: 0,
-  vibrance: 0,
-  saturation: 0,
-};
-/** Lightroom's names for a light, and what they are. */
-const LIGHTS: [string, [number, number] | null][] = [
-  ["As shot", null],
-  ["Daylight", [5500, 0]],
-  ["Cloudy", [6500, 0]],
-  ["Shade", [7500, 0]],
-  ["Tungsten", [2850, 0]],
-  ["Fluorescent", [3800, 20]],
-  ["Flash", [5500, 0]],
-];
-/** Temperature rides its slider in mireds (a million over kelvin), where
- * a step is a step of colour: 2000 K and 2500 K are as far apart as
- * 5000 K and 10000 K. */
-const MIRED_WARM = 1e6 / 2000;
-const MIRED_COOL = 1e6 / 25000;
-const toPos = (k: number) => ((MIRED_WARM - 1e6 / k) / (MIRED_WARM - MIRED_COOL)) * 1000;
-const fromPos = (p: number) => Math.round(1e6 / (MIRED_WARM - (p / 1000) * (MIRED_WARM - MIRED_COOL)) / 50) * 50;
-
+ * this is never a choice made once.
+ *
+ * Over the settings is the preview's histogram, with a corner each for
+ * what is clipped — pressed, the clipped pixels are painted over the
+ * photograph, red for highlights and blue for shadows — and Before, held
+ * (or the backslash key held), shows the plain development to compare. */
 function RawDevelopDialog({
   session,
   name,
@@ -13269,19 +13243,30 @@ function RawDevelopDialog({
 }) {
   const [s, setS] = useState<RawSettings>(initial);
   const [picking, setPicking] = useState(false);
+  const [before, setBefore] = useState(false);
+  const [showClip, setShowClip] = useState<{ high: boolean; low: boolean }>({ high: false, low: false });
+  const [clipped, setClipped] = useState<{ high: number; low: number }>({ high: 0, low: 0 });
   const canvas = useRef<HTMLCanvasElement>(null);
+  const graph = useRef<HTMLCanvasElement>(null);
   const white = s.white ?? info.asShot;
-  const light = s.white
-    ? (LIGHTS.find(([, w]) => w && w[0] === s.white![0] && w[1] === s.white![1])?.[0] ?? "Custom")
-    : "As shot";
+  const light = lightOf(s);
   useEffect(() => {
-    const key = (e: KeyboardEvent) => {
+    const down = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
+      if (e.key === "\\" && !isTextEntry(e.target)) setBefore(true);
     };
-    document.addEventListener("keydown", key);
-    return () => document.removeEventListener("keydown", key);
+    const up = (e: KeyboardEvent) => {
+      if (e.key === "\\") setBefore(false);
+    };
+    document.addEventListener("keydown", down);
+    document.addEventListener("keyup", up);
+    return () => {
+      document.removeEventListener("keydown", down);
+      document.removeEventListener("keyup", up);
+    };
   }, [onCancel]);
-  // Developed again on every change, at most once a frame.
+  // Developed again on every change, at most once a frame; the histogram
+  // read off what was developed, before any clipping is painted on it.
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const c = canvas.current;
@@ -13289,18 +13274,25 @@ function RawDevelopDialog({
       const longest = Math.min(1600, Math.round(Math.max(c.clientWidth, c.clientHeight) * devicePixelRatio) || 1000);
       let out: Uint8Array;
       try {
-        out = session.raw_preview(JSON.stringify(s), longest);
+        out = session.raw_preview(JSON.stringify(before ? RAW_DEFAULTS : s), longest);
       } catch {
         return;
       }
       const view = new DataView(out.buffer, out.byteOffset, 8);
       const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+      const pixels = new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4);
+      const hist = histogram(pixels);
+      setClipped({ high: hist.high, low: hist.low });
+      const g = graph.current;
+      const gx = g?.getContext("2d");
+      if (g && gx) drawHistogram(gx, hist, g.width, g.height);
+      if (showClip.high || showClip.low) markClipping(pixels, showClip.high, showClip.low);
       c.width = w;
       c.height = h;
-      c.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4), w, h), 0, 0);
+      c.getContext("2d")?.putImageData(new ImageData(pixels, w, h), 0, 0);
     });
     return () => cancelAnimationFrame(frame);
-  }, [s, session]);
+  }, [s, session, before, showClip]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
   const row = (label: string, k: Exclude<keyof RawSettings, "white">, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
@@ -13328,6 +13320,14 @@ function RawDevelopDialog({
     const got = session.raw_white_at(x, y);
     if (got) setS((o) => ({ ...o, white: JSON.parse(got) as [number, number] }));
   };
+  const auto = () => {
+    try {
+      setS({ ...RAW_DEFAULTS, ...(JSON.parse(session.raw_auto(JSON.stringify(s))) as Partial<RawSettings>) });
+    } catch (err) {
+      alert(`${err}`);
+    }
+  };
+  const percent = (f: number) => (f >= 0.001 ? `${(f * 100).toFixed(f < 0.1 ? 1 : 0)}%` : f > 0 ? "<0.1%" : "none");
   return (
     <div className="modal-scrim" onPointerDown={onCancel}>
       <div
@@ -13344,13 +13344,33 @@ function RawDevelopDialog({
               className={picking ? "picking" : undefined}
               onPointerDown={pick}
               aria-label="Developed picture"
+              data-before={before ? "" : undefined}
             />
             <p className="modal-aside">
               {info.width} × {info.height} px
-              {picking ? " — click something that should be grey" : ""}
+              {before ? " — before" : picking ? " — click something that should be grey" : ""}
             </p>
           </div>
           <div className="develop-settings">
+            <div className="develop-histogram">
+              <canvas ref={graph} width={240} height={64} aria-label="Histogram" />
+              <button
+                type="button"
+                className={`clip clip-low${clipped.low > 0 ? " hit" : ""}${showClip.low ? " on" : ""}`}
+                aria-pressed={showClip.low}
+                aria-label="Show clipped shadows"
+                title={`Shadows with nothing left in them: ${percent(clipped.low)}. Press to show them in blue.`}
+                onClick={() => setShowClip((o) => ({ ...o, low: !o.low }))}
+              />
+              <button
+                type="button"
+                className={`clip clip-high${clipped.high > 0 ? " hit" : ""}${showClip.high ? " on" : ""}`}
+                aria-pressed={showClip.high}
+                aria-label="Show clipped highlights"
+                title={`Highlights with nothing left in them: ${percent(clipped.high)}. Press to show them in red.`}
+                onClick={() => setShowClip((o) => ({ ...o, high: !o.high }))}
+              />
+            </div>
             <h3 className="props-head">White balance</h3>
             <div className="develop-light">
               <select
@@ -13383,8 +13403,8 @@ function RawDevelopDialog({
                 min={0}
                 max={1000}
                 step={1}
-                value={toPos(white[0])}
-                onChange={(e) => setS((o) => ({ ...o, white: [fromPos(Number(e.target.value)), white[1]] }))}
+                value={kelvinToSlider(white[0])}
+                onChange={(e) => setS((o) => ({ ...o, white: [sliderToKelvin(Number(e.target.value)), white[1]] }))}
                 aria-label="Temperature"
               />
             </label>
@@ -13400,7 +13420,12 @@ function RawDevelopDialog({
                 aria-label="Tint"
               />
             </label>
-            <h3 className="props-head">Tone</h3>
+            <div className="develop-head-row">
+              <h3 className="props-head">Tone</h3>
+              <button type="button" onClick={auto} title="Exposure, highlights and shadows worked out from the picture">
+                Auto
+              </button>
+            </div>
             {row("Exposure", "exposure", -5, 5, 0.05, " EV")}
             {row("Contrast", "contrast", -100, 100, 1)}
             {row("Highlights", "highlights", -100, 100, 1)}
@@ -13414,6 +13439,16 @@ function RawDevelopDialog({
         </div>
         <div className="modal-actions">
           <button onClick={() => setS(RAW_DEFAULTS)}>Reset</button>
+          <button
+            type="button"
+            className={before ? "on" : undefined}
+            onPointerDown={() => setBefore(true)}
+            onPointerUp={() => setBefore(false)}
+            onPointerLeave={() => setBefore(false)}
+            title="Hold to see the plain development (or hold \)"
+          >
+            Before
+          </button>
           <span className="spacer" />
           <button onClick={onCancel}>Cancel</button>
           <button className="primary" onClick={() => onDone(s)}>
