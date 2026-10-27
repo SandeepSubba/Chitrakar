@@ -38,7 +38,38 @@ pub fn is_raw_name(name: &str) -> bool {
 
 /// The sensor's picture as the reader gives it, in the terms developing
 /// it needs — so a mosaic can be made by hand in a test, without a file.
-pub struct Mosaic<'a, T: Copy + Into<f32>> {
+/// A sample as a mosaic holds it: a number, or the bytes of one as the
+/// packed form has it (little-endian), read where they lie rather than
+/// copied out first — forty million of them is 80 MB.
+pub trait Sample: Copy {
+    fn value(self) -> f32;
+}
+
+impl Sample for u16 {
+    fn value(self) -> f32 {
+        self as f32
+    }
+}
+
+impl Sample for f32 {
+    fn value(self) -> f32 {
+        self
+    }
+}
+
+impl Sample for [u8; 2] {
+    fn value(self) -> f32 {
+        u16::from_le_bytes(self) as f32
+    }
+}
+
+impl Sample for [u8; 4] {
+    fn value(self) -> f32 {
+        f32::from_le_bytes(self)
+    }
+}
+
+pub struct Mosaic<'a, T: Sample> {
     pub width: usize,
     pub height: usize,
     /// Samples per photosite: 1 for a colour-filtered sensor, 3 for a
@@ -160,35 +191,25 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
     }
     match kind {
         0 => {
-            let data: Vec<u16> = cur
-                .take(
-                    count
-                        .checked_mul(2)
-                        .ok_or_else(|| bad("a sensor too big to be one"))?,
-                )?
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            with!(&data)
+            let bytes = count
+                .checked_mul(2)
+                .ok_or_else(|| bad("a sensor too big to be one"))?;
+            let (data, _) = cur.take(bytes)?.as_chunks::<2>();
+            with!(data)
         }
         1 => {
-            let data: Vec<f32> = cur
-                .take(
-                    count
-                        .checked_mul(4)
-                        .ok_or_else(|| bad("a sensor too big to be one"))?,
-                )?
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            with!(&data)
+            let bytes = count
+                .checked_mul(4)
+                .ok_or_else(|| bad("a sensor too big to be one"))?;
+            let (data, _) = cur.take(bytes)?.as_chunks::<4>();
+            with!(data)
         }
         k => Err(bad(format!("samples of kind {k}"))),
     }
 }
 
 /// Develop a sensor's mosaic into 8-bit sRGB, plainly.
-pub fn develop<T: Copy + Into<f32>>(m: &Mosaic<T>) -> Result<SourceImage, CodecError> {
+pub fn develop<T: Sample>(m: &Mosaic<T>) -> Result<SourceImage, CodecError> {
     Ok(RawPhoto::from_mosaic(m)?.develop(&chitrakar_doc::RawDevelop::default()))
 }
 

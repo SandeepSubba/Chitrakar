@@ -1369,7 +1369,12 @@ impl WasmSession {
     /// Take a camera's raw file to develop: its mosaic as the raw module
     /// (in its worker) packed it, and the file. JSON `{width, height,
     /// asShot: [kelvin, tint]}`. Kept until placed or `raw_close`.
-    pub fn raw_open(&mut self, packed: &[u8], file: &[u8], name: &str) -> Result<String, JsError> {
+    pub fn raw_open(
+        &mut self,
+        packed: &[u8],
+        file: Vec<u8>,
+        name: &str,
+    ) -> Result<String, JsError> {
         let info = self.inner.raw_open(packed, file, name).map_err(to_js)?;
         serde_json::to_string(&info).map_err(|e| JsError::new(&e.to_string()))
     }
@@ -1585,6 +1590,30 @@ impl WasmSession {
     /// Serialize to `.chitra` bytes.
     pub fn save(&self) -> Result<Vec<u8>, JsError> {
         self.inner.save().map_err(to_js)
+    }
+
+    /// The draft kept after an edit: `.chitra` bytes without the pictures
+    /// and originals, which are `draft_parts`.
+    pub fn save_skeleton(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.save_skeleton().map_err(to_js)
+    }
+
+    /// JSON: the names of the parts a skeleton leaves out.
+    pub fn draft_parts(&self) -> String {
+        serde_json::to_string(&self.inner.draft_parts()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// One part's bytes, by its name.
+    pub fn draft_part(&self, name: &str) -> Result<Vec<u8>, JsError> {
+        self.inner
+            .draft_part(name)
+            .map(|b| b.to_vec())
+            .map_err(to_js)
+    }
+
+    /// Put a part back into a document opened from a skeleton.
+    pub fn restore_part(&mut self, name: &str, bytes: Vec<u8>) -> bool {
+        self.inner.restore_part(name, bytes)
     }
 
     /// Render and encode as PNG (export).

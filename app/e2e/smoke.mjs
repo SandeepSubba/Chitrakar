@@ -13348,10 +13348,60 @@ assert(
 
 // 10. Recovery: a draft of the document is kept as it changes, and a
 // fresh visit offers it back — restored, the layers and the ink return.
+// A picture on the page is kept beside the draft as a part of its own,
+// written once rather than with every edit, and comes back with it.
 {
+  const magentaPng = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 8;
+    c.height = 8;
+    const g = c.getContext("2d");
+    g.fillStyle = "#ff00ff";
+    g.fillRect(0, 0, 8, 8);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles('input[accept^="image/*,"]', {
+    name: "keep.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(magentaPng, "base64"),
+  });
+  await page.waitForTimeout(300);
   const rowsBefore = await page.locator(".panel ul li .layer-name").count();
-  assert(rowsBefore > 0, "something to lose");
+  assert(rowsBefore > 0, "something to lose, a picture among it");
+  // Where it went: the middle of the page, in the page's own units.
+  const middle = await page.evaluate(() => {
+    const c = document.getElementById("engine-canvas");
+    const p = document.getElementById("engine-page").getBoundingClientRect();
+    const k = c.width / c.getBoundingClientRect().width / (Number(c.dataset.frameScale) || 1);
+    return [Math.floor((p.width * k) / 2), Math.floor((p.height * k) / 2)];
+  });
+  const isMagenta = (p) => p[0] > 240 && p[1] < 15 && p[2] > 240;
+  const before = await canvasPixel(...middle);
+  assert(isMagenta(before), `the picture is on the page (${before})`);
   await page.waitForTimeout(2200); // the draft is written a breath after the last change
+  const kept = await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const open = indexedDB.open("chitrakar", 1);
+        open.onsuccess = () => {
+          const store = open.result.transaction("drafts").objectStore("drafts");
+          const keys = store.getAllKeys();
+          const parts = store.get("parts");
+          keys.onsuccess = () =>
+            (parts.onsuccess = () =>
+              resolve({
+                keys: keys.result.filter((k) => String(k).startsWith("part:")),
+                parts: parts.result,
+              }));
+        };
+      }),
+  );
+  assert(
+    kept.keys.length === 1 &&
+      String(kept.keys[0]).startsWith("part:resources/") &&
+      String(kept.parts).includes("resources/"),
+    `the picture is kept as a part beside the draft (${JSON.stringify(kept)})`,
+  );
   await page.reload();
   await page.waitForSelector("#engine-canvas");
   await page.waitForTimeout(600);
@@ -13371,6 +13421,12 @@ assert(
     (await page.locator(".unsaved-dot").count()) === 1,
     "and as work still to save, which is what it was",
   );
+  let back = [];
+  for (let i = 0; i < 50 && !isMagenta(back); i++) {
+    if (i) await page.waitForTimeout(100);
+    back = await canvasPixel(...middle);
+  }
+  assert(isMagenta(back), `and the picture with it (${back})`);
 }
 
 // 11. A finger is not a pointer. On a device that says its pointer is

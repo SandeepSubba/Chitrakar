@@ -20,8 +20,9 @@ pub mod tiff_export;
 pub mod tiff_import;
 
 pub use container::{
-    load_chitra, load_chitra_with_fonts, save_chitra, save_chitra_with_fonts, ContainerError,
-    FontFile, Opened,
+    draft_part, draft_parts, load_chitra, load_chitra_with_fonts, restore_part, save_chitra,
+    save_chitra_keeping, save_chitra_skeleton, save_chitra_with_fonts, ContainerError, FontFile,
+    Opened, WrittenPictures,
 };
 pub use pdf::{
     export_pdf, export_pdf_document, export_pdf_document_marked, export_pdf_frames,

@@ -379,10 +379,19 @@ function pointToSegment(
  * or a slider is focusable and ignores both, so treating every input as
  * text entry silently disables the shortcuts after any panel click. */
 /** The draft of the open document, kept in IndexedDB so it survives a
- * closed tab and a crash. One record; a .chitra with images can run past
- * what localStorage holds, and IndexedDB takes bytes as they are. */
+ * closed tab and a crash; a .chitra with images can run past what
+ * localStorage holds, and IndexedDB takes bytes as they are.
+ *
+ * Kept in pieces: `current` is the document without its pictures and
+ * originals (`save_skeleton`), written after every edit; each picture's
+ * PNG and each original is a record of its own, `part:<name>`, written
+ * once; and `parts` lists the ones `current` needs. Kept whole, a page of
+ * photographs was hundreds of megabytes copied out and written again a
+ * breath after every edit. A draft from before has no `parts`, and is
+ * the whole document. */
 const DRAFT_DB = "chitrakar";
 const DRAFT_STORE = "drafts";
+const PART = "part:";
 function draftDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
     try {
@@ -395,25 +404,104 @@ function draftDb(): Promise<IDBDatabase | null> {
     }
   });
 }
-async function putDraft(bytes: Uint8Array): Promise<void> {
+/** Records put and deleted in one transaction, done when it is. */
+function draftWrite(
+  db: IDBDatabase,
+  put: [string, unknown][],
+  remove: string[] = [],
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, "readwrite");
+    const store = tx.objectStore(DRAFT_STORE);
+    for (const [key, value] of put) store.put(value, key);
+    for (const key of remove) store.delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+function draftRead<T>(db: IDBDatabase, keys: string[]): Promise<(T | undefined)[]> {
+  return new Promise((resolve) => {
+    const store = db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE);
+    const out: (T | undefined)[] = [];
+    let left = keys.length;
+    if (left === 0) resolve(out);
+    keys.forEach((key, i) => {
+      const req = store.get(key);
+      req.onsuccess = () => {
+        out[i] = req.result as T;
+        if (--left === 0) resolve(out);
+      };
+      req.onerror = () => {
+        if (--left === 0) resolve(out);
+      };
+    });
+  });
+}
+function draftPartsKept(db: IDBDatabase): Promise<Set<string>> {
+  return new Promise((resolve) => {
+    const req = db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE).getAllKeys();
+    req.onsuccess = () =>
+      resolve(
+        new Set(
+          req.result
+            .filter((k): k is string => typeof k === "string" && k.startsWith(PART))
+            .map((k) => k.slice(PART.length)),
+        ),
+      );
+    req.onerror = () => resolve(new Set());
+  });
+}
+/** Keep the draft: the parts not kept yet, then the skeleton with the
+ * list of parts it needs in one step, then the parts it no longer does
+ * — so whatever moment the tab is closed at, the skeleton kept has its
+ * parts. `stillLatest` says whether a later draft has begun, which
+ * writes its own skeleton: this one's would be older. */
+async function putDraft(session: WasmSession, stillLatest: () => boolean): Promise<void> {
   const db = await draftDb();
   if (!db) return;
-  db.transaction(DRAFT_STORE, "readwrite")
-    .objectStore(DRAFT_STORE)
-    .put(bytes, "current");
+  const names = JSON.parse(session.draft_parts()) as string[];
+  const kept = await draftPartsKept(db);
+  for (const name of names) {
+    if (kept.has(name)) continue;
+    await draftWrite(db, [[PART + name, session.draft_part(name)]]);
+    if (!stillLatest()) return;
+  }
+  if (!stillLatest()) return;
+  await draftWrite(db, [
+    ["current", session.save_skeleton()],
+    ["parts", JSON.stringify(names)],
+  ]);
+  const wanted = new Set(names);
+  const stale = [...kept].filter((n) => !wanted.has(n)).map((n) => PART + n);
+  if (stale.length) await draftWrite(db, [], stale);
 }
-async function getDraft(): Promise<Uint8Array | null> {
+/** The draft kept, and the names of the parts it needs (none for a draft
+ * kept whole). */
+type Draft = { bytes: Uint8Array; parts: string[] };
+async function getDraft(): Promise<Draft | null> {
   const db = await draftDb();
   if (!db) return null;
-  return new Promise((resolve) => {
-    const req = db
-      .transaction(DRAFT_STORE)
-      .objectStore(DRAFT_STORE)
-      .get("current");
-    req.onsuccess = () =>
-      resolve(req.result instanceof Uint8Array ? req.result : null);
-    req.onerror = () => resolve(null);
+  const [bytes, parts] = await draftRead<unknown>(db, ["current", "parts"]);
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) return null;
+  let names: string[] = [];
+  try {
+    names = typeof parts === "string" ? (JSON.parse(parts) as string[]) : [];
+  } catch {
+    names = [];
+  }
+  return { bytes, parts: names };
+}
+/** A draft's parts, by name: those still there. */
+async function getDraftParts(names: string[]): Promise<Map<string, Uint8Array>> {
+  const db = await draftDb();
+  const out = new Map<string, Uint8Array>();
+  if (!db) return out;
+  const got = await draftRead<unknown>(db, names.map((n) => PART + n));
+  names.forEach((n, i) => {
+    const b = got[i];
+    if (b instanceof Uint8Array) out.set(n, b);
   });
+  return out;
 }
 /** What is kept beside the draft, so a restored document comes back as
  * what it was and not only as its layers: `name`, what it was called;
@@ -443,13 +531,8 @@ async function getDraftNote(key: DraftNote): Promise<string | null> {
 async function clearDraft(): Promise<void> {
   const db = await draftDb();
   if (!db) return;
-  const store = db
-    .transaction(DRAFT_STORE, "readwrite")
-    .objectStore(DRAFT_STORE);
-  store.delete("current");
-  store.delete("name");
-  store.delete("path");
-  store.delete("saved");
+  const parts = [...(await draftPartsKept(db))].map((n) => PART + n);
+  await draftWrite(db, [], ["current", "parts", "name", "path", "saved", ...parts]).catch(() => {});
 }
 
 function isTextEntry(target: EventTarget | null): boolean {
@@ -1718,7 +1801,7 @@ export function App() {
    * thrown away; and the draft-writer, a breath after the last change.
    * `saveTick` is bumped on every refresh, so the draft follows the
    * document. */
-  const [recoverable, setRecoverable] = useState<Uint8Array | null>(null);
+  const [recoverable, setRecoverable] = useState<Draft | null>(null);
   const [saveTick, setSaveTick] = useState(0);
   /** What this document is called: the name it was opened under, or the
    * one typed in the bar. Every save and every export is named after it,
@@ -1732,9 +1815,12 @@ export function App() {
   const draftName = useRef<string | null>(null);
   const draftPath = useRef<string | null>(null);
   const draftSaved = useRef(false);
+  /** Which draft is being kept: one begun later makes an earlier one
+   * stop rather than write an older skeleton over it. */
+  const draftRun = useRef(0);
   useEffect(() => {
     getDraft().then(
-      (bytes) => bytes && bytes.length > 0 && setRecoverable(bytes),
+      (draft) => draft && setRecoverable(draft),
     );
     getDraftNote("name").then((name) => (draftName.current = name));
     getDraftNote("path").then((path) => (draftPath.current = path || null));
@@ -1755,14 +1841,16 @@ export function App() {
       return;
     }
     const t = setTimeout(() => {
-      try {
-        putDraft(session.save());
-        putDraftNote("name", docName);
-        putDraftNote("path", docPath ?? "");
-        putDraftNote("saved", unsaved ? "no" : "yes");
-      } catch {
-        // A draft that cannot be written is not worth an alert.
-      }
+      const mine = ++draftRun.current;
+      putDraft(session, () => draftRun.current === mine)
+        .then(() => {
+          putDraftNote("name", docName);
+          putDraftNote("path", docPath ?? "");
+          putDraftNote("saved", unsaved ? "no" : "yes");
+        })
+        .catch(() => {
+          // A draft that cannot be written is not worth an alert.
+        });
     }, 1500);
     return () => clearTimeout(t);
     // `unsaved` is declared further down, with the history it reads;
@@ -8128,9 +8216,16 @@ export function App() {
   };
 
   /** Open a .chitra from its bytes, whether chosen or dropped. */
-  const openDocumentBytes = (bytes: Uint8Array, name?: string): boolean => {
+  const openDocumentBytes = (
+    bytes: Uint8Array,
+    name?: string,
+    parts?: Map<string, Uint8Array>,
+  ): boolean => {
     try {
       const s = WasmSession.open(bytes);
+      // A draft's pictures and originals, kept beside it, put back before
+      // anything is drawn.
+      for (const [part, b] of parts ?? []) s.restore_part(part, b);
       fitSession(s, s.width, s.height);
       // Faces the file carried are registered by the open; offer them.
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
@@ -9377,10 +9472,11 @@ export function App() {
           <span>A draft from your last session is here.</span>
           <button
             type="button"
-            onClick={() => {
-              const bytes = recoverable;
+            onClick={async () => {
+              const draft = recoverable;
               setRecoverable(null);
-              if (!openDocumentBytes(bytes, draftName.current ?? undefined)) return;
+              const parts = await getDraftParts(draft.parts);
+              if (!openDocumentBytes(draft.bytes, draftName.current ?? undefined, parts)) return;
               // Back with the file it had, so Save writes there again;
               // and, unless that file already held it, as work still to
               // save — it is a draft because it was not written down,

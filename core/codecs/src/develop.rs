@@ -29,7 +29,7 @@
 //! demosaic and makes a slider's drag a matter of milliseconds. Both go
 //! through [`Look::finish`], so the preview is the develop, smaller.
 
-use crate::raw::{camera_to_srgb, orient, Mosaic};
+use crate::raw::{camera_to_srgb, orient, Mosaic, Sample};
 use crate::{CodecError, SourceImage};
 use chitrakar_doc::RawDevelop;
 
@@ -53,6 +53,11 @@ pub struct RawPhoto {
     tile: [u8; TILE * TILE],
     /// Whether the pattern repeats every two sites both ways (Bayer).
     bayer: bool,
+    /// For a pattern that is not Bayer (X-Trans): at each place in the
+    /// tile and for each colour, the neighbours a site there averages for
+    /// it — the 3×3's sites of that colour, or the 5×5's where the 3×3 has
+    /// none. Worked out once rather than searched for at every site.
+    taps: Vec<Vec<(i8, i8)>>,
     /// The camera's white balance, green as one.
     as_shot: [f32; 3],
     /// XYZ to the camera's colours; sRGB's own when it has none.
@@ -73,13 +78,45 @@ const XYZ_TO_SRGB: [[f32; 3]; 3] = [
     [0.055_643_4, -0.204_025_9, 1.057_225_2],
 ];
 
+/// For each place in a tile and each colour, the offsets of the sites of
+/// that colour in the 3×3 round it, or in the 5×5 where the 3×3 has none,
+/// in the order `demosaic_at` visits them (row by row).
+fn taps_of(tile: &[u8; TILE * TILE]) -> Vec<Vec<(i8, i8)>> {
+    let colour = |y: isize, x: isize| {
+        tile[(y.rem_euclid(TILE as isize) as usize) * TILE + x.rem_euclid(TILE as isize) as usize]
+            as usize
+    };
+    let mut out = Vec::with_capacity(TILE * TILE * 3);
+    for y in 0..TILE as isize {
+        for x in 0..TILE as isize {
+            for c in 0..3 {
+                let mut taps = Vec::new();
+                for reach in [1isize, 2] {
+                    for dy in -reach..=reach {
+                        for dx in -reach..=reach {
+                            if colour(y + dy, x + dx) == c {
+                                taps.push((dy as i8, dx as i8));
+                            }
+                        }
+                    }
+                    if !taps.is_empty() {
+                        break;
+                    }
+                }
+                out.push(taps);
+            }
+        }
+    }
+    out
+}
+
 fn bad(what: impl std::fmt::Display) -> CodecError {
     CodecError::Format(format!("camera raw: {what}"))
 }
 
 impl RawPhoto {
     /// Keep a mosaic to develop.
-    pub fn from_mosaic<T: Copy + Into<f32>>(m: &Mosaic<T>) -> Result<RawPhoto, CodecError> {
+    pub fn from_mosaic<T: Sample>(m: &Mosaic<T>) -> Result<RawPhoto, CodecError> {
         let [top, right, bottom, left] = m.crops;
         if m.cpp != 1 && m.cpp != 3 {
             return Err(bad(format!("{} samples a photosite are not read", m.cpp)));
@@ -102,18 +139,38 @@ impl RawPhoto {
         }
         let bayer = (0..TILE)
             .all(|r| (0..TILE).all(|c| tile[r * TILE + c] == tile[(r % 2) * TILE + c % 2]));
+        // Black off and white at 65535, a colour's levels each. The
+        // filter's colours are read once for a square the pattern repeats
+        // within (the packed form's 48) rather than asked of `color_at` at
+        // every one of forty million sites; a raw already RGB takes each
+        // sample's colour from its place in the site.
+        // Rounded by adding a half and cutting, which for what is never
+        // negative is `round` without its library call — the call kept the
+        // loop from being vectorised, and was most of its time.
+        let scale = [0, 1, 2, 3].map(|k| 65535.0 / (m.white[k] - m.black[k]).max(1.0));
+        let level =
+            |v: f32, k: usize| (((v - m.black[k]) * scale[k]).clamp(0.0, 65535.0) + 0.5) as u16;
+        const SQUARE: usize = 48;
         let mut data = Vec::with_capacity(w * h * m.cpp);
-        for y in top..top + h {
-            for x in left..left + w {
-                for s in 0..m.cpp {
-                    let k = if m.cpp == 3 {
-                        s
-                    } else {
-                        (m.color_at)(y, x).min(3)
-                    };
-                    let span = (m.white[k] - m.black[k]).max(1.0);
-                    let v = (m.data[(y * m.width + x) * m.cpp + s].into() - m.black[k]) / span;
-                    data.push((v.clamp(0.0, 1.0) * 65535.0).round() as u16);
+        if m.cpp == 3 {
+            for y in top..top + h {
+                let row = &m.data[(y * m.width + left) * 3..(y * m.width + left + w) * 3];
+                data.extend(row.iter().enumerate().map(|(i, v)| level(v.value(), i % 3)));
+            }
+        } else {
+            let mut kinds = [0u8; SQUARE * SQUARE];
+            for (i, k) in kinds.iter_mut().enumerate() {
+                *k = (m.color_at)(top + i / SQUARE, left + i % SQUARE).min(3) as u8;
+            }
+            for (r, y) in (top..top + h).enumerate() {
+                let along = &kinds[(r % SQUARE) * SQUARE..][..SQUARE];
+                let row = &m.data[y * m.width + left..y * m.width + left + w];
+                for part in row.chunks(SQUARE) {
+                    data.extend(
+                        part.iter()
+                            .zip(along)
+                            .map(|(v, k)| level(v.value(), *k as usize)),
+                    );
                 }
             }
         }
@@ -133,6 +190,11 @@ impl RawPhoto {
             data,
             tile,
             bayer,
+            taps: if bayer || m.cpp == 3 {
+                Vec::new()
+            } else {
+                taps_of(&tile)
+            },
             as_shot: [one(0), 1.0, one(2)],
             xyz_to_cam,
             to_srgb: camera_to_srgb(&m.xyz_to_cam),
@@ -204,6 +266,43 @@ impl RawPhoto {
         }
         let own = self.color(y, x);
         let mut out = [0f32; 3];
+        // Two sites in from every edge the whole 5×5 is there, and the
+        // neighbours are the tile's list, summed in the same order.
+        if y >= 2 && x >= 2 && y + 2 < self.height && x + 2 < self.width {
+            let at = ((y % TILE) * TILE + x % TILE) * 3;
+            for (c, slot) in out.iter_mut().enumerate() {
+                if c == own {
+                    *slot = site(y, x, c);
+                    continue;
+                }
+                let taps = &self.taps[at + c];
+                if !taps.is_empty() {
+                    let sum: f32 = taps
+                        .iter()
+                        .map(|&(dy, dx)| {
+                            site(
+                                (y as isize + dy as isize) as usize,
+                                (x as isize + dx as isize) as usize,
+                                c,
+                            )
+                        })
+                        .fold(0.0, |a, b| a + b);
+                    *slot = sum / taps.len() as f32;
+                }
+            }
+            return out;
+        }
+        self.searched(y, x, wb)
+    }
+
+    /// The colours a site of a pattern other than Bayer lacks, found by
+    /// looking round it: the 3×3's sites of each, or the 5×5's. What
+    /// `demosaic_at` does at the edges, and what its tile's lists stand
+    /// for everywhere else.
+    fn searched(&self, y: usize, x: usize, wb: &[f32; 3]) -> [f32; 3] {
+        let site = |y: usize, x: usize, c: usize| (self.sample(y, x, 0) * wb[c]).min(1.0);
+        let own = self.color(y, x);
+        let mut out = [0f32; 3];
         for (c, slot) in out.iter_mut().enumerate() {
             if c == own {
                 *slot = site(y, x, c);
@@ -255,29 +354,42 @@ impl RawPhoto {
                 v
             }
         };
+        // A Bayer pattern repeats every two sites, so a site's colour is
+        // its row's and column's evenness — not the tile's two divisions,
+        // asked thirteen times a site. Two sites in from every edge the
+        // neighbours need no folding either.
+        let colour = |yy: usize, xx: usize| self.tile[(yy & 1) * TILE + (xx & 1)] as usize;
+        let inside = y >= 2 && x >= 2 && y + 2 < self.height && x + 2 < self.width;
         let at = |dy: isize, dx: isize| -> f32 {
-            let (yy, xx) = (
-                fold(y as isize + dy, h) as usize,
-                fold(x as isize + dx, w) as usize,
-            );
-            (self.sample(yy, xx, 0) * wb[self.color(yy, xx)]).min(1.0)
+            let (yy, xx) = if inside {
+                ((y as isize + dy) as usize, (x as isize + dx) as usize)
+            } else {
+                (
+                    fold(y as isize + dy, h) as usize,
+                    fold(x as isize + dx, w) as usize,
+                )
+            };
+            (self.data[yy * self.width + xx] as f32 * (1.0 / 65535.0) * wb[colour(yy, xx)]).min(1.0)
         };
+        // Each of the thirteen sites read once, and summed in the same
+        // order as the weights below were first written.
         let c0 = at(0, 0);
-        let cross1 = at(-1, 0) + at(1, 0) + at(0, -1) + at(0, 1);
-        let cross2 = at(-2, 0) + at(2, 0) + at(0, -2) + at(0, 2);
+        let (n, s, wst, e) = (at(-1, 0), at(1, 0), at(0, -1), at(0, 1));
+        let (nn, ss, ww, ee) = (at(-2, 0), at(2, 0), at(0, -2), at(0, 2));
+        let cross2 = nn + ss + ww + ee;
         let diag1 = at(-1, -1) + at(-1, 1) + at(1, -1) + at(1, 1);
-        let own = self.color(y, x);
+        let own = colour(y, x);
         let clamp = |v: f32| v.clamp(0.0, 1.0);
         if own == 1 {
             // A green site: red and blue lie either side of it, one pair
             // along its row and the other along its column.
-            let row = at(0, -1) + at(0, 1);
-            let col = at(-1, 0) + at(1, 0);
-            let row2 = at(0, -2) + at(0, 2);
-            let col2 = at(-2, 0) + at(2, 0);
+            let row = wst + e;
+            let col = n + s;
+            let row2 = ww + ee;
+            let col2 = nn + ss;
             let along_row = clamp((5.0 * c0 + 4.0 * row - diag1 - row2 + 0.5 * col2) / 8.0);
             let along_col = clamp((5.0 * c0 + 4.0 * col - diag1 - col2 + 0.5 * row2) / 8.0);
-            let row_colour = self.color(y, fold(x as isize + 1, w) as usize);
+            let row_colour = colour(y, fold(x as isize + 1, w) as usize);
             return if row_colour == 0 {
                 [along_row, c0, along_col]
             } else {
@@ -286,6 +398,7 @@ impl RawPhoto {
         }
         // A red or a blue site: green from the cross, the other colour
         // from the diagonals.
+        let cross1 = n + s + wst + e;
         let g = clamp((4.0 * c0 + 2.0 * cross1 - cross2) / 8.0);
         let other = clamp((6.0 * c0 + 2.0 * diag1 - 1.5 * cross2) / 8.0);
         if own == 0 {
@@ -1122,6 +1235,58 @@ mod tests {
             }
         });
         crate::raw::unpack(&dng).unwrap()
+    }
+
+    /// X-Trans away from the edges reads its neighbours from the tile's
+    /// lists; they are the search's own answer, site for site, crop and
+    /// all, so a photograph develops exactly as it did when every site
+    /// searched.
+    #[test]
+    fn x_trans_neighbours_from_the_tile_are_the_ones_searched_for() {
+        const XTRANS: [[usize; 6]; 6] = [
+            [1, 1, 0, 1, 1, 2],
+            [1, 1, 2, 1, 1, 0],
+            [2, 0, 1, 0, 2, 1],
+            [1, 1, 2, 1, 1, 0],
+            [1, 1, 0, 1, 1, 2],
+            [0, 2, 1, 2, 0, 1],
+        ];
+        let (w, h) = (40usize, 30usize);
+        let mut seed = 12345u32;
+        let data: Vec<u16> = (0..w * h)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (seed >> 16) as u16
+            })
+            .collect();
+        let color_at = |y: usize, x: usize| XTRANS[y % 6][x % 6];
+        // An odd crop, so the tile starts part way into the pattern.
+        let photo = RawPhoto::from_mosaic(&Mosaic {
+            width: w,
+            height: h,
+            cpp: 1,
+            data: &data,
+            color_at: &color_at,
+            black: [0.0; 4],
+            white: [65535.0; 4],
+            wb: [2.0, 1.0, 1.5, f32::NAN],
+            xyz_to_cam: [[0.0; 3]; 4],
+            crops: [1, 2, 3, 5],
+            orientation: 1,
+        })
+        .unwrap();
+        assert!(!photo.bayer);
+        let wb = [2.0, 1.0, 1.5];
+        for y in 0..photo.height {
+            for x in 0..photo.width {
+                let (fast, searched) = (photo.demosaic_at(y, x, &wb), photo.searched(y, x, &wb));
+                assert_eq!(
+                    fast.map(f32::to_bits),
+                    searched.map(f32::to_bits),
+                    "at {x}, {y}"
+                );
+            }
+        }
     }
 
     fn px(img: &SourceImage, x: u32, y: u32) -> [u8; 3] {

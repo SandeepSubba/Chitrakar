@@ -94,6 +94,153 @@ pub fn save_chitra_with_fonts(
     doc: &Document,
     fonts: &[FontFile],
 ) -> Result<Vec<u8>, ContainerError> {
+    save_chitra_keeping(doc, fonts, &mut WrittenPictures::default())
+}
+
+/// The PNG each picture was written as, kept from one save to the next.
+/// A picture never changes, so its PNG is made once: a document holding
+/// photographs was otherwise encoded whole every time it was saved —
+/// seconds, on the page, every time the draft was kept after an edit.
+#[derive(Default)]
+pub struct WrittenPictures {
+    /// By id: the picture's fingerprint, and its PNG.
+    by_id: std::collections::HashMap<String, (u64, std::sync::Arc<Vec<u8>>)>,
+}
+
+impl WrittenPictures {
+    /// How many pictures' PNGs are kept.
+    pub fn len(&self) -> usize {
+        self.by_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+}
+
+/// [`save_chitra_with_fonts`], taking each picture's PNG from `kept` where
+/// it was written before, and leaving there what this save wrote —
+/// only the pictures this document still holds.
+pub fn save_chitra_keeping(
+    doc: &Document,
+    fonts: &[FontFile],
+    kept: &mut WrittenPictures,
+) -> Result<Vec<u8>, ContainerError> {
+    write_chitra(doc, fonts, kept, true)
+}
+
+/// The document as a `.chitra` without its pictures or the files they
+/// were made from — everything else, which is the part an edit changes:
+/// what a draft writes after every edit, beside the parts it has
+/// (`draft_parts`, `draft_part`), each written once. A file that does not
+/// hold a picture opens with the picture missing, to be put back
+/// (`Document::restore_resource_bytes`).
+pub fn save_chitra_skeleton(doc: &Document, fonts: &[FontFile]) -> Result<Vec<u8>, ContainerError> {
+    write_chitra(doc, fonts, &mut WrittenPictures::default(), false)
+}
+
+/// The names of the parts a skeleton leaves out, as a whole file holds
+/// them: `resources/<id>.png` for each picture and `originals/<id>` for
+/// each file one was made from. Only those `kept` holds a PNG for, or
+/// this document still holds, stay in `kept`.
+pub fn draft_parts(doc: &Document, kept: &mut WrittenPictures) -> Vec<String> {
+    kept.by_id.retain(|id, _| doc.resource(id).is_some());
+    doc.resources()
+        .filter(|(_, r)| !r.rgba8.is_empty())
+        .map(|(id, _)| format!("resources/{id}.png"))
+        .chain(
+            doc.originals()
+                .filter(|(_, o)| !o.bytes.is_empty())
+                .map(|(id, _)| format!("{ORIGINALS}{id}")),
+        )
+        .collect()
+}
+
+/// One of `draft_parts`: a picture's PNG (made once, and kept in `kept`)
+/// or an original's bytes. `None` for a name the document has nothing
+/// under.
+pub fn draft_part(
+    doc: &Document,
+    kept: &mut WrittenPictures,
+    name: &str,
+) -> Result<Option<std::sync::Arc<Vec<u8>>>, ContainerError> {
+    if let Some(id) = name.strip_prefix(ORIGINALS) {
+        return Ok(doc
+            .original(id)
+            .filter(|o| !o.bytes.is_empty())
+            .map(|o| std::sync::Arc::new(o.bytes.to_vec())));
+    }
+    let Some(id) = name
+        .strip_prefix("resources/")
+        .and_then(|n| n.strip_suffix(".png"))
+    else {
+        return Ok(None);
+    };
+    let Some(res) = doc.resource(id).filter(|r| !r.rgba8.is_empty()) else {
+        return Ok(None);
+    };
+    picture_png(kept, id, res).map(Some)
+}
+
+/// A picture's PNG: kept from before if it was made from a picture like
+/// this one, else made now and kept.
+fn picture_png(
+    kept: &mut WrittenPictures,
+    id: &str,
+    res: &chitrakar_doc::Resource,
+) -> Result<std::sync::Arc<Vec<u8>>, ContainerError> {
+    let print = res.fingerprint();
+    if let Some((_, png)) = kept.by_id.get(id).filter(|(p, _)| *p == print) {
+        return Ok(png.clone());
+    }
+    let png = std::sync::Arc::new(
+        crate::encode_png(res.width, res.height, &res.rgba8)
+            .map_err(|e| ContainerError::Io(std::io::Error::other(e.to_string())))?,
+    );
+    kept.by_id.insert(id.to_string(), (print, png.clone()));
+    Ok(png)
+}
+
+/// Put back a part a skeleton left out — what a whole file would have
+/// held under `name` — into the document it was opened as; the PNG kept
+/// in `kept` too, so it is not made again. False for a name that is not
+/// a part, or bytes that are not what the document says belongs there.
+pub fn restore_part(
+    doc: &mut Document,
+    kept: &mut WrittenPictures,
+    name: &str,
+    bytes: Vec<u8>,
+) -> bool {
+    if let Some(id) = name.strip_prefix(ORIGINALS) {
+        return doc.restore_original_bytes(id, bytes);
+    }
+    let Some(id) = name
+        .strip_prefix("resources/")
+        .and_then(|n| n.strip_suffix(".png"))
+    else {
+        return false;
+    };
+    let Ok(img) = crate::decode(&bytes) else {
+        return false;
+    };
+    if !doc.restore_resource_bytes(id, img.rgba8) {
+        return false;
+    }
+    if let Some(res) = doc.resource(id) {
+        kept.by_id.insert(
+            id.to_string(),
+            (res.fingerprint(), std::sync::Arc::new(bytes)),
+        );
+    }
+    true
+}
+
+fn write_chitra(
+    doc: &Document,
+    fonts: &[FontFile],
+    kept: &mut WrittenPictures,
+    whole: bool,
+) -> Result<Vec<u8>, ContainerError> {
     let manifest = ManifestOut {
         format_version: FORMAT_VERSION,
         document: doc,
@@ -106,32 +253,49 @@ pub fn save_chitra_with_fonts(
             })
             .collect(),
     };
-    let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
+    // Every picture's PNG first — made, or taken from `kept` — so the
+    // file's size is known before it is written: grown as it went, a
+    // document of photographs was copied whole each time it doubled.
+    let mut written = std::collections::HashMap::new();
+    let mut pictures = Vec::new();
+    for (id, res) in doc.resources().filter(|_| whole) {
+        if res.rgba8.is_empty() {
+            continue; // metadata-only entry (bytes were never restored)
+        }
+        let png = picture_png(kept, id, res)?;
+        written.insert(id.to_string(), (res.fingerprint(), png.clone()));
+        pictures.push((id, png));
+    }
+    let originals: Vec<_> = doc
+        .originals()
+        .filter(|(_, o)| whole && !o.bytes.is_empty())
+        .collect();
+    let json = serde_json::to_string_pretty(&manifest)?;
+    let size = json.len()
+        + fonts.iter().map(|(_, b)| b.len()).sum::<usize>()
+        + pictures.iter().map(|(_, png)| png.len()).sum::<usize>()
+        + originals.iter().map(|(_, o)| o.bytes.len()).sum::<usize>()
+        + doc.cmyk_profile_bytes().map_or(0, |b| b.len())
+        // Each entry's headers, twice (local and central), with its name.
+        + (fonts.len() + pictures.len() + originals.len() + 2) * 256;
+    let mut zip = ZipWriter::new(Cursor::new(Vec::with_capacity(size)));
     zip.start_file(MANIFEST_PATH, SimpleFileOptions::default())?;
-    zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
+    zip.write_all(json.as_bytes())?;
     for (entry, (_, bytes)) in manifest.fonts.iter().zip(fonts) {
         zip.start_file(&entry.file, SimpleFileOptions::default())?;
         zip.write_all(bytes)?;
     }
-    for (id, res) in doc.resources() {
-        if res.rgba8.is_empty() {
-            continue; // metadata-only entry (bytes were never restored)
-        }
-        let png = crate::encode_png(res.width, res.height, &res.rgba8)
-            .map_err(|e| ContainerError::Io(std::io::Error::other(e.to_string())))?;
+    for (id, png) in &pictures {
         // PNG is already compressed; recompressing wastes time.
         zip.start_file(
             format!("resources/{id}.png"),
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
         )?;
-        zip.write_all(&png)?;
+        zip.write_all(png)?;
     }
     // The files pictures were made from, as they came: a camera's raw
     // file is its own compression already.
-    for (id, original) in doc.originals() {
-        if original.bytes.is_empty() {
-            continue;
-        }
+    for (id, original) in originals {
         zip.start_file(
             format!("{ORIGINALS}{id}"),
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
@@ -142,7 +306,11 @@ pub fn save_chitra_with_fonts(
         zip.start_file(CMYK_PROFILE_PATH, SimpleFileOptions::default())?;
         zip.write_all(icc)?;
     }
-    Ok(zip.finish()?.into_inner())
+    let bytes = zip.finish()?.into_inner();
+    if whole {
+        kept.by_id = written;
+    }
+    Ok(bytes)
 }
 
 const CMYK_PROFILE_PATH: &str = "profiles/cmyk.icc";
@@ -257,6 +425,109 @@ mod tests {
     use super::*;
     use chitrakar_color::ColorMode;
     use chitrakar_doc::{Command, Node, VectorShape};
+
+    /// A draft is a skeleton and its parts: the skeleton holds neither the
+    /// pictures nor the originals, and opened with its parts put back it
+    /// is the document a whole save would have opened as.
+    #[test]
+    fn a_skeleton_with_its_parts_put_back_is_the_whole_document() {
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let red = doc.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
+        let raw = doc.add_original("photo.dng", b"a camera's raw file".to_vec());
+        let mut kept = WrittenPictures::default();
+        let skeleton = save_chitra_skeleton(&doc, &[]).unwrap();
+        let whole = save_chitra(&doc).unwrap();
+        assert!(skeleton.len() < whole.len());
+        let parts = draft_parts(&doc, &mut kept);
+        assert_eq!(
+            parts,
+            vec![format!("resources/{red}.png"), format!("originals/{raw}")]
+        );
+
+        let mut opened = load_chitra(&skeleton).unwrap();
+        assert!(
+            opened.resource(&red).unwrap().rgba8.is_empty(),
+            "the skeleton holds no pixels"
+        );
+        assert!(opened.original(&raw).is_none());
+        let mut theirs = WrittenPictures::default();
+        for name in &parts {
+            let bytes = draft_part(&doc, &mut kept, name).unwrap().unwrap();
+            assert!(
+                restore_part(&mut opened, &mut theirs, name, bytes.to_vec()),
+                "{name}"
+            );
+        }
+        let from_whole = load_chitra(&whole).unwrap();
+        assert_eq!(spelled_out(&opened), spelled_out(&from_whole));
+        assert_eq!(
+            opened.resource(&red).unwrap().rgba8,
+            from_whole.resource(&red).unwrap().rgba8
+        );
+        assert_eq!(
+            opened.original(&raw).unwrap().bytes,
+            from_whole.original(&raw).unwrap().bytes
+        );
+        // The PNG put back is kept, so the next save does not make it again.
+        assert_eq!(theirs.len(), 1);
+        // Bytes that are not what the document says belong there are not
+        // taken, nor is a name that is not a part.
+        assert!(!restore_part(
+            &mut opened,
+            &mut theirs,
+            &format!("originals/{raw}"),
+            b"else".to_vec()
+        ));
+        assert!(!restore_part(
+            &mut opened,
+            &mut theirs,
+            "manifest.json",
+            Vec::new()
+        ));
+        assert!(draft_part(&doc, &mut kept, "resources/nothing.png")
+            .unwrap()
+            .is_none());
+    }
+
+    /// A picture's PNG is made once and written again by the next save;
+    /// what a save keeps is only what its document holds; and a picture
+    /// that is not the one a PNG was kept for under its id is encoded
+    /// afresh.
+    #[test]
+    fn a_pictures_png_is_kept_from_one_save_to_the_next() {
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let red = doc.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
+        let blue = doc.add_resource(2, 2, [0, 0, 255, 255].repeat(4));
+        let mut kept = WrittenPictures::default();
+        let first = save_chitra_keeping(&doc, &[], &mut kept).unwrap();
+        assert_eq!(kept.len(), 2);
+        let png_of = |k: &WrittenPictures, id: &str| k.by_id[id].1.clone();
+        let red_png = png_of(&kept, &red);
+        let second = save_chitra_keeping(&doc, &[], &mut kept).unwrap();
+        assert_eq!(first, second, "the same file");
+        assert!(
+            std::sync::Arc::ptr_eq(&red_png, &png_of(&kept, &red)),
+            "not encoded again"
+        );
+        assert_eq!(
+            first,
+            save_chitra(&doc).unwrap(),
+            "and the file a save without them writes"
+        );
+
+        let mut other = Document::new(16, 16, ColorMode::Rgb);
+        other.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
+        save_chitra_keeping(&other, &[], &mut kept).unwrap();
+        assert_eq!(kept.len(), 1, "only the pictures still held");
+        assert!(!kept.by_id.contains_key(&blue));
+
+        // The same id with other pixels (a file's word for an id is not
+        // checked on the way in) is written as what it now is.
+        assert!(other.restore_resource_bytes(&red, [0, 255, 0, 255].repeat(4)));
+        let bytes = save_chitra_keeping(&other, &[], &mut kept).unwrap();
+        let back = load_chitra(&bytes).unwrap();
+        assert_eq!(&back.resource(&red).unwrap().rgba8[..4], &[0, 255, 0, 255]);
+    }
 
     /// A document written out in full, in a fixed order: every field of
     /// every node, the page's own settings, its guides, its swatches,

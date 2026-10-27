@@ -115,6 +115,13 @@ palm (smoke 11b). The shell compiles for Android and iOS (CI jobs
 Android project with `tauri android init` and keeps an optimised APK,
 signed with a throwaway key made on the runner, as an artifact; nothing under `gen/android` or `gen/apple` is committed.
 
+The crash-recovery draft lives in IndexedDB in pieces: `current` is the
+document without its pictures and originals (`save_skeleton`), written a
+breath after each edit; each picture's PNG and each original is a
+`part:<name>` record written once; `parts` lists what `current` needs, and
+`restore_part` puts them back on Restore (smoke 10). A picture's PNG is
+made once per session (`WrittenPictures`) for drafts and Save alike.
+
 In a browser the built page is an installable app:
 `app/public/manifest.webmanifest` (share target, file handlers) and a
 service worker, `app/public/sw.js`, registered by `src/offline.ts` only

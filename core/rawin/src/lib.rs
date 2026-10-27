@@ -226,16 +226,22 @@ fn pack(
         }
     }
     match samples {
+        // Sized once and written in place: forty million two-byte
+        // `extend`s were most of the time the packing took in WASM.
         Samples::Int(v) => {
             out.push(0);
-            for s in v {
-                out.extend_from_slice(&s.to_le_bytes());
+            let at = out.len();
+            out.resize(at + v.len() * 2, 0);
+            for (to, s) in out[at..].chunks_exact_mut(2).zip(v) {
+                to.copy_from_slice(&s.to_le_bytes());
             }
         }
         Samples::Float(v) => {
             out.push(1);
-            for s in v {
-                out.extend_from_slice(&s.to_le_bytes());
+            let at = out.len();
+            out.resize(at + v.len() * 4, 0);
+            for (to, s) in out[at..].chunks_exact_mut(4).zip(v) {
+                to.copy_from_slice(&s.to_le_bytes());
             }
         }
     }

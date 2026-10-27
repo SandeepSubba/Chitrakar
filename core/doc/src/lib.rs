@@ -436,6 +436,36 @@ pub struct Resource {
     pub rgba8: Vec<u8>,
 }
 
+impl Resource {
+    /// A hash of the size and of four thousand bytes spread through the
+    /// picture: cheap enough to ask every frame, and enough to tell
+    /// whether something kept under a picture's id was made from a
+    /// picture like this one. An id is a hash of the whole picture when
+    /// the engine makes it, but one read out of a file is the file's word
+    /// for it, and is not hashed again on the way in — that would be a
+    /// pass over every byte of every photograph opened.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |b: u8| {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        for b in self
+            .width
+            .to_le_bytes()
+            .into_iter()
+            .chain(self.height.to_le_bytes())
+        {
+            eat(b);
+        }
+        let step = (self.rgba8.len() / 4096).max(1);
+        for &b in self.rgba8.iter().step_by(step) {
+            eat(b);
+        }
+        hash
+    }
+}
+
 impl Document {
     pub fn new(width: u32, height: u32, color_mode: ColorMode) -> Self {
         let root = NodeId(0);

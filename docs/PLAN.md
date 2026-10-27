@@ -10268,6 +10268,30 @@ without reading anything else.*
   draws them right: the Olympus E-10 (its filter is RGGB, rawler says
   BGGR), the Kodak P712 (white balance misread) and the Canon 40D's
   sRAW; Auto or the picker puts them right by hand.
+  **Big photographs, measured.** Opening, placing and keeping a
+  39–51-megapixel raw in the page, profiled: the engine's unpacking
+  read each site's colour through a closure and rounded through a
+  library call (1.0 s → 0.34 s native for 39 MP, the same pixels to
+  one level in a few hundred); X-Trans looks its neighbours up in a
+  table per tile rather than searching (develop 3.0 → 1.5 s, identical,
+  `x_trans_neighbours_from_the_tile_are_the_ones_searched_for`). Two
+  faults that were not the raw file's at all were most of the time.
+  Pictures' levels (`pyramid`) whose size passed the 96 MB bound — any
+  photograph above about 36 MP — were never kept, so made again for
+  every tile of every frame (12 s a frame for three of them); now what
+  the frame being drawn uses is kept whatever it comes to
+  (`pyramid::next_frame`, called by the page's frames, the mirror's and
+  each thumbnail) and only levels no frame since has drawn make room.
+  And the crash-recovery draft encoded every picture as a PNG and wrote
+  the whole document a breath after every edit (9 s, growing with each
+  photograph): a picture's PNG is now made once and kept
+  (`WrittenPictures`, also used by Save), and the draft is a skeleton
+  (`save_skeleton`) written after each edit beside parts written once
+  each (`draft_parts`/`draft_part` → IndexedDB `part:<name>`,
+  `restore_part` on the way back; smoke 10). A draft from before is the
+  whole document and still restores. Measured in this sandbox, where a
+  first touch of fresh memory is slow (640 MB takes 1.8 s even natively),
+  so first opens look worse than they are.
   **Presets and sync.** Settings kept by name (`prefs.developPresets`,
   read back through `cleanSettings`/`cleanPresets` in `app/src/develop.ts`
   so a kept preset is always settings the engine takes) are chips over

@@ -404,6 +404,9 @@ pub struct Session {
     raw: Option<OpenRaw>,
     /// Developments waiting to go into the history as one step.
     staged_develop: Vec<Command>,
+    /// The PNG each picture was last saved as, for the next save (and the
+    /// draft kept after every edit) to write again rather than encode.
+    written: std::sync::Mutex<chitrakar_codecs::WrittenPictures>,
     /// Soft-proofing (display-only): round-trip presented pixels through the
     /// document's press profile, optionally marking out-of-gamut pixels.
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
@@ -494,6 +497,7 @@ impl Session {
             import_notes: Vec::new(),
             raw: None,
             staged_develop: Vec::new(),
+            written: Default::default(),
             proof_cms: None,
             soft_proof: false,
             display_cms: None,
@@ -8157,6 +8161,9 @@ impl Session {
     /// only the strips the pan exposed are encoded again, since encoding
     /// is most of what presenting a frame costs.
     pub fn present_into(&mut self, frame: &mut Vec<u8>) -> Result<Option<ClipRect>, EngineError> {
+        // Pictures' levels the last frame drew may make room now for this
+        // one's, if this one does not draw them too.
+        chitrakar_render::pyramid::next_frame();
         let (fw, fh) = self.present_size();
         let expected = (fw * fh * 4) as usize;
         let first_frame = frame.len() != expected;
@@ -9058,16 +9065,18 @@ impl Session {
     pub fn raw_open(
         &mut self,
         packed: &[u8],
-        file: &[u8],
+        file: impl Into<Vec<u8>>,
         name: &str,
     ) -> Result<RawInfo, EngineError> {
         let photo = chitrakar_codecs::raw::unpack(packed)
             .map_err(|e| EngineError::BadCommand(e.to_string()))?;
         let info = RawInfo::of(&photo);
+        // Taken rather than copied: a raw file is tens of megabytes.
+        let file = file.into();
         self.raw = Some(OpenRaw {
-            original: chitrakar_doc::content_id(0, 0, file),
+            original: chitrakar_doc::content_id(0, 0, &file),
             name: name.to_string(),
-            bytes: Some(file.to_vec()),
+            bytes: Some(file),
             photo,
             preview: None,
         });
@@ -9831,8 +9840,50 @@ impl Session {
             .iter()
             .filter_map(|n| chitrakar_render::text::font_bytes(n).map(|b| (n.as_str(), b)))
             .collect();
-        chitrakar_codecs::save_chitra_with_fonts(&self.doc, &fonts)
+        let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        chitrakar_codecs::save_chitra_keeping(&self.doc, &fonts, &mut written)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The document as a draft keeps it after every edit: a `.chitra`
+    /// without its pictures or originals, which are kept beside it as
+    /// parts (`draft_parts`), each written once rather than with every
+    /// edit — a photograph is tens of megabytes, an edit a few hundred
+    /// bytes of manifest.
+    pub fn save_skeleton(&self) -> Result<Vec<u8>, EngineError> {
+        let names = self.fonts_used();
+        let fonts: Vec<(&str, &[u8])> = names
+            .iter()
+            .filter_map(|n| chitrakar_render::text::font_bytes(n).map(|b| (n.as_str(), b)))
+            .collect();
+        chitrakar_codecs::save_chitra_skeleton(&self.doc, &fonts)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The parts a skeleton leaves out, by the names a whole file keeps
+    /// them under.
+    pub fn draft_parts(&self) -> Vec<String> {
+        let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        chitrakar_codecs::draft_parts(&self.doc, &mut written)
+    }
+
+    /// One part by its name: a picture's PNG, or an original's bytes.
+    pub fn draft_part(&self, name: &str) -> Result<std::sync::Arc<Vec<u8>>, EngineError> {
+        let mut written = self.written.lock().unwrap_or_else(|e| e.into_inner());
+        chitrakar_codecs::draft_part(&self.doc, &mut written, name)
+            .map_err(|e| EngineError::BadCommand(e.to_string()))?
+            .ok_or_else(|| EngineError::BadCommand(format!("no part {name}")))
+    }
+
+    /// Put a part back into a document opened from a skeleton, before it
+    /// is drawn. False when the bytes are not what belongs there.
+    pub fn restore_part(&mut self, name: &str, bytes: Vec<u8>) -> bool {
+        let written = self.written.get_mut().unwrap_or_else(|e| e.into_inner());
+        let ok = chitrakar_codecs::restore_part(&mut self.doc, written, name, bytes);
+        if ok {
+            self.cache = None;
+        }
+        ok
     }
 
     /// The faces this document's text blocks draw with — each one named,
@@ -10362,7 +10413,7 @@ mod tests {
     fn read_card(s: &mut Session) -> RawInfo {
         let file = grey_card_dng();
         let packed = chitrakar_raw_in::read(&file).unwrap();
-        s.raw_open(&packed, &file, "card.dng").unwrap()
+        s.raw_open(&packed, &file[..], "card.dng").unwrap()
     }
 
     fn grey_card_dng() -> Vec<u8> {
@@ -10424,7 +10475,7 @@ mod tests {
         assert!(s.raw_open_layer(id).is_err(), "not before it is read");
         let (name, file) = s.raw_original(id).unwrap();
         assert_eq!(name, "card.dng");
-        s.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file, &name)
+        s.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file[..], &name)
             .unwrap();
         let (info, was) = s.raw_open_layer(id).unwrap();
         assert_eq!((info.width, was), (40, RawDevelop::default()));
@@ -10468,7 +10519,7 @@ mod tests {
         let before: Vec<_> = ids.iter().map(|id| picture_of(&s, *id)).collect();
         for id in &ids[1..] {
             let (name, file) = s.raw_original(*id).unwrap();
-            s.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file, &name)
+            s.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file[..], &name)
                 .unwrap();
             s.stage_redevelop(*id, &look).unwrap();
         }
@@ -10509,7 +10560,7 @@ mod tests {
         let bytes = s.save().unwrap();
         let mut t = Session::load(&bytes).unwrap();
         let (name, file) = t.raw_original(id).unwrap();
-        t.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file, &name)
+        t.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file[..], &name)
             .unwrap();
         let (_, was) = t.raw_open_layer(id).unwrap();
         assert_eq!(was, RawDevelop::default());

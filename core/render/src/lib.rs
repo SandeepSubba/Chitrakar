@@ -11122,6 +11122,9 @@ fn lay_strokes(
 /// nothing on a transparent square. A layer never scales up past its own
 /// size, so a small one sits small in its square rather than going soft.
 pub fn thumbnail(doc: &Document, id: NodeId, size: u32) -> Result<Option<Vec<u8>>, DocError> {
+    // A frame of its own, so a run of thumbnails does not hold every
+    // picture's levels at once (`pyramid::next_frame`).
+    pyramid::next_frame();
     let Some(fit) = fit_into_square(doc, id, size)? else {
         return Ok(None);
     };

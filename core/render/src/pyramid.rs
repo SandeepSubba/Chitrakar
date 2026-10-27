@@ -96,15 +96,23 @@ pub fn level_for(foot: f32) -> u32 {
     foot.log2().floor() as u32
 }
 
-/// The whole lot kept may not pass this. A phone's tab is the reason it
-/// is a bound at all — memory a page has taken is never given back — and
-/// a picture whose levels alone pass it is not kept. It holds three
+/// The whole lot kept may not pass this, but for what the frame being
+/// drawn uses (`next_frame`). A phone's tab is the reason it is a bound
+/// at all — memory a page has taken is never given back. It holds three
 /// 12-megapixel photographs' levels.
+///
+/// What the frame draws is kept whatever it comes to: levels let go in
+/// the middle of a frame were made again for every tile of it and every
+/// frame after — seconds a frame for a 50-megapixel photograph, whose
+/// levels alone pass the bound — and they are two-thirds of the size of
+/// pictures the page already holds. Levels nothing has drawn since go
+/// first, oldest first, until the rest are within the bound again.
 const KEPT_MOST: usize = 96 << 20;
 
 #[derive(Default)]
 struct Kept {
-    by_id: HashMap<String, Arc<Pyramid>>,
+    /// Each picture's levels, and the frame that last asked for them.
+    by_id: HashMap<String, (Arc<Pyramid>, u64)>,
     /// Least recently used first.
     order: Vec<String>,
     bytes: usize,
@@ -116,6 +124,20 @@ struct Kept {
 /// once for each.
 static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
 
+/// The frame being drawn: levels asked for during it are not let go
+/// until a later one.
+static FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A new frame begins: what the last one drew may go, if room is wanted
+/// and this one does not draw it too.
+pub fn next_frame() {
+    FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn frame() -> u64 {
+    FRAME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The levels of the picture `id`, made the first time they are asked
 /// for and kept. `None` for a picture too small to have a half.
 pub fn of(id: &str, res: &Resource) -> Option<Arc<Pyramid>> {
@@ -126,45 +148,60 @@ pub fn of(id: &str, res: &Resource) -> Option<Arc<Pyramid>> {
     {
         let mut guard = kept();
         let kept = guard.get_or_insert_with(Kept::default);
-        if let Some(p) = kept.by_id.get(id).cloned() {
+        if let Some((p, used)) = kept.by_id.get_mut(id) {
             if p.of == fingerprint(res) {
+                *used = frame();
+                let p = p.clone();
                 kept.order.retain(|k| k != id);
                 kept.order.push(id.to_string());
                 return Some(p);
             }
             // Another picture under the same id: these levels are not
             // its, and are let go.
+            let bytes = p.bytes();
             kept.order.retain(|k| k != id);
-            kept.bytes -= p.bytes();
+            kept.bytes -= bytes;
             kept.by_id.remove(id);
         }
     }
     // Made without holding the others up: a frame of another picture
     // need not wait for this one's levels.
     let p = Arc::new(build(res));
-    let size = p.bytes();
-    if size > KEPT_MOST {
-        return Some(p);
-    }
     let mut guard = kept();
     let kept = guard.get_or_insert_with(Kept::default);
-    if let Some(theirs) = kept.by_id.get(id).filter(|t| t.of == p.of).cloned() {
-        return Some(theirs);
+    Some(keep(kept, id, p, KEPT_MOST, frame()))
+}
+
+/// Keep `p` as the levels of `id`, used in frame `now`: the least
+/// recently used that `now` has not asked for go first, until what is
+/// kept is within `most` or only this frame's are left. Or, if another
+/// thread kept levels for the same picture while these were made, those.
+fn keep(kept: &mut Kept, id: &str, p: Arc<Pyramid>, most: usize, now: u64) -> Arc<Pyramid> {
+    if let Some((theirs, used)) = kept.by_id.get_mut(id).filter(|(t, _)| t.of == p.of) {
+        *used = now;
+        return theirs.clone();
     }
-    if let Some(stale) = kept.by_id.remove(id) {
+    if let Some((stale, _)) = kept.by_id.remove(id) {
         kept.order.retain(|k| k != id);
         kept.bytes -= stale.bytes();
     }
-    while kept.bytes + size > KEPT_MOST && !kept.order.is_empty() {
-        let gone = kept.order.remove(0);
-        if let Some(g) = kept.by_id.remove(&gone) {
+    let size = p.bytes();
+    let mut i = 0;
+    while kept.bytes + size > most && i < kept.order.len() {
+        let id = &kept.order[i];
+        if kept.by_id.get(id).is_some_and(|(_, used)| *used == now) {
+            i += 1;
+            continue;
+        }
+        let gone = kept.order.remove(i);
+        if let Some((g, _)) = kept.by_id.remove(&gone) {
             kept.bytes -= g.bytes();
         }
     }
     kept.bytes += size;
     kept.order.push(id.to_string());
-    kept.by_id.insert(id.to_string(), p.clone());
-    Some(p)
+    kept.by_id.insert(id.to_string(), (p.clone(), now));
+    p
 }
 
 /// Every level of a picture, the half from its own texels and each one
@@ -202,31 +239,11 @@ pub fn build(res: &Resource) -> Pyramid {
 }
 
 /// A picture's size and a few thousand of its bytes, spread across it.
-/// An id is a hash of the whole picture when the engine makes it, but one
-/// read out of a file is the file's word for it and is not hashed again
-/// on the way in — that would be a pass over every byte of every
-/// photograph opened — so before levels kept under an id are handed out
-/// for a picture, they are checked to have been made from one like it.
-/// Cheap enough to ask every frame.
+/// Levels kept under an id are checked to have been made from a picture
+/// like the one asking (`Resource::fingerprint`) before they are handed
+/// out for it.
 fn fingerprint(res: &Resource) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |b: u8| {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    };
-    for b in res
-        .width
-        .to_le_bytes()
-        .into_iter()
-        .chain(res.height.to_le_bytes())
-    {
-        eat(b);
-    }
-    let step = (res.rgba8.len() / 4096).max(1);
-    for &b in res.rgba8.iter().step_by(step) {
-        eat(b);
-    }
-    hash
+    res.fingerprint()
 }
 
 /// The half, from the picture's own bytes: [`halve`] over them, with the
@@ -451,5 +468,37 @@ mod tests {
         assert_eq!(level_for(2.0), 1);
         assert_eq!(level_for(7.9), 2);
         assert_eq!(level_for(f32::NAN), 0);
+    }
+
+    /// What a frame draws is kept however big it is — two photographs
+    /// whose levels pass the bound between them are not each made again
+    /// for the other — and what the frames since have not drawn goes
+    /// first when room is wanted, oldest first.
+    #[test]
+    fn what_a_frame_draws_is_kept_and_what_it_does_not_goes_first() {
+        let small = picture(8, 8, |x, _| [x as u8 * 30, 0, 0, 255]);
+        let big = picture(32, 32, |x, y| [x as u8 * 8, y as u8 * 8, 0, 255]);
+        let (s_size, b_size) = (build(&small).bytes(), build(&big).bytes());
+        let most = 2 * s_size;
+        let mut kept = Kept::default();
+        let new = || Arc::new(build(&big));
+        // Frame 1: two small pictures, within the bound.
+        keep(&mut kept, "s1", Arc::new(build(&small)), most, 1);
+        keep(&mut kept, "s2", Arc::new(build(&small)), most, 1);
+        assert_eq!(kept.bytes, 2 * s_size);
+        // Frame 2 draws two big ones: the small ones make room, and both
+        // big ones stay though together they pass the bound.
+        let b1 = keep(&mut kept, "b1", new(), most, 2);
+        let b2 = keep(&mut kept, "b2", new(), most, 2);
+        assert!(!kept.by_id.contains_key("s1") && !kept.by_id.contains_key("s2"));
+        assert_eq!(kept.bytes, 2 * b_size);
+        // Asked for again in the same frame, the same levels.
+        assert!(Arc::ptr_eq(&keep(&mut kept, "b1", new(), most, 2), &b1));
+        // Frame 3 draws b2 and a third: b1, which it has not drawn, goes.
+        assert!(Arc::ptr_eq(&keep(&mut kept, "b2", new(), most, 3), &b2));
+        keep(&mut kept, "b3", new(), most, 3);
+        assert!(!kept.by_id.contains_key("b1"));
+        assert!(kept.by_id.contains_key("b2") && kept.by_id.contains_key("b3"));
+        assert_eq!(kept.bytes, 2 * b_size);
     }
 }

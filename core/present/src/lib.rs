@@ -162,6 +162,7 @@ impl Presenter {
             f: y,
             ..Default::default()
         };
+        chitrakar_render::pyramid::next_frame();
         let surface = self.gpu.render_view(doc, view, (width, height))?;
         Some(surface.to_srgb8())
     }
