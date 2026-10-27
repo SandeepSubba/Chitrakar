@@ -23,6 +23,7 @@ const KINDS: Record<string, Filter> = {
   svg: { name: "SVG drawing", extensions: ["svg"] },
   tif: { name: "TIFF image", extensions: ["tif", "tiff"] },
   tiff: { name: "TIFF image", extensions: ["tiff", "tif"] },
+  psd: { name: "Photoshop document", extensions: ["psd"] },
 };
 
 /** The panel filter for a file of this name, by its extension — and the

@@ -110,6 +110,15 @@ const FORMATS: Record<
     shows: false,
     note: "CMYK, separated through the press profile.",
   },
+  psd: {
+    label: "PSD",
+    ext: "psd",
+    mime: "image/vnd.adobe.photoshop",
+    scales: false,
+    area: false,
+    shows: false,
+    note: "Layers for Photoshop: groups, names, opacity, blend modes, hidden layers and clipping, as Photoshop's own.",
+  },
 };
 
 const SCALES = [0.5, 1, 2, 3];
@@ -301,6 +310,11 @@ export function ExportDialog({
         return new TextEncoder().encode(session.export_svg());
       case "tiff":
         return session.export_cmyk_tiff();
+      case "psd": {
+        const bytes = session.export_psd();
+        setPsdNotes(JSON.parse(session.export_notes()) as string[]);
+        return bytes;
+      }
       case "jpeg": {
         // A JPEG has no alpha, so a region leaves as the box that holds
         // it, flattened onto white — the shape it was picked in has
@@ -358,6 +372,8 @@ export function ExportDialog({
   /** How big the file comes out. `null` while it is being worked out,
    * `-1` when it is too big to work out without being asked. */
   const [size, setSize] = useState<number | null>(null);
+  /** What a Photoshop file carries across differently, once made. */
+  const [psdNotes, setPsdNotes] = useState<string[]>([]);
   const [failed, setFailed] = useState<string | null>(null);
   /** The picture beside the settings: a URL the browser can show, and
    * whether it is the file itself or the page standing in for one the
@@ -608,6 +624,11 @@ export function ExportDialog({
           ))}
         </div>
         <p className="modal-aside">{spec.note}</p>
+        {format === "psd" && psdNotes.length > 0 && (
+          <p className="modal-aside export-notes" role="status" aria-label="What changes">
+            Not as they are here: {psdNotes.join("; ")}.
+          </p>
+        )}
 
         <label className="row">
           Area

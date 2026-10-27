@@ -15172,6 +15172,60 @@ assert(
   await settle();
 }
 
+// 9co. A Photoshop file with layers goes out of the Export window: each
+// layer its own, with its name and blend mode, and what changes on the
+// way said beside the format. Read back by the editor's own reader, the
+// layers are the page's.
+{
+  await newDocument(200, 150, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 200) * b.width, b.y + (y / 150) * b.height];
+  const rect = async (x0, y0, x1, y1) => {
+    await page.keyboard.press("Escape");
+    await pickTool("Rect");
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await rect(10, 10, 120, 100);
+  await rect(60, 50, 180, 140);
+  const names = () => page.locator(".panel ul li .layer-name").allTextContents();
+  const before = await names();
+  // The top one multiplied.
+  await page.locator(".panel ul li").first().click();
+  await page.selectOption('select[aria-label="Blend mode"]', { index: 1 });
+  await page.waitForTimeout(200);
+  const blend = await page.locator('select[aria-label="Blend mode"]').inputValue();
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PSD")');
+  await page.waitForTimeout(600);
+  const said = await page.locator('[aria-label="What changes"]').textContent();
+  assert(said.includes("text and shapes come as pixels"), `what changes is said (${said})`);
+  const [dl] = await Promise.all([page.waitForEvent("download"), page.click(".modal-actions .primary")]);
+  assert(dl.suggestedFilename().endsWith(".psd"), `named as a Photoshop file (${dl.suggestedFilename()})`);
+  const psd = await readFile(await dl.path());
+  assert(psd.subarray(0, 4).toString() === "8BPS", "and it is one");
+  // Opened again, it is the page's layers, the top one still multiplied.
+  await newDocument(200, 150, "rgb");
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "back.psd", mimeType: "", buffer: psd });
+  await page.waitForTimeout(600);
+  assert((await names()).join() === before.join(), `the layers came back (${await names()} against ${before})`);
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator('select[aria-label="Blend mode"]').inputValue()) === blend,
+    `with its blend mode (${blend})`,
+  );
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 // 11j. The layer list under a finger: a swipe scrolls it, and a row held
 // still a moment lifts to be carried, as a phone's own lists are
 // reordered. The rows had been set to give the browser nothing, so a
@@ -16395,7 +16449,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
   assert(
     (await page.locator(".export-formats .preset").allTextContents()).join(",") ===
-      "PNG,JPEG,WebP,PDF,SVG,TIFF",
+      "PNG,JPEG,WebP,PDF,SVG,TIFF,PSD",
     "every format the engine can write is offered",
   );
   // The window opens on whatever it was last used for — which is the

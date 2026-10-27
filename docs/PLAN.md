@@ -10175,6 +10175,27 @@ without reading anything else.*
   file the document kept the same way (`raw_original`). Twelve damaged
   ARWs in a row then a good CR3 all behave; the engine is 3.1 MB
   gzipped with the raw module 1.4 MB beside it, fetched when needed.
+- **Photoshop files out, with layers** ✅. The Export window's PSD
+  (`Session::export_psd`, writer `core/codecs/src/psd_export.rs`): the
+  page's layers as Photoshop's layers and its groups as groups, each
+  with its name (in full, in the Unicode block), place, opacity, blend
+  mode, visibility and clipping — what Photoshop can change about a
+  layer stays changeable there, so a layer's pixels are what it draws
+  alone (`draw_alone`, at full strength in the normal way) and the rest
+  is written beside them. Each layer is cut to the box of what it draws
+  and PackBits-compressed; the flattened picture with its transparency
+  follows, and the resolution (resource 1005). What the format has no
+  layer for comes as the nearest thing that keeps the look: an
+  adjustment or a filter as a picture of what is under it in its group
+  with it applied ("Brightness (applied)"); a group wearing a mask or
+  effects, a frame and a live copy as one picture of itself; masks and
+  effects in the pixels; text and shapes as pixels. Each is said once
+  beside the format before the file is written, and so is that
+  Photoshop blends in gamma where this blends in linear light. Its first
+  test caught a reader bug: a run-length count overflowed in debug
+  builds (release wrapped to the right answer), which the reader's own
+  hand-written test files had never exercised since they only wrote
+  literal runs. Smoke 9co exports and opens the file again.
   **The develop window** ✅ is where a raw file opens: the photograph
   beside its settings, developed again as each moves. What is there is
   what needs the sensor's own values (`core/codecs/src/develop.rs`,

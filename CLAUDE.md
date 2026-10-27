@@ -275,7 +275,12 @@ the picture (`RasterRef::develop`), so Develop again is a `SetKind`
 with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and
 a HEIC that will not decode says how to get a JPEG. hayro ships Foxit's
 BSD standard fonts and rawler is LGPL-2.1, which a GPL-3.0 project
-can carry. Smoke 9cm builds each file byte by byte.
+can carry. Smoke 9cm builds each file byte by byte. Going the other
+way, the Export window writes a layered PSD (`Session::export_psd`,
+`psd_export.rs`): each layer drawn alone with its opacity, blend,
+visibility and clipping written beside it, groups as groups, and
+adjustments as stamps of what they make of what is under them (smoke
+9co).
 
 ## Measuring
 

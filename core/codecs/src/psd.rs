@@ -734,7 +734,7 @@ fn unpackbits(mut src: &[u8], row: usize, out: &mut Vec<u8>) -> Result<(), Codec
             src = &src[k..];
         } else if n != -128 {
             let v = *src.first().ok_or_else(|| bad("a run past its row"))?;
-            out.extend(std::iter::repeat_n(v, 1 - n as isize as usize));
+            out.extend(std::iter::repeat_n(v, (1 - n as isize) as usize));
             src = &src[1..];
         }
     }

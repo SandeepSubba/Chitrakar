@@ -15,6 +15,8 @@ use wasm_bindgen::prelude::*;
 pub struct WasmSession {
     inner: Session,
     frame: Vec<u8>,
+    /// What the last Photoshop export carried across differently.
+    export_notes: Vec<String>,
 }
 
 #[wasm_bindgen]
@@ -29,6 +31,7 @@ impl WasmSession {
         WasmSession {
             inner: Session::new(width, height, mode),
             frame: Vec::new(),
+            export_notes: Vec::new(),
         }
     }
 
@@ -37,6 +40,7 @@ impl WasmSession {
         Ok(WasmSession {
             inner: Session::load(bytes).map_err(to_js)?,
             frame: Vec::new(),
+            export_notes: Vec::new(),
         })
     }
 
@@ -1465,6 +1469,20 @@ impl WasmSession {
     /// array of sentences.
     pub fn import_notes(&self) -> String {
         serde_json::to_string(self.inner.import_notes()).unwrap_or_else(|_| "[]".into())
+    }
+
+    /// A Photoshop file with layers; what came across differently is
+    /// then `export_notes`.
+    pub fn export_psd(&mut self) -> Result<Vec<u8>, JsError> {
+        let (bytes, notes) = self.inner.export_psd().map_err(to_js)?;
+        self.export_notes = notes;
+        Ok(bytes)
+    }
+
+    /// What the last Photoshop export carried across differently, as a
+    /// JSON array of sentences.
+    pub fn export_notes(&self) -> String {
+        serde_json::to_string(&self.export_notes).unwrap_or_else(|_| "[]".into())
     }
 
     /// Pixels drawn elsewhere (a PDF's page, drawn by the PDF module)

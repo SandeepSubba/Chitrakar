@@ -36,7 +36,7 @@ export type FingerDoes = "auto" | "draw" | "pan";
  * page each sits in, or the key layer — the picked one wearing the
  * handles, which stays put. */
 export type AlignTo = "selection" | "page" | "key";
-export type ExportFormat = "png" | "jpeg" | "webp" | "pdf" | "svg" | "tiff";
+export type ExportFormat = "png" | "jpeg" | "webp" | "pdf" | "svg" | "tiff" | "psd";
 /** A frame exports at the multiple the *frame* asks for, under a name
  * the frame gives it, so it stays a row on the menu rather than a
  * choice here — see `exportArtboard`. */
@@ -67,7 +67,7 @@ export type ExportSetup = {
   pdfCropMarks: boolean;
 };
 
-export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "pdf", "svg", "tiff"];
+export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "pdf", "svg", "tiff", "psd"];
 
 export type Prefs = {
   /** What the rulers and the geometry fields read in. */

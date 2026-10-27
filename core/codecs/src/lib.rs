@@ -10,6 +10,7 @@ pub mod cube;
 pub mod develop;
 pub mod pdf;
 pub mod psd;
+pub mod psd_export;
 pub mod raw;
 mod strokes;
 mod subset;

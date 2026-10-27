@@ -8363,6 +8363,193 @@ impl Session {
         Ok(chitrakar_render::render(&self.doc)?)
     }
 
+    /// Export a Photoshop file with layers, for somebody who works in
+    /// Photoshop to go on with: the page's layers as its layers, groups as
+    /// groups, each with its name, place, opacity, blend mode, visibility
+    /// and clipping — what Photoshop can change about a layer stays
+    /// changeable there. And the flattened picture beside them, for a
+    /// reader that shows only that. The answer is the file and what came
+    /// across differently, in words, once each.
+    ///
+    /// A layer's pixels are what it draws on its own (`draw_alone`), its
+    /// mask and effects in them, at its own opacity and blend — those are
+    /// the file's to carry, so they are taken off the pixels and written
+    /// beside them. What the format has no layer for comes as the nearest
+    /// thing that keeps the look: an adjustment or a filter rewrites what
+    /// is under it, so it comes as a picture of everything below it in
+    /// its group with it applied ("applied"); a group wearing a mask or
+    /// effects, a frame or a live copy comes as one picture of itself.
+    pub fn export_psd(&self) -> Result<(Vec<u8>, Vec<String>), EngineError> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        if w > chitrakar_codecs::psd_export::PSD_SIDE_MOST
+            || h > chitrakar_codecs::psd_export::PSD_SIDE_MOST
+        {
+            return Err(EngineError::BadCommand(format!(
+                "a Photoshop file holds pages up to {} pixels a side",
+                chitrakar_codecs::psd_export::PSD_SIDE_MOST
+            )));
+        }
+        let mut notes = Vec::new();
+        let items = self.psd_items(self.doc.root(), &mut notes, 0)?;
+        let composite = self.render()?.to_srgb8();
+        let bytes =
+            chitrakar_codecs::psd_export::write_psd(w, h, self.doc.meta.dpi, &items, &composite)
+                .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        Ok((bytes, notes))
+    }
+
+    /// The Photoshop items for `parent`'s children, bottom first.
+    fn psd_items(
+        &self,
+        parent: NodeId,
+        notes: &mut Vec<String>,
+        depth: usize,
+    ) -> Result<Vec<chitrakar_codecs::psd_export::PsdOutItem>, EngineError> {
+        use chitrakar_codecs::psd_export::{PsdOutItem, PsdOutLayer};
+        let note = |n: &str, notes: &mut Vec<String>| {
+            if !notes.iter().any(|m| m == n) {
+                notes.push(n.to_string());
+            }
+        };
+        let mut out = Vec::new();
+        for &id in self.doc.children_of(parent)? {
+            let node = self.doc.node(id)?;
+            let plain_group = matches!(node.kind, NodeKind::Group)
+                && node.mask.is_none()
+                && node.effects.is_empty()
+                && !node.clipped
+                && depth < chitrakar_doc::MAX_DEPTH;
+            if plain_group {
+                out.push(PsdOutItem::Group {
+                    name: node.name.clone(),
+                    opacity: node.opacity,
+                    blend: node.blend,
+                    visible: node.visible,
+                    children: self.psd_items(id, notes, depth + 1)?,
+                });
+                continue;
+            }
+            let applies = matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+            let (name, rgba) = if applies {
+                note(
+                    "adjustments and filters come as pictures of what is under them with them applied",
+                    notes,
+                );
+                (format!("{} (applied)", node.name), self.psd_applied(id)?)
+            } else {
+                match &node.kind {
+                    NodeKind::Text(_) | NodeKind::Vector { .. } => {
+                        note("text and shapes come as pixels", notes)
+                    }
+                    NodeKind::Group => note(
+                        "a group wearing a mask or effects comes as one picture",
+                        notes,
+                    ),
+                    NodeKind::Instance { .. } => {
+                        note("live copies come as pictures of themselves", notes)
+                    }
+                    NodeKind::Artboard { .. } => {
+                        note("frames come as pictures of themselves", notes)
+                    }
+                    _ => {}
+                }
+                if node.mask.is_some() {
+                    note("masks are part of the pixels", notes);
+                }
+                if !node.effects.is_empty() {
+                    note("effects are part of the pixels", notes);
+                }
+                (node.name.clone(), self.psd_alone(id)?)
+            };
+            if node.blend != chitrakar_doc::BlendMode::Normal {
+                note(
+                    "Photoshop blends in its own colour space, so a blended layer can look a little different there",
+                    notes,
+                );
+            }
+            let mut layer =
+                PsdOutLayer::trimmed(&name, self.doc.meta.width, self.doc.meta.height, &rgba);
+            if !applies {
+                layer.opacity = node.opacity;
+                layer.blend = node.blend;
+                layer.clipped = node.clipped;
+            }
+            layer.visible = node.visible;
+            out.push(PsdOutItem::Layer(layer));
+        }
+        Ok(out)
+    }
+
+    /// One layer drawn on its own at page size, shown and at its full
+    /// strength in the normal way — the file carries those beside it.
+    fn psd_alone(&self, id: NodeId) -> Result<Vec<u8>, EngineError> {
+        let mut scratch = self.doc.clone();
+        scratch.apply(Command::Batch(vec![
+            Command::SetVisible { id, visible: true },
+            Command::SetOpacity { id, opacity: 1.0 },
+            Command::SetBlendMode {
+                id,
+                blend: chitrakar_doc::BlendMode::Normal,
+            },
+            Command::SetClipped { id, clipped: false },
+        ]))?;
+        let mut surface = Surface::new(self.doc.meta.width, self.doc.meta.height);
+        chitrakar_render::draw_alone(
+            &scratch,
+            id,
+            &mut surface,
+            chitrakar_render::ancestor_space(&scratch, id),
+        )?;
+        Ok(surface.to_srgb8())
+    }
+
+    /// What an adjustment or a filter makes of what is under it in its
+    /// group: the group drawn on its own with the layers above it left
+    /// out — or, at the top, the page with them left out.
+    fn psd_applied(&self, id: NodeId) -> Result<Vec<u8>, EngineError> {
+        let mut scratch = self.doc.clone();
+        let parent = scratch
+            .parent_of(id)
+            .ok_or_else(|| EngineError::BadCommand("the root is not a layer".into()))?;
+        let siblings = scratch.children_of(parent)?.to_vec();
+        let at = siblings.iter().position(|s| *s == id).unwrap_or(0);
+        let mut hide: Vec<Command> = siblings[at + 1..]
+            .iter()
+            .map(|s| Command::SetVisible {
+                id: *s,
+                visible: false,
+            })
+            .collect();
+        hide.push(Command::SetVisible { id, visible: true });
+        if parent == scratch.root() {
+            scratch.apply(Command::Batch(hide))?;
+            return Ok(chitrakar_render::render(&scratch)?.to_srgb8());
+        }
+        hide.extend([
+            Command::SetVisible {
+                id: parent,
+                visible: true,
+            },
+            Command::SetOpacity {
+                id: parent,
+                opacity: 1.0,
+            },
+            Command::SetBlendMode {
+                id: parent,
+                blend: chitrakar_doc::BlendMode::Normal,
+            },
+        ]);
+        scratch.apply(Command::Batch(hide))?;
+        let mut surface = Surface::new(self.doc.meta.width, self.doc.meta.height);
+        chitrakar_render::draw_alone(
+            &scratch,
+            parent,
+            &mut surface,
+            chitrakar_render::ancestor_space(&scratch, parent),
+        )?;
+        Ok(surface.to_srgb8())
+    }
+
     /// Export the composite as a CMYK TIFF separated through — and with —
     /// the document's press profile. Requires a loaded profile.
     pub fn export_cmyk_tiff(&self) -> Result<Vec<u8>, EngineError> {
@@ -9902,6 +10089,130 @@ mod tests {
             .place_image(b"not really a raw file", "IMG_0001.CR2")
             .unwrap_err();
         assert!(format!("{err:?}").contains("camera raw"), "{err:?}");
+    }
+
+    #[test]
+    fn a_photoshop_file_written_out_comes_back_as_its_layers() {
+        use chitrakar_codecs::psd::{read_psd, PsdItem};
+        let mut s = Session::new(40, 30, ColorMode::Rgb);
+        let root = s.doc.root();
+        let rect = |name: &str, w: f32, h: f32, rgb: [f32; 3]| {
+            let mut n = Node::vector(
+                name,
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+            );
+            if let NodeKind::Vector { fill, .. } = &mut n.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: rgb[0],
+                    g: rgb[1],
+                    b: rgb[2],
+                    a: 1.0,
+                });
+            }
+            n
+        };
+        let add = |s: &mut Session, parent: NodeId, node: Node| {
+            let i = s.doc.children_of(parent).unwrap().len();
+            let id = s.doc.peek_next_id();
+            s.apply(Command::AddNode {
+                parent,
+                index: i,
+                node: Box::new(node),
+            })
+            .unwrap();
+            id
+        };
+        add(&mut s, root, rect("Ground", 40.0, 30.0, [0.0, 0.0, 1.0]));
+        // A group moved ten across, holding a multiplied half-strength red
+        // square at its own (2, 2) and a hidden one.
+        let mut g = Node::group("Marks");
+        g.transform.e = 10.0;
+        g.opacity = 0.8;
+        let group = add(&mut s, root, g);
+        let mut red = rect("Red", 5.0, 5.0, [1.0, 0.0, 0.0]);
+        red.transform.e = 2.0;
+        red.transform.f = 2.0;
+        red.opacity = 0.5;
+        red.blend = chitrakar_doc::BlendMode::Multiply;
+        add(&mut s, group, red);
+        let mut hidden = rect("Hidden", 3.0, 3.0, [0.0, 1.0, 0.0]);
+        hidden.visible = false;
+        add(&mut s, group, hidden);
+        add(
+            &mut s,
+            root,
+            Node::adjustment(
+                "Brighter",
+                chitrakar_doc::Adjustment::Exposure { stops: 1.0 },
+            ),
+        );
+
+        let (bytes, notes) = s.export_psd().unwrap();
+        let f = read_psd(&bytes).unwrap();
+        assert_eq!((f.width, f.height), (40, 30));
+        let names: Vec<String> = f
+            .items
+            .iter()
+            .map(|i| match i {
+                PsdItem::Pixels(p) => p.name.clone(),
+                PsdItem::Group { name, .. } => name.clone(),
+            })
+            .collect();
+        assert_eq!(names, ["Ground", "Marks", "Brighter (applied)"]);
+        let PsdItem::Group {
+            opacity, children, ..
+        } = &f.items[1]
+        else {
+            panic!()
+        };
+        assert!(
+            (opacity - 0.8).abs() < 0.01,
+            "the group's opacity is the group's"
+        );
+        let PsdItem::Pixels(r) = &children[0] else {
+            panic!()
+        };
+        // At the page's (12, 2): the group's move and its own.
+        assert_eq!((r.left, r.top, r.width, r.height), (12, 2, 5, 5));
+        assert_eq!(r.blend, chitrakar_doc::BlendMode::Multiply);
+        assert!(
+            (r.opacity - 0.5).abs() < 0.01,
+            "opacity beside the pixels, not in them"
+        );
+        assert_eq!(
+            &r.rgba[..4],
+            &[255, 0, 0, 255],
+            "the pixels at full strength"
+        );
+        let PsdItem::Pixels(hd) = &children[1] else {
+            panic!()
+        };
+        assert!(
+            !hd.visible && hd.width == 3,
+            "a hidden layer is written, hidden"
+        );
+        // The adjustment comes as the page under it, brightened.
+        let PsdItem::Pixels(applied) = &f.items[2] else {
+            panic!()
+        };
+        assert_eq!((applied.width, applied.height), (40, 30));
+        let flat = s.render().unwrap().to_srgb8();
+        assert_eq!(
+            &applied.rgba[..4],
+            &flat[..4],
+            "what it applies is what the page shows"
+        );
+        assert!(notes.iter().any(|n| n.contains("adjustments")), "{notes:?}");
+        assert!(
+            notes.iter().any(|n| n.contains("text and shapes")),
+            "{notes:?}"
+        );
+        // And the flattened picture is the page.
+        assert_eq!(f.composite.unwrap(), flat);
     }
 
     /// A raw file of a grey card under a warm light: what the develop

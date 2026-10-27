@@ -108,6 +108,7 @@ const FORMAT_NAMES: Record<ExportFormat, string> = {
   pdf: "PDF",
   svg: "SVG",
   tiff: "TIFF (CMYK)",
+  psd: "PSD (layers)",
 };
 
 /** The rail's sections as the window lists them: the shared slots
