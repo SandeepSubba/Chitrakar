@@ -21,6 +21,17 @@ node tools/bench/engine/run.mjs --prof --only median  # where the time went
 node tools/bench/engine/run.mjs /some/other/wasm-pkg  # an A/B against another build
 ```
 
+With `--io` it times a photograph on its way in and out instead
+(`engine/io.html`): a 12-megapixel PNG placed, the document saved with
+its picture encoded and with it kept, the draft's skeleton, and a
+24-megapixel raw mosaic (made on the page, packed as the raw reader
+packs one) opened, previewed and developed in full.
+
+```sh
+node tools/bench/engine/run.mjs --io
+node tools/bench/engine/run.mjs --io /some/other/wasm-pkg
+```
+
 The frame is invalidated before it is timed: a view moved by whole
 pixels at the same scale is a pan, which the engine draws from the
 frame before it, and would be timed as one.

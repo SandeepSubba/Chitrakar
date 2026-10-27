@@ -719,8 +719,33 @@ export function colorToHex(named: AuthoredColor): string {
 let wasmReady: Promise<unknown> | null = null;
 let wasmMemory: WebAssembly.Memory | null = null;
 
-/** Idempotent engine module initialization. */
+/** Whether this browser runs WebAssembly with SIMD, which the engine and
+ * the readers are built with (`.cargo/config.toml`): the smallest module
+ * that uses a SIMD instruction, asked whether it would compile. Chrome
+ * and Edge 91, Firefox 89 and Safari 16.4 do. */
+export function wasmSupported(): boolean {
+  try {
+    return WebAssembly.validate(
+      new Uint8Array([
+        0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0,
+        253, 15, 253, 98, 11,
+      ]),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** What to say when the engine cannot run here. */
+export const UNSUPPORTED =
+  "This browser is too old to run Chitrakar: it needs WebAssembly with SIMD, " +
+  "which Chrome and Edge have had since version 91, Firefox since 89 and Safari since 16.4. " +
+  "Updating the browser, or the system it comes with, will let it open.";
+
+/** Idempotent engine module initialization. Fails, saying why, in a
+ * browser the engine cannot run in. */
 export function initEngine(): Promise<unknown> {
+  if (!wasmSupported()) return Promise.reject(new Error(UNSUPPORTED));
   wasmReady ??= init().then((exports) => {
     wasmMemory = (exports as { memory: WebAssembly.Memory }).memory;
     return exports;

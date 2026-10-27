@@ -51,6 +51,16 @@ cd shells/tauri/src-tauri && ../../../app/node_modules/.bin/tauri dev    # deskt
 cd shells/tauri/src-tauri && cargo test     # the shell's own (needs webkit2gtk-4.1 dev libs)
 ```
 
+Every WebAssembly module (engine, PDF reader, raw reader) is built with
+SIMD: `.cargo/config.toml` gives the wasm targets `+simd128`, which the
+compiler uses to run the per-pixel loops four lanes at a time. A browser
+without it (before Chrome 91, Firefox 89, Safari 16.4) is told so by
+`initEngine` (`wasmSupported` in `src/engine.ts`, smoke 11g2) rather than
+left blank. A `RUSTFLAGS` in the environment replaces those flags, so a
+build that sets one must carry `-C target-feature=+simd128` itself.
+`node tools/bench/engine/run.mjs --io` times a photograph's way in and
+out (decode, save, a raw opened and developed); without `--io`, frames.
+
 In the desktop shell a document has a file: Save writes back to it,
 Save as and Open use the system's panels, exports ask where (a folder
 for several files), and File › Open recent keeps `prefs.recent`.

@@ -14146,6 +14146,27 @@ assert(
   await ctx2.close();
 }
 
+// 11g2. The engine is built with WebAssembly SIMD. A browser without it
+// cannot compile the module, and is told so — which browsers will open
+// it — rather than shown an editor that never starts.
+{
+  assert((await page.locator(".engine-failed").count()) === 0, "a browser with SIMD is not warned");
+  const old = await browser.newContext();
+  await old.addInitScript(() => {
+    WebAssembly.validate = () => false;
+  });
+  const op = await old.newPage();
+  await op.goto("http://localhost:8123/");
+  const said = op.locator('.engine-failed[role="alert"]');
+  await said.waitFor({ timeout: 10000 });
+  const text = await said.textContent();
+  assert(
+    text.includes("SIMD") && text.includes("Safari") && text.includes("16.4"),
+    `a browser without SIMD is told what it needs (${text})`,
+  );
+  await old.close();
+}
+
 // 11h. On a phone the rail lies along the bottom, and what it carries
 // beside its tools — the palette — lies down with it: in a row, so the
 // rail is as tall as a tool rather than as tall as a column of swatches.

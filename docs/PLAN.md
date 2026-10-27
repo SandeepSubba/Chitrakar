@@ -10292,6 +10292,22 @@ without reading anything else.*
   whole document and still restores. Measured in this sandbox, where a
   first touch of fresh memory is slow (640 MB takes 1.8 s even natively),
   so first opens look worse than they are.
+  **WebAssembly SIMD.** Every module is built with `simd128`
+  (`.cargo/config.toml`), so the compiler runs per-pixel loops four
+  lanes at a time; a browser without it (before Chrome 91, Firefox 89,
+  Safari 16.4) is told so on the page (`wasmSupported`, smoke 11g2).
+  Measured against the same build without it, in headless Chromium, best
+  of two to three runs: the 12-megapixel photograph's frame 38 → 29 ms
+  (−24%), nearly every adjustment and filter 5–35% faster (blur −35%,
+  pinch −28%, find edges −28%, sharpen −24%, radial blur −23%), a save
+  that encodes the picture 928 → 438 ms, placing a PNG 422 → 377 ms;
+  developing a raw barely moves (2.84 → 2.76 s for 24 MP — branchy,
+  scalar code). Motion blur came out 24% slower — its taps' offsets were
+  worked out per pixel, which the compiler vectorised into lane-by-lane
+  gathers — until they were worked out once (now 70–79 ms against 83–94
+  before SIMD; same arithmetic, same pixels). Levels with a gamma is
+  still about 9% slower (`chitrakar_color::pow`). `node
+  tools/bench/engine/run.mjs --io` is the in-and-out half of these.
   **Presets and sync.** Settings kept by name (`prefs.developPresets`,
   read back through `cleanSettings`/`cleanPresets` in `app/src/develop.ts`
   so a kept preset is always settings the engine takes) are chips over

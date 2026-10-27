@@ -35,7 +35,10 @@ page.on("pageerror", (e) => console.log("page error:", e.message));
 page.on("console", (m) => { if (m.type() === "error" || process.env.BENCH_DEBUG) console.log("page:", m.text()); });
 let cdp;
 if (prof) { cdp = await page.context().newCDPSession(page); await cdp.send("Profiler.enable"); await cdp.send("Profiler.setSamplingInterval", { interval: 200 }); await cdp.send("Profiler.start"); }
-await page.goto(`http://localhost:${port}/page.html${only ? `?only=${encodeURIComponent(only)}` : ""}`);
+// `--io`: the photograph on its way in and out (io.html) rather than
+// frames.
+const pageName = args.includes("--io") ? "io.html" : "page.html";
+await page.goto(`http://localhost:${port}/${pageName}${only ? `?only=${encodeURIComponent(only)}` : ""}`);
 await page.waitForFunction(() => window.result, null, { timeout: 1_800_000 });
 for (const [n, t] of await page.evaluate(() => window.result)) console.log(n.padEnd(22), t);
 if (prof) {

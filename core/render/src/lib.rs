@@ -9425,14 +9425,21 @@ fn smeared(
     let n = ((far.ceil() as usize).saturating_add(1)).min(MOST) | 1;
     let half = (n / 2) as f32;
     let (sx, sy) = (ox / (n as f32 - 1.0), oy / (n as f32 - 1.0));
+    // Each sample's offset, the same products as worked out at every
+    // pixel, worked out once.
+    let taps: Vec<(f32, f32)> = (0..n)
+        .map(|k| {
+            let step = k as f32 - half;
+            (sx * step, sy * step)
+        })
+        .collect();
     let mut out = Vec::with_capacity(write.area() as usize);
     for y in (write.y0 - clip.y0) as i64..(write.y1 - clip.y0) as i64 {
         for x in (write.x0 - clip.x0) as i64..(write.x1 - clip.x0) as i64 {
             let mut acc = LinearRgba::TRANSPARENT;
-            for k in 0..n {
-                let step = k as f32 - half;
-                let px = (x as f32 + sx * step).rounded() as i64;
-                let py = (y as f32 + sy * step).rounded() as i64;
+            for &(tx, ty) in &taps {
+                let px = (x as f32 + tx).rounded() as i64;
+                let py = (y as f32 + ty).rounded() as i64;
                 let (px, py) = (px.clamp(0, w - 1), py.clamp(0, h - 1));
                 let s = original[(py * w + px) as usize];
                 acc.r += s.r;

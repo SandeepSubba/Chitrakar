@@ -2249,11 +2249,19 @@ export function App() {
     [refresh, fitView, fitSession, setDocumentSize],
   );
 
+  /** Why the engine could not start, if it could not: said on the page
+   * rather than left blank. */
+  const [engineFailed, setEngineFailed] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    initEngine().then(() => {
-      if (!cancelled) newDocument(false);
-    });
+    initEngine().then(
+      () => {
+        if (!cancelled) newDocument(false);
+      },
+      (err) => {
+        if (!cancelled) setEngineFailed(err instanceof Error ? err.message : String(err));
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -9465,6 +9473,12 @@ export function App() {
           <button type="button" onClick={() => setImportNotes(null)}>
             OK
           </button>
+        </div>
+      )}
+      {engineFailed && (
+        <div className="engine-failed" role="alert">
+          <h1>Chitrakar cannot start here</h1>
+          <p>{engineFailed}</p>
         </div>
       )}
       {recoverable && (
