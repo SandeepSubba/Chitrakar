@@ -9998,6 +9998,30 @@ pub fn shift_rows<T: Copy>(buf: &mut [T], w: usize, h: usize, dx: i64, dy: i64, 
 
 #[cfg(test)]
 mod tests {
+    /// The time this thread has spent working. What the tests that put
+    /// a ceiling on a wait read, since the clock on the wall also counts
+    /// every other test the suite runs at the same moment: under the
+    /// whole suite a sweep that takes twenty seconds alone once came out
+    /// past sixty with nothing about the work changed. A hang still
+    /// costs this thread its time, so it is still caught.
+    fn worked() -> std::time::Duration {
+        #[cfg(unix)]
+        {
+            let mut t = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: `t` is a valid timespec for the call to fill.
+            if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) } == 0 {
+                return std::time::Duration::new(t.tv_sec as u64, t.tv_nsec as u32);
+            }
+        }
+        thread_local! {
+            static START: std::time::Instant = std::time::Instant::now();
+        }
+        START.with(|s| s.elapsed())
+    }
+
     use super::*;
 
     fn psd_two_layers() -> Vec<u8> {
@@ -21394,10 +21418,10 @@ mod tests {
         // a radius of a few million used to be a wait nobody came back
         // from — reachable by typing, and by opening a file.
         session.feather_selection(1.0e7).unwrap();
-        let started = std::time::Instant::now();
+        let started = worked();
         let (_, _, alpha) = read(&session);
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
+            worked() - started < std::time::Duration::from_secs(10),
             "a wash of it comes back"
         );
         let _ = alpha(1, 1);
@@ -21548,7 +21572,7 @@ mod tests {
             0.0,
             -0.0,
         ];
-        let started = std::time::Instant::now();
+        let started = worked();
         for n in absurd {
             let mut session = Session::new(40, 30, ColorMode::Rgb);
             let shape = add_rect(&mut session, "r", 30.0, 20.0);
@@ -21671,7 +21695,7 @@ mod tests {
         // hangs this found took minutes each, and a suite that waits
         // that long is one nobody runs.
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(60),
+            worked() - started < std::time::Duration::from_secs(60),
             "the whole sweep came back"
         );
     }

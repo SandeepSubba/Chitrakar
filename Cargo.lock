@@ -299,6 +299,7 @@ dependencies = [
  "chitrakar-raw-in",
  "chitrakar-render",
  "image-webp",
+ "libc",
  "serde",
  "serde_json",
  "tiff",

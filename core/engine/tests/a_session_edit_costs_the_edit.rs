@@ -19,10 +19,33 @@ use chitrakar_doc::{Command, Node, NodeKind, Transform, VectorShape};
 use chitrakar_engine::Session;
 use std::time::{Duration, Instant};
 
+/// The time this thread has spent working: what the timing below is read
+/// in, since the clock on the wall also counts every other test the
+/// suite is running at the same moment, and one run in a few came out
+/// slower than the ceiling with nothing about the work changed.
+fn worked() -> Duration {
+    #[cfg(unix)]
+    {
+        let mut t = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `t` is a valid timespec for the call to fill.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) } == 0 {
+            return Duration::new(t.tv_sec as u64, t.tv_nsec as u32);
+        }
+    }
+    START.with(|s| s.elapsed())
+}
+
+thread_local! {
+    static START: Instant = Instant::now();
+}
+
 fn build(n: usize) -> Duration {
     let mut session = Session::new(400, 300, chitrakar_color::ColorMode::Rgb);
     let root = session.document().root();
-    let at = Instant::now();
+    let at = worked();
     for i in 0..n {
         let mut node = Node::vector(
             &format!("l{i}"),
@@ -55,7 +78,7 @@ fn build(n: usize) -> Duration {
             })
             .unwrap();
     }
-    let spent = at.elapsed();
+    let spent = worked() - at;
     assert_eq!(
         session.document().children_of(root).unwrap().len(),
         n,

@@ -38,3 +38,9 @@ chitrakar-pdf-in.workspace = true
 # And so is the raw reader: the tests read a DNG with it and hand the
 # engine the mosaic.
 chitrakar-raw-in.workspace = true
+
+# The timing tests read the time their own thread spent working rather
+# than the clock on the wall, which everything else the machine does
+# moves (the whole suite runs at once).
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
