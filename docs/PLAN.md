@@ -10247,6 +10247,27 @@ without reading anything else.*
   a run of photographs taken under one light. Before this, the engine
   held one open raw file, so a drop of three opened the last and the
   others vanished without a word.
+  **Formats, surveyed.** 47 CC0 files from raw.pixls.us, one or two a
+  maker, went through `core/rawin/examples/survey.rs` (natively) and the
+  page's own raw worker (in Chromium): 37 open in both, identically —
+  3FR, ARW, CR2 (sRAW too), CR3, CRW, DCR, ERF, FFF, KDC, MOS, NRW,
+  ORF/ORI, PEF, RAF (Bayer, X-Trans, GFX and SuperCCD), RW2, RWL, SR2,
+  SRF, SRW, and DNGs from iPhones, a Pixel, Leica, Ricoh, DJI and
+  Nikon's lossy NEF. What rawler cannot read is refused with its
+  reason, never a crash: GoPro's GPR (VC-5), Nikon's high-efficiency
+  NEF, Sigma's Foveon X3F, a Blackmagic cinema DNG, Phase One P40+,
+  Minolta DiMAGE 5, Sinar, a Coolscan's NEF. What the survey fixed:
+  a file that does not say its white balance is balanced for daylight
+  from its camera's matrix (as dcraw does) rather than not at all;
+  four-colour filters (Canon's CMYG, Sony's RGBE) and Fuji's SuperCCD,
+  laid out at 45 degrees, are developed by rawler's own steps as far as
+  three colours on a square grid and come to `develop.rs` as RGB; and
+  a file named as raw that starts as a JPEG or PNG (a phone's ".dng", a
+  Raspberry Pi's ".raw") is the picture it is. Three cameras still come
+  out with a cast because rawler's data for them is wrong — LibRaw
+  draws them right: the Olympus E-10 (its filter is RGGB, rawler says
+  BGGR), the Kodak P712 (white balance misread) and the Canon 40D's
+  sRAW; Auto or the picker puts them right by hand.
   **Presets and sync.** Settings kept by name (`prefs.developPresets`,
   read back through `cleanSettings`/`cleanPresets` in `app/src/develop.ts`
   so a kept preset is always settings the engine takes) are chips over

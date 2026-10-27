@@ -27,8 +27,8 @@ export type ImportKind =
  * (`core/codecs/src/raw.rs`), which this must keep up with. */
 export const RAW_EXTENSIONS = [
   "3fr", "ari", "arw", "bay", "cap", "cr2", "cr3", "crw", "dcr", "dcs", "dng", "drf", "eip",
-  "erf", "fff", "iiq", "k25", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "pef",
-  "ptx", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
+  "erf", "fff", "gpr", "iiq", "k25", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "ori", "pef",
+  "ptx", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "sti", "x3f",
 ];
 
 const PICTURE_EXTENSIONS = [
@@ -73,7 +73,12 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
     // A PDF's header may sit a little way in.
     const head = String.fromCharCode(...bytes.slice(0, 1024));
     if (head.includes("%PDF-")) return "pdf";
-    if (RAW_EXTENSIONS.includes(ext)) return "raw";
+    // A raw file is a TIFF, or a format of the camera maker's own, and
+    // never starts as a JPEG or a PNG does: one that does was named for
+    // the camera rather than for what it holds (a phone's ".dng" that is
+    // its JPEG), and is a picture.
+    const jpegOrPng = starts(bytes, [0xff, 0xd8, 0xff]) || starts(bytes, [0x89, 0x50, 0x4e, 0x47]);
+    if (RAW_EXTENSIONS.includes(ext) && !jpegOrPng) return "raw";
     if (
       starts(bytes, [0x89, 0x50, 0x4e, 0x47]) ||
       starts(bytes, [0xff, 0xd8, 0xff]) ||

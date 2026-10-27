@@ -26,8 +26,8 @@ use crate::{CodecError, SourceImage};
 /// give the small preview at their front rather than the photograph.
 pub const RAW_EXTENSIONS: &[&str] = &[
     "3fr", "ari", "arw", "bay", "cap", "cr2", "cr3", "crw", "dcr", "dcs", "dng", "drf", "eip",
-    "erf", "fff", "iiq", "k25", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw", "orf", "pef",
-    "ptx", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "x3f",
+    "erf", "fff", "gpr", "iiq", "k25", "kdc", "mdc", "mef", "mos", "mrw", "nef", "nrw", "orf",
+    "ori", "pef", "ptx", "raf", "raw", "rw2", "rwl", "sr2", "srf", "srw", "sti", "x3f",
 ];
 
 /// Whether a file's name says it is a camera's raw file.

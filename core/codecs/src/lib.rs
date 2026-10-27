@@ -105,8 +105,14 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
 /// small preview at their front — and anything else by its bytes; a TIFF
 /// that will not read as a picture is asked once more as a raw file, for
 /// a DNG that has lost its extension.
+///
+/// No raw format starts as a JPEG or a PNG does, so one named as a raw
+/// file that does is the picture it looks like: a phone's ".dng" that is
+/// its JPEG, or a Raspberry Pi's ".raw", which is a JPEG with the sensor's
+/// values after it.
 pub fn decode_named(bytes: &[u8], name: &str) -> Result<SourceImage, CodecError> {
-    if raw::is_raw_name(name) {
+    let jpeg_or_png = bytes.starts_with(&[0xff, 0xd8, 0xff]) || bytes.starts_with(b"\x89PNG");
+    if raw::is_raw_name(name) && !jpeg_or_png {
         return raw::decode_raw(bytes);
     }
     match decode(bytes) {
@@ -301,6 +307,15 @@ pub(crate) fn blended_page(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_picture_named_as_a_raw_file_is_the_picture() {
+        let px = [200u8, 100, 50, 255].repeat(4);
+        let png = encode_png(2, 2, &px).unwrap();
+        let img = decode_named(&png, "20190401_120000.dng").unwrap();
+        assert_eq!((img.width, img.height, &img.rgba8[..4]), (2, 2, &px[..4]));
+        assert!(decode_named(b"II*\0 and then not much", "photo.dng").is_err());
+    }
 
     /// An 8-bit picture of every kind is read as the general road reads
     /// it — grey, grey with alpha, colour, colour with alpha — through the

@@ -43,6 +43,8 @@ check(importKind("IMG_0051.CR2", bytes("II*", [0])) === "raw", "a CR2 is a raw f
 check(importKind("DSC_0059.nef", bytes("MM", [0], "*")) === "raw", "a NEF too");
 check(importKind("photo.dng") === "raw", "by name alone");
 check(importKind("DSCF0001.RAF", bytes("FUJIFILMCCD-RAW")) === "raw", "a RAF, which is not a TIFF");
+check(importKind("20190401_120000.dng", bytes([0xff, 0xd8, 0xff, 0xe1])) === "picture", "a phone's .dng that is its JPEG is a picture");
+check(importKind("odd.cr2", bytes([0x89], "PNG")) === "picture", "and a .cr2 that is a PNG");
 
 // By name, when the bytes are not to hand (a dialog's filter, a path).
 check(importKind("a.psd") === "psd" && importKind("big.psb") === "psd", "PSD and PSB by name");
