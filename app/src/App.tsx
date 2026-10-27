@@ -63,8 +63,10 @@ import {
   lightOf,
   markClipping,
   RAW_DEFAULTS,
+  type DevelopPreset,
   type RawInfo,
   type RawSettings,
+  samePreset,
   sliderToKelvin,
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
@@ -8475,6 +8477,43 @@ export function App() {
     }
   };
 
+  /** The other picked layers developed from raw files, which the picked
+   * one's settings can be given to. */
+  const developedOthers = layers.filter(
+    (l) => l.developed && l.id !== selected && multiSel.includes(l.id),
+  );
+  /** Give the picked layer's develop settings to the other picked raw
+   * layers — Lightroom's Sync: a run of photographs taken under one light
+   * wants one development. Each file the document kept is read again by
+   * the raw module in turn and developed; all of them go into the history
+   * as one step. */
+  const developOthersLikeThis = async () => {
+    const source = layers.find((l) => l.id === selected);
+    if (!session || !source?.developed || developedOthers.length === 0) return;
+    const settings = session.developed_settings(source.id);
+    const others = developedOthers;
+    try {
+      for (const [i, t] of others.entries()) {
+        setImporting(`Developing ${t.name} (${i + 1} of ${others.length})…`);
+        await nextPaint();
+        const file = session.raw_original(t.id);
+        session.raw_open(await readRaw(file), file, t.name);
+        session.stage_redevelop(t.id, settings);
+      }
+    } catch (err) {
+      alert(`Could not develop every picture: ${err}`);
+    } finally {
+      // What was developed before anything failed still goes in, as one step.
+      try {
+        session.commit_staged_develop();
+      } finally {
+        session.raw_close();
+        setImporting(null);
+        refresh(session);
+      }
+    }
+  };
+
   /** The page asked for, drawn at the resolution asked for. */
   const placePdf = async (page: number, dpi: number) => {
     const ask = pdfAsk;
@@ -9049,6 +9088,16 @@ export function App() {
         item("square-corners", "image", "Put the picture's corners back", squareCorners),
         ...(selectedLayer?.developed
           ? [item("develop-again", "image", "Develop again…", developAgain)]
+          : []),
+        ...(selectedLayer?.developed && developedOthers.length > 0
+          ? [
+              item(
+                "develop-others",
+                "image",
+                `Develop the other ${developedOthers.length} like this one`,
+                developOthersLikeThis,
+              ),
+            ]
           : []),
         item("trace-picture", "image", "Trace into shapes…", tracePicture),
         SEP,
@@ -9984,6 +10033,8 @@ export function App() {
           info={developing.info}
           initial={developing.initial}
           action={developing.layer === null ? "Place" : "Develop"}
+          presets={prefs.developPresets}
+          onPresets={(developPresets) => setPrefs({ developPresets })}
           count={
             developing.layer === null && rawDone.current + 1 + rawWaiting > 1
               ? [rawDone.current + 1, rawDone.current + 1 + rawWaiting]
@@ -12419,6 +12470,16 @@ export function App() {
                   >
                     Develop again…
                   </button>
+                  {developedOthers.length > 0 && (
+                    <button
+                      type="button"
+                      className="mask-button develop-others"
+                      onClick={developOthersLikeThis}
+                      title="Give the other picked raw photographs this one's develop settings, in one step"
+                    >
+                      Develop the other {developedOthers.length} like this
+                    </button>
+                  )}
                 </>
               )}
               <h3 className="props-head">Appearance</h3>
@@ -13313,6 +13374,8 @@ function RawDevelopDialog({
   initial,
   action,
   count,
+  presets,
+  onPresets,
   onCancel,
   onDone,
 }: {
@@ -13323,6 +13386,9 @@ function RawDevelopDialog({
   action: string;
   /** Which of how many raw files waiting this is, when more than one. */
   count?: [number, number];
+  /** Settings kept by name, and keeping or forgetting one. */
+  presets: DevelopPreset[];
+  onPresets: (p: DevelopPreset[]) => void;
   onCancel: () => void;
   onDone: (s: RawSettings, all?: boolean) => void;
 }) {
@@ -13491,6 +13557,46 @@ function RawDevelopDialog({
             </p>
           </div>
           <div className="develop-settings">
+            {/* Settings kept by name: a press gives them all, alt
+                forgets one, + keeps what the window says now. */}
+            <div className="develop-presets" role="group" aria-label="Presets">
+              {presets.map((p) => {
+                const inHand = samePreset(p, s);
+                return (
+                  <button
+                    key={p.name}
+                    type="button"
+                    className={inHand ? "preset setup active" : "preset setup"}
+                    aria-pressed={inHand}
+                    aria-label={`Preset ${p.name}`}
+                    title={`${p.name} — alt-click to forget it`}
+                    onClick={(e) => {
+                      if (e.altKey) onPresets(presets.filter((o) => o.name !== p.name));
+                      else setS({ ...RAW_DEFAULTS, ...p.settings });
+                    }}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                className="preset setup add"
+                aria-label="Keep these settings"
+                title="Keep these settings by name, to give another photograph in one press"
+                onClick={() => {
+                  const taken = new Set(presets.map((p) => p.name));
+                  let suggestion = "Preset 1";
+                  for (let n = 2; taken.has(suggestion); n++) suggestion = `Preset ${n}`;
+                  const name = window.prompt("Keep these settings as:", suggestion)?.trim();
+                  if (!name) return;
+                  // A name kept again is the new settings under it.
+                  onPresets([...presets.filter((p) => p.name !== name), { name, settings: { ...s } }]);
+                }}
+              >
+                {presets.length === 0 ? "+ Keep these settings" : "+"}
+              </button>
+            </div>
             <div className="develop-histogram">
               <canvas ref={graph} width={240} height={64} aria-label="Histogram" />
               <button

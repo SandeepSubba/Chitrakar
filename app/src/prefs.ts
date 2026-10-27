@@ -21,6 +21,7 @@
 
 import { COMMANDS, claimable, isChord, type CommandKeys, type MenuKeys } from "./commands";
 import { useCallback, useEffect, useState } from "react";
+import { cleanPresets, type DevelopPreset } from "./develop";
 import { ALWAYS_SHOWN, KEYED_TOOLS, TOOL_KEYS, type Tool, type ToolKeys, isTool } from "./tools";
 
 export type Units = "px" | "mm" | "in";
@@ -148,6 +149,8 @@ export type Prefs = {
   brushes: BrushPreset[];
   /** The exports kept by name. */
   exportSetups: ExportSetup[];
+  /** Camera raw settings kept by name, chips in the develop window. */
+  developPresets: DevelopPreset[];
   /** The documents opened or saved most lately, by path, newest first.
    * Only the desktop shell has paths to keep; in a browser this stays
    * empty. About the person and the machine, which is why it is here
@@ -209,6 +212,7 @@ export const DEFAULTS: Prefs = {
   commandKeys: {},
   menuKeys: {},
   exportSetups: [],
+  developPresets: [],
   recent: [],
   recentColors: [],
   barDocument: true,
@@ -381,6 +385,7 @@ export function clamp(p: Prefs): Prefs {
     })(),
     // Each setup a name and four answers the window can take; names
     // each once; anything else is dropped rather than offered.
+    developPresets: cleanPresets(p.developPresets),
     exportSetups: Array.isArray(p.exportSetups)
       ? p.exportSetups
           .filter(

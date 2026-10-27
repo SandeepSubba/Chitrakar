@@ -58,6 +58,24 @@ d.markClipping(pic, false, true);
 check(pic[6] === 255 && pic[5] === 80, "a clipped shadow goes blue");
 check(pic[8] === 40 && pic[9] === 50 && pic[10] === 60, "and the rest is untouched");
 
+// Settings read back from what was kept are settings.
+const clean = d.cleanSettings({ exposure: 99, contrast: "x", noise: -5, white: [100, 999], extra: 1 });
+check(clean.exposure === 5 && clean.contrast === 0 && clean.noise === 0, "held to what each can be");
+check(clean.white[0] === 2000 && clean.white[1] === 150, "a white balance held to the slider's ends");
+check(d.cleanSettings({ white: [5000] }).white === undefined, "half a white balance is the camera's");
+check(d.cleanSettings(null).exposure === 0, "nothing is the defaults");
+const presets = d.cleanPresets([
+  { name: "Warm", settings: { white: [6500, 10], vibrance: 20 } },
+  { name: "Warm", settings: {} },
+  { name: "", settings: {} },
+  "nonsense",
+  { name: "Flat", settings: { contrast: -40 } },
+]);
+check(presets.map((p) => p.name).join() === "Warm,Flat", `a name each, once (${presets.map((p) => p.name)})`);
+check(d.cleanPresets("x").length === 0, "a list or nothing");
+check(d.samePreset(presets[1], { ...d.RAW_DEFAULTS, contrast: -40 }), "a preset is in hand when every setting is its");
+check(!d.samePreset(presets[1], { ...d.RAW_DEFAULTS, contrast: -40, white: [5000, 0] }), "and not when the light differs");
+
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));
   process.exit(1);

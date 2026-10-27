@@ -1460,6 +1460,32 @@ impl WasmSession {
         serde_json::to_string(&s).map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// The settings a layer was developed with, as JSON.
+    pub fn developed_settings(&self, id: f64) -> Result<String, JsError> {
+        let s = self
+            .inner
+            .developed_settings(NodeId(id as u64))
+            .map_err(to_js)?;
+        serde_json::to_string(&s).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Develop a layer again with `settings` (JSON) from the open raw file,
+    /// kept aside to go into the history with the others as one step.
+    pub fn stage_redevelop(&mut self, id: f64, settings: &str) -> Result<(), JsError> {
+        let s = raw_settings(settings)?;
+        self.inner
+            .stage_redevelop(NodeId(id as u64), &s)
+            .map_err(to_js)
+    }
+
+    /// Apply what was staged as one step; how many pictures it was.
+    pub fn commit_staged_develop(&mut self) -> Result<u32, JsError> {
+        self.inner
+            .commit_staged_develop()
+            .map(|n| n as u32)
+            .map_err(to_js)
+    }
+
     /// Let the open raw file go.
     pub fn raw_close(&mut self) {
         self.inner.raw_close();

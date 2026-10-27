@@ -38,6 +38,66 @@ export const RAW_DEFAULTS: RawSettings = {
   noise: 0,
 };
 
+/** Settings kept by name, to be given to another photograph in one
+ * press: a look, or a way a camera's files want developing. About the
+ * person, so kept in `prefs` rather than in a document. */
+export type DevelopPreset = { name: string; settings: RawSettings };
+
+/** What each setting can be, as the engine holds it to. */
+const RANGES: Record<Exclude<keyof RawSettings, "white">, [number, number]> = {
+  exposure: [-5, 5],
+  contrast: [-100, 100],
+  highlights: [-100, 100],
+  shadows: [-100, 100],
+  whites: [-100, 100],
+  blacks: [-100, 100],
+  vibrance: [-100, 100],
+  saturation: [-100, 100],
+  sharpen: [0, 150],
+  noise: [0, 100],
+};
+
+/** Settings read from somewhere that might say anything (a kept preset,
+ * a file): each a number within what it can be, else its default; a
+ * white balance of two numbers, else the camera's own. */
+export function cleanSettings(x: unknown): RawSettings {
+  const o = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+  const out = { ...RAW_DEFAULTS };
+  for (const [k, [lo, hi]] of Object.entries(RANGES) as [keyof typeof RANGES, [number, number]][]) {
+    const v = o[k];
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = Math.min(hi, Math.max(lo, v));
+  }
+  const w = o.white;
+  if (Array.isArray(w) && w.length === 2 && w.every((v) => typeof v === "number" && Number.isFinite(v))) {
+    out.white = [Math.min(25000, Math.max(2000, w[0])), Math.min(150, Math.max(-150, w[1]))];
+  }
+  return out;
+}
+
+/** Kept presets as they are read back: a name each, once, and settings
+ * that are settings. */
+export function cleanPresets(x: unknown): DevelopPreset[] {
+  if (!Array.isArray(x)) return [];
+  const seen = new Set<string>();
+  const out: DevelopPreset[] = [];
+  for (const p of x) {
+    if (!p || typeof p !== "object") continue;
+    const { name, settings } = p as { name?: unknown; settings?: unknown };
+    if (typeof name !== "string" || name.trim() === "" || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, settings: cleanSettings(settings) });
+  }
+  return out;
+}
+
+/** Whether settings are a preset's: every one the same. */
+export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
+  const keys = Object.keys(RANGES) as (keyof typeof RANGES)[];
+  const white = (a?: [number, number], b?: [number, number]) =>
+    (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1]);
+  return keys.every((k) => p.settings[k] === s[k]) && white(p.settings.white, s.white);
+}
+
 /** Lightroom's names for a light, and what they are. */
 export const LIGHTS: [string, [number, number] | null][] = [
   ["As shot", null],

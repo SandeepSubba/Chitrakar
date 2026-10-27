@@ -15168,8 +15168,50 @@ assert(
     (await win.locator('input[aria-label="Exposure"]').inputValue()) === "-1" && !(await title()).includes(" of "),
     "each with the settings they were placed with, and on its own",
   );
+  // Settings kept by name: kept, given back after a reset, forgotten.
+  await win.locator('input[aria-label="Exposure"]').fill("2");
+  promptAnswer = "Bright";
+  await win.locator('button[aria-label="Keep these settings"]').click();
+  promptAnswer = "";
+  const chip = win.locator('button[aria-label="Preset Bright"]');
+  assert((await chip.count()) === 1 && (await chip.getAttribute("aria-pressed")) === "true", "a kept preset is a chip, in hand");
+  await win.locator('button:text-is("Reset")').click();
+  assert((await chip.getAttribute("aria-pressed")) === "false", "and not once the settings move off it");
+  await chip.click();
+  assert((await win.locator('input[aria-label="Exposure"]').inputValue()) === "2", "a press gives its settings back");
+  await chip.click({ modifiers: ["Alt"] });
+  assert((await chip.count()) === 0, "alt forgets it");
   await win.locator('button:text-is("Cancel")').click();
   await settle();
+
+  // One photograph's settings given to the others picked: c is developed
+  // a stop up, then given to b, as one step that one undo takes back.
+  await page.locator("button.develop-again").click();
+  await win.waitFor();
+  await win.locator('input[aria-label="Exposure"]').fill("1");
+  await win.locator('button:text-is("Develop")').click();
+  await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  await page.locator(".panel ul li", { hasText: "b.dng" }).click({ modifiers: [MOD] });
+  await settle();
+  const others = page.locator("button.develop-others");
+  assert((await others.textContent()).includes("other 1"), `offered for the other picked (${await others.textContent()})`);
+  await others.click();
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  const exposureOf = async (name) => {
+    await page.locator(".panel ul li", { hasText: name }).click();
+    await page.locator("button.develop-again").click();
+    await win.waitFor();
+    const v = await win.locator('input[aria-label="Exposure"]').inputValue();
+    await win.locator('button:text-is("Cancel")').click();
+    await settle();
+    return v;
+  };
+  assert((await exposureOf("b.dng")) === "1", "the other has this one's settings");
+  await page.keyboard.press("Control+z");
+  await settle();
+  assert((await exposureOf("b.dng")) === "-1", "and one undo takes them back");
 }
 
 // 9co. A Photoshop file with layers goes out of the Export window: each

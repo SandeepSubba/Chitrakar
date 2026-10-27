@@ -10247,6 +10247,17 @@ without reading anything else.*
   a run of photographs taken under one light. Before this, the engine
   held one open raw file, so a drop of three opened the last and the
   others vanished without a word.
+  **Presets and sync.** Settings kept by name (`prefs.developPresets`,
+  read back through `cleanSettings`/`cleanPresets` in `app/src/develop.ts`
+  so a kept preset is always settings the engine takes) are chips over
+  the histogram: a press gives them, alt forgets one, + keeps the window's
+  under a name. And with several raw photographs picked, "Develop the
+  other N like this one" (Layer menu, and the panel) gives them the
+  picked one's settings: each file the document kept is read again by
+  the raw worker and its new development staged
+  (`Session::stage_redevelop`), then all of them go into the history at
+  once (`commit_staged_develop`, "Develop 3 pictures"), so one undo takes
+  them back. A white balance left as shot stays each photograph's own.
   **Detail** (`develop::detail`, settings `sharpen` and `noise`):
   noise reduction treats the two kinds differently — colour noise is
   blotches, and the eye reads colour coarsely, so the colour-difference

@@ -269,7 +269,9 @@ with `RawDevelop` — white balance in kelvin and tint through the
 camera's matrix, exposure, highlights, shadows, whites, blacks,
 contrast, vibrance, saturation, and Detail (sharpening, noise
 reduction, judged in a 1:1 square from `develop_square`) — with a
-block-averaged `RawPreview` for the sliders. Placed, the raw file is kept in the document
+block-averaged `RawPreview` for the sliders; settings kept by name
+(`prefs.developPresets`) and given to other picked raw layers as one
+step (`stage_redevelop` + `commit_staged_develop`). Placed, the raw file is kept in the document
 (`Document::originals`, `originals/` in the zip) and the settings on
 the picture (`RasterRef::develop`), so Develop again is a `SetKind`
 with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and

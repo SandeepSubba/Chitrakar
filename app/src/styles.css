@@ -4082,3 +4082,23 @@ button.fold:hover {
   overflow-y: auto;
   padding-right: 0.25rem;
 }
+/* Develop settings kept by name, as chips above the histogram. */
+.develop-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.develop-presets .setup {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+.develop-presets .setup.add {
+  color: var(--muted);
+  min-width: 1.6rem;
+}
+.develop-presets .setup.add:hover {
+  color: var(--text);
+}
+.develop-others {
+  align-self: flex-start;
+}

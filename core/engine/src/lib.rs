@@ -402,6 +402,8 @@ pub struct Session {
     import_notes: Vec<String>,
     /// A camera's raw file open in the develop window.
     raw: Option<OpenRaw>,
+    /// Developments waiting to go into the history as one step.
+    staged_develop: Vec<Command>,
     /// Soft-proofing (display-only): round-trip presented pixels through the
     /// document's press profile, optionally marking out-of-gamut pixels.
     proof_cms: Option<chitrakar_color::cms::ProofCms>,
@@ -491,6 +493,7 @@ impl Session {
             last_touched: None,
             import_notes: Vec::new(),
             raw: None,
+            staged_develop: Vec::new(),
             proof_cms: None,
             soft_proof: false,
             display_cms: None,
@@ -9161,6 +9164,55 @@ impl Session {
     /// changes and nothing else — where it is, its size on the page, its
     /// corners, mask and effects — in one step of history.
     pub fn redevelop(&mut self, id: NodeId, settings: &RawDevelop) -> Result<(), EngineError> {
+        let cmd = self.redevelop_command(id, settings)?;
+        self.apply_labeled(cmd, Some("Develop".into()))
+    }
+
+    /// How a layer was developed: the settings it carries.
+    pub fn developed_settings(&self, id: NodeId) -> Result<RawDevelop, EngineError> {
+        Ok(self.developed(id)?.settings)
+    }
+
+    /// Develop a layer again with `settings`, kept aside to go into the
+    /// history with others as one step (`commit_staged_develop`): settings
+    /// given to a run of photographs are one thing done, and one undo
+    /// should take them all back. The layer's raw file has to be the open
+    /// one, as for `redevelop`; each is read in turn and staged.
+    pub fn stage_redevelop(
+        &mut self,
+        id: NodeId,
+        settings: &RawDevelop,
+    ) -> Result<(), EngineError> {
+        let cmd = self.redevelop_command(id, settings)?;
+        self.staged_develop.push(cmd);
+        Ok(())
+    }
+
+    /// Apply what was staged as one step; how many pictures it was.
+    pub fn commit_staged_develop(&mut self) -> Result<usize, EngineError> {
+        let cmds = std::mem::take(&mut self.staged_develop);
+        let n = cmds.len();
+        match n {
+            0 => Ok(0),
+            1 => self
+                .apply_labeled(
+                    cmds.into_iter().next().expect("one"),
+                    Some("Develop".into()),
+                )
+                .map(|()| 1),
+            _ => self
+                .apply_labeled(Command::Batch(cmds), Some(format!("Develop {n} pictures")))
+                .map(|()| n),
+        }
+    }
+
+    /// The command that gives a layer its raw file developed with
+    /// `settings`: a new picture, everything else about the layer kept.
+    fn redevelop_command(
+        &mut self,
+        id: NodeId,
+        settings: &RawDevelop,
+    ) -> Result<Command, EngineError> {
         let developed = self.developed(id)?;
         self.raw_open_layer(id)?;
         let raw = self.raw.as_ref().expect("opened above");
@@ -9175,13 +9227,10 @@ impl Session {
             original: developed.original,
             settings: *settings,
         });
-        self.apply_labeled(
-            Command::SetKind {
-                id,
-                kind: Box::new(NodeKind::Raster(new)),
-            },
-            Some("Develop".into()),
-        )
+        Ok(Command::SetKind {
+            id,
+            kind: Box::new(NodeKind::Raster(new)),
+        })
     }
 
     /// A square of the open raw file at its own size, developed in full
@@ -10401,6 +10450,55 @@ mod tests {
         assert!(a[0] > b[0] && a[2] < b[2], "warmer: {b:?} to {a:?}");
         s.undo().unwrap();
         assert_eq!(picture_of(&s, id), before, "one undo puts it back");
+    }
+
+    #[test]
+    fn settings_given_to_a_run_of_photographs_are_one_step() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            read_card(&mut s);
+            ids.push(s.place_raw(&RawDevelop::default()).unwrap());
+        }
+        let look = RawDevelop {
+            exposure: -1.0,
+            vibrance: 30.0,
+            ..Default::default()
+        };
+        let before: Vec<_> = ids.iter().map(|id| picture_of(&s, *id)).collect();
+        for id in &ids[1..] {
+            let (name, file) = s.raw_original(*id).unwrap();
+            s.raw_open(&chitrakar_raw_in::read(&file).unwrap(), &file, &name)
+                .unwrap();
+            s.stage_redevelop(*id, &look).unwrap();
+        }
+        assert_eq!(
+            picture_of(&s, ids[1]),
+            before[1],
+            "nothing changes until it is committed"
+        );
+        assert_eq!(s.commit_staged_develop().unwrap(), 2);
+        for id in &ids[1..] {
+            assert_eq!(s.developed_settings(*id).unwrap(), look);
+        }
+        assert_eq!(
+            s.developed_settings(ids[0]).unwrap(),
+            RawDevelop::default(),
+            "the first left alone"
+        );
+        assert_eq!(
+            s.history_labels().0.last().map(String::as_str),
+            Some("Develop 2 pictures")
+        );
+        s.undo().unwrap();
+        for (id, was) in ids.iter().zip(&before) {
+            assert_eq!(&picture_of(&s, *id), was, "one undo takes them all back");
+        }
+        assert_eq!(
+            s.commit_staged_develop().unwrap(),
+            0,
+            "and nothing is left staged"
+        );
     }
 
     #[test]
