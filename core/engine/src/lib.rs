@@ -8415,7 +8415,6 @@ impl Session {
         for &id in self.doc.children_of(parent)? {
             let node = self.doc.node(id)?;
             let plain_group = matches!(node.kind, NodeKind::Group)
-                && node.mask.is_none()
                 && node.effects.is_empty()
                 && !node.clipped
                 && depth < chitrakar_doc::MAX_DEPTH;
@@ -8425,10 +8424,15 @@ impl Session {
                     opacity: node.opacity,
                     blend: node.blend,
                     visible: node.visible,
+                    mask: self.psd_mask(id),
                     children: self.psd_items(id, notes, depth + 1)?,
                 });
                 continue;
             }
+            // A mask Photoshop can keep as a mask, when nothing the layer
+            // wears is cut by it: effects are drawn from the masked layer,
+            // which a mask beside the pixels would not give.
+            let own_mask = node.mask.is_some() && node.effects.is_empty();
             let applies = matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
             let (name, rgba) = if applies {
                 note(
@@ -8453,13 +8457,16 @@ impl Session {
                     }
                     _ => {}
                 }
-                if node.mask.is_some() {
-                    note("masks are part of the pixels", notes);
+                if node.mask.is_some() && !own_mask {
+                    note(
+                        "a mask on a layer wearing effects is part of its pixels",
+                        notes,
+                    );
                 }
                 if !node.effects.is_empty() {
                     note("effects are part of the pixels", notes);
                 }
-                (node.name.clone(), self.psd_alone(id)?)
+                (node.name.clone(), self.psd_alone(id, !own_mask)?)
             };
             if node.blend != chitrakar_doc::BlendMode::Normal {
                 note(
@@ -8473,6 +8480,9 @@ impl Session {
                 layer.opacity = node.opacity;
                 layer.blend = node.blend;
                 layer.clipped = node.clipped;
+                if own_mask {
+                    layer.mask = self.psd_mask(id);
+                }
             }
             layer.visible = node.visible;
             out.push(PsdOutItem::Layer(layer));
@@ -8482,8 +8492,11 @@ impl Session {
 
     /// One layer drawn on its own at page size, shown and at its full
     /// strength in the normal way — the file carries those beside it.
-    fn psd_alone(&self, id: NodeId) -> Result<Vec<u8>, EngineError> {
+    fn psd_alone(&self, id: NodeId, with_mask: bool) -> Result<Vec<u8>, EngineError> {
         let mut scratch = self.doc.clone();
+        if !with_mask {
+            scratch.apply(Command::SetMask { id, mask: None })?;
+        }
         scratch.apply(Command::Batch(vec![
             Command::SetVisible { id, visible: true },
             Command::SetOpacity { id, opacity: 1.0 },
@@ -8501,6 +8514,28 @@ impl Session {
             chitrakar_render::ancestor_space(&scratch, id),
         )?;
         Ok(surface.to_srgb8())
+    }
+
+    /// A layer's or a group's mask as Photoshop keeps one: what it lets
+    /// through over the page, worked out as the page's renderer does.
+    fn psd_mask(&self, id: NodeId) -> Option<chitrakar_codecs::psd_export::PsdOutMask> {
+        let mask = self.doc.node(id).ok()?.mask.as_ref()?;
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let coverage = chitrakar_render::mask_plane_over(
+            &self.doc,
+            mask,
+            chitrakar_render::ancestor_space(&self.doc, id),
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: w,
+                y1: h,
+            },
+            (w, h),
+        );
+        Some(chitrakar_codecs::psd_export::PsdOutMask::from_coverage(
+            w, h, &coverage,
+        ))
     }
 
     /// What an adjustment or a filter makes of what is under it in its
@@ -10142,6 +10177,22 @@ mod tests {
         let mut hidden = rect("Hidden", 3.0, 3.0, [0.0, 1.0, 0.0]);
         hidden.visible = false;
         add(&mut s, group, hidden);
+        // A layer masked to its left half, which Photoshop keeps as a mask.
+        let mut masked = rect("Masked", 20.0, 10.0, [0.0, 1.0, 0.0]);
+        masked.transform.f = 18.0;
+        masked.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 10.0,
+                    height: 10.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(0.0, 18.0),
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        add(&mut s, root, masked);
         add(
             &mut s,
             root,
@@ -10162,7 +10213,7 @@ mod tests {
                 PsdItem::Group { name, .. } => name.clone(),
             })
             .collect();
-        assert_eq!(names, ["Ground", "Marks", "Brighter (applied)"]);
+        assert_eq!(names, ["Ground", "Marks", "Masked", "Brighter (applied)"]);
         let PsdItem::Group {
             opacity, children, ..
         } = &f.items[1]
@@ -10195,8 +10246,25 @@ mod tests {
             !hd.visible && hd.width == 3,
             "a hidden layer is written, hidden"
         );
+        // The masked layer whole, its mask beside it.
+        let PsdItem::Pixels(m) = &f.items[2] else {
+            panic!()
+        };
+        assert_eq!(
+            (m.left, m.top, m.width, m.height),
+            (0, 18, 20, 10),
+            "the pixels unmasked"
+        );
+        let mask = m.mask.as_ref().expect("and a mask Photoshop keeps");
+        let cover = |x: u32| mask.rgba[((5 * mask.width + x) * 4) as usize];
+        assert!(
+            cover(2) > 250 && cover(15) < 5,
+            "letting the left half through: {} {}",
+            cover(2),
+            cover(15)
+        );
         // The adjustment comes as the page under it, brightened.
-        let PsdItem::Pixels(applied) = &f.items[2] else {
+        let PsdItem::Pixels(applied) = &f.items[3] else {
             panic!()
         };
         assert_eq!((applied.width, applied.height), (40, 30));

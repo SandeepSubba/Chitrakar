@@ -278,7 +278,8 @@ BSD standard fonts and rawler is LGPL-2.1, which a GPL-3.0 project
 can carry. Smoke 9cm builds each file byte by byte. Going the other
 way, the Export window writes a layered PSD (`Session::export_psd`,
 `psd_export.rs`): each layer drawn alone with its opacity, blend,
-visibility and clipping written beside it, groups as groups, and
+visibility, clipping and mask (as Photoshop's own layer mask) written
+beside it, groups as groups, and
 adjustments as stamps of what they make of what is under them (smoke
 9co).
 

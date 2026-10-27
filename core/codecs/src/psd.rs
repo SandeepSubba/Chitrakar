@@ -52,6 +52,8 @@ pub enum PsdItem {
         visible: bool,
         opacity: f32,
         blend: BlendMode,
+        /// A group mask, which cuts everything the group holds.
+        mask: Option<PsdMask>,
         /// Bottom first.
         children: Vec<PsdItem>,
     },
@@ -354,6 +356,7 @@ fn read_layers(
     }
     // The channels' pixels follow every record, in the records' order.
     let mut pixels: Vec<Option<PsdPixels>> = Vec::with_capacity(count);
+    let mut group_masks: Vec<Option<PsdMask>> = Vec::with_capacity(count);
     for rec in &records {
         let (w, hh) = (
             (rec.right - rec.left).max(0) as usize,
@@ -385,17 +388,12 @@ fn read_layers(
                 Err(e) => lost.push(format!("a channel of \"{}\" ({e})", rec.name)),
             }
         }
-        if !matches!(rec.section, Section::Pixels) || w == 0 || hh == 0 {
-            pixels.push(None);
-            continue;
-        }
         let get = |id: i16| {
             planes
                 .iter()
                 .find(|(i, _)| *i == id)
                 .map(|(_, p)| p.as_slice())
         };
-        let rgba = colour.layer_rgba(&get, w * hh);
         // The layer's pixel mask: the "real" one when the layer has a
         // vector mask too, else the only one.
         let (mask_box, mask_id) = match (rec.real_mask, get(-3).is_some()) {
@@ -440,6 +438,15 @@ fn read_layers(
             }
             _ => None,
         };
+        // A group's record carries a mask the same way a layer's does,
+        // and nothing else of its own.
+        if !matches!(rec.section, Section::Pixels) || w == 0 || hh == 0 {
+            group_masks.push(mask);
+            pixels.push(None);
+            continue;
+        }
+        group_masks.push(None);
+        let rgba = colour.layer_rgba(&get, w * hh);
         pixels.push(Some(PsdPixels {
             name: rec.name.clone(),
             left: rec.left,
@@ -459,7 +466,7 @@ fn read_layers(
     // (Photoshop's "bounding section divider"), then what is in it, then
     // the record that names it.
     let mut stack: Vec<Vec<PsdItem>> = vec![Vec::new()];
-    for (rec, px) in records.into_iter().zip(pixels) {
+    for ((rec, px), group_mask) in records.into_iter().zip(pixels).zip(group_masks) {
         if rec.adjustment {
             lost.push(format!("the adjustment layer \"{}\"", rec.name));
         }
@@ -492,6 +499,7 @@ fn read_layers(
                     visible: rec.visible,
                     opacity: rec.opacity,
                     blend: rec.blend.unwrap_or_default(),
+                    mask: group_mask,
                     children,
                 };
                 if let Some(top) = stack.last_mut() {
@@ -992,6 +1000,19 @@ impl PsdFile {
         use chitrakar_doc::{Command, Mask, MaskKind, Node, NodeId, RasterRef, Transform};
         let mut next = first.0;
         let mut cmds = Vec::new();
+        /// A Photoshop mask as one of ours: its grey, where it sits.
+        fn raster_mask(doc: &mut chitrakar_doc::Document, m: PsdMask) -> Mask {
+            Mask {
+                kind: MaskKind::Raster {
+                    resource_id: doc.add_resource(m.width, m.height, m.rgba),
+                    width: m.width,
+                    height: m.height,
+                    transform: Transform::translation(m.left as f32, m.top as f32),
+                },
+                invert: false,
+                feather: 0.0,
+            }
+        }
         fn add(
             item: PsdItem,
             parent: NodeId,
@@ -1006,12 +1027,14 @@ impl PsdFile {
                     visible,
                     opacity,
                     blend,
+                    mask,
                     children,
                 } => {
                     let mut node = Node::group(&name);
                     node.visible = visible;
                     node.opacity = opacity;
                     node.blend = blend;
+                    node.mask = mask.map(|m| raster_mask(doc, m));
                     let id = NodeId(*next);
                     *next += 1;
                     cmds.push(Command::AddNode {
@@ -1040,16 +1063,7 @@ impl PsdFile {
                     node.visible = p.visible;
                     node.blend = p.blend;
                     node.clipped = p.clipped;
-                    node.mask = p.mask.map(|m| Mask {
-                        kind: MaskKind::Raster {
-                            resource_id: doc.add_resource(m.width, m.height, m.rgba),
-                            width: m.width,
-                            height: m.height,
-                            transform: Transform::translation(m.left as f32, m.top as f32),
-                        },
-                        invert: false,
-                        feather: 0.0,
-                    });
+                    node.mask = p.mask.map(|m| raster_mask(doc, m));
                     *next += 1;
                     cmds.push(Command::AddNode {
                         parent,

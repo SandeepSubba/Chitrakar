@@ -15193,6 +15193,12 @@ assert(
   await rect(60, 50, 180, 140);
   const names = () => page.locator(".panel ul li .layer-name").allTextContents();
   const before = await names();
+  // The bottom one masked, which Photoshop keeps as a mask.
+  await page.locator(".panel ul li").nth(1).click();
+  await page.click("text=Rect mask");
+  await page.waitForTimeout(250);
+  const masked = () => page.locator(".panel ul li").nth(1).locator('[title="What this layer\'s mask lets through"]').count();
+  assert((await masked()) === 1, "the bottom layer wears a mask");
   // The top one multiplied.
   await page.locator(".panel ul li").first().click();
   await page.selectOption('select[aria-label="Blend mode"]', { index: 1 });
@@ -15204,6 +15210,7 @@ assert(
   await page.waitForTimeout(600);
   const said = await page.locator('[aria-label="What changes"]').textContent();
   assert(said.includes("text and shapes come as pixels"), `what changes is said (${said})`);
+  assert(!said.includes("mask"), "and a mask is not among them: Photoshop keeps it");
   const [dl] = await Promise.all([page.waitForEvent("download"), page.click(".modal-actions .primary")]);
   assert(dl.suggestedFilename().endsWith(".psd"), `named as a Photoshop file (${dl.suggestedFilename()})`);
   const psd = await readFile(await dl.path());
@@ -15213,6 +15220,7 @@ assert(
   await page.setInputFiles('input[accept^="image/*,"]', { name: "back.psd", mimeType: "", buffer: psd });
   await page.waitForTimeout(600);
   assert((await names()).join() === before.join(), `the layers came back (${await names()} against ${before})`);
+  assert((await masked()) === 1, "and the mask with its layer");
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(150);
   assert(

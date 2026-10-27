@@ -35,6 +35,61 @@ pub struct PsdOutLayer {
     pub blend: BlendMode,
     pub visible: bool,
     pub clipped: bool,
+    /// A layer mask, which Photoshop keeps as one: painted on, turned
+    /// off, applied or thrown away there.
+    pub mask: Option<PsdOutMask>,
+}
+
+/// A layer mask at its place on the page: grey, white showing the
+/// layer, and `default` beyond its box.
+#[derive(Debug, Clone)]
+pub struct PsdOutMask {
+    pub left: i32,
+    pub top: i32,
+    pub width: u32,
+    pub height: u32,
+    pub grey: Vec<u8>,
+    pub default: u8,
+}
+
+impl PsdOutMask {
+    /// A mask from what it lets through over the whole page (0..=1 a
+    /// pixel), cut to the box of where it lets anything through — black
+    /// everywhere else.
+    pub fn from_coverage(page_w: u32, page_h: u32, coverage: &[f32]) -> PsdOutMask {
+        let (w, h) = (page_w as usize, page_h as usize);
+        let grey: Vec<u8> = coverage
+            .iter()
+            .map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect();
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                if grey.get(y * w + x).copied().unwrap_or(0) != 0 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        let mut out = PsdOutMask {
+            left: 0,
+            top: 0,
+            width: 0,
+            height: 0,
+            grey: Vec::new(),
+            default: 0,
+        };
+        if x0 < x1 {
+            for y in y0..y1 {
+                out.grey.extend_from_slice(&grey[y * w + x0..y * w + x1]);
+            }
+            (out.left, out.top, out.width, out.height) =
+                (x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32);
+        }
+        out
+    }
 }
 
 /// A layer or a group of them, bottom first as the page stacks them.
@@ -46,6 +101,7 @@ pub enum PsdOutItem {
         opacity: f32,
         blend: BlendMode,
         visible: bool,
+        mask: Option<PsdOutMask>,
         children: Vec<PsdOutItem>,
     },
 }
@@ -77,6 +133,7 @@ impl PsdOutLayer {
             blend: BlendMode::Normal,
             visible: true,
             clipped: false,
+            mask: None,
         };
         if x0 >= x1 {
             return out;
@@ -209,6 +266,44 @@ struct Record {
     name: String,
     /// `lsct`: 0 a layer, 1 an open group, 3 the end of one.
     section: Option<(u32, [u8; 4])>,
+    /// The mask's box (top, left, bottom, right) and default.
+    mask: Option<([i32; 4], u8)>,
+}
+
+/// One plane as a channel's data: compressed, or nothing for no pixels.
+fn channel_data(plane: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut data = Vec::new();
+    if w == 0 || h == 0 {
+        data.extend_from_slice(&0u16.to_be_bytes());
+    } else {
+        let (counts, rows) = compressed_plane(plane, w, h);
+        data.extend_from_slice(&1u16.to_be_bytes());
+        for n in counts {
+            data.extend_from_slice(&n.to_be_bytes());
+        }
+        data.extend(rows);
+    }
+    data
+}
+
+fn mask_channel(
+    mask: &Option<PsdOutMask>,
+    channels: &mut Vec<(i16, Vec<u8>)>,
+) -> Option<([i32; 4], u8)> {
+    let m = mask.as_ref()?;
+    channels.push((
+        -2,
+        channel_data(&m.grey, m.width as usize, m.height as usize),
+    ));
+    Some((
+        [
+            m.top,
+            m.left,
+            m.top + m.height as i32,
+            m.left + m.width as i32,
+        ],
+        m.default,
+    ))
 }
 
 fn records(items: &[PsdOutItem], out: &mut Vec<Record>) {
@@ -216,23 +311,11 @@ fn records(items: &[PsdOutItem], out: &mut Vec<Record>) {
         match item {
             PsdOutItem::Layer(l) => {
                 let (w, h) = (l.width as usize, l.height as usize);
-                let channels = [(-1i16, 3usize), (0, 0), (1, 1), (2, 2)]
+                let mut channels: Vec<(i16, Vec<u8>)> = [(-1i16, 3usize), (0, 0), (1, 1), (2, 2)]
                     .into_iter()
-                    .map(|(id, c)| {
-                        let mut data = Vec::new();
-                        if w == 0 || h == 0 {
-                            data.extend_from_slice(&0u16.to_be_bytes());
-                        } else {
-                            let (counts, rows) = compressed_plane(&plane_of(&l.rgba, c), w, h);
-                            data.extend_from_slice(&1u16.to_be_bytes());
-                            for n in counts {
-                                data.extend_from_slice(&n.to_be_bytes());
-                            }
-                            data.extend(rows);
-                        }
-                        (id, data)
-                    })
+                    .map(|(id, c)| (id, channel_data(&plane_of(&l.rgba, c), w, h)))
                     .collect();
+                let mask = mask_channel(&l.mask, &mut channels);
                 out.push(Record {
                     rect: [
                         l.top,
@@ -247,6 +330,7 @@ fn records(items: &[PsdOutItem], out: &mut Vec<Record>) {
                     hidden: !l.visible,
                     name: l.name.clone(),
                     section: None,
+                    mask,
                 });
             }
             PsdOutItem::Group {
@@ -254,6 +338,7 @@ fn records(items: &[PsdOutItem], out: &mut Vec<Record>) {
                 opacity,
                 blend,
                 visible,
+                mask,
                 children,
             } => {
                 // Bottom first: the group's end, what it holds, then the
@@ -273,17 +358,21 @@ fn records(items: &[PsdOutItem], out: &mut Vec<Record>) {
                     hidden: false,
                     name: "</Layer group>".into(),
                     section: Some((3, *b"norm")),
+                    mask: None,
                 });
                 records(children, out);
+                let mut channels = empty();
+                let mask = mask_channel(mask, &mut channels);
                 out.push(Record {
                     rect: [0; 4],
-                    channels: empty(),
+                    channels,
                     blend: *blend_key(*blend),
                     opacity: (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
                     clipped: false,
                     hidden: !visible,
                     name: name.clone(),
                     section: Some((1, *blend_key(*blend))),
+                    mask,
                 });
             }
         }
@@ -362,7 +451,18 @@ pub fn write_psd(
         info.push(if r.hidden { 2 } else { 0 } | 8);
         info.push(0);
         let mut extra = Vec::new();
-        extra.extend_from_slice(&0u32.to_be_bytes()); // no layer mask
+        match r.mask {
+            Some((rect, default)) => {
+                extra.extend_from_slice(&20u32.to_be_bytes());
+                for v in rect {
+                    extra.extend_from_slice(&v.to_be_bytes());
+                }
+                extra.push(default);
+                extra.push(0); // shown, moving with the layer, not inverted
+                extra.extend_from_slice(&[0, 0]);
+            }
+            None => extra.extend_from_slice(&0u32.to_be_bytes()),
+        }
         extra.extend_from_slice(&0u32.to_be_bytes()); // no blending ranges
         extra.extend(pascal(&r.name));
         block(b"luni", &unicode_name(&r.name), &mut extra);
@@ -489,6 +589,7 @@ mod tests {
                 opacity: 0.75,
                 blend: BlendMode::Screen,
                 visible: true,
+                mask: None,
                 children: vec![PsdOutItem::Layer(red)],
             },
         ];
@@ -529,6 +630,66 @@ mod tests {
             &[1, 2, 3, 255],
             "and the flattened picture"
         );
+    }
+
+    #[test]
+    fn a_layer_mask_is_written_as_photoshops_and_read_back_as_one() {
+        let mut layer = PsdOutLayer::trimmed("Masked", 6, 4, &solid(6, 4, [0, 200, 0, 255]));
+        // The left half let through, a soft step down the middle.
+        let coverage: Vec<f32> = (0..24)
+            .map(|i| [1.0, 1.0, 0.5, 0.0, 0.0, 0.0][i % 6])
+            .collect();
+        let mask = PsdOutMask::from_coverage(6, 4, &coverage);
+        assert_eq!(
+            (mask.left, mask.width, mask.height),
+            (0, 3, 4),
+            "cut to where it lets anything through"
+        );
+        layer.mask = Some(mask);
+        let bytes = write_psd(
+            6,
+            4,
+            72.0,
+            &[PsdOutItem::Layer(layer)],
+            &solid(6, 4, [0; 4]),
+        )
+        .unwrap();
+        let f = read_psd(&bytes).unwrap();
+        assert!(f.lost.is_empty(), "{:?}", f.lost);
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        let m = p.mask.as_ref().expect("the mask came back");
+        assert_eq!(
+            (m.width, m.height),
+            (6, 4),
+            "over the layer, black beyond its box"
+        );
+        // Half let through comes back as the grey whose light is half —
+        // 188, since a mask here reads its coverage as linear light.
+        let at = |x: usize| m.rgba[x * 4];
+        assert_eq!((at(0), at(2), at(3), at(5)), (255, 188, 0, 0));
+    }
+
+    #[test]
+    fn a_group_mask_comes_back_on_the_group() {
+        let inside = PsdOutLayer::trimmed("Inside", 4, 4, &solid(4, 4, [9, 9, 9, 255]));
+        let coverage: Vec<f32> = (0..16).map(|i| if i % 4 < 2 { 1.0 } else { 0.0 }).collect();
+        let items = [PsdOutItem::Group {
+            name: "Held".into(),
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            visible: true,
+            mask: Some(PsdOutMask::from_coverage(4, 4, &coverage)),
+            children: vec![PsdOutItem::Layer(inside)],
+        }];
+        let f = read_psd(&write_psd(4, 4, 72.0, &items, &solid(4, 4, [0; 4])).unwrap()).unwrap();
+        let PsdItem::Group { mask, children, .. } = &f.items[0] else {
+            panic!()
+        };
+        let m = mask.as_ref().expect("the group's mask");
+        assert_eq!((m.left, m.width), (0, 2));
+        assert_eq!(children.len(), 1);
     }
 
     #[test]

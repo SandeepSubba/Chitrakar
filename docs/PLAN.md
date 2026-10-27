@@ -10187,9 +10187,14 @@ without reading anything else.*
   follows, and the resolution (resource 1005). What the format has no
   layer for comes as the nearest thing that keeps the look: an
   adjustment or a filter as a picture of what is under it in its group
-  with it applied ("Brightness (applied)"); a group wearing a mask or
-  effects, a frame and a live copy as one picture of itself; masks and
-  effects in the pixels; text and shapes as pixels. Each is said once
+  with it applied ("Brightness (applied)"); a group wearing effects, a
+  frame and a live copy as one picture of itself; effects in the pixels;
+  text and shapes as pixels. Masks go as Photoshop's own layer masks —
+  on a layer and on a group — worked out by the page's renderer
+  (`mask_plane_over`) and cut to where they let anything through, the
+  layer's pixels then drawn without it; only a mask on a layer wearing
+  effects stays in the pixels, since the effects are drawn from the
+  masked layer. The reader takes group masks now too, so they come back. Each is said once
   beside the format before the file is written, and so is that
   Photoshop blends in gamma where this blends in linear light. Its first
   test caught a reader bug: a run-length count overflowed in debug
