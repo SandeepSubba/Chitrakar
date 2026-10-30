@@ -717,6 +717,11 @@ pub struct RawDevelop {
     pub sharpen: f32,
     /// Detail: edge-aware smoothing, colour hardest, 0 to 100.
     pub noise: f32,
+    /// Leave off the lens corrections the camera wrote into the file
+    /// (distortion, colour fringes, dark corners — a Fuji's RAF carries
+    /// them), which are otherwise applied.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub uncorrected: bool,
 }
 
 impl RasterRef {

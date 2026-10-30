@@ -15289,6 +15289,58 @@ assert(
   await page.keyboard.press("Control+z");
   await settle();
   assert((await exposureOf("b.dng")) === "-1", "and one undo takes them back");
+
+  // A file carrying its lens's corrections (a Fuji's RAF) offers to leave
+  // them off. A RAF is beyond writing by hand here, so the raw reader's
+  // answer is given a lens on its way back — corners at half the light —
+  // by a worker that adds one.
+  assert((await win.count()) === 0, "the window is closed");
+  await page.evaluate(() => {
+    const Real = window.Worker;
+    window.Worker = class extends Real {
+      set onmessage(fn) {
+        super.onmessage = (e) => {
+          const p = e.data && e.data.packed;
+          if (!p) return fn(e);
+          const lens = new Float32Array([0, 1.2, 0, 0, 0, 0, 0, 0, 100, 40]);
+          const out = new Uint8Array(p.length + 40);
+          out.set(p.subarray(0, p.length - 4));
+          new DataView(out.buffer).setUint32(p.length - 4, 2, true);
+          out.set(new Uint8Array(lens.buffer), p.length);
+          fn({ data: { ...e.data, packed: out } });
+        };
+      }
+    };
+  });
+  // A damaged file retires the reader in use, so the next is made
+  // through the wrapped one.
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "broken.dng", mimeType: "", buffer: card.subarray(0, 300) });
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "lens.raf", mimeType: "", buffer: card });
+  await win.waitFor();
+  await settle();
+  const lensBox = win.locator('input[aria-label="Lens corrections"]');
+  assert((await lensBox.count()) === 1 && (await lensBox.isChecked()), "a file with a lens offers its corrections, on");
+  const corner = async () => (await previewAt(0.02, 0.04))[1];
+  const on = await corner();
+  await lensBox.uncheck();
+  await settle();
+  const off = await corner();
+  assert(on > off + 15, `the corners are lifted by the lens's light (${off} off, ${on} on)`);
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+  // Put back, and a DNG without a lens does not offer it.
+  await page.evaluate(() => (window.Worker = Object.getPrototypeOf(window.Worker)));
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "broken.dng", mimeType: "", buffer: card.subarray(0, 300) });
+  await page.waitForFunction(() => !document.querySelector('[aria-label="Reading"]'));
+  await settle();
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "card.dng", mimeType: "", buffer: card });
+  await win.waitFor();
+  await settle();
+  assert((await win.locator('input[aria-label="Lens corrections"]').count()) === 0, "a file without a lens offers none");
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
 }
 
 // 9co. A Photoshop file with layers goes out of the Export window: each

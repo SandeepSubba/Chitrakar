@@ -13588,7 +13588,7 @@ function RawDevelopDialog({
     return () => cancelAnimationFrame(frame);
   }, [s, session, before, spot]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
-  const row = (label: string, k: Exclude<keyof RawSettings, "white">, min: number, max: number, step: number, unit = "") => (
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected">, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
       <SliderHead label={label} value={s[k]} unit={unit} />
       <input
@@ -13800,6 +13800,26 @@ function RawDevelopDialog({
             />
             {row("Sharpening", "sharpen", 0, 150, 1)}
             {row("Noise reduction", "noise", 0, 100, 1)}
+            {info.lens && (
+              <>
+                <h3 className="props-head">Lens</h3>
+                <label
+                  className="row check"
+                  title="The distortion, colour fringes and dark corners the camera wrote into the file are put right, as the camera's own pictures are"
+                >
+                  <input
+                    type="checkbox"
+                    aria-label="Lens corrections"
+                    checked={!s.uncorrected}
+                    onChange={(e) => {
+                      const { uncorrected: _, ...rest } = s;
+                      setS(e.target.checked ? rest : { ...rest, uncorrected: true });
+                    }}
+                  />
+                  Corrections from the camera
+                </label>
+              </>
+            )}
           </div>
         </div>
         <div className="modal-actions">

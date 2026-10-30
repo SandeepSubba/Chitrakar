@@ -137,8 +137,9 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
         return Err(bad("not a packed mosaic"));
     }
     let head = cur.u32s(5)?;
-    if head[0] != 1 {
-        return Err(bad(format!("a packed mosaic of version {}", head[0])));
+    let version = head[0];
+    if version != 1 && version != 2 {
+        return Err(bad(format!("a packed mosaic of version {version}")));
     }
     let (width, height, cpp, orientation) = (
         head[1] as usize,
@@ -189,7 +190,7 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
             })
         };
     }
-    match kind {
+    let mut photo = match kind {
         0 => {
             let bytes = count
                 .checked_mul(2)
@@ -205,7 +206,30 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
             with!(data)
         }
         k => Err(bad(format!("samples of kind {k}"))),
+    }?;
+    // Version 2: the lens corrections the file carries, if any.
+    if version >= 2 {
+        let n = cur.u32s(1)?[0] as usize;
+        if n > 0 {
+            if n > 64 {
+                return Err(bad("more lens radii than a lens has"));
+            }
+            let floats: Vec<f32> = cur
+                .take(n * 5 * 4)?
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let part = |i: usize| floats[i * n..(i + 1) * n].to_vec();
+            photo.lens = Some(crate::develop::Lens {
+                radii: part(0),
+                distortion: part(1),
+                red: part(2),
+                blue: part(3),
+                light: part(4),
+            });
+        }
     }
+    Ok(photo)
 }
 
 /// Develop a sensor's mosaic into 8-bit sRGB, plainly.

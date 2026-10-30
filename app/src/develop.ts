@@ -19,11 +19,14 @@ export type RawSettings = {
   sharpen: number;
   /** Detail: edge-aware smoothing, 0 to 100. */
   noise: number;
+  /** Leave off the lens corrections the file carries (a Fuji's RAF). */
+  uncorrected?: boolean;
 };
 
-/** What the develop window starts from: the size and the camera's own
- * white balance as a temperature and tint. */
-export type RawInfo = { width: number; height: number; asShot: [number, number] };
+/** What the develop window starts from: the size, the camera's own
+ * white balance as a temperature and tint, and whether the file carries
+ * lens corrections. */
+export type RawInfo = { width: number; height: number; asShot: [number, number]; lens?: boolean };
 
 export const RAW_DEFAULTS: RawSettings = {
   exposure: 0,
@@ -44,7 +47,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white">, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected">, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -71,6 +74,7 @@ export function cleanSettings(x: unknown): RawSettings {
   if (Array.isArray(w) && w.length === 2 && w.every((v) => typeof v === "number" && Number.isFinite(v))) {
     out.white = [Math.min(25000, Math.max(2000, w[0])), Math.min(150, Math.max(-150, w[1]))];
   }
+  if (o.uncorrected === true) out.uncorrected = true;
   return out;
 }
 
@@ -95,7 +99,11 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
   const keys = Object.keys(RANGES) as (keyof typeof RANGES)[];
   const white = (a?: [number, number], b?: [number, number]) =>
     (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1]);
-  return keys.every((k) => p.settings[k] === s[k]) && white(p.settings.white, s.white);
+  return (
+    keys.every((k) => p.settings[k] === s[k]) &&
+    white(p.settings.white, s.white) &&
+    !!p.settings.uncorrected === !!s.uncorrected
+  );
 }
 
 /** Lightroom's names for a light, and what they are. */

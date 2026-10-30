@@ -76,6 +76,307 @@ pub struct RawPhoto {
     /// camera's own balance — fixed for the photograph, so a change of
     /// white balance is not also a change of exposure.
     auto_gain: f32,
+    /// The lens corrections the camera wrote into the file, if any.
+    pub(crate) lens: Option<Lens>,
+}
+
+/// A lens's corrections as the camera wrote them for one photograph (a
+/// Fuji's RAF; `core/rawin` reads them): at each radius from the middle,
+/// a fraction of the half-diagonal, the distortion in per cent, red's and
+/// blue's scale against green as fractions, and the light that reaches
+/// there in per cent of the middle's. Applied the way darktable applies
+/// them: the light made even where the sensor caught it, then each point
+/// of the picture taken from `1 + distortion/100` times as far out as it
+/// lands (red and blue a little more or less), zoomed in just enough
+/// that no corner is left with nothing in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lens {
+    pub radii: Vec<f32>,
+    pub distortion: Vec<f32>,
+    pub red: Vec<f32>,
+    pub blue: Vec<f32>,
+    pub light: Vec<f32>,
+}
+
+/// How finely the lens's curves are tabled, over the square of the radius
+/// (so that a pixel needs no square root to look one up).
+const LENS_STEPS: usize = 1024;
+
+impl Lens {
+    /// Each list as long as the radii, the radii rising, every value
+    /// finite: what is worth applying.
+    fn usable(&self) -> bool {
+        let n = self.radii.len();
+        n >= 2
+            && [&self.distortion, &self.red, &self.blue, &self.light]
+                .iter()
+                .all(|v| v.len() == n)
+            && self.radii.windows(2).all(|w| w[0] < w[1])
+            && [
+                &self.radii,
+                &self.distortion,
+                &self.red,
+                &self.blue,
+                &self.light,
+            ]
+            .iter()
+            .all(|v| v.iter().all(|x| x.is_finite()))
+    }
+
+    /// One of the curves at radius `r`, straight between the radii, held
+    /// at the ends — from `at_nought` at the middle where the first
+    /// radius is past it.
+    fn at(&self, values: &[f32], at_nought: f32, r: f32) -> f32 {
+        let (xs, ys) = (&self.radii, values);
+        if r <= xs[0] {
+            return if xs[0] > 0.0 {
+                at_nought + (ys[0] - at_nought) * (r / xs[0]).max(0.0)
+            } else {
+                ys[0]
+            };
+        }
+        let i = xs.partition_point(|&x| x <= r);
+        if i >= xs.len() {
+            return ys[ys.len() - 1];
+        }
+        let t = (r - xs[i - 1]) / (xs[i] - xs[i - 1]);
+        ys[i - 1] + (ys[i] - ys[i - 1]) * t
+    }
+
+    /// What brightens a site whose radius squared is `rr`, tabled over
+    /// `rr` from nought to one (the corner) and a little past.
+    fn light_table(&self) -> Vec<f32> {
+        (0..=LENS_STEPS)
+            .map(|i| {
+                let r = (i as f32 / LENS_STEPS as f32 * 1.25).sqrt();
+                100.0 / self.at(&self.light, 100.0, r).max(10.0)
+            })
+            .collect()
+    }
+
+    /// The warp: for each channel, how many times as far out as a point
+    /// lands its source is, tabled over the landing radius squared; and
+    /// the zoom that keeps a picture `w` by `h` full to its edges. `None`
+    /// where the curve folds back on itself, which no lens does.
+    fn warp(&self, w: f32, h: f32) -> Option<Warp> {
+        // From where a point comes from (a radius in the source) to where
+        // it lands: `rin / m`, `m = 1 + distortion / 100`.
+        const FINE: usize = 512;
+        let mut lands = Vec::with_capacity(FINE + 1);
+        for k in 0..=FINE {
+            let rin = k as f32 / FINE as f32 * 1.2;
+            let m = 1.0 + self.at(&self.distortion, 0.0, rin) / 100.0;
+            if m <= 0.0 {
+                return None;
+            }
+            let scale = [
+                m * (1.0 + self.at(&self.red, 0.0, rin)),
+                m,
+                m * (1.0 + self.at(&self.blue, 0.0, rin)),
+            ];
+            lands.push((rin / m, scale));
+        }
+        if lands.windows(2).any(|w| w[1].0 <= w[0].0) {
+            return None;
+        }
+        let most = lands[FINE].0 * lands[FINE].0;
+        // Read back over where points land, by the radius squared.
+        let mut table = Vec::with_capacity(LENS_STEPS + 1);
+        let mut k = 0;
+        for i in 0..=LENS_STEPS {
+            let rr = i as f32 / LENS_STEPS as f32 * most;
+            let r = rr.sqrt();
+            while k + 1 < FINE && lands[k + 1].0 < r {
+                k += 1;
+            }
+            let (a, b) = (lands[k], lands[(k + 1).min(FINE)]);
+            let t = if b.0 > a.0 {
+                ((r - a.0) / (b.0 - a.0)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            table.push([0, 1, 2].map(|c| a.1[c] + (b.1[c] - a.1[c]) * t));
+        }
+        let mut warp = Warp {
+            table,
+            per_rr: LENS_STEPS as f32 / most,
+            half_diagonal: (w * w + h * h).sqrt() * 0.5,
+            zoom: 1.0,
+        };
+        // The least zoom that keeps every edge's source inside the
+        // picture, found by halving.
+        let fits = |warp: &Warp| {
+            let (hw, hh) = (w * 0.5, h * 0.5);
+            (0..=64).all(|i| {
+                let f = i as f32 / 64.0;
+                [
+                    (-hw + f * w, -hh),
+                    (-hw + f * w, hh),
+                    (-hw, -hh + f * h),
+                    (hw, -hh + f * h),
+                ]
+                .iter()
+                .all(|&(x, y)| {
+                    (0..3).all(|c| {
+                        let (sx, sy) = warp.source(x, y, c);
+                        sx.abs() <= hw + 0.5 && sy.abs() <= hh + 0.5
+                    })
+                })
+            })
+        };
+        if !fits(&warp) {
+            let (mut lo, mut hi) = (1.0f32, 2.0f32);
+            warp.zoom = hi;
+            if !fits(&warp) {
+                return None;
+            }
+            for _ in 0..30 {
+                warp.zoom = 0.5 * (lo + hi);
+                if fits(&warp) {
+                    hi = warp.zoom;
+                } else {
+                    lo = warp.zoom;
+                }
+            }
+            warp.zoom = hi;
+        }
+        Some(warp)
+    }
+}
+
+/// Brighten the sites of a region (rows `y0..y1`, columns `x0..x1`, as
+/// `region` lays them out) of a photograph `w` by `h` by the lens's light
+/// table, each by how far it is from the middle.
+fn brighten(
+    light: &[f32],
+    sites: &mut [[f32; 3]],
+    (w, h): (usize, usize),
+    (y0, y1, x0, x1): (usize, usize, usize, usize),
+) {
+    let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
+    let per_rr = LENS_STEPS as f32 / 1.25 / (hw * hw + hh * hh);
+    let width = x1 - x0;
+    for (row, y) in sites.chunks_mut(width.max(1)).zip(y0..y1) {
+        let dy = y as f32 + 0.5 - hh;
+        for (px, x) in row.iter_mut().zip(x0..x1) {
+            let dx = x as f32 + 0.5 - hw;
+            let f = ((dx * dx + dy * dy) * per_rr).min(LENS_STEPS as f32);
+            let i = (f as usize).min(LENS_STEPS - 1);
+            let gain = light[i] + (light[i + 1] - light[i]) * (f - i as f32);
+            for v in px.iter_mut() {
+                *v *= gain;
+            }
+        }
+    }
+}
+
+/// [`Lens::warp`] made ready: for a point of the corrected picture, where
+/// in the photograph each channel of it comes from.
+struct Warp {
+    /// Per channel, how many times as far out the source is, over the
+    /// landing radius squared (in half-diagonals) times `per_rr`.
+    table: Vec<[f32; 3]>,
+    per_rr: f32,
+    half_diagonal: f32,
+    zoom: f32,
+}
+
+impl Warp {
+    /// The source of channel `c` at (`x`, `y`) from the middle, in pixels
+    /// from the middle.
+    #[inline]
+    fn source(&self, x: f32, y: f32, c: usize) -> (f32, f32) {
+        let s = self.scales(x, y)[c];
+        (x / self.zoom * s, y / self.zoom * s)
+    }
+
+    #[inline]
+    fn scales(&self, x: f32, y: f32) -> [f32; 3] {
+        let (qx, qy) = (x / self.zoom, y / self.zoom);
+        let rr = (qx * qx + qy * qy) / (self.half_diagonal * self.half_diagonal);
+        let f = (rr * self.per_rr).min(LENS_STEPS as f32);
+        let i = (f as usize).min(LENS_STEPS - 1);
+        let t = f - i as f32;
+        let (a, b) = (self.table[i], self.table[i + 1]);
+        [0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * t)
+    }
+}
+
+/// Turn a picture upright by its EXIF orientation (as `orient` does) and,
+/// where there is a `warp`, take each point from where the lens put it,
+/// red, green and blue each from its own place, between pixels by their
+/// four neighbours.
+fn orient_through(
+    px: Vec<u8>,
+    w: usize,
+    h: usize,
+    o: u8,
+    warp: Option<&Warp>,
+) -> (usize, usize, Vec<u8>) {
+    let Some(warp) = warp else {
+        return orient(px, w, h, o);
+    };
+    let swap = (5..=8).contains(&o);
+    let (ow, oh) = if swap { (h, w) } else { (w, h) };
+    let mut out = vec![0u8; px.len()];
+    let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
+    let inv_zoom = 1.0 / warp.zoom;
+    let per_rr = warp.per_rr / (warp.half_diagonal * warp.half_diagonal);
+    // Source positions in 256ths of a pixel, kept a pixel short of the
+    // far edges so that the four neighbours are always there.
+    let (most_x, most_y) = (((w - 1) * 256) as f32, ((h - 1) * 256) as f32);
+    let (hw256, hh256) = ((hw - 0.5) * 256.0, (hh - 0.5) * 256.0);
+    let (right, down) = (if w > 1 { 4 } else { 0 }, if h > 1 { w * 4 } else { 0 });
+    // Where (x, y) of the photograph goes in the turned picture, as a
+    // start for each row and a step along it.
+    let place = |x: usize, y: usize| match o {
+        2 => (w - 1 - x, y),
+        3 => (w - 1 - x, h - 1 - y),
+        4 => (x, h - 1 - y),
+        5 => (y, x),
+        6 => (h - 1 - y, x),
+        7 => (h - 1 - y, w - 1 - x),
+        8 => (y, w - 1 - x),
+        _ => (x, y),
+    };
+    let index = |(nx, ny): (usize, usize)| (ny * ow + nx) as isize * 4;
+    let step = if w > 1 {
+        index(place(1, 0)) - index(place(0, 0))
+    } else {
+        0
+    };
+    // Walked in the photograph's own rows, so that what each point reads
+    // is near what the last one read; written where `orient` puts it.
+    for y in 0..h {
+        let qy = (y as f32 + 0.5 - hh) * inv_zoom;
+        let qyy = qy * qy;
+        let mut to = index(place(0, y));
+        for x in 0..w {
+            let qx = (x as f32 + 0.5 - hw) * inv_zoom;
+            let f = ((qx * qx + qyy) * per_rr).min(LENS_STEPS as f32 - 0.001);
+            let i = f as usize;
+            let t = f - i as f32;
+            let (a, b) = (warp.table[i], warp.table[i + 1]);
+            let at_out = to as usize;
+            for c in 0..3 {
+                let k = (a[c] + (b[c] - a[c]) * t) * 256.0;
+                // Pixel centres are at the halves.
+                let fx = (qx * k + hw256).clamp(0.0, most_x) as u32;
+                let fy = (qy * k + hh256).clamp(0.0, most_y) as u32;
+                let (x0, y0) = ((fx >> 8) as usize, (fy >> 8) as usize);
+                let (tx, ty) = (fx & 255, fy & 255);
+                let r = if x0 + 1 < w { right } else { 0 };
+                let d = if y0 + 1 < h { down } else { 0 };
+                let at = (y0 * w + x0) * 4 + c;
+                let top = px[at] as u32 * (256 - tx) + px[at + r] as u32 * tx;
+                let bottom = px[at + d] as u32 * (256 - tx) + px[at + d + r] as u32 * tx;
+                out[at_out + c] = ((top * (256 - ty) + bottom * ty + 32768) >> 16) as u8;
+            }
+            out[at_out + 3] = 255;
+            to += step;
+        }
+    }
+    (ow, oh, out)
 }
 
 /// XYZ to linear sRGB's primaries, which stand in as the camera's matrix
@@ -309,9 +610,21 @@ impl RawPhoto {
             to_srgb: camera_to_srgb(&m.xyz_to_cam),
             orientation: m.orientation,
             auto_gain: 1.0,
+            lens: None,
         };
         photo.auto_gain = photo.measure_gain();
         Ok(photo)
+    }
+
+    /// The lens corrections to develop with: the file's, unless the
+    /// settings leave them off or they are not worth applying.
+    fn lens_for(&self, s: &RawDevelop) -> Option<&Lens> {
+        self.lens.as_ref().filter(|l| !s.uncorrected && l.usable())
+    }
+
+    /// Whether the file carries lens corrections this photograph can use.
+    pub fn has_lens(&self) -> bool {
+        self.lens.as_ref().is_some_and(Lens::usable)
     }
 
     /// The developed size, after the camera's orientation.
@@ -771,10 +1084,15 @@ impl RawPhoto {
         // In bands, so X-Trans's working planes are a band's, not the
         // photograph's.
         const BAND: usize = 128;
+        let lens = self.lens_for(s);
+        let light = lens.map(Lens::light_table);
         let (mut planes, mut band) = (Planes::default(), Vec::new());
         for y0 in (0..h).step_by(BAND) {
             let y1 = (y0 + BAND).min(h);
             self.region((y0, y1, 0, w), &look.wb, &mut planes, &mut band);
+            if let Some(light) = &light {
+                brighten(light, &mut band, (w, h), (y0, y1, 0, w));
+            }
             for (px, out) in band
                 .iter()
                 .zip(upright[y0 * w * 4..y1 * w * 4].chunks_exact_mut(4))
@@ -784,7 +1102,8 @@ impl RawPhoto {
             }
         }
         let upright = detail(&upright, w, h, s.sharpen, s.noise).unwrap_or(upright);
-        let (width, height, rgba8) = orient(upright, w, h, self.orientation);
+        let warp = lens.and_then(|l| l.warp(w as f32, h as f32));
+        let (width, height, rgba8) = orient_through(upright, w, h, self.orientation, warp.as_ref());
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -831,6 +1150,17 @@ impl RawPhoto {
             &mut Planes::default(),
             &mut sites,
         );
+        // The light made even, as in the develop; the square is not moved
+        // by the lens's distortion, which at one site a pixel is a shift
+        // of where it is taken from, not of what it shows.
+        if let Some(lens) = self.lens_for(s) {
+            brighten(
+                &lens.light_table(),
+                &mut sites,
+                (self.width, self.height),
+                (my0, my1, mx0, mx1),
+            );
+        }
         for (site, out) in sites.iter().zip(px.chunks_exact_mut(4)) {
             let c = look.finish(*site);
             out.copy_from_slice(&[c[0], c[1], c[2], 255]);
@@ -1191,12 +1521,26 @@ impl RawPreview {
     /// Develop the preview as `photo` would be developed with `s`.
     pub fn develop(&self, photo: &RawPhoto, s: &RawDevelop) -> SourceImage {
         let look = Look::new(photo, s);
-        let mut upright = vec![0u8; self.width * self.height * 4];
-        for (i, c) in self.cam.iter().enumerate() {
-            let c = look.finish([0, 1, 2].map(|k| (c[k] * look.wb[k]).min(1.0)));
+        let (pw, ph) = (self.width, self.height);
+        let mut sites: Vec<[f32; 3]> = self
+            .cam
+            .iter()
+            .map(|c| [0, 1, 2].map(|k| (c[k] * look.wb[k]).min(1.0)))
+            .collect();
+        // The lens's corrections as the develop makes them, at the
+        // preview's size: they are in fractions of the picture.
+        let lens = photo.lens_for(s);
+        if let Some(lens) = lens {
+            brighten(&lens.light_table(), &mut sites, (pw, ph), (0, ph, 0, pw));
+        }
+        let mut upright = vec![0u8; pw * ph * 4];
+        for (i, c) in sites.iter().enumerate() {
+            let c = look.finish(*c);
             upright[i * 4..i * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
-        let (width, height, rgba8) = orient(upright, self.width, self.height, photo.orientation);
+        let warp = lens.and_then(|l| l.warp(pw as f32, ph as f32));
+        let (width, height, rgba8) =
+            orient_through(upright, pw, ph, photo.orientation, warp.as_ref());
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -1602,6 +1946,219 @@ mod tests {
             }
         });
         crate::raw::unpack(&dng).unwrap()
+    }
+
+    /// A lens of one curve each, straight from the middle to past the
+    /// corners.
+    fn lens_of(distortion: [f32; 2], light: [f32; 2], red: f32, blue: f32) -> Lens {
+        Lens {
+            radii: vec![0.0, 1.2],
+            distortion: distortion.to_vec(),
+            red: vec![0.0, red],
+            blue: vec![0.0, blue],
+            light: light.to_vec(),
+        }
+    }
+
+    fn luma(img: &SourceImage, x: u32, y: u32) -> f32 {
+        let p = px(img, x, y);
+        0.3 * p[0] as f32 + 0.59 * p[1] as f32 + 0.11 * p[2] as f32
+    }
+
+    #[test]
+    fn a_lens_s_dark_corners_are_made_even() {
+        let lens = lens_of([0.0, 0.0], [100.0, 40.0], 0.0, 0.0);
+        let (w, h) = (120u32, 80u32);
+        // A grey card through a lens that darkens towards the corners
+        // as the lens says it does.
+        let r = |x: u32, y: u32| {
+            let (dx, dy) = (x as f32 + 0.5 - 60.0, y as f32 + 0.5 - 40.0);
+            (dx * dx + dy * dy).sqrt() / (60f32 * 60.0 + 40.0 * 40.0).sqrt()
+        };
+        let packed = sample::packed(w, h, 4095, [1.0; 3], |x, y| {
+            [0.3 * (1.0 - 0.5 * r(x, y)); 3]
+        });
+        let mut photo = crate::raw::unpack(&packed).unwrap();
+        photo.lens = Some(lens);
+        assert!(photo.has_lens());
+        let s = RawDevelop::default();
+        let on = photo.develop(&s);
+        let off = photo.develop(&RawDevelop {
+            uncorrected: true,
+            ..s
+        });
+        let (middle, corner) = ((60, 40), (4, 4));
+        assert!(luma(&off, corner.0, corner.1) < luma(&off, middle.0, middle.1) - 20.0);
+        assert!(
+            (luma(&on, corner.0, corner.1) - luma(&on, middle.0, middle.1)).abs() < 4.0,
+            "{} against {}",
+            luma(&on, corner.0, corner.1),
+            luma(&on, middle.0, middle.1)
+        );
+        // The preview is the develop, smaller, here too.
+        let small = photo.preview(60).develop(&photo, &s);
+        let (sw, sh) = (small.width, small.height);
+        let (pm, pc) = (luma(&small, sw / 2, sh / 2), luma(&small, 1, 1));
+        assert!((pm - pc).abs() < 5.0, "{pc} against {pm}");
+    }
+
+    /// Where the bright part of a picture is, on average.
+    fn centroid(img: &SourceImage) -> (f32, f32) {
+        let (mut sx, mut sy, mut n) = (0f32, 0f32, 0f32);
+        for y in 0..img.height {
+            for x in 0..img.width {
+                let v = luma(img, x, y);
+                if v > 128.0 {
+                    sx += x as f32 + 0.5;
+                    sy += y as f32 + 0.5;
+                    n += 1.0;
+                }
+            }
+        }
+        (sx / n, sy / n)
+    }
+
+    #[test]
+    fn a_lens_s_barrel_is_put_straight_where_it_says() {
+        // Four in a hundred short everywhere: a point lands 1/0.96 as far
+        // out as the sensor caught it.
+        let (w, h) = (200u32, 150u32);
+        let packed = sample::packed(w, h, 4095, [1.0; 3], |x, y| {
+            if (146..154).contains(&x) && (30..38).contains(&y) {
+                [0.9; 3]
+            } else {
+                [0.02; 3]
+            }
+        });
+        let mut photo = crate::raw::unpack(&packed).unwrap();
+        let s = RawDevelop::default();
+        let (bx, by) = centroid(&photo.develop(&s));
+        photo.lens = Some(lens_of([-4.0, -4.0], [100.0, 100.0], 0.0, 0.0));
+        let (cx, cy) = centroid(&photo.develop(&s));
+        let (ex, ey) = (100.0 + (bx - 100.0) / 0.96, 75.0 + (by - 75.0) / 0.96);
+        assert!(
+            (cx - ex).abs() < 0.3 && (cy - ey).abs() < 0.3,
+            "({cx}, {cy}) against ({ex}, {ey})"
+        );
+        // Turned, it lands in the same place of the turned picture.
+        photo.orientation = 6;
+        let turned = photo.develop(&s);
+        let (tx, ty) = centroid(&turned);
+        assert!(
+            (tx - (150.0 - ey)).abs() < 0.3 && (ty - ex).abs() < 0.3,
+            "({tx}, {ty})"
+        );
+    }
+
+    #[test]
+    fn a_lens_s_pincushion_is_zoomed_so_no_corner_is_empty() {
+        // Points taken from further out than they land: without a zoom
+        // the corners would be taken from past the sensor's edge.
+        let (w, h) = (120f32, 90f32);
+        for (lens, least, most) in [
+            (lens_of([0.0, 6.0], [100.0, 100.0], 0.0, 0.0), 1.04, 1.06),
+            (lens_of([0.0, 3.0], [100.0, 100.0], 0.02, -0.02), 1.02, 1.05),
+            (lens_of([0.0, -6.0], [100.0, 100.0], 0.0, 0.0), 1.0, 1.0),
+        ] {
+            let warp = lens.warp(w, h).unwrap();
+            assert!(
+                (least..=most).contains(&warp.zoom),
+                "zoom {} for {:?}",
+                warp.zoom,
+                lens.distortion
+            );
+            for i in 0..=200 {
+                let f = i as f32 / 200.0;
+                for (x, y) in [
+                    (-w / 2.0 + f * w, -h / 2.0),
+                    (-w / 2.0 + f * w, h / 2.0),
+                    (-w / 2.0, -h / 2.0 + f * h),
+                    (w / 2.0, -h / 2.0 + f * h),
+                ] {
+                    for c in 0..3 {
+                        let (sx, sy) = warp.source(x, y, c);
+                        assert!(sx.abs() <= w / 2.0 + 0.5 && sy.abs() <= h / 2.0 + 0.5);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_lens_s_colour_fringes_move_red_and_blue_apart_from_green() {
+        // Red eight in a hundred further out than green at the corners:
+        // a white square near the edge comes out with red's part moved.
+        let (w, h) = (200u32, 150u32);
+        let packed = sample::packed(w, h, 4095, [1.0; 3], |x, y| {
+            if (170..180).contains(&x) && (70..80).contains(&y) {
+                [0.9; 3]
+            } else {
+                [0.02; 3]
+            }
+        });
+        let mut photo = crate::raw::unpack(&packed).unwrap();
+        photo.lens = Some(lens_of([0.0, 0.0], [100.0, 100.0], 0.08, 0.0));
+        let img = photo.develop(&RawDevelop::default());
+        // Red is taken from about 3.7% further out there, so the square
+        // in red sits that much further in than in green: it starts and
+        // ends a few pixels sooner.
+        let span = |c: usize| {
+            let lit: Vec<u32> = (100..200).filter(|&x| px(&img, x, 75)[c] > 200).collect();
+            (lit[0], lit[lit.len() - 1])
+        };
+        let (red, green) = (span(0), span(1));
+        assert!(
+            red.0 + 2 < green.0 && red.1 + 2 < green.1,
+            "red {red:?}, green {green:?}"
+        );
+    }
+
+    #[test]
+    fn corrections_left_off_are_the_develop_without_a_lens() {
+        let mut photo = grey_card([0.5, 1.0, 0.7]);
+        let s = RawDevelop {
+            exposure: 0.3,
+            ..Default::default()
+        };
+        let plain = photo.develop(&s);
+        photo.lens = Some(lens_of([-3.0, -6.0], [100.0, 60.0], 0.01, -0.01));
+        let off = photo.develop(&RawDevelop {
+            uncorrected: true,
+            ..s
+        });
+        assert_eq!(plain.rgba8, off.rgba8);
+        assert_ne!(plain.rgba8, photo.develop(&s).rgba8);
+    }
+
+    #[test]
+    fn a_packed_mosaic_carries_its_lens() {
+        let mut packed = sample::packed(32, 16, 4095, [1.0; 3], |_, _| [0.3; 3]);
+        // Version 1, as before: no lens.
+        assert!(crate::raw::unpack(&packed).unwrap().lens.is_none());
+        packed[4..8].copy_from_slice(&2u32.to_le_bytes());
+        let lens = lens_of([-1.0, -2.0], [100.0, 80.0], 0.001, -0.002);
+        let mut with = packed.clone();
+        with.extend_from_slice(&2u32.to_le_bytes());
+        for v in [
+            &lens.radii,
+            &lens.distortion,
+            &lens.red,
+            &lens.blue,
+            &lens.light,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            with.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(crate::raw::unpack(&with).unwrap().lens, Some(lens));
+        // Version 2 with none, and cut short anywhere in the lens.
+        let mut none = packed.clone();
+        none.extend_from_slice(&0u32.to_le_bytes());
+        assert!(crate::raw::unpack(&none).unwrap().lens.is_none());
+        for end in packed.len()..with.len() {
+            assert!(crate::raw::unpack(&with[..end]).is_err(), "cut at {end}");
+        }
     }
 
     /// X-Trans away from the edges reads its neighbours from the tile's

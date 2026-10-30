@@ -26,7 +26,9 @@ With `--io` it times a photograph on its way in and out instead
 its picture encoded and with it kept, the draft's skeleton, and a
 24-megapixel raw mosaic (made on the page, packed as the raw reader
 packs one) opened, previewed and developed in full — as Bayer, and
-developed again as Fuji's X-Trans, which has a demosaic of its own.
+developed again as Fuji's X-Trans, which has a demosaic of its own,
+and once more with a lens's corrections (straightened, its colour
+fringes closed, its corners lifted) as a Fuji's RAF carries them.
 
 ```sh
 node tools/bench/engine/run.mjs --io

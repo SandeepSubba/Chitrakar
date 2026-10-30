@@ -288,7 +288,11 @@ contrast, vibrance, saturation, and Detail (sharpening, noise
 reduction, judged in a 1:1 square from `develop_square`) — with a
 block-averaged `RawPreview` for the sliders; settings kept by name
 (`prefs.developPresets`) and given to other picked raw layers as one
-step (`stage_redevelop` + `commit_staged_develop`). Placed, the raw file is kept in the document
+step (`stage_redevelop` + `commit_staged_develop`). X-Trans has a
+demosaic of its own (`x_trans_region`, judged by the ignored
+`demosaic_against_truth`); a Fuji's RAF carries its lens's corrections,
+which `core/rawin` reads (`fuji_lens`) and develop applies unless
+`RawDevelop::uncorrected` says not to. Placed, the raw file is kept in the document
 (`Document::originals`, `originals/` in the zip) and the settings on
 the picture (`RasterRef::develop`), so Develop again is a `SetKind`
 with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and

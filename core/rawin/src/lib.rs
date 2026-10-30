@@ -18,7 +18,12 @@
 //! crop (top, right, bottom, left, u32 each); the filter's colour at each
 //! site of the 48 by 48 square from the sensor's corner (a byte each,
 //! which every pattern repeats within); whether the samples are whole
-//! numbers (0) or floats (1); and the samples, u16 or f32.
+//! numbers (0) or floats (1); and the samples, u16 or f32. Version 2
+//! (what is written now) goes on with the lens corrections the file
+//! carries: a count `n` (u32, nought for none), then `n` radii from the
+//! middle as fractions of the half-diagonal, and at each the distortion
+//! (per cent), red's and blue's scale against green (fractions), and the
+//! light that reaches there (per cent of the middle's), `5n` f32 in all.
 
 use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
 
@@ -31,6 +36,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut raw = rawler::decode(&source, &rawler::decoders::RawDecodeParams::default())
         .map_err(|e| format!("camera raw: {e}"))?;
     correct(&mut raw, bytes);
+    let lens = fuji_lens(bytes);
     // The camera's colours from XYZ, measured under daylight where the file
     // (or rawler's tables) has it, otherwise under whatever light it was;
     // none at all for a camera nobody measured.
@@ -124,6 +130,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
             crops,
             |_, _| 0,
             Samples::Float(&floats),
+            lens.as_ref(),
         ));
     }
     let color_at = |row: usize, col: usize| filter.as_ref().map_or(0, |c| c.color_at(row, col));
@@ -162,6 +169,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
         crops,
         color_at,
         samples,
+        lens.as_ref(),
     ))
 }
 
@@ -326,6 +334,7 @@ fn pack(
     crops: [u32; 4],
     color_at: impl Fn(usize, usize) -> usize,
     samples: Samples,
+    lens: Option<&Lens>,
 ) -> Vec<u8> {
     let bytes = match &samples {
         Samples::Int(v) => v.len() * 2,
@@ -333,7 +342,7 @@ fn pack(
     };
     let mut out = Vec::with_capacity(4 + 4 * 5 + 4 * 24 + 16 + PATTERN * PATTERN + 1 + bytes);
     out.extend_from_slice(b"CKRW");
-    for v in std::iter::once(1u32).chain(size) {
+    for v in std::iter::once(2u32).chain(size) {
         out.extend_from_slice(&v.to_le_bytes());
     }
     for v in levels.iter().flatten().chain(xyz_to_cam) {
@@ -367,7 +376,139 @@ fn pack(
             }
         }
     }
+    match lens {
+        None => out.extend_from_slice(&0u32.to_le_bytes()),
+        Some(l) => {
+            out.extend_from_slice(&(l.radii.len() as u32).to_le_bytes());
+            for v in [&l.radii, &l.distortion, &l.red, &l.blue, &l.light]
+                .into_iter()
+                .flatten()
+            {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
     out
+}
+
+/// A lens's corrections, as the camera wrote them for this photograph:
+/// at each radius from the middle (a fraction of the half-diagonal), the
+/// distortion in per cent, red's and blue's scale against green as
+/// fractions, and the light there in per cent of the middle's.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lens {
+    pub radii: Vec<f32>,
+    pub distortion: Vec<f32>,
+    pub red: Vec<f32>,
+    pub blue: Vec<f32>,
+    pub light: Vec<f32>,
+}
+
+/// The lens corrections in a Fuji RAF: tags 0xF00B (distortion), 0xF00F
+/// (chromatic aberration) and 0xF010 (vignetting) of the RAF's own
+/// directory (0xF000, in the TIFF the header's word at 100 points at),
+/// signed rationals. Two layouts, read as darktable reads them: X-Trans
+/// IV and V write nine radii (19, 29 and 19 values), the cameras before
+/// eleven (23, 31 and 23), with chromatic aberration's first radius left
+/// out as nought. `None` for anything else, or radii that do not agree.
+pub fn fuji_lens(bytes: &[u8]) -> Option<Lens> {
+    if bytes.get(..8)? != b"FUJIFILM" {
+        return None;
+    }
+    let be32 = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    let base = be32(100)? as usize;
+    let little = match bytes.get(base..base + 4)? {
+        [b'I', b'I', 42, 0] => true,
+        [b'M', b'M', 0, 42] => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| {
+        let b: [u8; 2] = bytes.get(at..at + 2)?.try_into().ok()?;
+        Some(if little {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    };
+    let u32_at = |at: usize| {
+        let b: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
+    // A directory's entries: tag, type, count, and the value's offset
+    // from `base` (or the entry's own place, where it fits).
+    let entries = |dir: usize| -> Option<Vec<(u16, u16, u32, usize)>> {
+        let at = base.checked_add(dir)?;
+        let n = u16_at(at)? as usize;
+        (0..n.min(512))
+            .map(|i| {
+                let e = at + 2 + 12 * i;
+                let (tag, ty, count) = (u16_at(e)?, u16_at(e + 2)?, u32_at(e + 4)?);
+                let value = u32_at(e + 8)? as usize;
+                Some((tag, ty, count, value))
+            })
+            .collect()
+    };
+    let first = entries(u32_at(base + 4)? as usize)?;
+    let &(_, _, _, fuji) = first.iter().find(|e| e.0 == 0xF000)?;
+    let fuji = entries(fuji)?;
+    let rationals = |tag: u16| -> Option<Vec<f32>> {
+        let &(_, ty, count, at) = fuji.iter().find(|e| e.0 == tag)?;
+        if ty != 10 || count > 64 {
+            return None;
+        }
+        (0..count as usize)
+            .map(|i| {
+                let at = base.checked_add(at)?.checked_add(i * 8)?;
+                let (n, d) = (u32_at(at)? as i32, u32_at(at + 4)? as i32);
+                (d != 0).then(|| n as f32 / d as f32)
+            })
+            .collect()
+    };
+    let (d, c, v) = (rationals(0xF00B)?, rationals(0xF00F)?, rationals(0xF010)?);
+    let lens = match (d.len(), c.len(), v.len()) {
+        (19, 29, 19) => {
+            let n = 9;
+            if (0..n).any(|i| c[i + 1] != d[i + 1] || v[i + 1] != d[i + 1]) {
+                return None;
+            }
+            Lens {
+                radii: d[1..=n].to_vec(),
+                distortion: d[10..10 + n].to_vec(),
+                red: c[10..10 + n].to_vec(),
+                blue: c[19..19 + n].to_vec(),
+                light: v[10..10 + n].to_vec(),
+            }
+        }
+        (23, 31, 23) => {
+            let n = 11;
+            if (1..n).any(|i| c[i] != d[i + 1]) || (0..n).any(|i| v[i + 1] != d[i + 1]) {
+                return None;
+            }
+            let ca = |from: usize| {
+                (0..n)
+                    .map(|i| if i == 0 { 0.0 } else { c[i + from] })
+                    .collect()
+            };
+            Lens {
+                radii: d[1..=n].to_vec(),
+                distortion: d[12..12 + n].to_vec(),
+                red: ca(10),
+                blue: ca(20),
+                light: v[12..12 + n].to_vec(),
+            }
+        }
+        _ => return None,
+    };
+    let sane = lens.radii.windows(2).all(|w| w[0] < w[1])
+        && lens.radii.iter().all(|r| (0.0..2.0).contains(r))
+        && lens.distortion.iter().all(|d| d.abs() < 50.0)
+        && lens.red.iter().chain(&lens.blue).all(|c| c.abs() < 0.1)
+        && lens.light.iter().all(|l| (10.0..=200.0).contains(l));
+    sane.then_some(lens)
 }
 
 /// The module the page's worker loads, built for WASI rather than with
@@ -562,6 +703,133 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A RAF as far as its lens corrections: the header's pointer at
+    /// 100 to a TIFF whose one directory points at the RAF's own (0xF000),
+    /// which holds the three tags as signed rationals.
+    fn raf_with(tags: &[(u16, Vec<(i32, i32)>)]) -> Vec<u8> {
+        let mut out = b"FUJIFILMCCD-RAW 0201FF383501".to_vec();
+        out.resize(104, 0);
+        let base = 128u32;
+        out[100..104].copy_from_slice(&base.to_be_bytes());
+        out.resize(base as usize, 0);
+        let le = |v: u32| v.to_le_bytes();
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend(le(8));
+        // The first directory: one entry, the RAF's own.
+        tiff.extend(1u16.to_le_bytes());
+        let fuji_at = 8 + 2 + 12 + 4;
+        tiff.extend(0xF000u16.to_le_bytes());
+        tiff.extend(4u16.to_le_bytes());
+        tiff.extend(le(1));
+        tiff.extend(le(fuji_at));
+        tiff.extend(le(0));
+        let n = tags.len() as u32;
+        let mut values_at = fuji_at + 2 + 12 * n + 4;
+        tiff.extend((n as u16).to_le_bytes());
+        for (tag, values) in tags {
+            tiff.extend(tag.to_le_bytes());
+            tiff.extend(10u16.to_le_bytes());
+            tiff.extend(le(values.len() as u32));
+            tiff.extend(le(values_at));
+            values_at += 8 * values.len() as u32;
+        }
+        tiff.extend(le(0));
+        for (_, values) in tags {
+            for (n, d) in values {
+                tiff.extend(n.to_le_bytes());
+                tiff.extend(d.to_le_bytes());
+            }
+        }
+        out.extend(tiff);
+        out
+    }
+
+    #[test]
+    fn a_fujis_lens_corrections_are_read_in_either_layout() {
+        // X-Trans IV and V: nine radii.
+        let radii: Vec<(i32, i32)> = (1..=9).map(|k| (k * 100, 900)).collect();
+        let head = |n: usize| vec![(4000, n as i32)];
+        let d: Vec<(i32, i32)> = [
+            head(9),
+            radii.clone(),
+            (1..=9).map(|k| (-k * 6553, 65536)).collect(),
+        ]
+        .concat();
+        let c: Vec<(i32, i32)> = [
+            head(9),
+            radii.clone(),
+            (1..=9).map(|k| (k * 3, 65536)).collect(),
+            (1..=9).map(|k| (-k * 2, 65536)).collect(),
+            // A twenty-ninth value the files carry and nothing reads.
+            vec![(0, 1)],
+        ]
+        .concat();
+        let v: Vec<(i32, i32)> = [
+            head(9),
+            radii.clone(),
+            (1..=9).map(|k| (204800 - k * 4096, 2048)).collect(),
+        ]
+        .concat();
+        let file = raf_with(&[
+            (0xF00B, d.clone()),
+            (0xF00F, c.clone()),
+            (0xF010, v.clone()),
+        ]);
+        let lens = fuji_lens(&file).unwrap();
+        assert_eq!(lens.radii.len(), 9);
+        assert!((lens.radii[8] - 1.0).abs() < 1e-6);
+        assert!(
+            (lens.distortion[0] + 0.1).abs() < 1e-3,
+            "{:?}",
+            lens.distortion
+        );
+        assert!((lens.red[2] - 9.0 / 65536.0).abs() < 1e-7);
+        assert!((lens.blue[2] + 6.0 / 65536.0).abs() < 1e-7);
+        assert!((lens.light[0] - 98.0).abs() < 1e-3, "{:?}", lens.light);
+        // Earlier cameras: eleven radii from nought, chromatic
+        // aberration's first left out.
+        let radii: Vec<(i32, i32)> = (0..=10).map(|k| (k, 10)).collect();
+        let d: Vec<(i32, i32)> = [
+            head(11),
+            radii.clone(),
+            (0..=10).map(|k| (k * 15, 1000)).collect(),
+        ]
+        .concat();
+        let c: Vec<(i32, i32)> = [
+            head(10),
+            radii[1..].to_vec(),
+            (1..=10).map(|k| (k * 100, 1_000_000)).collect(),
+            (1..=10).map(|k| (-k * 50, 1_000_000)).collect(),
+        ]
+        .concat();
+        let v: Vec<(i32, i32)> = [
+            head(11),
+            radii.clone(),
+            (0..=10).map(|k| (10000 - k * 60, 100)).collect(),
+        ]
+        .concat();
+        let file = raf_with(&[
+            (0xF00B, d.clone()),
+            (0xF00F, c.clone()),
+            (0xF010, v.clone()),
+        ]);
+        let lens = fuji_lens(&file).unwrap();
+        assert_eq!(lens.radii.len(), 11);
+        assert_eq!((lens.red[0], lens.blue[0]), (0.0, 0.0));
+        assert!((lens.red[1] - 0.0001).abs() < 1e-7 && (lens.blue[10] + 0.0005).abs() < 1e-7);
+        assert!((lens.distortion[10] - 0.15).abs() < 1e-6 && (lens.light[10] - 94.0).abs() < 1e-4);
+        // Cut short anywhere, nothing rather than a panic; and radii that
+        // disagree between the tags are nothing too.
+        for end in 0..file.len() {
+            let _ = fuji_lens(&file[..end]);
+        }
+        let mut wrong = c.clone();
+        wrong[3] = (1, 3);
+        let mismatched = raf_with(&[(0xF00B, d.clone()), (0xF00F, wrong), (0xF010, v.clone())]);
+        assert_eq!(fuji_lens(&mismatched), None);
+        assert_eq!(fuji_lens(b"FUJIFILM"), None);
     }
 
     #[test]

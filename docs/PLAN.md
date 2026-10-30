@@ -10310,6 +10310,34 @@ without reading anything else.*
   half as much time again), a weight without a division (−0.2 dB),
   green taken wholly from the second pass (busy pictures better, smooth
   ones 1.3 dB worse — the site's own colour brings its noise too).
+  **Fuji's lens corrections** ✅. Fuji's lenses are drawn on the
+  understanding that software straightens them, and every RAF says how:
+  tags 0xF00B, 0xF00F and 0xF010 of its own directory are distortion
+  (per cent), red's and blue's scale against green, and the light that
+  reaches each radius (per cent), at nine radii (X-Trans IV and V) or
+  eleven (before), read the way darktable reads them (`fuji_lens` in
+  `core/rawin`; carried to the engine in version 2 of the packed form,
+  `Lens` in `develop.rs`). Developed, the light is made even in linear
+  light as the sites come out of the demosaic (`brighten`), and each
+  point of the picture is taken from `1 + d/100` times as far out as it
+  lands — red and blue each from their own place, so lateral colour
+  fringes close — in the same pass that turns it upright
+  (`orient_through`, bilinear in 256ths), zoomed in just enough that no
+  edge is taken from past the sensor. Checked against the camera's own
+  JPEG inside each RAF: the scale that best lines a ring of our
+  uncorrected picture up with it falls from 1.014 at the middle to
+  0.958 at the corners on an X-T3 (the file says −0.5% at a third out,
+  −2% by three fifths); corrected, it is one number, 1.016 ± 0.003, all
+  the way out — the camera crops a further 1.6% of its own — and lines
+  up 0.87–0.91 where it was 0.61–0.84. The preview makes the same
+  corrections at its size; the 1:1 square only its light. On by default,
+  as Lightroom has it; the develop window's Lens switch (shown for a
+  file that carries them, smoke 9cn wraps the reader's worker to give a
+  card one) is `RawDevelop::uncorrected`. It costs: 2.1 s more to place
+  a 24-megapixel X-Trans raw in the browser (the io bench's last row),
+  most of it twelve reads a pixel for three channels from three places.
+  Not read: a crop mode's 1.25 (`CropMode`, a maker note rawler keeps
+  to itself), and anything a Canon or a DNG says of its lens.
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a

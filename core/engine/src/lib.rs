@@ -9994,6 +9994,9 @@ pub struct RawInfo {
     pub height: u32,
     /// The camera's own white balance, as a temperature and tint.
     pub as_shot: [f32; 2],
+    /// Whether the file carries lens corrections (a Fuji's RAF), which
+    /// the window offers to leave off.
+    pub lens: bool,
 }
 
 impl RawInfo {
@@ -10003,6 +10006,7 @@ impl RawInfo {
             width,
             height,
             as_shot: photo.as_shot_white(),
+            lens: photo.has_lens(),
         }
     }
 }
@@ -10459,6 +10463,43 @@ mod tests {
             ("card.dng", grey_card_dng().len())
         );
         assert!(s.layers().iter().any(|l| l.id == id.0 && l.developed));
+    }
+
+    #[test]
+    fn a_raw_file_carrying_lens_corrections_says_so_and_can_leave_them_off() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        assert!(!read_card(&mut s).lens, "a DNG with none");
+        // The same card as a file carrying a lens: dark corners, a barrel.
+        let file = grey_card_dng();
+        let mut packed = chitrakar_raw_in::read(&file).unwrap();
+        assert_eq!(
+            packed[packed.len() - 4..],
+            0u32.to_le_bytes(),
+            "packed with no lens"
+        );
+        packed.truncate(packed.len() - 4);
+        packed.extend_from_slice(&2u32.to_le_bytes());
+        for v in [0.0f32, 1.2, -1.0, -5.0, 0.0, 0.0, 0.0, 0.0, 100.0, 50.0] {
+            packed.extend_from_slice(&v.to_le_bytes());
+        }
+        let info = s.raw_open(&packed, &file[..], "card.raf").unwrap();
+        assert!(info.lens);
+        let pixels = |s: &Session, id: NodeId| {
+            let r = picture_of(s, id);
+            s.doc.resource(&r.resource_id).unwrap().rgba8.clone()
+        };
+        let on = s.place_raw(&RawDevelop::default()).unwrap();
+        let off_settings = RawDevelop {
+            uncorrected: true,
+            ..Default::default()
+        };
+        let off = s.place_raw(&off_settings).unwrap();
+        assert_ne!(pixels(&s, on), pixels(&s, off));
+        assert_eq!(picture_of(&s, off).develop.unwrap().settings, off_settings);
+        // Kept in the file only when it says something.
+        let json = |d: &RawDevelop| serde_json::to_string(d).unwrap();
+        assert!(!json(&RawDevelop::default()).contains("uncorrected"));
+        assert!(json(&off_settings).contains("\"uncorrected\":true"));
     }
 
     #[test]
