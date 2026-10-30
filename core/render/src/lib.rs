@@ -10092,8 +10092,9 @@ fn apply_filter(
             let (mid, reach) = warp_circle(*radius, *center, page);
             let power = pinch_power(*amount);
             if reach > 0.0 && power != 1.0 {
+                let power = chitrakar_color::Exponent::new(power);
                 warp(doc, mask, dst, clip, opacity, view, |p| {
-                    pinch_source(p, mid, reach, power)
+                    pinch_source_by(p, mid, reach, &power)
                 });
             }
         }
@@ -10289,6 +10290,16 @@ pub fn twirl_source(here: [f32; 2], mid: [f32; 2], reach: f32, turn: f32) -> [f3
 /// at `reach · (r / reach)^power` where it is `r` away. Outside the
 /// circle, and at its middle, the point itself. The GPU's own.
 pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f32; 2] {
+    pinch_source_by(here, mid, reach, &chitrakar_color::Exponent::new(power))
+}
+
+/// [`pinch_source`] with its power fetched once for the pass.
+fn pinch_source_by(
+    here: [f32; 2],
+    mid: [f32; 2],
+    reach: f32,
+    power: &chitrakar_color::Exponent,
+) -> [f32; 2] {
     let (dx, dy) = (here[0] - mid[0], here[1] - mid[1]);
     let r = (dx * dx + dy * dy).sqrt();
     if r.is_nan() || r >= reach || r <= 0.0 {
@@ -10296,7 +10307,7 @@ pub fn pinch_source(here: [f32; 2], mid: [f32; 2], reach: f32, power: f32) -> [f
     }
     // `powf` natively; read from a table of this power in a browser,
     // where a power a pixel was most of what a pinch cost.
-    let k = chitrakar_color::pow(r / reach, power) * reach / r;
+    let k = power.of(r / reach) * reach / r;
     [mid[0] + dx * k, mid[1] + dy * k]
 }
 
@@ -12739,6 +12750,8 @@ pub enum Prepared {
     /// curve is monotone, with the formula itself asked only within a
     /// whisker of the level, where the two could round apart.
     Level(f32),
+    /// Levels' gamma as a power fetched once for the pass.
+    Power(chitrakar_color::Exponent),
 }
 
 /// A table of a per-channel function over the light in a channel, at
@@ -12841,6 +12854,9 @@ pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
             .and_then(|r| chitrakar_doc::lut::decode(*size, r.width, r.height, &r.rgba8))
             .map(|t| Prepared::Table(*size, t)),
         Adjustment::Exposure { stops } => Some(Prepared::Gain(2f32.powf(*stops))),
+        Adjustment::Levels { gamma, .. } => Some(Prepared::Power(chitrakar_color::Exponent::new(
+            levels_exponent(*gamma),
+        ))),
         _ => None,
     }
 }
@@ -13125,6 +13141,12 @@ fn curve_at(lut: &[f32], x: f32) -> f32 {
 /// `lut` is the tabulated curve when `adj` is one — built by the caller
 /// once per pass; built here when the caller has not, so the function
 /// stays total.
+/// The power levels raise a channel to: one over the gamma, held off
+/// nothing.
+fn levels_exponent(gamma: f32) -> f32 {
+    1.0 / gamma.hi(0.05)
+}
+
 fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) -> LinearRgba {
     if px.a <= 0.0 {
         return px;
@@ -13248,17 +13270,21 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // An input range that has collapsed still has to map somewhere:
             // hold it a hair wide rather than divide by nothing.
             let span = (in_white - in_black).hi(1e-3);
-            let exponent = 1.0 / gamma.hi(0.05);
+            let fetched;
+            let power = match ready {
+                Some(Prepared::Power(p)) => p,
+                _ => {
+                    fetched = chitrakar_color::Exponent::new(levels_exponent(*gamma));
+                    &fetched
+                }
+            };
+            let exponent = power.exponent();
             // A gamma of one — levels set for their black and white
             // points alone, which is most of them — is no power at all,
             // and `x^1` is `x` to the bit.
             let f = |v: f32| {
                 let v = ((v - in_black) / span).hi(0.0);
-                let v = if exponent == 1.0 {
-                    v
-                } else {
-                    chitrakar_color::pow(v, exponent)
-                };
+                let v = if exponent == 1.0 { v } else { power.of(v) };
                 (out_black + v * (out_white - out_black)).hi(0.0)
             };
             (f(r), f(g), f(b))
@@ -28907,6 +28933,37 @@ mod tests {
             worst.0,
             worst.1
         );
+    }
+
+    #[test]
+    fn levels_raise_to_the_same_power_prepared_or_not() {
+        for gamma in [0.4f32, 1.0, 1.3, 2.5, 0.0] {
+            let adj = Adjustment::Levels {
+                in_black: 0.05,
+                in_white: 0.9,
+                gamma,
+                out_black: 0.02,
+                out_white: 0.97,
+            };
+            let ready = prepare(&Document::new(1, 1, ColorMode::Rgb), &adj);
+            assert!(matches!(ready, Some(Prepared::Power(_))));
+            for i in 0..=400 {
+                let v = i as f32 / 300.0;
+                let px = LinearRgba {
+                    r: v,
+                    g: v * 0.5,
+                    b: 1.2 - v,
+                    a: 1.0,
+                };
+                let by_pass = apply_adjustment(&adj, ready.as_ref(), px);
+                let alone = apply_adjustment(&adj, None, px);
+                assert_eq!(
+                    [by_pass.r, by_pass.g, by_pass.b],
+                    [alone.r, alone.g, alone.b],
+                    "gamma {gamma} at {v}"
+                );
+            }
+        }
     }
 
     /// An upright picture read one tap a pixel is drawn by rows and

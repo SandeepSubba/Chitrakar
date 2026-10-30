@@ -274,15 +274,49 @@ impl PowerTable {
 /// is a thousandth of the eight bits a page is shown in
 /// (`a_power_by_table_is_the_power`). Off the table's ends — above one,
 /// or darker than it reaches — `powf` answers.
+///
+/// It fetches the table each time, so a pass raising millions of
+/// channels to one power holds an [`Exponent`] instead and asks that.
 #[inline]
 pub fn pow(x: f32, e: f32) -> f32 {
+    Exponent::new(e).of(x)
+}
+
+/// One power, fetched once for a whole pass: `of(x)` is [`pow`]`(x, e)`
+/// to the bit, without finding the table again for every channel —
+/// which was a lock and a count up and down each time, and made levels
+/// with a gamma slower in WebAssembly built for SIMD than without.
+#[derive(Clone)]
+pub struct Exponent {
+    e: f32,
     #[cfg(target_arch = "wasm32")]
-    {
-        if let Some(v) = exponent_table(e).at(x) {
-            return v;
+    table: std::sync::Arc<PowerTable>,
+}
+
+impl Exponent {
+    pub fn new(e: f32) -> Exponent {
+        Exponent {
+            e,
+            #[cfg(target_arch = "wasm32")]
+            table: exponent_table(e),
         }
     }
-    x.powf(e)
+
+    /// The power it raises to.
+    pub fn exponent(&self) -> f32 {
+        self.e
+    }
+
+    #[inline]
+    pub fn of(&self, x: f32) -> f32 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(v) = self.table.at(x) {
+                return v;
+            }
+        }
+        x.powf(self.e)
+    }
 }
 
 #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]

@@ -10263,11 +10263,17 @@ without reading anything else.*
   laid out at 45 degrees, are developed by rawler's own steps as far as
   three colours on a square grid and come to `develop.rs` as RGB; and
   a file named as raw that starts as a JPEG or PNG (a phone's ".dng", a
-  Raspberry Pi's ".raw") is the picture it is. Three cameras still come
-  out with a cast because rawler's data for them is wrong — LibRaw
-  draws them right: the Olympus E-10 (its filter is RGGB, rawler says
-  BGGR), the Kodak P712 (white balance misread) and the Canon 40D's
-  sRAW; Auto or the picker puts them right by hand.
+  Raspberry Pi's ".raw") is the picture it is. Three cameras came out
+  with a cast because rawler 0.8 has them wrong, and `correct` in
+  `core/rawin` puts each right the way dcraw has it: the Olympus E-10's
+  filter is RGGB (rawler says BGGR); a Kodak's balance as shot is the
+  preset tag 0xFA0D names, out of the file's own directory (rawler read
+  another table — 1.5/1/3.8 on the P712, 60/1/16 on an EasyShare Z981,
+  2/1/172 on a Z990; `kodak_balance`, which fixed every modern KDC tried:
+  P712, P880, Z981, Z990, Z1015); and the 40D's sRAW had its black taken
+  off twice (rawler's sRAW arithmetic already takes it off; only the 40D
+  reads that way). Six more Kodaks, fetched for the balance, found a
+  fourth: the Z981's greens are on the other diagonal (GRBG, one sample).
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a
@@ -10305,8 +10311,13 @@ without reading anything else.*
   scalar code). Motion blur came out 24% slower — its taps' offsets were
   worked out per pixel, which the compiler vectorised into lane-by-lane
   gathers — until they were worked out once (now 70–79 ms against 83–94
-  before SIMD; same arithmetic, same pixels). Levels with a gamma is
-  still about 9% slower (`chitrakar_color::pow`). `node
+  before SIMD; same arithmetic, same pixels). Levels with a gamma came
+  out 9% slower too, and that was not SIMD's at all: the browser's power
+  table was found again for every channel of every pixel, a lock and a
+  count up and down each time. A pass holds it now
+  (`chitrakar_color::Exponent`, `Prepared::Power`; the pinch too), and
+  levels with a gamma is 52 → 16–29 ms a frame, the same pixels
+  (`levels_raise_to_the_same_power_prepared_or_not`). `node
   tools/bench/engine/run.mjs --io` is the in-and-out half of these.
   **Presets and sync.** Settings kept by name (`prefs.developPresets`,
   read back through `cleanSettings`/`cleanPresets` in `app/src/develop.ts`

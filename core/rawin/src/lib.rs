@@ -30,6 +30,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     let mut raw = rawler::decode(&source, &rawler::decoders::RawDecodeParams::default())
         .map_err(|e| format!("camera raw: {e}"))?;
+    correct(&mut raw, bytes);
     // The camera's colours from XYZ, measured under daylight where the file
     // (or rawler's tables) has it, otherwise under whatever light it was;
     // none at all for a camera nobody measured.
@@ -149,6 +150,113 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
         color_at,
         samples,
     ))
+}
+
+/// What rawler 0.8 has wrong about particular cameras, put right the way
+/// dcraw and LibRaw have it, each found by a sample from raw.pixls.us
+/// developing with a cast that its own maker's software does not have.
+fn correct(raw: &mut rawler::RawImage, bytes: &[u8]) {
+    // Filters laid the other way from rawler's table. Olympus's E-10 is
+    // RGGB where rawler says BGGR: leaves come out cyan and skin blue.
+    // Kodak's EasyShare Z981, as rawler reads it, has its greens on the
+    // other diagonal from the BGGR it is given (they average the same
+    // there, and the other two do not), and GRBG is the one layout that
+    // makes white roses white — one sample, so a second would be worth
+    // having; the Z990 beside it is BGGR as rawler says.
+    let filter = match (raw.clean_make.as_str(), raw.clean_model.as_str()) {
+        ("Olympus", "E-10") => Some("RGGB"),
+        ("Kodak", "EasyShare Z981") => Some("GRBG"),
+        _ => None,
+    };
+    if let (Some(name), RawPhotometricInterpretation::Cfa(c)) = (filter, &mut raw.photometric) {
+        c.cfa = rawler::CFA::new(name);
+    }
+    // A Kodak's balance as shot is one of a table of presets in the
+    // file's own directory (0xFE00), and which one the camera used is
+    // tag 0xFA0D; rawler reads another table altogether, and gets
+    // anything from a blue cast to a red one sixty times over.
+    if raw.make.to_ascii_uppercase().contains("KODAK") {
+        if let Some(wb) = kodak_balance(bytes) {
+            raw.wb_coeffs = wb;
+        }
+    }
+    // The 40D's small raw takes its black off when it is turned from
+    // brightness and colour to red, green and blue (the 512 in rawler's
+    // and dcraw's version 0), and then rawler's colour data takes the
+    // full-size raw's black off again, which is a quarter of the blue
+    // there is: a yellow-green cast. No other camera reads that way.
+    if raw.cpp == 3 && raw.camera.find_hint("sraw_40d") {
+        raw.blacklevel = rawler::rawimage::BlackLevel::new(&[0u16; 3], 1, 1, 3);
+    }
+}
+
+/// The balance a Kodak was set to, from its own directory: dcraw's
+/// `wbtag`, the preset tags in the order tag 0xFA0D numbers them.
+fn kodak_balance(bytes: &[u8]) -> Option<[f32; 4]> {
+    const PRESETS: [Option<u16>; 7] = [
+        Some(0xFA25),
+        Some(0xFA28),
+        Some(0xFA27),
+        Some(0xFA29),
+        None,
+        None,
+        Some(0xFA2A),
+    ];
+    let little = match bytes.get(..4)? {
+        [b'I', b'I', 42, 0] => true,
+        [b'M', b'M', 0, 42] => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| {
+        let b: [u8; 2] = bytes.get(at..at + 2)?.try_into().ok()?;
+        Some(if little {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    };
+    let u32_at = |at: usize| {
+        let b: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
+    // Each entry of a directory: its tag, type, count and where its
+    // value is (in the entry when it fits in four bytes).
+    let entries = |dir: usize| -> Option<Vec<(u16, u16, u32, usize)>> {
+        let n = u16_at(dir)? as usize;
+        (0..n.min(1024))
+            .map(|i| {
+                let e = dir + 2 + 12 * i;
+                let (ty, count) = (u16_at(e + 2)?, u32_at(e + 4)?);
+                let size = match ty {
+                    1 | 2 | 6 | 7 => 1,
+                    3 | 8 => 2,
+                    4 | 9 | 11 | 13 => 4,
+                    _ => 8,
+                } * count as usize;
+                let at = if size <= 4 {
+                    e + 8
+                } else {
+                    u32_at(e + 8)? as usize
+                };
+                Some((u16_at(e)?, ty, count, at))
+            })
+            .collect()
+    };
+    let first = entries(u32_at(4)? as usize)?;
+    let &(_, _, _, at) = first.iter().find(|e| e.0 == 0xFE00)?;
+    let kodak = entries(u32_at(at)? as usize)?;
+    let &(_, _, _, at) = kodak.iter().find(|e| e.0 == 0xFA0D)?;
+    let preset = PRESETS.get(*bytes.get(at)? as usize).copied().flatten()?;
+    let &(_, ty, count, at) = kodak.iter().find(|e| e.0 == preset)?;
+    if ty != 4 || count != 3 {
+        return None;
+    }
+    let [r, g, b] = [0, 4, 8].map(|o| u32_at(at + o).map_or(0.0, |v| v as f32));
+    (r > 0.0 && g > 0.0 && b > 0.0).then(|| [r / g, 1.0, b / g, f32::NAN])
 }
 
 /// The white balance that makes daylight (D65) neutral, from the camera's
@@ -387,6 +495,96 @@ mod tests {
 
     /// Real files, when `CHITRAKAR_TEST_RAW` names a folder of them: each
     /// reads, unpacks and develops to a photograph of its own size.
+    /// A TIFF of two directories, the first pointing at a Kodak's own
+    /// (0xFE00) holding its preset number and the presets.
+    fn kodak_tiff(little: bool, preset: u8, tables: &[(u16, [u32; 3])]) -> Vec<u8> {
+        let u16b = |v: u16| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let u32b = |v: u32| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let mut out = if little {
+            b"II*\0".to_vec()
+        } else {
+            b"MM\0*".to_vec()
+        };
+        out.extend(u32b(8));
+        // The first directory: one entry, then no next.
+        out.extend(u16b(1));
+        let kodak_at = 8 + 2 + 12 + 4;
+        out.extend(u16b(0xFE00));
+        out.extend(u16b(4));
+        out.extend(u32b(1));
+        out.extend(u32b(kodak_at));
+        out.extend(u32b(0));
+        // The Kodak directory, its values after it.
+        let n = 1 + tables.len() as u32;
+        let mut values_at = kodak_at + 2 + 12 * n + 4;
+        out.extend(u16b(n as u16));
+        out.extend(u16b(0xFA0D));
+        out.extend(u16b(1));
+        out.extend(u32b(1));
+        out.extend([preset, 0, 0, 0]);
+        for (tag, _) in tables {
+            out.extend(u16b(*tag));
+            out.extend(u16b(4));
+            out.extend(u32b(3));
+            out.extend(u32b(values_at));
+            values_at += 12;
+        }
+        out.extend(u32b(0));
+        for (_, v) in tables {
+            for x in v {
+                out.extend(u32b(*x));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_kodaks_balance_is_the_preset_it_says_it_used() {
+        let tables = [
+            (0xFA25, [120576, 65536, 125184]),
+            (0xFA29, [101376, 65536, 128256]),
+            (0xFA2A, [169984, 65536, 86784]),
+        ];
+        for little in [true, false] {
+            let wb = kodak_balance(&kodak_tiff(little, 0, &tables)).unwrap();
+            assert_eq!(wb[..3], [120576.0 / 65536.0, 1.0, 125184.0 / 65536.0]);
+            let wb = kodak_balance(&kodak_tiff(little, 3, &tables)).unwrap();
+            assert_eq!(wb[..3], [101376.0 / 65536.0, 1.0, 128256.0 / 65536.0]);
+            let wb = kodak_balance(&kodak_tiff(little, 6, &tables)).unwrap();
+            assert_eq!(wb[..3], [169984.0 / 65536.0, 1.0, 86784.0 / 65536.0]);
+            // A preset with no table, one the file does not have, and a
+            // number past the end are no balance, not somebody else's.
+            assert_eq!(kodak_balance(&kodak_tiff(little, 4, &tables)), None);
+            assert_eq!(kodak_balance(&kodak_tiff(little, 1, &tables)), None);
+            assert_eq!(kodak_balance(&kodak_tiff(little, 9, &tables)), None);
+        }
+        // Cut short anywhere before the preset's own values end, it is
+        // nothing rather than a panic; past there, the preset.
+        let whole = kodak_tiff(true, 0, &tables);
+        let needed = whole.len() - 24;
+        for end in 0..whole.len() {
+            let got = kodak_balance(&whole[..end]);
+            if end < needed {
+                assert_eq!(got, None, "cut at {end}");
+            } else {
+                assert!(got.is_some(), "cut at {end}");
+            }
+        }
+        assert_eq!(kodak_balance(b"not a tiff at all"), None);
+    }
+
     #[test]
     fn real_cameras_files_read_when_there_are_some() {
         let Ok(dir) = std::env::var("CHITRAKAR_TEST_RAW") else {
