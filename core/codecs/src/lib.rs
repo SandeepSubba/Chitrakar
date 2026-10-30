@@ -8,6 +8,7 @@
 pub mod container;
 pub mod cube;
 pub mod develop;
+pub mod opcodes;
 pub mod pdf;
 pub mod psd;
 pub mod psd_export;

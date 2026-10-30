@@ -10336,8 +10336,45 @@ without reading anything else.*
   card one) is `RawDevelop::uncorrected`. It costs: 2.1 s more to place
   a 24-megapixel X-Trans raw in the browser (the io bench's last row),
   most of it twelve reads a pixel for three channels from three places.
-  Not read: a crop mode's 1.25 (`CropMode`, a maker note rawler keeps
-  to itself), and anything a Canon or a DNG says of its lens.
+  Through the sports finder or the electronic shutter's 1.25 crop
+  (maker note `CropMode` 2 or 4, read from the EXIF of the JPEG the RAF
+  holds, `fuji_crop_mode`) the radii are the crop's, times 1.25, as
+  darktable has it — tested on a RAF made by hand, since none of the 17
+  samples was taken that way. Nothing a Canon says of its lens is read:
+  a CR2 carries no such table.
+  Two attempts at the cost came to nothing and are left as they are:
+  the straightening is 1.1 s of its 1.2 s (24 MP, natively) in twelve
+  reads a pixel and their blending — packing a pixel's four channels
+  into one integer does not help when each channel comes from its own
+  place — and the X-Trans demosaic is some 700 instructions a site.
+  **A DNG's own corrections** ✅. A phone writes its lens into the DNG
+  as opcodes (`core/codecs/src/opcodes.rs`): list 2, on the sensor's
+  values, a gain map per colour of the filter (Pixel 4a, 7 Pro, Xiaomi;
+  a Galaxy S23's are one point each, nothing), and list 3, on the
+  picture, a radial vignette (iPhone 8, DJI), a gain map of colour
+  shading (DJI) and a warp with its tangential terms (DJI, Pixel 7 Pro).
+  `core/rawin` finds the lists with the full-size picture
+  (`dng_opcodes`) and packs them in version 3 with where the default
+  crop sits in the active area they are written for; list 2 is applied
+  once, on unpacking, like black and white (a sensor's calibration, so
+  it is not undone by the Lens switch); list 3 where a Fuji's
+  corrections go — the vignette and gain maps as the light is made
+  even (`dng_shade`), the warp in the turning pass (`DngWarp`, behind
+  the same `Geometry` as Fuji's radial one) — and the window's Lens
+  switch leaves them off. A Pixel 4a's forest comes up a quarter at the
+  corners; a DJI's lens loses more than a stop there and is given it
+  back. Bad-pixel lists, tables and deltas are not read.
+  The phones found two faults that were nobody's opcodes. A Galaxy
+  S23's linear DNG is read by rawler as red at full scale and nothing
+  else, and developed as a field of salmon; a file whose values stand
+  past its white by a tenth, one sample in a hundred, is now refused
+  as misread (`misread`). And a camera with two matrices but no D65
+  one (a Xiaomi's D55 and A, a OnePlus's) was developed with whichever
+  rawler's hash map gave first — a different matrix from one run to the
+  next. Two matrices are blended now as the DNG specification has it,
+  by the reciprocal of the temperature the as-shot white comes to
+  through the blend (`as_shot_matrix`, McCamy's formula, a few rounds);
+  one is used as it is, the light nearest daylight's if there are more.
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a

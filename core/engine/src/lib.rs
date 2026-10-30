@@ -10472,16 +10472,15 @@ mod tests {
         // The same card as a file carrying a lens: dark corners, a barrel.
         let file = grey_card_dng();
         let mut packed = chitrakar_raw_in::read(&file).unwrap();
-        assert_eq!(
-            packed[packed.len() - 4..],
-            0u32.to_le_bytes(),
-            "packed with no lens"
-        );
-        packed.truncate(packed.len() - 4);
+        // Packed with no lens: its count (nought), then a DNG's frame and
+        // two empty opcode lists. The lens goes after the count.
+        let tail = packed.split_off(packed.len() - 28);
+        assert_eq!(tail[..4], 0u32.to_le_bytes(), "packed with no lens");
         packed.extend_from_slice(&2u32.to_le_bytes());
         for v in [0.0f32, 1.2, -1.0, -5.0, 0.0, 0.0, 0.0, 0.0, 100.0, 50.0] {
             packed.extend_from_slice(&v.to_le_bytes());
         }
+        packed.extend_from_slice(&tail[4..]);
         let info = s.raw_open(&packed, &file[..], "card.raf").unwrap();
         assert!(info.lens);
         let pixels = |s: &Session, id: NodeId| {

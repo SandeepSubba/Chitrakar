@@ -15302,11 +15302,15 @@ assert(
         super.onmessage = (e) => {
           const p = e.data && e.data.packed;
           if (!p) return fn(e);
+          // The packing ends with the lens's count (nought), a DNG's frame
+          // and its two opcode lists (empty): the lens goes after the count.
           const lens = new Float32Array([0, 1.2, 0, 0, 0, 0, 0, 0, 100, 40]);
+          const at = p.length - 28;
           const out = new Uint8Array(p.length + 40);
-          out.set(p.subarray(0, p.length - 4));
-          new DataView(out.buffer).setUint32(p.length - 4, 2, true);
-          out.set(new Uint8Array(lens.buffer), p.length);
+          out.set(p.subarray(0, at));
+          new DataView(out.buffer).setUint32(at, 2, true);
+          out.set(new Uint8Array(lens.buffer), at + 4);
+          out.set(p.subarray(at + 4), at + 44);
           fn({ data: { ...e.data, packed: out } });
         };
       }

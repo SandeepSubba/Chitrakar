@@ -138,7 +138,7 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
     }
     let head = cur.u32s(5)?;
     let version = head[0];
-    if version != 1 && version != 2 {
+    if !(1..=3).contains(&version) {
         return Err(bad(format!("a packed mosaic of version {version}")));
     }
     let (width, height, cpp, orientation) = (
@@ -227,6 +227,31 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
                 blue: part(3),
                 light: part(4),
             });
+        }
+    }
+    // Version 3: a DNG's opcode lists, and where the photograph sits in
+    // the area they speak of.
+    if version >= 3 {
+        let f = cur.u32s(4)?;
+        let frame = crate::opcodes::Frame {
+            left: f[0] as usize,
+            top: f[1] as usize,
+            width: f[2] as usize,
+            height: f[3] as usize,
+        };
+        let mut list = || -> Result<Vec<crate::opcodes::Op>, CodecError> {
+            let n = cur.u32s(1)?[0] as usize;
+            Ok(crate::opcodes::parse(cur.take(n)?))
+        };
+        let (two, three) = (list()?, list()?);
+        if frame.width > 0 && frame.height > 0 {
+            if !two.is_empty() {
+                crate::develop::mosaic_gains(&mut photo, &two, &frame);
+                photo.remeasure();
+            }
+            if !three.is_empty() {
+                photo.dng = Some((frame, three));
+            }
         }
     }
     Ok(photo)

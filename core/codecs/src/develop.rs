@@ -29,6 +29,7 @@
 //! demosaic and makes a slider's drag a matter of milliseconds. Both go
 //! through [`Look::finish`], so the preview is the develop, smaller.
 
+use crate::opcodes::{Frame, GainMap, Op};
 use crate::raw::{camera_to_srgb, orient, Mosaic, Sample};
 use crate::{CodecError, SourceImage};
 use chitrakar_doc::RawDevelop;
@@ -78,6 +79,9 @@ pub struct RawPhoto {
     auto_gain: f32,
     /// The lens corrections the camera wrote into the file, if any.
     pub(crate) lens: Option<Lens>,
+    /// What a DNG's opcode list 3 says to do to the developed picture,
+    /// and where the photograph sits in the area it was written for.
+    pub(crate) dng: Option<(Frame, Vec<Op>)>,
 }
 
 /// A lens's corrections as the camera wrote them for one photograph (a
@@ -302,31 +306,116 @@ impl Warp {
     }
 }
 
+/// Where each channel of a point of a corrected picture comes from in
+/// the photograph: offsets from its middle, in pixels, for the point's
+/// own offset from the middle.
+trait Geometry {
+    fn sources(&self, x: f32, y: f32) -> [[f32; 2]; 3];
+}
+
+impl Geometry for Warp {
+    #[inline]
+    fn sources(&self, x: f32, y: f32) -> [[f32; 2]; 3] {
+        let k = self.scales(x, y);
+        let (qx, qy) = (x / self.zoom, y / self.zoom);
+        [0, 1, 2].map(|c| [qx * k[c], qy * k[c]])
+    }
+}
+
+/// A DNG's WarpRectilinear (opcode 1) laid on a photograph: its centre as
+/// an offset from the photograph's middle, and the radius of one, both
+/// in the photograph's pixels; one plane's polynomial, or three.
+struct DngWarp {
+    planes: Vec<[f32; 6]>,
+    centre: [f32; 2],
+    reach: f32,
+}
+
+impl DngWarp {
+    /// The warp in `ops`, for a photograph `w` by `h` at `frame` of the
+    /// area it was written for, drawn at `scale` of its size.
+    fn of(ops: &[Op], frame: &Frame, w: usize, h: usize, scale: f32) -> Option<DngWarp> {
+        ops.iter().find_map(|op| match op {
+            Op::Warp { planes, centre } => {
+                let (aw, ah) = (frame.width as f32, frame.height as f32);
+                let middle = [
+                    frame.left as f32 + w as f32 * 0.5,
+                    frame.top as f32 + h as f32 * 0.5,
+                ];
+                Some(DngWarp {
+                    planes: planes.clone(),
+                    centre: [
+                        (centre[0] * aw - middle[0]) * scale,
+                        (centre[1] * ah - middle[1]) * scale,
+                    ],
+                    reach: crate::opcodes::reach(*centre, aw, ah) * scale,
+                })
+            }
+            _ => None,
+        })
+    }
+}
+
+impl Geometry for DngWarp {
+    #[inline]
+    fn sources(&self, x: f32, y: f32) -> [[f32; 2]; 3] {
+        let (dx, dy) = (
+            (x - self.centre[0]) / self.reach,
+            (y - self.centre[1]) / self.reach,
+        );
+        let rr = dx * dx + dy * dy;
+        [0, 1, 2].map(|c| {
+            let [k0, k1, k2, k3, t0, t1] = self.planes[c.min(self.planes.len() - 1)];
+            let ratio = k0 + rr * (k1 + rr * (k2 + rr * k3));
+            let sx = dx * ratio + t0 * 2.0 * dx * dy + t1 * (rr + 2.0 * dx * dx);
+            let sy = dy * ratio + t1 * 2.0 * dx * dy + t0 * (rr + 2.0 * dy * dy);
+            [
+                self.centre[0] + sx * self.reach,
+                self.centre[1] + sy * self.reach,
+            ]
+        })
+    }
+}
+
+/// Either lens's straightening.
+enum Straighten {
+    Radial(Warp),
+    Dng(DngWarp),
+}
+
+impl Geometry for Straighten {
+    #[inline]
+    fn sources(&self, x: f32, y: f32) -> [[f32; 2]; 3] {
+        match self {
+            Straighten::Radial(w) => w.sources(x, y),
+            Straighten::Dng(w) => w.sources(x, y),
+        }
+    }
+}
+
 /// Turn a picture upright by its EXIF orientation (as `orient` does) and,
-/// where there is a `warp`, take each point from where the lens put it,
-/// red, green and blue each from its own place, between pixels by their
-/// four neighbours.
+/// where there is a lens to straighten, take each point from where the
+/// lens put it, red, green and blue each from its own place, between
+/// pixels by their four neighbours.
 fn orient_through(
     px: Vec<u8>,
     w: usize,
     h: usize,
     o: u8,
-    warp: Option<&Warp>,
+    geometry: Option<&Straighten>,
 ) -> (usize, usize, Vec<u8>) {
-    let Some(warp) = warp else {
+    let Some(geometry) = geometry.filter(|_| w >= 2 && h >= 2) else {
         return orient(px, w, h, o);
     };
     let swap = (5..=8).contains(&o);
     let (ow, oh) = if swap { (h, w) } else { (w, h) };
     let mut out = vec![0u8; px.len()];
     let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
-    let inv_zoom = 1.0 / warp.zoom;
-    let per_rr = warp.per_rr / (warp.half_diagonal * warp.half_diagonal);
-    // Source positions in 256ths of a pixel, kept a pixel short of the
-    // far edges so that the four neighbours are always there.
-    let (most_x, most_y) = (((w - 1) * 256) as f32, ((h - 1) * 256) as f32);
+    // Source positions in 256ths of a pixel, kept short of the far edges
+    // by a 256th so that the four neighbours are always there.
+    let (most_x, most_y) = (((w - 1) * 256 - 1) as f32, ((h - 1) * 256 - 1) as f32);
     let (hw256, hh256) = ((hw - 0.5) * 256.0, (hh - 0.5) * 256.0);
-    let (right, down) = (if w > 1 { 4 } else { 0 }, if h > 1 { w * 4 } else { 0 });
+    let (right, down) = (4, w * 4);
     // Where (x, y) of the photograph goes in the turned picture, as a
     // start for each row and a step along it.
     let place = |x: usize, y: usize| match o {
@@ -340,43 +429,127 @@ fn orient_through(
         _ => (x, y),
     };
     let index = |(nx, ny): (usize, usize)| (ny * ow + nx) as isize * 4;
-    let step = if w > 1 {
-        index(place(1, 0)) - index(place(0, 0))
-    } else {
-        0
-    };
+    let step = index(place(1, 0)) - index(place(0, 0));
     // Walked in the photograph's own rows, so that what each point reads
     // is near what the last one read; written where `orient` puts it.
     for y in 0..h {
-        let qy = (y as f32 + 0.5 - hh) * inv_zoom;
-        let qyy = qy * qy;
+        let qy = y as f32 + 0.5 - hh;
         let mut to = index(place(0, y));
         for x in 0..w {
-            let qx = (x as f32 + 0.5 - hw) * inv_zoom;
-            let f = ((qx * qx + qyy) * per_rr).min(LENS_STEPS as f32 - 0.001);
-            let i = f as usize;
-            let t = f - i as f32;
-            let (a, b) = (warp.table[i], warp.table[i + 1]);
+            let qx = x as f32 + 0.5 - hw;
+            let from = geometry.sources(qx, qy);
             let at_out = to as usize;
-            for c in 0..3 {
-                let k = (a[c] + (b[c] - a[c]) * t) * 256.0;
+            let pixel: [u8; 3] = std::array::from_fn(|c| {
                 // Pixel centres are at the halves.
-                let fx = (qx * k + hw256).clamp(0.0, most_x) as u32;
-                let fy = (qy * k + hh256).clamp(0.0, most_y) as u32;
-                let (x0, y0) = ((fx >> 8) as usize, (fy >> 8) as usize);
+                let fx = (from[c][0] * 256.0 + hw256).clamp(0.0, most_x) as u32;
+                let fy = (from[c][1] * 256.0 + hh256).clamp(0.0, most_y) as u32;
                 let (tx, ty) = (fx & 255, fy & 255);
-                let r = if x0 + 1 < w { right } else { 0 };
-                let d = if y0 + 1 < h { down } else { 0 };
-                let at = (y0 * w + x0) * 4 + c;
-                let top = px[at] as u32 * (256 - tx) + px[at + r] as u32 * tx;
-                let bottom = px[at + d] as u32 * (256 - tx) + px[at + d + r] as u32 * tx;
-                out[at_out + c] = ((top * (256 - ty) + bottom * ty + 32768) >> 16) as u8;
-            }
-            out[at_out + 3] = 255;
+                let at = ((fy >> 8) as usize * w + (fx >> 8) as usize) * 4 + c;
+                let top = px[at] as u32 * (256 - tx) + px[at + right] as u32 * tx;
+                let bottom = px[at + down] as u32 * (256 - tx) + px[at + down + right] as u32 * tx;
+                ((top * (256 - ty) + bottom * ty + 32768) >> 16) as u8
+            });
+            out[at_out..at_out + 4].copy_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
             to += step;
         }
     }
     (ow, oh, out)
+}
+
+/// Lift a DNG's vignette and its gain maps off the sites of a region
+/// (as `region` lays them out), whose (x, y) is at
+/// `((x + 0.5) * scale - 0.5, ...)` of the photograph — one for the
+/// photograph itself, a block's size for its preview.
+fn dng_shade(
+    ops: &[Op],
+    frame: &Frame,
+    sites: &mut [[f32; 3]],
+    (y0, y1, x0, x1): (usize, usize, usize, usize),
+    scale: (f32, f32),
+) {
+    let (aw, ah) = (frame.width as f32, frame.height as f32);
+    let vignettes: Vec<([f32; 5], [f32; 2], f32)> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Vignette { k, centre } => Some((
+                *k,
+                [centre[0] * aw, centre[1] * ah],
+                1.0 / crate::opcodes::reach(*centre, aw, ah),
+            )),
+            _ => None,
+        })
+        .collect();
+    let maps: Vec<&GainMap> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Gain(g) => Some(g),
+            _ => None,
+        })
+        .collect();
+    if vignettes.is_empty() && maps.is_empty() {
+        return;
+    }
+    let width = (x1 - x0).max(1);
+    for (row, y) in sites.chunks_mut(width).zip(y0..y1) {
+        let fy = (y as f32 + 0.5) * scale.1 - 0.5 + frame.top as f32;
+        for (px, x) in row.iter_mut().zip(x0..x1) {
+            let fx = (x as f32 + 0.5) * scale.0 - 0.5 + frame.left as f32;
+            for (k, c, per) in &vignettes {
+                let (dx, dy) = ((fx + 0.5 - c[0]) * per, (fy + 0.5 - c[1]) * per);
+                let r2 = dx * dx + dy * dy;
+                let g = 1.0 + r2 * (k[0] + r2 * (k[1] + r2 * (k[2] + r2 * (k[3] + r2 * k[4]))));
+                for v in px.iter_mut() {
+                    *v *= g;
+                }
+            }
+            let (row_i, col_i) = (fy.round().max(0.0) as usize, fx.round().max(0.0) as usize);
+            for map in &maps {
+                if row_i < map.top || row_i >= map.bottom || col_i < map.left || col_i >= map.right
+                {
+                    continue;
+                }
+                for (c, v) in px.iter_mut().enumerate() {
+                    if c >= map.plane && c < map.plane + map.planes {
+                        *v *= map.gain(row_i, col_i, frame, c - map.plane);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A DNG's opcode list 2 on a photograph's sensor values: each gain map
+/// multiplying the sites it is for (a phone's lens shading, a map for
+/// each colour of the filter), positions taken in the active area.
+pub(crate) fn mosaic_gains(photo: &mut RawPhoto, ops: &[Op], frame: &Frame) {
+    let (w, h, cpp) = (photo.width, photo.height, photo.cpp);
+    for op in ops {
+        let Op::Gain(map) = op else { continue };
+        for plane in map.plane..(map.plane + map.planes).min(cpp) {
+            let p = plane - map.plane;
+            // The first row (column) of the photograph the map is for:
+            // inside its rectangle and on its pitch.
+            let first = |start: usize, offset: usize, pitch: usize| {
+                let from = start.max(offset);
+                from + (pitch - (from - start) % pitch) % pitch - offset
+            };
+            let (r0, c0) = (
+                first(map.top, frame.top, map.row_pitch),
+                first(map.left, frame.left, map.col_pitch),
+            );
+            let mut y = r0;
+            while y < h && y + frame.top < map.bottom {
+                let mut x = c0;
+                while x < w && x + frame.left < map.right {
+                    let g = map.gain(y + frame.top, x + frame.left, frame, p);
+                    let at = (y * w + x) * cpp + plane;
+                    photo.data[at] = (photo.data[at] as f32 * g + 0.5).min(65535.0) as u16;
+                    x += map.col_pitch;
+                }
+                y += map.row_pitch;
+            }
+        }
+    }
 }
 
 /// XYZ to linear sRGB's primaries, which stand in as the camera's matrix
@@ -611,6 +784,7 @@ impl RawPhoto {
             orientation: m.orientation,
             auto_gain: 1.0,
             lens: None,
+            dng: None,
         };
         photo.auto_gain = photo.measure_gain();
         Ok(photo)
@@ -622,9 +796,33 @@ impl RawPhoto {
         self.lens.as_ref().filter(|l| !s.uncorrected && l.usable())
     }
 
-    /// Whether the file carries lens corrections this photograph can use.
+    /// What the DNG says to do to the developed picture, unless the
+    /// settings leave the lens's corrections off.
+    fn dng_for(&self, s: &RawDevelop) -> Option<&(Frame, Vec<Op>)> {
+        self.dng.as_ref().filter(|_| !s.uncorrected)
+    }
+
+    /// Whether the file carries lens corrections this photograph can use:
+    /// a Fuji's, or a DNG's vignette, gain map or warp.
     pub fn has_lens(&self) -> bool {
-        self.lens.as_ref().is_some_and(Lens::usable)
+        self.lens.as_ref().is_some_and(Lens::usable) || self.dng.is_some()
+    }
+
+    /// The straightening to develop with, for the photograph drawn at
+    /// `w` by `h` (its own size, or its preview's).
+    fn straighten(&self, s: &RawDevelop, w: usize, h: usize) -> Option<Straighten> {
+        if let Some(lens) = self.lens_for(s) {
+            return lens.warp(w as f32, h as f32).map(Straighten::Radial);
+        }
+        let (frame, ops) = self.dng_for(s)?;
+        let scale = w as f32 / self.width as f32;
+        DngWarp::of(ops, frame, self.width, self.height, scale).map(Straighten::Dng)
+    }
+
+    /// The exposure worked out again, once the sensor's values have
+    /// changed (a DNG's gain maps).
+    pub(crate) fn remeasure(&mut self) {
+        self.auto_gain = self.measure_gain();
     }
 
     /// The developed size, after the camera's orientation.
@@ -1093,6 +1291,9 @@ impl RawPhoto {
             if let Some(light) = &light {
                 brighten(light, &mut band, (w, h), (y0, y1, 0, w));
             }
+            if let Some((frame, ops)) = self.dng_for(s) {
+                dng_shade(ops, frame, &mut band, (y0, y1, 0, w), (1.0, 1.0));
+            }
             for (px, out) in band
                 .iter()
                 .zip(upright[y0 * w * 4..y1 * w * 4].chunks_exact_mut(4))
@@ -1102,8 +1303,9 @@ impl RawPhoto {
             }
         }
         let upright = detail(&upright, w, h, s.sharpen, s.noise).unwrap_or(upright);
-        let warp = lens.and_then(|l| l.warp(w as f32, h as f32));
-        let (width, height, rgba8) = orient_through(upright, w, h, self.orientation, warp.as_ref());
+        let geometry = self.straighten(s, w, h);
+        let (width, height, rgba8) =
+            orient_through(upright, w, h, self.orientation, geometry.as_ref());
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -1160,6 +1362,9 @@ impl RawPhoto {
                 (self.width, self.height),
                 (my0, my1, mx0, mx1),
             );
+        }
+        if let Some((frame, ops)) = self.dng_for(s) {
+            dng_shade(ops, frame, &mut sites, (my0, my1, mx0, mx1), (1.0, 1.0));
         }
         for (site, out) in sites.iter().zip(px.chunks_exact_mut(4)) {
             let c = look.finish(*site);
@@ -1529,18 +1734,24 @@ impl RawPreview {
             .collect();
         // The lens's corrections as the develop makes them, at the
         // preview's size: they are in fractions of the picture.
-        let lens = photo.lens_for(s);
-        if let Some(lens) = lens {
+        if let Some(lens) = photo.lens_for(s) {
             brighten(&lens.light_table(), &mut sites, (pw, ph), (0, ph, 0, pw));
+        }
+        if let Some((frame, ops)) = photo.dng_for(s) {
+            let scale = (
+                photo.width as f32 / pw as f32,
+                photo.height as f32 / ph as f32,
+            );
+            dng_shade(ops, frame, &mut sites, (0, ph, 0, pw), scale);
         }
         let mut upright = vec![0u8; pw * ph * 4];
         for (i, c) in sites.iter().enumerate() {
             let c = look.finish(*c);
             upright[i * 4..i * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
-        let warp = lens.and_then(|l| l.warp(pw as f32, ph as f32));
+        let geometry = photo.straighten(s, pw, ph);
         let (width, height, rgba8) =
-            orient_through(upright, pw, ph, photo.orientation, warp.as_ref());
+            orient_through(upright, pw, ph, photo.orientation, geometry.as_ref());
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -2128,6 +2339,148 @@ mod tests {
         });
         assert_eq!(plain.rgba8, off.rgba8);
         assert_ne!(plain.rgba8, photo.develop(&s).rgba8);
+    }
+
+    /// A grey card developed, with `ops` as its DNG's opcode list 3 over
+    /// the whole of it.
+    fn with_list3(photo: &RawPhoto, ops: Vec<Op>) -> RawPhoto {
+        let mut p = photo.clone();
+        p.dng = Some((
+            Frame {
+                left: 0,
+                top: 0,
+                width: p.width,
+                height: p.height,
+            },
+            ops,
+        ));
+        p
+    }
+
+    #[test]
+    fn a_dng_s_vignette_lifts_the_corners_by_its_polynomial() {
+        let photo =
+            crate::raw::unpack(&sample::packed(120, 80, 4095, [1.0; 3], |_, _| [0.2; 3])).unwrap();
+        let lifted = with_list3(
+            &photo,
+            vec![Op::Vignette {
+                k: [1.0, 0.0, 0.0, 0.0, 0.0],
+                centre: [0.5, 0.5],
+            }],
+        );
+        // Two stops down, so that a flat card is not white already.
+        let s = RawDevelop {
+            exposure: -2.0,
+            ..Default::default()
+        };
+        let (plain, on) = (photo.develop(&s), lifted.develop(&s));
+        assert!(lifted.has_lens() && !photo.has_lens());
+        // The middle as it was; a corner twice the light (r = 1 there).
+        let (mid, corner) = ((60, 40), (0, 0));
+        assert!((luma(&on, mid.0, mid.1) - luma(&plain, mid.0, mid.1)).abs() < 2.0);
+        assert!(luma(&on, corner.0, corner.1) > luma(&plain, corner.0, corner.1) + 20.0);
+        let off = lifted.develop(&RawDevelop {
+            uncorrected: true,
+            ..s
+        });
+        assert_eq!(off.rgba8, plain.rgba8);
+    }
+
+    #[test]
+    fn a_dng_s_warp_moves_what_it_says_and_nothing_when_it_is_the_identity() {
+        let (w, h) = (200u32, 150u32);
+        let packed = sample::packed(w, h, 4095, [1.0; 3], |x, y| {
+            if (146..154).contains(&x) && (30..38).contains(&y) {
+                [0.9; 3]
+            } else {
+                [0.02; 3]
+            }
+        });
+        let photo = crate::raw::unpack(&packed).unwrap();
+        let s = RawDevelop::default();
+        let plain = photo.develop(&s);
+        let warp = |k0: f32| {
+            vec![Op::Warp {
+                planes: vec![[k0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+                centre: [0.5, 0.5],
+            }]
+        };
+        assert_eq!(with_list3(&photo, warp(1.0)).develop(&s).rgba8, plain.rgba8);
+        // Each point taken from 0.96 as far out: it lands 1/0.96 out.
+        let (bx, by) = centroid(&plain);
+        let (cx, cy) = centroid(&with_list3(&photo, warp(0.96)).develop(&s));
+        let (ex, ey) = (100.0 + (bx - 100.0) / 0.96, 75.0 + (by - 75.0) / 0.96);
+        assert!(
+            (cx - ex).abs() < 0.3 && (cy - ey).abs() < 0.3,
+            "({cx}, {cy}) against ({ex}, {ey})"
+        );
+    }
+
+    #[test]
+    fn a_dng_s_gain_maps_on_the_mosaic_are_its_own_colour_s_sites() {
+        // Twice the light on the red sites of the right half: as if the
+        // camera's red corner were dark and the map put it right.
+        let packed = sample::packed(40, 20, 4095, [1.0; 3], |_, _| [0.2; 3]);
+        let mut photo = crate::raw::unpack(&packed).unwrap();
+        let before = photo.data.clone();
+        let frame = Frame {
+            left: 0,
+            top: 0,
+            width: 40,
+            height: 20,
+        };
+        let map = crate::opcodes::parse(&crate::opcodes::tests::list(&[(
+            9,
+            crate::opcodes::tests::gain_map([0, 20, 20, 40], (0, 1), 2, (1, 1), &[2.0]),
+        )]));
+        mosaic_gains(&mut photo, &map, &frame);
+        for y in 0..20 {
+            for x in 0..40 {
+                let (was, now) = (before[y * 40 + x], photo.data[y * 40 + x]);
+                if x >= 20 && x % 2 == 0 && y % 2 == 0 {
+                    assert!(
+                        (now as i32 - 2 * was as i32).abs() <= 1,
+                        "({x}, {y}) {was} to {now}"
+                    );
+                } else {
+                    assert_eq!(now, was, "({x}, {y})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_packed_mosaic_carries_a_dng_s_opcodes() {
+        let mut packed = sample::packed(32, 16, 4095, [1.0; 3], |_, _| [0.3; 3]);
+        packed[4..8].copy_from_slice(&3u32.to_le_bytes());
+        packed.extend_from_slice(&0u32.to_le_bytes());
+        for v in [0u32, 0, 32, 16] {
+            packed.extend_from_slice(&v.to_le_bytes());
+        }
+        let two = crate::opcodes::tests::list(&[(
+            9,
+            crate::opcodes::tests::gain_map([0, 0, 16, 32], (0, 1), 1, (1, 1), &[1.5]),
+        )]);
+        let three = crate::opcodes::tests::list(&[(
+            3,
+            crate::opcodes::tests::f64s(&[0.3, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5]),
+        )]);
+        for list in [&two, &three] {
+            packed.extend_from_slice(&(list.len() as u32).to_le_bytes());
+            packed.extend_from_slice(list);
+        }
+        let plain =
+            crate::raw::unpack(&sample::packed(32, 16, 4095, [1.0; 3], |_, _| [0.3; 3])).unwrap();
+        let photo = crate::raw::unpack(&packed).unwrap();
+        assert!(photo.has_lens());
+        assert!(photo.data[0] > plain.data[0], "list 2 applied once read");
+        assert!(matches!(
+            photo.dng.as_ref().unwrap().1[0],
+            Op::Vignette { .. }
+        ));
+        for end in packed.len() - three.len()..packed.len() {
+            let _ = crate::raw::unpack(&packed[..end]);
+        }
     }
 
     #[test]

@@ -24,6 +24,10 @@
 //! middle as fractions of the half-diagonal, and at each the distortion
 //! (per cent), red's and blue's scale against green (fractions), and the
 //! light that reaches there (per cent of the middle's), `5n` f32 in all.
+//! Version 3 goes on with what a DNG says should be done to it: where the
+//! photograph's crop starts inside the DNG's active area, and that area's
+//! width and height (four u32), then opcode list 2 and opcode list 3 as
+//! the file has them, each a length (u32) and its bytes.
 
 use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
 
@@ -36,15 +40,46 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut raw = rawler::decode(&source, &rawler::decoders::RawDecodeParams::default())
         .map_err(|e| format!("camera raw: {e}"))?;
     correct(&mut raw, bytes);
-    let lens = fuji_lens(bytes);
+    misread(&raw)?;
+    let (list2, list3) = dng_opcodes(bytes);
+    let active = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
+        rawler::imgop::Point::new(0, 0),
+        rawler::imgop::Dim2::new(raw.width, raw.height),
+    ));
+    let kept = raw.crop_area.unwrap_or(active);
+    let mut extras = Extras {
+        lens: fuji_lens(bytes),
+        frame: [
+            kept.p.x.saturating_sub(active.p.x) as u32,
+            kept.p.y.saturating_sub(active.p.y) as u32,
+            active.d.w as u32,
+            active.d.h as u32,
+        ],
+        list2,
+        list3,
+    };
     // The camera's colours from XYZ, measured under daylight where the file
     // (or rawler's tables) has it, otherwise under whatever light it was;
     // none at all for a camera nobody measured.
     let mut xyz_to_cam = [0f32; 12];
-    let matrix = raw
-        .color_matrix
-        .get(&rawler::imgop::xyz::Illuminant::D65)
-        .or_else(|| raw.color_matrix.values().next());
+    // A DNG (or rawler's tables) may give two matrices, measured under
+    // two lights; the DNG specification develops with them blended by
+    // the light the photograph was taken under (`as_shot_matrix`). One
+    // alone is used as it is. (rawler keeps them in a hash map, and
+    // taking "whichever comes first" had a Xiaomi's daylight and
+    // tungsten matrices swap from one run to the next.)
+    let blended = as_shot_matrix(&raw.color_matrix, &raw.wb_coeffs);
+    let matrix = blended.as_ref().or_else(|| {
+        raw.color_matrix
+            .iter()
+            .min_by(|a, b| {
+                let off = |i: &rawler::imgop::xyz::Illuminant| (kelvin_of(i) / 6504.0).ln().abs();
+                off(a.0)
+                    .total_cmp(&off(b.0))
+                    .then((*a.0 as u16).cmp(&(*b.0 as u16)))
+            })
+            .map(|(_, m)| m)
+    });
     if let Some(m) = matrix {
         for (slot, v) in xyz_to_cam.iter_mut().zip(m.iter()) {
             *slot = *v;
@@ -130,7 +165,13 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
             crops,
             |_, _| 0,
             Samples::Float(&floats),
-            lens.as_ref(),
+            &{
+                // Developed by rawler's own steps: what a DNG says of
+                // its raw picture no longer applies to it.
+                extras.list2.clear();
+                extras.list3.clear();
+                extras
+            },
         ));
     }
     let color_at = |row: usize, col: usize| filter.as_ref().map_or(0, |c| c.color_at(row, col));
@@ -169,7 +210,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
         crops,
         color_at,
         samples,
-        lens.as_ref(),
+        &extras,
     ))
 }
 
@@ -281,6 +322,65 @@ fn kodak_balance(bytes: &[u8]) -> Option<[f32; 4]> {
     (r > 0.0 && g > 0.0 && b > 0.0).then(|| [r / g, 1.0, b / g, f32::NAN])
 }
 
+/// A Fuji's crop mode (maker note tag 0x104D: 1 full frame on a GFX,
+/// 2 the sports finder, 4 the electronic shutter's 1.25 crop, 8 the
+/// digital teleconverter), read from the EXIF of the JPEG the RAF holds
+/// (the header's words at 84 and 88 say where): IFD0, its EXIF
+/// directory, the maker note ("FUJIFILM", then the offset of its own
+/// directory, little-endian, from the note's start).
+fn fuji_crop_mode(bytes: &[u8]) -> Option<u16> {
+    if bytes.get(..8)? != b"FUJIFILM" {
+        return None;
+    }
+    let be32 =
+        |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize);
+    let (at, len) = (be32(84)?, be32(88)?);
+    let jpeg = bytes.get(at..at.checked_add(len)?)?;
+    let exif = jpeg
+        .windows(6)
+        .take(1 << 16)
+        .position(|w| w == b"Exif\0\0")?
+        + 6;
+    let tiff = jpeg.get(exif..)?;
+    let little = match tiff.get(..4)? {
+        [b'I', b'I', 42, 0] => true,
+        [b'M', b'M', 0, 42] => false,
+        _ => return None,
+    };
+    let read = |d: &[u8], at: usize, n: usize, little: bool| -> Option<u32> {
+        let b = d.get(at..at + n)?;
+        Some(b.iter().enumerate().fold(0u32, |v, (i, &x)| {
+            let shift = if little { i } else { n - 1 - i } * 8;
+            v | (x as u32) << shift
+        }))
+    };
+    // The entries of a directory at `dir` in `d`: tag, count, value.
+    let find = |d: &[u8], dir: usize, tag: u16, little: bool| -> Option<(u32, u32)> {
+        let n = read(d, dir, 2, little)? as usize;
+        (0..n.min(512)).find_map(|i| {
+            let e = dir + 2 + 12 * i;
+            (read(d, e, 2, little)? == tag as u32)
+                .then(|| Some((read(d, e + 4, 4, little)?, read(d, e + 8, 4, little)?)))
+                .flatten()
+        })
+    };
+    let ifd0 = read(tiff, 4, 4, little)? as usize;
+    let (_, exif_dir) = find(tiff, ifd0, 0x8769, little)?;
+    let (len, at) = find(tiff, exif_dir as usize, 0x927C, little)?;
+    let note = tiff.get(at as usize..(at as usize).checked_add(len as usize)?)?;
+    if note.get(..8)? != b"FUJIFILM" {
+        return None;
+    }
+    let dir = read(note, 8, 4, true)? as usize;
+    let n = read(note, dir, 2, true)? as usize;
+    (0..n.min(512)).find_map(|i| {
+        let e = dir + 2 + 12 * i;
+        (read(note, e, 2, true)? == 0x104D)
+            .then(|| read(note, e + 8, 2, true).map(|v| v as u16))
+            .flatten()
+    })
+}
+
 /// The white balance that makes daylight (D65) neutral, from the camera's
 /// matrix: what a file that does not say how it was balanced is given, as
 /// dcraw does, rather than none at all, which is a green picture. Each
@@ -334,7 +434,7 @@ fn pack(
     crops: [u32; 4],
     color_at: impl Fn(usize, usize) -> usize,
     samples: Samples,
-    lens: Option<&Lens>,
+    extras: &Extras,
 ) -> Vec<u8> {
     let bytes = match &samples {
         Samples::Int(v) => v.len() * 2,
@@ -342,7 +442,7 @@ fn pack(
     };
     let mut out = Vec::with_capacity(4 + 4 * 5 + 4 * 24 + 16 + PATTERN * PATTERN + 1 + bytes);
     out.extend_from_slice(b"CKRW");
-    for v in std::iter::once(2u32).chain(size) {
+    for v in std::iter::once(3u32).chain(size) {
         out.extend_from_slice(&v.to_le_bytes());
     }
     for v in levels.iter().flatten().chain(xyz_to_cam) {
@@ -376,7 +476,7 @@ fn pack(
             }
         }
     }
-    match lens {
+    match &extras.lens {
         None => out.extend_from_slice(&0u32.to_le_bytes()),
         Some(l) => {
             out.extend_from_slice(&(l.radii.len() as u32).to_le_bytes());
@@ -388,7 +488,107 @@ fn pack(
             }
         }
     }
+    for v in extras.frame {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for list in [&extras.list2, &extras.list3] {
+        out.extend_from_slice(&(list.len() as u32).to_le_bytes());
+        out.extend_from_slice(list);
+    }
     out
+}
+
+/// What goes after the samples: the lens's corrections a Fuji carries;
+/// and a DNG's opcode lists, with where the crop sits in the active area
+/// they are written for (left and top offset, then its width and height).
+#[derive(Debug, Clone, Default)]
+pub struct Extras {
+    pub lens: Option<Lens>,
+    pub frame: [u32; 4],
+    pub list2: Vec<u8>,
+    pub list3: Vec<u8>,
+}
+
+/// A DNG's opcode lists 2 and 3 (tags 51009 and 51022) as its raw
+/// picture's directory holds them: the full-size one (NewSubFileType 0),
+/// in IFD0's chain or among its SubIFDs. Empty where there are none.
+pub fn dng_opcodes(bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let little = match bytes.get(..4) {
+        Some([b'I', b'I', 42, 0]) => true,
+        Some([b'M', b'M', 0, 42]) => false,
+        _ => return Default::default(),
+    };
+    let read = |at: usize, n: usize| -> Option<u32> {
+        let b = bytes.get(at..at.checked_add(n)?)?;
+        Some(b.iter().enumerate().fold(0u32, |v, (i, &x)| {
+            let shift = if little { i } else { n - 1 - i } * 8;
+            v | (x as u32) << shift
+        }))
+    };
+    let size = |ty: u32| match ty {
+        1 | 2 | 6 | 7 => 1,
+        3 | 8 => 2,
+        4 | 9 | 11 | 13 => 4,
+        _ => 8,
+    };
+    let mut found = (Vec::new(), Vec::new());
+    let mut todo = vec![read(4, 4).unwrap_or(0) as usize];
+    let mut seen = Vec::new();
+    while let Some(dir) = todo.pop() {
+        if dir == 0 || seen.contains(&dir) || seen.len() > 64 {
+            continue;
+        }
+        seen.push(dir);
+        let Some(n) = read(dir, 2) else { continue };
+        let (mut primary, mut lists) = (true, (Vec::new(), Vec::new()));
+        for i in 0..(n as usize).min(1024) {
+            let e = dir + 2 + 12 * i;
+            let (Some(tag), Some(ty), Some(count), Some(value)) =
+                (read(e, 2), read(e + 2, 2), read(e + 4, 4), read(e + 8, 4))
+            else {
+                break;
+            };
+            let bytes_long = size(ty) * count as usize;
+            let at = if bytes_long <= 4 {
+                e + 8
+            } else {
+                value as usize
+            };
+            match tag {
+                254 => {
+                    primary = value == 0 || (bytes_long <= 4 && read(e + 8, size(ty)) == Some(0))
+                }
+                330 => (0..count as usize).for_each(|k| {
+                    if let Some(sub) = read(at + 4 * k, 4) {
+                        todo.push(sub as usize);
+                    }
+                }),
+                51009 | 51022 => {
+                    let list = bytes
+                        .get(at..at.saturating_add(bytes_long))
+                        .unwrap_or_default()
+                        .to_vec();
+                    if tag == 51009 {
+                        lists.0 = list;
+                    } else {
+                        lists.1 = list;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(next) = read(dir + 2 + 12 * n as usize, 4) {
+            todo.push(next as usize);
+        }
+        if primary
+            && (!lists.0.is_empty() || !lists.1.is_empty())
+            && found.0.is_empty()
+            && found.1.is_empty()
+        {
+            found = lists;
+        }
+    }
+    found
 }
 
 /// A lens's corrections, as the camera wrote them for this photograph:
@@ -402,6 +602,147 @@ pub struct Lens {
     pub red: Vec<f32>,
     pub blue: Vec<f32>,
     pub light: Vec<f32>,
+}
+
+/// The XYZ-to-camera matrix for the light a photograph was taken under,
+/// from the two a camera was measured with (the coolest and the warmest
+/// light given), blended by the reciprocal of the temperature as the DNG
+/// specification has it — and that temperature found from the camera's
+/// as-shot white through the blend itself, a few rounds until it holds.
+/// `None` where there are not two lights to blend, or nothing to find.
+fn as_shot_matrix(
+    matrices: &std::collections::HashMap<rawler::imgop::xyz::Illuminant, Vec<f32>>,
+    wb: &[f32; 4],
+) -> Option<Vec<f32>> {
+    let mut lights: Vec<(f32, &Vec<f32>)> = matrices
+        .iter()
+        .filter(|(_, m)| m.len() >= 9)
+        .map(|(l, m)| (kelvin_of(l), m))
+        .collect();
+    lights.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (&(warm, mw), &(cool, mc)) = (lights.first()?, lights.last()?);
+    if cool - warm < 100.0 || !wb[..3].iter().all(|v| v.is_finite() && *v > 0.0) {
+        return None;
+    }
+    // What a grey reads as, in the camera's colours.
+    let neutral = [wb[1] / wb[0], 1.0, wb[1] / wb[2]];
+    let blend = |t: f32| -> Vec<f32> {
+        let g = ((1.0 / t - 1.0 / cool) / (1.0 / warm - 1.0 / cool)).clamp(0.0, 1.0);
+        mw.iter()
+            .zip(mc.iter())
+            .map(|(a, b)| g * a + (1.0 - g) * b)
+            .collect()
+    };
+    let mut t = 5000.0f32;
+    for _ in 0..24 {
+        let m = blend(t);
+        let inv = invert3(&[[m[0], m[1], m[2]], [m[3], m[4], m[5]], [m[6], m[7], m[8]]])?;
+        let xyz: Vec<f32> = (0..3)
+            .map(|i| (0..3).map(|j| inv[i][j] * neutral[j]).sum())
+            .collect();
+        let sum = xyz[0] + xyz[1] + xyz[2];
+        if !(sum.is_finite() && sum > 0.0) {
+            return None;
+        }
+        let (x, y) = (xyz[0] / sum, xyz[1] / sum);
+        // McCamy's temperature from chromaticity.
+        let n = (x - 0.3320) / (0.1858 - y);
+        let next =
+            (449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33).clamp(2000.0, 25_000.0);
+        if !next.is_finite() {
+            return None;
+        }
+        if (next - t).abs() < 1.0 {
+            t = next;
+            break;
+        }
+        t = next;
+    }
+    Some(blend(t))
+}
+
+/// A 3×3 matrix's inverse, if it has one.
+fn invert3(m: &[[f32; 3]; 3]) -> Option<[[f32; 3]; 3]> {
+    let [[a, b, c], [d, e, f], [g, h, i]] = *m;
+    let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if det.abs() < 1e-9 || !det.is_finite() {
+        return None;
+    }
+    let k = 1.0 / det;
+    Some([
+        [
+            (e * i - f * h) * k,
+            (c * h - b * i) * k,
+            (b * f - c * e) * k,
+        ],
+        [
+            (f * g - d * i) * k,
+            (a * i - c * g) * k,
+            (c * d - a * f) * k,
+        ],
+        [
+            (d * h - e * g) * k,
+            (b * g - a * h) * k,
+            (a * e - b * d) * k,
+        ],
+    ])
+}
+
+/// The colour temperature of a light a camera's matrix was measured
+/// under (EXIF's LightSource), nearly enough to say which is nearest
+/// daylight.
+fn kelvin_of(light: &rawler::imgop::xyz::Illuminant) -> f32 {
+    use rawler::imgop::xyz::Illuminant as L;
+    match light {
+        L::D65 => 6504.0,
+        L::D55 => 5503.0,
+        L::D75 => 7504.0,
+        L::D50 => 5003.0,
+        L::C => 6774.0,
+        L::B => 4874.0,
+        L::Daylight | L::FineWeather | L::Flash => 5500.0,
+        L::CloudyWeather => 6500.0,
+        L::Shade => 7500.0,
+        L::DaylightFluorescent => 6430.0,
+        L::DaylightWhiteFluorescent => 5000.0,
+        L::CoolWhiteFluorescent => 4150.0,
+        L::Fluorescent => 4200.0,
+        L::WhiteFluorescent => 3450.0,
+        L::IsoStudioTungsten => 3200.0,
+        L::A | L::Tungsten => 2856.0,
+        L::Unknown => 5000.0,
+    }
+}
+
+/// A sensor's values cannot stand far past its own white: where more
+/// than one in a hundred do, rawler has read the file wrong (a Galaxy
+/// S23's linear DNG comes out red at full scale and green and blue at
+/// nothing), and what it read is said to be unreadable rather than
+/// developed into a field of one colour.
+fn misread(raw: &rawler::RawImage) -> Result<(), String> {
+    let whites = &raw.whitelevel.0;
+    let Some(&white) = whites.iter().max() else {
+        return Ok(());
+    };
+    let past = white as f32 * 1.1;
+    let (mut over, mut seen) = (0usize, 0usize);
+    let mut count = |v: f32| {
+        seen += 1;
+        if v > past {
+            over += 1;
+        }
+    };
+    match &raw.data {
+        RawImageData::Integer(v) => v.iter().step_by(97).for_each(|&x| count(x as f32)),
+        RawImageData::Float(v) => v.iter().step_by(97).for_each(|&x| count(x)),
+    }
+    if seen > 0 && over * 100 > seen {
+        return Err(format!(
+            "camera raw: this file's pictures were not read as they are ({} {}), so it cannot be developed here",
+            raw.clean_make, raw.clean_model
+        ));
+    }
+    Ok(())
 }
 
 /// The lens corrections in a Fuji RAF: tags 0xF00B (distortion), 0xF00F
@@ -503,6 +844,16 @@ pub fn fuji_lens(bytes: &[u8]) -> Option<Lens> {
         }
         _ => return None,
     };
+    // Taken through a 1.25 crop (the sports finder, or the electronic
+    // shutter's), the radii the lens was described at are the full
+    // frame's: a point at one of them is 1.25 times as far out in the
+    // picture the crop made.
+    let mut lens = lens;
+    if matches!(fuji_crop_mode(bytes), Some(2 | 4)) {
+        for r in &mut lens.radii {
+            *r *= 1.25;
+        }
+    }
     let sane = lens.radii.windows(2).all(|w| w[0] < w[1])
         && lens.radii.iter().all(|r| (0.0..2.0).contains(r))
         && lens.distortion.iter().all(|d| d.abs() < 50.0)
@@ -709,6 +1060,11 @@ mod tests {
     /// 100 to a TIFF whose one directory points at the RAF's own (0xF000),
     /// which holds the three tags as signed rationals.
     fn raf_with(tags: &[(u16, Vec<(i32, i32)>)]) -> Vec<u8> {
+        raf_cropped(tags, None)
+    }
+
+    /// The same, holding a JPEG whose EXIF maker note says the crop mode.
+    fn raf_cropped(tags: &[(u16, Vec<(i32, i32)>)], crop: Option<u16>) -> Vec<u8> {
         let mut out = b"FUJIFILMCCD-RAW 0201FF383501".to_vec();
         out.resize(104, 0);
         let base = 128u32;
@@ -743,6 +1099,42 @@ mod tests {
             }
         }
         out.extend(tiff);
+        if let Some(mode) = crop {
+            // A JPEG that is only its EXIF: big-endian TIFF, IFD0 with an
+            // EXIF directory, which holds the maker note.
+            let be16 = |v: u16| v.to_be_bytes();
+            let be32 = |v: u32| v.to_be_bytes();
+            let mut note = b"FUJIFILM".to_vec();
+            note.extend(12u32.to_le_bytes());
+            note.extend(1u16.to_le_bytes());
+            note.extend(0x104Du16.to_le_bytes());
+            note.extend(3u16.to_le_bytes());
+            note.extend(1u32.to_le_bytes());
+            note.extend([mode.to_le_bytes()[0], mode.to_le_bytes()[1], 0, 0]);
+            note.extend(0u32.to_le_bytes());
+            let mut t = b"MM\0*".to_vec();
+            t.extend(be32(8));
+            t.extend(be16(1));
+            t.extend(be16(0x8769));
+            t.extend(be16(4));
+            t.extend(be32(1));
+            t.extend(be32(8 + 18));
+            t.extend(be32(0));
+            t.extend(be16(1));
+            t.extend(be16(0x927C));
+            t.extend(be16(7));
+            t.extend(be32(note.len() as u32));
+            t.extend(be32(8 + 18 + 18));
+            t.extend(be32(0));
+            t.extend(note);
+            let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE1, 0, 0];
+            jpeg.extend(b"Exif\0\0");
+            jpeg.extend(t);
+            let at = out.len() as u32;
+            out[84..88].copy_from_slice(&at.to_be_bytes());
+            out[88..92].copy_from_slice(&(jpeg.len() as u32).to_be_bytes());
+            out.extend(jpeg);
+        }
         out
     }
 
@@ -830,6 +1222,111 @@ mod tests {
         let mismatched = raf_with(&[(0xF00B, d.clone()), (0xF00F, wrong), (0xF010, v.clone())]);
         assert_eq!(fuji_lens(&mismatched), None);
         assert_eq!(fuji_lens(b"FUJIFILM"), None);
+        // Through the 1.25 crop (2, 4) the radii are the crop's; at full
+        // frame (0) and the teleconverter (8), as written.
+        let tags = [(0xF00B, d), (0xF00F, c), (0xF010, v)];
+        let full = fuji_lens(&raf_cropped(&tags, Some(0))).unwrap();
+        assert_eq!(full, lens);
+        for (mode, k) in [(2u16, 1.25f32), (4, 1.25), (8, 1.0)] {
+            let file = raf_cropped(&tags, Some(mode));
+            assert_eq!(fuji_crop_mode(&file), Some(mode));
+            let got = fuji_lens(&file).unwrap();
+            for (a, b) in got.radii.iter().zip(&lens.radii) {
+                assert!((a - b * k).abs() < 1e-6, "mode {mode}: {a} against {b}");
+            }
+            assert_eq!(got.distortion, lens.distortion);
+        }
+        let file = raf_cropped(&tags, Some(2));
+        for end in 0..file.len() {
+            let _ = fuji_crop_mode(&file[..end]);
+        }
+    }
+
+    #[test]
+    fn a_dngs_opcode_lists_are_found_with_its_raw_picture() {
+        // IFD0 a preview (NewSubFileType 1) pointing at one SubIFD, the
+        // full-size picture (0), which holds lists 2 and 3.
+        let le16 = |v: u16| v.to_le_bytes();
+        let le32 = |v: u32| v.to_le_bytes();
+        let (two, three) = (b"list two".to_vec(), b"the third list".to_vec());
+        let mut f = b"II*\0".to_vec();
+        f.extend(le32(8));
+        let entry = |f: &mut Vec<u8>, tag: u16, ty: u16, count: u32, value: u32| {
+            f.extend(le16(tag));
+            f.extend(le16(ty));
+            f.extend(le32(count));
+            f.extend(le32(value));
+        };
+        let sub = 8 + 2 + 2 * 12 + 4;
+        f.extend(le16(2));
+        entry(&mut f, 254, 4, 1, 1);
+        entry(&mut f, 330, 4, 1, sub);
+        f.extend(le32(0));
+        let data = sub + 2 + 3 * 12 + 4;
+        f.extend(le16(3));
+        entry(&mut f, 254, 4, 1, 0);
+        entry(&mut f, 51009, 7, two.len() as u32, data);
+        entry(
+            &mut f,
+            51022,
+            7,
+            three.len() as u32,
+            data + two.len() as u32,
+        );
+        f.extend(le32(0));
+        f.extend(&two);
+        f.extend(&three);
+        assert_eq!(dng_opcodes(&f), (two, three));
+        for end in 0..f.len() {
+            let _ = dng_opcodes(&f[..end]);
+        }
+        assert_eq!(dng_opcodes(b"not a tiff"), (vec![], vec![]));
+    }
+
+    #[test]
+    fn a_file_whose_values_pass_its_white_is_refused() {
+        let mut dng =
+            chitrakar_codecs::develop::sample::dng(40, 20, 4095, [1.0; 3], |_, _| [0.8; 3]);
+        assert!(read(&dng).is_ok());
+        // Its white level (50717, a long) said to be a quarter of what it is.
+        let at = dng
+            .windows(4)
+            .position(|w| w == [0x1D, 0xC6, 4, 0])
+            .expect("the white level's entry");
+        dng[at + 8..at + 12].copy_from_slice(&1000u32.to_le_bytes());
+        let said = read(&dng).unwrap_err();
+        assert!(said.contains("not read as they are"), "{said}");
+    }
+
+    #[test]
+    fn two_matrices_are_blended_by_the_light_the_photograph_was_taken_under() {
+        use rawler::imgop::xyz::Illuminant;
+        let daylight = vec![0.70, -0.20, -0.05, -0.30, 1.10, 0.20, -0.05, 0.15, 0.60];
+        let tungsten = vec![0.90, -0.35, -0.10, -0.40, 1.25, 0.15, -0.10, 0.25, 0.45];
+        let matrices = std::collections::HashMap::from([
+            (Illuminant::D65, daylight.clone()),
+            (Illuminant::A, tungsten.clone()),
+        ]);
+        // What a grey reads as under a light of white `xyz`, through
+        // `m`, as a white balance (green as one).
+        let wb_under = |m: &[f32], xyz: [f32; 3]| {
+            let n: Vec<f32> = (0..3)
+                .map(|i| (0..3).map(|j| m[i * 3 + j] * xyz[j]).sum())
+                .collect();
+            [n[1] / n[0], 1.0, n[1] / n[2], f32::NAN]
+        };
+        for (m, white) in [
+            (&daylight, [0.9505, 1.0, 1.089]),
+            (&tungsten, [1.0985, 1.0, 0.3558]),
+        ] {
+            let got = as_shot_matrix(&matrices, &wb_under(m, white)).unwrap();
+            for (a, b) in got.iter().zip(m.iter()) {
+                assert!((a - b).abs() < 0.02, "{got:?} against {m:?}");
+            }
+        }
+        // One matrix is not blended.
+        let one = std::collections::HashMap::from([(Illuminant::D65, daylight.clone())]);
+        assert_eq!(as_shot_matrix(&one, &[2.0, 1.0, 1.5, f32::NAN]), None);
     }
 
     #[test]
