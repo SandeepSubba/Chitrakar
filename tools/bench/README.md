@@ -25,7 +25,8 @@ With `--io` it times a photograph on its way in and out instead
 (`engine/io.html`): a 12-megapixel PNG placed, the document saved with
 its picture encoded and with it kept, the draft's skeleton, and a
 24-megapixel raw mosaic (made on the page, packed as the raw reader
-packs one) opened, previewed and developed in full.
+packs one) opened, previewed and developed in full — as Bayer, and
+developed again as Fuji's X-Trans, which has a demosaic of its own.
 
 ```sh
 node tools/bench/engine/run.mjs --io

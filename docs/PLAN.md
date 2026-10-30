@@ -10231,7 +10231,8 @@ without reading anything else.*
   (each missing colour corrected by how the site's own colour changes,
   five by five) rather than averaged — visibly sharper on a real
   Canon file and without the orange and blue fringes along black type,
-  at about the same cost; X-Trans keeps the wider average. Over the
+  at about the same cost; X-Trans has its own since (below, *Fuji's
+  X-Trans and Canon's CR2, surveyed*). Over the
   settings sits the preview's histogram (`app/src/develop.ts`,
   unit-tested in `e2e/develop.test.mjs`), its corners lit when
   highlights or shadows clip and, pressed, painting them red and blue
@@ -10270,10 +10271,45 @@ without reading anything else.*
   preset tag 0xFA0D names, out of the file's own directory (rawler read
   another table — 1.5/1/3.8 on the P712, 60/1/16 on an EasyShare Z981,
   2/1/172 on a Z990; `kodak_balance`, which fixed every modern KDC tried:
-  P712, P880, Z981, Z990, Z1015); and the 40D's sRAW had its black taken
-  off twice (rawler's sRAW arithmetic already takes it off; only the 40D
-  reads that way). Six more Kodaks, fetched for the balance, found a
-  fourth: the Z981's greens are on the other diagonal (GRBG, one sample).
+  P712, P880, Z981, Z990, Z1015); and a Canon's small and medium raws
+  had their black taken off twice (rawler's sRAW arithmetic already takes
+  it off, and their darkest sites are nought; found on the 40D, then on
+  the 7D's mRAW and sRAW). Six more Kodaks, fetched for the balance,
+  found a fourth: the Z981's greens are on the other diagonal (GRBG, one
+  sample).
+  **Fuji's X-Trans and Canon's CR2, surveyed.** Seventeen Fujis (X-Trans
+  I to V: X-Pro1, X-E2, X-T1 to X-T5, X-Pro2, X-S10 compressed, lossless
+  and uncompressed, X-S20, X-E4 lossy, X-H2 compressed and lossless,
+  X100V, X100VI) and seventeen Canon bodies (550D to the 5DS R and the
+  1D X Mark II, 7D's mRAW and sRAW) all open and develop. Two faults
+  found: rawler says every RAF is upright, so a Fuji held for a portrait
+  came out on its side — the orientation is read from the file's EXIF
+  when the decoder has nothing better (`from_exif` in `core/rawin`); and
+  the Canon small-raw black above. X-Trans was the weak one: each
+  missing colour the plain average of its neighbours, soft and speckled
+  green and magenta along fine detail. It has a demosaic of its own now
+  (`RawPhoto::x_trans_region`): green first, along whichever of four
+  lines through a red or blue site green changes least; red and blue as
+  green plus their difference from green at the 5×5's sites of them,
+  weighted by likeness in green; then green once more from the site's
+  own colour and those differences, half and half with the first, and
+  red and blue again. Judged by `demosaic_against_truth` (ignored; a
+  Bayer raw's 2×2 blocks are a photograph with every colour measured,
+  `core/rawin`'s `truth` example writes one, and it is sampled through
+  either pattern and developed back) over seven Canon photographs: the
+  old average was 0.5 to 1.7 dB behind Bayer's Malvar, the new one 0.4
+  to 2.5 dB ahead of the old and ahead of Malvar on six of seven (the
+  seventh, a forest, 0.7 dB behind). On a grey edge it fringes a ninth
+  as much (`x_trans_keeps_a_grey_edge_grey`). It costs: about 700
+  instructions a site to Bayer's 420, so developing a 24-megapixel
+  X-Trans raw in the browser is 3.3 s where it was 2.2 (the io bench
+  has an X-Trans row now); the sliders' preview does not use it. Worked
+  in bands of 128 rows (`Planes`, kept from band to band) that are the
+  photograph all at once to the bit (`x_trans_in_bands_is_x_trans_all_at_once`).
+  Tried and not kept: a median over the colour differences (+0.1 dB for
+  half as much time again), a weight without a division (−0.2 dB),
+  green taken wholly from the second pass (busy pictures better, smooth
+  ones 1.3 dB worse — the site's own colour brings its noise too).
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a

@@ -2,9 +2,9 @@
 // What happens to a photograph on its way in and out, rather than what a
 // frame costs: a 12-megapixel PNG read and placed; the document saved
 // (the first save encodes the picture, the second has it kept); the
-// draft's skeleton; and a 24-megapixel camera raw — a Bayer mosaic made
+// draft's skeleton; and a 24-megapixel camera raw — a mosaic made
 // here, packed as the raw reader packs one — opened, previewed and
-// developed in full. Each the least of `n` runs.
+// developed in full, as Bayer and as X-Trans. Each the least of `n` runs.
 const q = new URLSearchParams(location.search);
 const mod = await import(`./${q.get("pkg") || "pkg"}/chitrakar_engine.js`);
 await mod.default();
@@ -27,29 +27,39 @@ out.push(["save, encoding it", least(3, () => { s = new mod.WasmSession(W, H, fa
 out.push(["save, PNG kept", least(5, () => s.save())]);
 out.push(["draft skeleton", least(5, () => s.save_skeleton())]);
 
-// A 6000 x 4000 RGGB mosaic, twelve bits, packed (core/rawin's form).
+// A 6000 x 4000 mosaic, twelve bits, packed (core/rawin's form):
+// Bayer (RGGB) and Fuji's X-Trans, which develop differently.
 const RW = 6000, RH = 4000;
-const head = new ArrayBuffer(4 + 4 * 5 + 4 * 24 + 16);
-const dv = new DataView(head);
-[67, 75, 82, 87].forEach((b, i) => dv.setUint8(i, b));
-[1, RW, RH, 1, 1].forEach((v, i) => dv.setUint32(4 + i * 4, v, true));
-const floats = [0, 0, 0, 0, 4095, 4095, 4095, 4095, 2, 1, 1.5, NaN,
-  3.2405, -1.5371, -0.4985, -0.9693, 1.876, 0.0416, 0.0556, -0.204, 1.0572, 0, 0, 0];
-floats.forEach((v, i) => dv.setFloat32(24 + i * 4, v, true));
-const pattern = new Uint8Array(48 * 48);
-for (let r = 0; r < 48; r++) for (let k = 0; k < 48; k++) pattern[r * 48 + k] = r % 2 === 0 ? (k % 2 === 0 ? 0 : 1) : k % 2 === 0 ? 1 : 2;
+const XTRANS = [[1, 1, 0, 1, 1, 2], [1, 1, 2, 1, 1, 0], [2, 0, 1, 0, 2, 1], [1, 1, 2, 1, 1, 0], [1, 1, 0, 1, 1, 2], [0, 2, 1, 2, 0, 1]];
 const samples = new Uint16Array(RW * RH);
 for (let y = 0; y < RH; y++) for (let x = 0; x < RW; x++) samples[y * RW + x] = (((x * 7 + y * 3) & 2047) + ((x * y) % 1500)) & 4095;
-const packed = new Uint8Array(head.byteLength + pattern.length + 1 + samples.byteLength);
-packed.set(new Uint8Array(head), 0);
-packed.set(pattern, head.byteLength);
-packed[head.byteLength + pattern.length] = 0;
-packed.set(new Uint8Array(samples.buffer), head.byteLength + pattern.length + 1);
+function packedRaw(colourAt) {
+  const head = new ArrayBuffer(4 + 4 * 5 + 4 * 24 + 16);
+  const dv = new DataView(head);
+  [67, 75, 82, 87].forEach((b, i) => dv.setUint8(i, b));
+  [1, RW, RH, 1, 1].forEach((v, i) => dv.setUint32(4 + i * 4, v, true));
+  const floats = [0, 0, 0, 0, 4095, 4095, 4095, 4095, 2, 1, 1.5, NaN,
+    3.2405, -1.5371, -0.4985, -0.9693, 1.876, 0.0416, 0.0556, -0.204, 1.0572, 0, 0, 0];
+  floats.forEach((v, i) => dv.setFloat32(24 + i * 4, v, true));
+  const pattern = new Uint8Array(48 * 48);
+  for (let r = 0; r < 48; r++) for (let k = 0; k < 48; k++) pattern[r * 48 + k] = colourAt(r, k);
+  const packed = new Uint8Array(head.byteLength + pattern.length + 1 + samples.byteLength);
+  packed.set(new Uint8Array(head), 0);
+  packed.set(pattern, head.byteLength);
+  packed[head.byteLength + pattern.length] = 0;
+  packed.set(new Uint8Array(samples.buffer), head.byteLength + pattern.length + 1);
+  return packed;
+}
 const file = new Uint8Array(1 << 20); // stands in for the raw file, kept beside the picture
 
 const r = new mod.WasmSession(RW, RH, false);
-out.push(["open a 24 MP raw", least(3, () => { r.raw_close(); r.raw_open(packed, file.slice(), "photo.dng"); })]);
+const bayer = packedRaw((y, x) => y % 2 === 0 ? (x % 2 === 0 ? 0 : 1) : x % 2 === 0 ? 1 : 2);
+out.push(["open a 24 MP raw", least(3, () => { r.raw_close(); r.raw_open(bayer, file.slice(), "photo.dng"); })]);
 out.push(["preview it, 1600 px", least(3, (i) => r.raw_preview(JSON.stringify({ exposure: i * 0.1 }), 1600))]);
 out.push(["develop and place it", least(2, () => { r.place_raw("{}"); r.undo(); })]);
+const xtrans = packedRaw((y, x) => XTRANS[y % 6][x % 6]);
+r.raw_close();
+r.raw_open(xtrans, file.slice(), "photo.raf");
+out.push(["develop and place, X-Trans", least(2, () => { r.place_raw("{}"); r.undo(); })]);
 window.result = out.map(([n, t]) => [n, t.toFixed(0)]);
 </script>

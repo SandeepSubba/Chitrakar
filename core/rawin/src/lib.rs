@@ -57,6 +57,19 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
         _ => (None, false),
     };
     use rawler::Orientation as O;
+    // rawler's decoder says "upright" for every Fuji file, whichever way
+    // the camera was held; its own reading of the file's EXIF has it
+    // (6 or 8 for a photograph taken upright). Asked only when the
+    // decoder has nothing better to say.
+    let from_exif = || {
+        let params = rawler::decoders::RawDecodeParams::default();
+        rawler::get_decoder(&source)
+            .and_then(|d| d.raw_metadata(&source, &params))
+            .ok()
+            .and_then(|m| m.exif.orientation)
+            .filter(|o| (2..=8).contains(o))
+            .map_or(1, u32::from)
+    };
     let orientation = match raw.orientation {
         O::HorizontalFlip => 2,
         O::Rotate180 => 3,
@@ -65,7 +78,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
         O::Rotate90 => 6,
         O::Transverse => 7,
         O::Rotate270 => 8,
-        O::Normal | O::Unknown => 1u32,
+        O::Normal | O::Unknown => from_exif(),
     };
     // A filter of four colours (cyan, magenta, yellow and green; or red,
     // green, blue and emerald) has no red, green and blue of its own to
@@ -180,12 +193,13 @@ fn correct(raw: &mut rawler::RawImage, bytes: &[u8]) {
             raw.wb_coeffs = wb;
         }
     }
-    // The 40D's small raw takes its black off when it is turned from
-    // brightness and colour to red, green and blue (the 512 in rawler's
-    // and dcraw's version 0), and then rawler's colour data takes the
-    // full-size raw's black off again, which is a quarter of the blue
-    // there is: a yellow-green cast. No other camera reads that way.
-    if raw.cpp == 3 && raw.camera.find_hint("sraw_40d") {
+    // A Canon's small and medium raws (sRAW, mRAW) take their black off
+    // when they are turned from brightness and colour to red, green and
+    // blue — their darkest sites are nought — and then rawler gives them
+    // the full-size raw's black as well (2047 on a 7D, 1023 on a 40D),
+    // which takes it off again: most of the blue there is, and a
+    // yellow-green cast on every one tried (40D, 7D's mRAW and sRAW).
+    if raw.cpp == 3 && raw.clean_make == "Canon" && raw.camera.mode.starts_with("sRaw") {
         raw.blacklevel = rawler::rawimage::BlackLevel::new(&[0u16; 3], 1, 1, 3);
     }
 }
