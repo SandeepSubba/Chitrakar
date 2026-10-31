@@ -1,0 +1,10 @@
+# Single source of truth for the toolchain, so CI and a dev machine run the
+# same clippy. Version skew is not cosmetic here: `-D warnings` turns any
+# lint a newer clippy adds into a CI error that never fired locally.
+# Bump deliberately, then re-run the full gate before pushing.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+# wasm32-wasip1 is the raw reader's: its CR3 decoder asks for the clock,
+# which only WASI's standard library can answer in a browser.
+targets = ["wasm32-unknown-unknown", "wasm32-wasip1"]

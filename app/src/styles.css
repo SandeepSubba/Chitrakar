@@ -1,0 +1,4131 @@
+/* The chrome's colours, all of them, as tokens: the dark set here and
+   the light set below it, chosen by `data-theme` on the root, which the
+   app sets from the theme preference (system, dark or light — "system"
+   is resolved to one of the other two in the app, so the stylesheet
+   never has to say the light set twice). What is drawn *over the
+   picture* — handles, anchors, ants, the crop's frame, the brush ring —
+   keeps its own white and black: it sits on the page, not on the
+   chrome, and a page can be any colour under either theme. */
+:root {
+  --bg: #1e1e22;
+  --panel: #2a2a30;
+  --border: #3a3a42;
+  --text: #e8e8ec;
+  --muted: #8a8a94;
+  --accent: #6c8cff;
+  /* What sits on the accent: a button's label. */
+  --on-accent: #10101a;
+  /* A hairline where a border would be too much. */
+  --line: rgb(255 255 255 / 0.08);
+  /* The rulers, the area behind the page, and a mask's thumbnail. */
+  --rule: #1c1c20;
+  --canvas: #141416;
+  --thumb: #111;
+  /* A field's quiet ground, and a note in a window. */
+  --field: rgba(127, 127, 127, 0.08);
+  --note: #ffd9a0;
+  /* Shadows under what floats, and the scrim behind a window. */
+  --shadow: rgb(0 0 0 / 0.45);
+  --shadow-deep: rgb(0 0 0 / 0.5);
+  --scrim: rgb(0 0 0 / 0.5);
+  /* The checkerboard that says "transparent": under a layer's
+     thumbnail and under the export preview. */
+  --thumb-check: rgba(255, 255, 255, 0.08);
+  --check-a: #8a8a8a;
+  --check-b: #6a6a6a;
+  color-scheme: dark;
+}
+
+/* Ticks, sliders and radio dots in the app's own colour rather than
+   the browser's blue, in either theme: the accent unless a person has
+   given them one of their own (Preferences › Appearance, which sets
+   `--slider` on the root, as it sets `--accent`). */
+:root {
+  --slider: var(--accent);
+  accent-color: var(--slider);
+}
+
+:root[data-theme="light"] {
+  --bg: #f2f2f5;
+  --panel: #ffffff;
+  --border: #d4d4dc;
+  --text: #1b1b22;
+  --muted: #6b6b78;
+  --accent: #3b5bdb;
+  --on-accent: #ffffff;
+  --line: rgb(0 0 0 / 0.08);
+  --rule: #e9e9ee;
+  --canvas: #d6d6dc;
+  --thumb: #e4e4e8;
+  --field: rgba(127, 127, 127, 0.12);
+  --note: #7a4f00;
+  --shadow: rgb(0 0 0 / 0.16);
+  --shadow-deep: rgb(0 0 0 / 0.22);
+  --scrim: rgb(0 0 0 / 0.28);
+  --thumb-check: rgba(0, 0, 0, 0.08);
+  --check-a: #c9c9ce;
+  --check-b: #adadb4;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Where the keyboard is, in the app's own accent: the browser's ring is
+   black and white whatever the theme, and the accent is what says
+   "this one" everywhere else. Only for the keyboard — a click does not
+   draw it. The text typed on the page and the document's name keep
+   their own way of saying they have the caret. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+html,
+body {
+  /* A drag down from the top of the page is not a reload. Android's
+     Chrome takes one for pull-to-refresh, which here throws away
+     whatever has not been saved. */
+  overscroll-behavior: none;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  /* The height that is there to draw in. A phone's browser counts the
+     strip behind its own toolbar as part of 100vh, which put the tool
+     rail along the bottom partly under that toolbar; 100dvh is what is
+     showing. The first line is for a browser that does not know it. */
+  height: 100vh;
+  height: 100dvh;
+  /* Clear of a notch and the rounded corners, on a phone held either
+     way; zero everywhere else. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
+}
+
+/* Chrome. Two influences, deliberately: the density and dark neutrals of a
+   professional tool — a slim menu bar, a compact icon rail, artwork carrying
+   the only saturated colour on screen — with the softer edges and generous
+   hit targets of a consumer one, so nothing is a 20px square you have to aim
+   at. Accent is reserved for state (active tool, open menu, live toggle);
+   everything at rest is greyscale. */
+.topbar {
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Two rows, as an editor of this kind has them: the menus, with the
+   name of what is open at the far end where a title sits; and under
+   them the buttons. The buttons had sat on the menus' own row after
+   Help, where they read as one more menu that had lost its words. Each
+   row is one row tall; a row wider than the window would scroll the
+   whole page sideways and slide the canvas under the tool rail, so what
+   only informs gives way first (below), and the browser suite asks at
+   the widths a laptop is. */
+.topbar-menus,
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.25rem 0.7rem;
+  height: 2.4rem;
+}
+
+.topbar-tools {
+  gap: 0.4rem;
+  border-top: 1px solid var(--line);
+}
+
+/* A hairline between the groups of buttons, so a row of a dozen icons
+   reads as the four things they are. */
+.topbar-tools > .chrome-group + .chrome-group {
+  padding-left: 0.4rem;
+  border-left: 1px solid var(--line);
+}
+
+/* The pointer's place on the page, quiet and in figures of one width so
+   it does not jitter as it changes; empty while the pointer is off the
+   canvas. A phone has no pointer to follow. */
+.cursor-readout {
+  min-width: 7.5rem;
+  text-align: right;
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.topbar.one-row .cursor-readout {
+  display: none;
+}
+
+/* The name of what is open, at the menus' far end. */
+.topbar-menus .doc-name {
+  margin-left: auto;
+}
+
+/* Where there is no row of menus — a phone's drawer, the desktop app's
+   system bar — the two rows are one, as the bar always was there. */
+.topbar.one-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.3rem 0.7rem;
+  height: 2.6rem;
+}
+
+.topbar.one-row .topbar-menus,
+.topbar.one-row .topbar-tools {
+  display: contents;
+}
+
+.topbar.one-row .topbar-menus .doc-name {
+  margin-left: 0;
+}
+
+/* The wordmark goes first — the name over the door, which the window's
+   own title bar says anyway — and then the facts about the document,
+   whose mode, size and resolution the panel's fields say too. The
+   badges beside them stay, since a profile being loaded is said nowhere
+   else on screen. Everything that can be pressed stays. */
+@media (max-width: 1180px) {
+  .brand {
+    display: none;
+  }
+}
+
+@media (max-width: 1060px) {
+  .doc-facts {
+    display: none;
+  }
+}
+
+/* A window too narrow for every group in the buttons' row lets the
+   selection's go — each is a row of the Select menu — rather than
+   wrapping the zoom field onto a third line. */
+@media (max-width: 760px) {
+  .topbar-tools .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+
+/* A larger interface (Preferences › Appearance) fills the rows sooner,
+   so it gives the same things up at a wider window, in proportion. */
+@media (max-width: 860px) {
+  :root[data-scale="large"] .topbar-tools .chrome-group[aria-label="Selection"] { display: none; }
+}
+@media (max-width: 950px) {
+  :root[data-scale="larger"] .topbar-tools .chrome-group[aria-label="Selection"] { display: none; }
+}
+@media (max-width: 1330px) {
+  :root[data-scale="large"] .brand { display: none; }
+}
+@media (max-width: 1195px) {
+  :root[data-scale="large"] .doc-facts { display: none; }
+}
+@media (max-width: 1475px) {
+  :root[data-scale="larger"] .brand { display: none; }
+}
+@media (max-width: 1325px) {
+  :root[data-scale="larger"] .doc-facts { display: none; }
+}
+
+.brand {
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.01em;
+  padding-right: 0.35rem;
+}
+
+/* The zoom, read and set in one place. Narrow enough for three digits,
+   which is all a zoom ever needs. */
+.zoom-field {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.zoom-field input {
+  width: 3.4rem;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.15rem 0.25rem;
+  font-size: 0.72rem;
+}
+
+/* Work that has not been saved, said where the name is and no louder
+   than that. */
+.unsaved-dot {
+  color: var(--accent);
+  font-size: 1rem;
+  line-height: 1;
+  margin-left: -0.15rem;
+}
+
+.doc-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.icc-badge {
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: 999px;
+  color: var(--accent);
+  padding: 0.05rem 0.45rem;
+  font-size: 0.7rem;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* Menu bar */
+.menubar {
+  display: flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.menu {
+  position: relative;
+}
+
+.menu-label {
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-label:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.menu-label.open {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.menu-pop {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  z-index: 20;
+  min-width: 15rem;
+  padding: 0.3rem;
+  background: color-mix(in srgb, var(--panel) 92%, #000);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px var(--shadow);
+  /* A menu can be taller than the room under it, and one that is went on
+     past the bottom of the window with no way to reach what was down
+     there: on a phone held sideways, fourteen of Edit's twenty-four items
+     were off the screen. It scrolls now. What is taken off is room for
+     the bar itself, which is one row on a wide window and up to three
+     when it wraps — generous rather than exact, since what matters is
+     that a menu can never run out of the window, and one that scrolls a
+     little sooner than it had to is no worse than one that fits. */
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
+}
+
+/* The same popup, put where the pointer asked for it rather than under a
+   label in the bar. Its place comes in as a style of its own. */
+.context-menu {
+  position: fixed;
+}
+
+.menu-pop hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 0.3rem 0.15rem;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.menu-item:hover {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.menu-item .icon {
+  color: var(--muted);
+  flex: none;
+}
+
+.menu-item:hover .icon {
+  color: var(--text);
+}
+
+.menu-item-label {
+  flex: 1;
+}
+
+.menu-item-hint {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A row with a menu behind it, and that menu. The popup is fixed to the
+   window rather than to the row — see SubMenu for why — so its place
+   comes in as a style of its own. */
+.menu-sub {
+  position: relative;
+}
+
+.menu-sub.open > .menu-item {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+}
+
+.menu-sub-mark {
+  font-size: 0.7rem;
+}
+
+.menu-pop.sub {
+  position: fixed;
+  top: auto;
+  left: auto;
+  z-index: 25;
+}
+
+/* Chrome buttons: the few actions that stay out of the menus because they
+   are toggled mid-edit rather than chosen once. */
+.chrome-group {
+  display: flex;
+  gap: 0.15rem;
+}
+
+.chrome-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+}
+
+.chrome-button:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.chrome-button.icon-only {
+  padding: 0.3rem;
+}
+
+.chrome-button.toggled {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.fill-swatch {
+  width: 2.2rem;
+  height: 2rem;
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  padding: 2px;
+  cursor: pointer;
+}
+
+/* Dialogs: dim the app, sit the panel above it, and keep the same rounded
+   surfaces the menus use so it reads as part of the same program. */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: var(--scrim);
+}
+
+.modal {
+  /* Never wider or taller than the window it is in. A dialog is centred
+     on the scrim, so one taller than the screen hangs off *both* ends and
+     takes its buttons with it — on a phone held sideways that left New
+     document with no Create and no Cancel on the screen at all, and
+     nothing to scroll. What it has now is a size it cannot exceed and,
+     past that, its own scrollbar. */
+  width: min(20rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  padding: 1rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px var(--shadow-deep);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* The trace window is wider than a form: most of it is the picture of
+   what the trace will be. */
+.modal.trace {
+  width: min(26rem, calc(100vw - 2rem));
+}
+
+.trace-preview {
+  margin: 0;
+  min-height: 8rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: repeating-conic-gradient(var(--border) 0% 25%, transparent 0% 50%) 0 0 / 16px 16px;
+}
+
+.trace-preview img {
+  max-width: 100%;
+  max-height: 16rem;
+  display: block;
+}
+
+.modal h2 {
+  margin: 0 0 0.2rem;
+  font-size: 0.95rem;
+}
+
+.modal .row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.modal .row input,
+.modal .row select {
+  margin-left: auto;
+  width: 7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+/* A row that is a box to tick: the box first, where it is read from,
+   rather than pushed to the far side like a field. */
+.modal .row.check input {
+  margin: 0;
+  width: auto;
+}
+
+/* Find and replace: words want more room than a number does, and the
+   count of what was found sits under them, quietly. */
+.modal .row input[type="text"] {
+  width: 12rem;
+}
+
+.modal .found {
+  margin: 0.2rem 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-bottom: 0.3rem;
+}
+
+.preset {
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+}
+
+.preset:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.preset.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+/* A short line of context inside a dialog: the size the page is now, or
+   what happens to what falls outside it. */
+.modal-note {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* The nine points of the page, one of which stays where it is while the
+   rest grows or shrinks around it. */
+.anchor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1.4rem);
+  gap: 3px;
+  justify-content: center;
+  margin: 0.3rem 0;
+}
+
+.anchor-grid .anchor-cell {
+  width: 1.4rem;
+  height: 1.4rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+.anchor-grid .anchor-cell:hover {
+  border-color: var(--accent);
+}
+
+.anchor-grid .anchor-cell.active {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  /* Kept against the bottom of a dialog that has had to scroll, so that
+     what answers it is where it always is rather than somewhere down the
+     end of a list of fields. */
+  position: sticky;
+  bottom: -1rem;
+  padding: 0.4rem 0 0;
+  background: var(--panel);
+}
+
+.mask-button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+/* A button with nothing to do yet — Replace all with nothing found —
+   is faded where it stands rather than turned the browser's grey. */
+.mask-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.mask-button:disabled:hover {
+  background: none;
+}
+
+.mask-button.primary:disabled:hover {
+  background: var(--accent);
+}
+
+/* Align controls: a strip of icon buttons that appears only with a
+   multi-selection, since neither word means anything for one layer. */
+.align-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.15rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.4rem;
+}
+
+.align-bar button {
+  display: grid;
+  place-items: center;
+  height: 1.8rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.align-bar button:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}
+
+/* The one in force — a text block's alignment — marked as the active
+   tool is, not left looking like the others. */
+.align-bar button.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+/* What the buttons line layers up with: a row of its own under them. */
+.align-bar .align-to {
+  grid-column: 1 / -1;
+  margin-top: 0.2rem;
+}
+
+/* What the tool in hand can be told: a strip at the top left of the
+   canvas, under the rulers, with its settings named. It floats over
+   the canvas rather than taking a row from it, so picking a paint tool
+   does not move the page under the pointer. */
+.tool-options {
+  position: absolute;
+  top: 26px;
+  left: 26px;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  max-width: calc(100% - 52px);
+  overflow-x: auto;
+  padding: 0.3rem 0.6rem;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.tool-option {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.tool-option-value {
+  min-width: 2.2rem;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.tool-option-sep {
+  align-self: stretch;
+  width: 1px;
+  background: var(--border);
+}
+
+.tool-options .palette {
+  max-width: none;
+  flex-wrap: nowrap;
+}
+
+.brush-size {
+  box-sizing: border-box;
+  width: 3.2rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.3rem;
+}
+
+.paint-softness {
+  width: 6rem;
+  margin: 0;
+  accent-color: var(--slider);
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  /* The row of layer actions has grown past the panel's width; wrapping
+     keeps it inside rather than letting it push the whole chrome wider
+     and scroll the canvas sideways when one of them is clicked. */
+  flex-wrap: wrap;
+}
+
+.panel-head {
+  margin-bottom: 0.35rem;
+}
+
+.panel-head h2 {
+  flex: 1;
+}
+
+/* The layer actions on a row of their own under the heading, spread
+   across it, rather than two beside the heading and a ragged six under. */
+.panel-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  width: 100%;
+}
+
+.panel-head button {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.panel-head button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}
+
+.panel-head button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.panel li.selected {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.panel li.multi {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.history {
+  margin-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.4rem;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
+.history h2 {
+  margin: 0 0 0.3rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.history ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.history button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 0.78rem;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.history button:hover {
+  background: var(--border);
+}
+
+.history button.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Where the document began: set apart from the steps under it. */
+.history li.history-start button {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.history li.history-start button.current {
+  color: var(--accent);
+  font-style: normal;
+}
+
+.history li.history-start button:disabled {
+  cursor: default;
+}
+
+.history li.future button {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.panel .kind {
+  display: grid;
+  place-items: center;
+  margin-left: auto;
+  color: var(--accent);
+  flex: none;
+}
+
+.panel li.empty {
+  padding: 0.6rem 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+.layer-props {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.2rem;
+  margin-top: 0.4rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* Headings over the parts of a layer's settings, so a long column reads
+   as four short ones: where it is, how it looks, what it wears, what
+   shows of it. Quieter than the panel's own headings. */
+.layer-props .props-head {
+  margin: 0.45rem 0 0;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--line, var(--border));
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+
+.layer-props .props-head:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+/* The ways to give a layer a mask, as equal tiles rather than a ragged
+   wrap of buttons. */
+.layer-props .mask-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(5.5rem, 1fr));
+  gap: 0.3rem;
+}
+
+.layer-props .mask-row .mask-button {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.layer-props .slider-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.layer-props .slider-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.layer-props label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.layer-props textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.25rem;
+  font: inherit;
+  font-size: 0.8rem;
+  resize: vertical;
+}
+
+.layer-props select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem;
+}
+
+/* The typed fields dressed as the choices beside them: they were the
+   browser's own, white and grey-edged with square corners in either
+   theme, under a Blend that was not. */
+.layer-props input[type="number"],
+.layer-props input[type="text"] {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.2rem 0.3rem;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
+.layer-props input[type="number"]:focus-visible,
+.layer-props input[type="text"]:focus-visible,
+.layer-props select:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: -1px;
+}
+
+.layer-props .row {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* A name and a choice on one line: the name keeps to one line and the
+   choice takes the rest, shrinking before it pushes past the panel.
+   "Past the ends" had wrapped onto three lines beside a choice cut off
+   at the edge. */
+.layer-props label.row:has(> select) {
+  white-space: nowrap;
+}
+
+.layer-props label.row > select {
+  flex: 1;
+  min-width: 0;
+}
+
+.layer-props input[type="color"] {
+  width: 2rem;
+  height: 1.4rem;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: none;
+  margin-left: auto;
+}
+
+.mask-button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font-size: 0.76rem;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  margin-left: auto;
+}
+
+.mask-button:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.ramp-preview {
+  height: 0.85rem;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+}
+
+.stop-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.stop-row input[type="color"] {
+  width: 1.9rem;
+  height: 1.5rem;
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.stop-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+}
+
+.stop-remove {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+}
+
+.stop-remove:hover:not(:disabled) {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.stop-remove:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.add-adjustment {
+  background: none;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.25rem;
+  width: 5rem;
+  cursor: pointer;
+}
+
+.add-adjustment:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--text) 30%, transparent);
+}
+
+.panel .rename {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  padding: 0.1rem 0.3rem;
+}
+
+#engine-canvas {
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.pen-overlay,
+/* A layer's own picture, in place of the glyph that says what kind it
+   is. Checkered behind it, so a transparent layer reads as transparent
+   rather than as the panel's own background. */
+.layer-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  object-fit: contain;
+  background-color: var(--panel);
+  background-image:
+    linear-gradient(45deg, var(--thumb-check) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--thumb-check) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--thumb-check) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--thumb-check) 75%);
+  background-size: 8px 8px;
+  background-position:
+    0 0,
+    0 4px,
+    4px -4px,
+    -4px 0;
+}
+
+/* A mask's picture reads as coverage rather than as artwork, so it sits
+   on black: what it lets through is white, what it hides is nothing. */
+.mask-thumb {
+  width: 15px;
+  height: 15px;
+  background-color: var(--thumb);
+  background-image: none;
+}
+
+/* The brush's own cursor is the ring, so the pointer gets out of its
+   way: a crosshair says where the centre is without hiding the paint. */
+.canvas-host.painting {
+  cursor: crosshair;
+}
+
+.brush-ring,
+.marquee-overlay,
+.snap-overlay,
+.crop-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* The three ways to start a mask, side by side. */
+.mask-row {
+  display: flex;
+  gap: 0.3rem;
+  flex-wrap: wrap;
+}
+
+/* Rulers: thin strips over the top and left of the canvas, marked in
+   document units. Guides are dragged out of them. */
+.ruler {
+  position: absolute;
+  z-index: 2;
+  background: var(--rule);
+  color: var(--muted);
+  touch-action: none;
+  cursor: crosshair;
+  overflow: hidden;
+}
+
+.ruler-top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ruler-left {
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 18px;
+  border-right: 1px solid var(--line);
+}
+
+.ruler svg {
+  width: 100%;
+  height: 100%;
+}
+
+.ruler line {
+  stroke: rgb(255 255 255 / 0.35);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.ruler text {
+  fill: currentColor;
+  font-size: 9px;
+}
+
+/* The little square where the two rulers meet, so neither shows through
+   the other's first tick. */
+.ruler-corner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 18px;
+  height: 18px;
+  z-index: 3;
+  background: var(--rule);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The grid: under the artwork's own overlays and quiet enough to draw
+   on top of, since it is there to line things up against rather than to
+   be looked at. */
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.grid-line {
+  stroke: color-mix(in srgb, var(--accent) 28%, transparent);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.guide-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* A guide is a hairline, but it has to be grabbable, so it is drawn thin
+   and hit through a wider invisible twin. */
+.guide-overlay .guide {
+  stroke: #2ec4b6;
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+  pointer-events: none;
+}
+
+.guide-overlay .guide-hit {
+  stroke: transparent;
+  stroke-width: 9;
+  pointer-events: stroke;
+  cursor: grab;
+}
+
+.guide-overlay .guide.dragging {
+  pointer-events: none;
+  stroke-dasharray: 4 3;
+}
+
+/* Position and size, typed rather than nudged: X and Y, then the two
+   sides with the chain that ties them between, then the angle and the
+   lean. Two to a row: four to a row left a panel's width a few
+   characters a field, and 383.25 read as "383.(". */
+.geometry {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  grid-template-areas:
+    "x . y"
+    "w lock h"
+    "r . sk";
+  align-items: center;
+  gap: 0.3rem 0.35rem;
+}
+
+.geometry .geo-x { grid-area: x; }
+.geometry .geo-y { grid-area: y; }
+.geometry .geo-w { grid-area: w; }
+.geometry .geo-h { grid-area: h; }
+.geometry .geo-r { grid-area: r; }
+.geometry .geo-sk { grid-area: sk; }
+.geometry .ratio-lock { grid-area: lock; }
+
+.layer-props .geometry label {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* The letter beside each field, all the same width so the fields line
+   up down the column. */
+.geometry label {
+  display: flex;
+}
+
+.geometry input {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  /* The spinners took a third of a field this narrow; the arrow keys
+     still step it. */
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.geometry input::-webkit-inner-spin-button,
+.geometry input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* The chain between the two sides: a small toggle, not a field's worth
+   of grey. */
+.ratio-lock {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.8rem;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+}
+
+.ratio-lock:hover {
+  border-color: var(--border);
+}
+
+.ratio-lock.on {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Each effect reads as one unit stacked on the next, so it gets a hairline
+   rule above it rather than a heading of its own. */
+.effects {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.effect {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line);
+}
+
+.effect-head span {
+  flex: 1;
+  font-weight: 500;
+}
+
+/* The crop frame: everything outside it is dimmed, so what survives the
+   crop is what still looks like the picture. */
+/* The straighten panel sits over the canvas rather than in front of it:
+   a horizon is laid level against the page, so the page has to stay
+   reachable while the angle is chosen. */
+.straighten-panel {
+  position: fixed;
+  right: 1.2rem;
+  bottom: 1.2rem;
+  z-index: 30;
+  width: 17rem;
+  padding: 0.7rem 0.8rem;
+  background: color-mix(in srgb, var(--panel) 94%, #000);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px var(--shadow);
+}
+
+.straighten-panel h2 {
+  margin: 0 0 0.4rem;
+  font-size: 0.9rem;
+}
+
+/* The line drawn along something that ought to be level. */
+.level-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.level-line {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
+.crop-shade {
+  fill: rgb(0 0 0 / 0.55);
+}
+
+/* The thirds, drawn thinner than the frame: a guide to put a horizon
+   on, not another edge. */
+.crop-third {
+  stroke: rgb(255 255 255 / 0.5);
+  stroke-width: 1;
+}
+
+/* The crop's ratio picker. The same width as the number above it, and
+   as the buttons, so that picking a tool never moves the rail — and with
+   it the canvas — sideways under the pointer. */
+.tool-ratio {
+  width: 2.4rem;
+  padding: 0.2rem 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.68rem;
+}
+
+.crop-frame {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+}
+
+/* Alignment guides: one hairline, drawn in the accent so it reads as
+   live feedback rather than as part of the artwork. */
+.snap-overlay line {
+  stroke: var(--accent);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.pen-overlay polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.pen-overlay .pen-first {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.anchor {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: grab;
+  touch-action: none;
+  z-index: 2;
+}
+
+/* The rotation knob sits above the selection, clear of the corner handles
+   so the two gestures never compete for the same pixels. */
+.rot-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #fff;
+  cursor: grab;
+  /* The selection box is pointer-transparent so it never blocks the canvas;
+     its handles opt back in. */
+  pointer-events: auto;
+  touch-action: none;
+}
+
+/* Gradient geometry: hollow knobs so they read as controls over artwork
+   rather than as part of it, and a dashed line for the ramp's axis. */
+.mask-outline {
+  fill: none;
+  stroke: #ffcf5c;
+  stroke-width: 1;
+  stroke-dasharray: 5 4;
+}
+
+.mask-handle,
+.mask-move {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: #ffcf5c;
+  border: 1px solid #2a2a30;
+  border-radius: 2px;
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 3;
+}
+
+.mask-move {
+  border-radius: 50%;
+}
+
+.grad-line {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.grad-handle,
+.grad-stop {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 3;
+}
+
+.grad-stop {
+  width: 8px;
+  height: 8px;
+  margin: 1px;
+  border-width: 1.5px;
+}
+
+/* A radial's focus: where its rings start, told from its centre by being
+   filled with the accent rather than white. */
+.grad-focus {
+  background: var(--accent);
+  border-color: #fff;
+}
+
+.curve-handle {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 1.5px solid #fff;
+  cursor: grab;
+  touch-action: none;
+  z-index: 2;
+}
+
+/* The selection outline follows the layer's own axes, so it is drawn as a
+   quad rather than positioned as a box. SVG keeps the line 1px however the
+   layer is scaled or turned. */
+.sel-outline {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.sel-outline polygon {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+/* The marching ants round what is picked out of the page. Two strokes
+   over each other: a pale solid one under a dark dashed one, so the edge
+   reads on a dark picture and on a light one — which is what the
+   convention has always been for, and why it is not simply a dotted
+   line in the accent colour. The march is the dash offset travelling,
+   slow enough to read as motion rather than shimmer. */
+/* A region the document has kept, by name: a chip in the same row the
+   palette's colours sit in, since both are things the page keeps to be
+   reached for rather than made again. */
+.kept {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: inherit;
+  border-radius: 4px;
+  padding: 0 6px;
+  height: 22px;
+  font-size: 11px;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.kept:hover {
+  border-color: var(--accent);
+}
+
+/* The wash over what is not picked out: the region's own coverage, laid
+   over the page where the page is and under the ants, so a soft edge and
+   an inverted region can be seen rather than guessed at. */
+.veil {
+  position: absolute;
+  pointer-events: none;
+}
+
+.ants {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.ants polygon,
+.ants rect,
+.ants ellipse {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1;
+  paint-order: stroke;
+}
+
+.ants::after {
+  content: "";
+}
+
+.ants > * {
+  /* The dark half is the same shape drawn again by the browser's own
+     dash, which is cheaper than a second element per ring. */
+  stroke: #000;
+  stroke-dasharray: 4 4;
+  stroke-dashoffset: 0;
+  animation: march 0.6s linear infinite;
+  filter: drop-shadow(0 0 0.5px #fff) drop-shadow(0 0 0.5px #fff);
+}
+
+/* A region still being dragged out does not march: it is following the
+   pointer, and a second motion on top of that reads as a stutter. */
+.ants.drawing > * {
+  animation: none;
+}
+
+@keyframes march {
+  to {
+    stroke-dashoffset: -8;
+  }
+}
+
+/* The distances shown with alt held: a line each, its length on a label
+   in the middle, and the box measured to outlined. Drawn over the
+   picture, so in its own colours rather than the chrome's. */
+.measures {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.measures line,
+.measures .measure-to {
+  stroke: #f24e1e;
+  stroke-width: 1;
+  fill: none;
+}
+
+.measures .measure-to {
+  stroke-dasharray: 3 3;
+}
+
+.measures .measure rect {
+  fill: #f24e1e;
+}
+
+/* Equal spacing while a layer is dragged: the same marks as the
+   distances alt shows, in a colour of their own, since they say
+   something else — these gaps are the same. */
+.measures.spacing line {
+  stroke: #e0389b;
+}
+
+.measures.spacing .measure rect {
+  fill: #e0389b;
+}
+
+.measures text {
+  fill: #fff;
+  font: 11px/1 system-ui, sans-serif;
+  text-anchor: middle;
+}
+
+/* The other layers picked beside the one the handles are on: the same
+   line, dashed and half-strength, so what a drag will carry along is
+   visible without competing with the box being resized. */
+.sel-outline.also polygon {
+  stroke-dasharray: 4 3;
+  opacity: 0.65;
+}
+
+.sel-outline line {
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+/* Every grab on the canvas is placed by its own middle rather than by
+   its corner, so its size is the stylesheet's business alone — which is
+   what lets a finger have bigger ones than a mouse. */
+.handle,
+.warp-pin,
+.anchor,
+.curve-handle,
+.rot-handle,
+.mask-handle,
+.mask-move,
+.grad-handle,
+.grad-stop {
+  transform: translate(-50%, -50%);
+}
+
+.handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: var(--accent);
+  border: 1px solid #fff;
+  border-radius: 2px;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.handle.nw {
+  cursor: nwse-resize;
+}
+
+.handle.ne {
+  cursor: nesw-resize;
+}
+
+.handle.sw {
+  cursor: nesw-resize;
+}
+
+.handle.se {
+  cursor: nwse-resize;
+}
+
+/* A picture's own corner, once it has moved off its box: round, so it
+   is not taken for one of the box's square handles. */
+.warp-pin {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  pointer-events: auto;
+  touch-action: none;
+  cursor: move;
+}
+
+.warp-outline polygon {
+  stroke-dasharray: 3 3;
+}
+
+/* The sides' middles: slimmer than a corner, lying along their side. */
+.handle.side.n,
+.handle.side.s {
+  width: 14px;
+  height: 7px;
+  cursor: ns-resize;
+}
+
+.handle.side.e,
+.handle.side.w {
+  width: 7px;
+  height: 14px;
+  cursor: ew-resize;
+}
+
+.workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  /* The panel is taken out of the row on a narrow window and laid over
+     the canvas; it measures itself against this. */
+  position: relative;
+}
+
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.45rem 0.4rem;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+}
+
+/* Carried off its edge: the same rail, floating over the canvas, with a
+   shadow to say it is above rather than beside. */
+.toolbar.floating {
+  position: fixed;
+  z-index: 40;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px var(--shadow);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+/* A kept look, as a chip: its fill for a ground, its stroke for a
+   border, and its name — a look is more than a colour can show. */
+.palette.styles .style-chip {
+  display: grid;
+  place-items: center;
+  width: auto;
+  min-width: 1.6rem;
+  padding: 0 0.3rem;
+  font-size: 0.68rem;
+  color: var(--text);
+  text-shadow: 0 0 3px rgb(0 0 0 / 0.8);
+  border-width: 2px;
+}
+
+/* The style the picked layer follows, ringed in the accent. */
+.palette.styles .style-chip.followed {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The rail's own width is the tools', and what sits under them wraps
+   to it: a row of chips wider than the rail widened the rail, which
+   narrowed the canvas, which moved the page — so picking the paint
+   tool moved everything under the pointer. */
+.toolbar .palette {
+  max-width: 2.4rem;
+}
+
+/* The shape library's chips: each shape drawn small as itself. */
+.palette.shape-library .shape-chip {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--bg);
+}
+
+.palette.shape-library .shape-chip.active {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Finding layers: a field and a kind, in one row above the list. */
+.layer-search {
+  display: flex;
+  gap: 4px;
+  padding: 2px 6px 4px;
+}
+
+.layer-search input {
+  flex: 1;
+  min-width: 5.5rem;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+/* The kind beside it dressed as the field is, not as the browser's
+   default control — black-edged on white in the light theme, beside a
+   grey field. */
+.layer-search select {
+  flex: none;
+  max-width: 6rem;
+  padding: 2px 4px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.layer-search-none {
+  margin: 4px 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+/* A group shown only because something found is inside it. */
+.panel ul li.context {
+  opacity: 0.55;
+}
+
+/* Layer comps: a row of named chips under the layers' header, the one
+   the page is showing now in the accent colour. */
+.palette.comps {
+  max-width: none;
+  padding: 2px 6px 4px;
+}
+
+/* What the row is, said once: a lone "+" under the heading did not. */
+.palette.comps .palette-label {
+  margin-right: 2px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+
+.palette.comps .comp-chip {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--field);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.palette.comps .comp-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* A kept brush, drawn as itself: a dot the brush's width, blurred by
+   its softness. */
+.palette.brushes .brush-chip {
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+.palette.brushes .brush-chip.active {
+  border-color: var(--accent);
+}
+
+.brush-dot {
+  display: block;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+/* A line between the rail's sections. */
+.tool-sep {
+  display: block;
+  height: 1px;
+  margin: 0.15rem 0.4rem;
+  background: var(--border);
+}
+
+.tool.grip {
+  height: 1.5rem;
+  color: var(--muted);
+  cursor: grab;
+}
+
+.tool.grip:active {
+  cursor: grabbing;
+}
+
+/* The shape tools share one slot: the one in hand sits in it, and a
+   corner opens the rest beside the rail. */
+.tool-group {
+  position: relative;
+  display: grid;
+}
+
+.tool-more {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 0;
+  height: 0;
+  padding: 0;
+  border: none;
+  border-left: 5px solid transparent;
+  border-bottom: 5px solid var(--muted);
+  background: none;
+  cursor: pointer;
+}
+
+.tool-group:hover .tool-more {
+  border-bottom-color: var(--text);
+}
+
+.tool-flyout {
+  position: absolute;
+  left: calc(100% + 0.35rem);
+  top: 0;
+  z-index: 45;
+  display: flex;
+  gap: 0.2rem;
+  padding: 0.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 24px var(--shadow);
+}
+
+.tool-number {
+  width: 2.4rem;
+  padding: 0.2rem 0;
+  text-align: center;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+
+.tool {
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.tool:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+  color: var(--text);
+}
+
+.tool.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.canvas-host.handing {
+  cursor: grab;
+}
+
+.canvas-host.handing:active {
+  cursor: grabbing;
+}
+
+.canvas-host.zooming {
+  cursor: zoom-in;
+}
+
+.canvas-host.grading {
+  cursor: crosshair;
+}
+
+.canvas-host.filling {
+  cursor: cell;
+}
+
+.canvas-host {
+  /* Fingers draw and pinch; the browser must not take them for a
+     scroll or a page zoom first. */
+  touch-action: none;
+  /* Nor is a drag here the page's text being picked: Shift held down on a
+     handle would stretch the selection to it, and the next drag would
+     carry that off as a native drag, cancelling the pointer after one
+     move. Text typed onto the canvas is still text. */
+  user-select: none;
+  -webkit-user-select: none;
+  /* A finger held still is the editor's long press, not Safari's
+     callout over an image. */
+  -webkit-touch-callout: none;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+.canvas-host textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#engine-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* The page under the canvas. The canvas covers the viewport and paints
+   only the artwork, so the paper it sits on is this. */
+#engine-page {
+  position: absolute;
+  background: #fff;
+  box-shadow: 0 4px 24px var(--shadow-deep);
+  pointer-events: none;
+}
+
+.panel {
+  position: relative;
+  flex: none;
+  padding: 0.6rem;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  /* A layer's properties above the list are taller than a short window:
+     a tablet on its side, 768 high, put the list itself past the bottom
+     with nothing to scroll. The overlay below already scrolled; the
+     column beside the canvas does too now. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* A narrow window — a phone, a tablet held upright, a window dragged
+   small — has no room for a column of layers beside the canvas. The
+   panel comes over the canvas there instead, and is put away again from
+   the button in the bar; the canvas is what the room is for. */
+@media (max-width: 900px) {
+  /* The menus open from the bar's left edge rather than from under their
+     own label. A popup is fifteen rem wide and a narrow window has no
+     room for that under a label near the right of the bar — View hung
+     three pixels off the edge at a phone's width. Making the bar the
+     thing they are placed against, rather than each label, costs nothing
+     and puts every one of them where there is room. */
+  .menubar {
+    position: relative;
+    /* Eight labels are wider than a phone; they go onto a second row
+       rather than pushing the whole page sideways, and the bar grows to
+       hold them the way it already does for anything else that wraps. */
+    flex-wrap: wrap;
+  }
+
+  .menu {
+    position: static;
+  }
+
+  /* The bar keeps everything that can be pressed. What goes is what only
+     tells you something — the name over the door, and the size of the
+     page, which the fields in the panel say too — because a bar wider
+     than the window makes the whole page slide sideways. Wrapping is the
+     backstop for a window narrower still. */
+  .brand,
+  .doc-chip {
+    display: none;
+  }
+
+  .topbar-menus,
+  .topbar-tools,
+  .topbar.one-row {
+    flex-wrap: wrap;
+    /* And it grows to hold what it wrapped. The bar is one row tall by
+       fixed height on a wide window, which is right while nothing wraps
+       and wrong the moment something does: a second row went on
+       overflowing *below* the bar, over the canvas and under the ruler,
+       where it could be seen and not pressed. The layers button is the
+       last thing in the bar and so the first thing to wrap, which made
+       the one way to the layers on a phone the thing that broke. */
+    height: auto;
+    min-height: 2.6rem;
+  }
+
+  .panel.overlay {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 15;
+    max-width: 80vw;
+    overflow-y: auto;
+    box-shadow: -12px 0 32px var(--shadow);
+  }
+}
+
+/* A phone, upright or on its side: the menus are one button and a
+   drawer (MenuSheet), and the bar is one row — on a phone held on its
+   side two rows of bar were half the screen. What only informs goes;
+   the rulers go too, over a canvas a few hundred pixels across, where
+   every pixel they hold is picture that cannot be seen. */
+@media (max-width: 640px), (max-height: 500px) {
+  .topbar.one-row {
+    flex-wrap: nowrap;
+    height: auto;
+    min-height: 2.6rem;
+    gap: 0.15rem;
+  }
+
+  .topbar .doc-chip,
+  .topbar .brand,
+  .topbar .wide-only {
+    display: none;
+  }
+
+  /* The name gives way first: it is the window's title as well. */
+  .topbar .doc-name {
+    min-width: 0;
+    flex: 1 1 4rem;
+  }
+
+  .topbar .zoom-field input {
+    width: 3.2rem;
+  }
+
+  .ruler,
+  .ruler-corner {
+    display: none;
+  }
+}
+
+/* A phone on its side: the rail stays down the left, where a thumb
+   holding that edge is, and scrolls rather than running off the bottom
+   of a screen four hundred pixels tall. */
+@media (max-height: 500px) and (min-width: 641px) {
+  .toolbar,
+  .toolbar.floating {
+    position: static;
+    overflow-y: auto;
+    overflow-x: hidden;
+    max-height: 100%;
+  }
+
+  .toolbar > *,
+  .toolbar .tool-group {
+    flex: 0 0 auto;
+  }
+
+  /* Nothing to carry it off by: here it has one place to be. */
+  .toolbar .tool.grip {
+    display: none;
+  }
+}
+
+/* A key's chord beside a row is a promise a phone cannot keep: under a
+   finger the drawer says what each row does and nothing else. */
+@media (pointer: coarse) {
+  .menu-sheet .menu-item-hint {
+    display: none;
+  }
+}
+
+/* The menus' drawer: from the left, the height of the window, a section
+   a menu, each opening in place. */
+.sheet-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--scrim);
+}
+
+.menu-sheet {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(20rem, 86vw);
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  box-shadow: 12px 0 32px var(--shadow);
+  padding: max(0.5rem, env(safe-area-inset-top)) 0.4rem max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.sheet-menu-label {
+  display: block;
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: left;
+  padding: 0 0.75rem;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.sheet-menu.open .sheet-menu-label {
+  color: var(--accent);
+}
+
+.sheet-rows {
+  padding: 0 0 0.4rem 0.4rem;
+}
+
+.sheet-rows .menu-item {
+  width: 100%;
+  min-height: 2.6rem;
+}
+
+.sheet-sub > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.sheet-sub > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sheet-sub[open] > summary {
+  color: var(--accent);
+}
+
+/* A phone. The rail goes along the bottom, where the hand already is.
+   A column down the left edge takes width from a canvas that has none to
+   spare and puts every tool at the far end of the reach; along the bottom
+   it takes height instead, which a page held upright has more of. The
+   same buttons in the same order, scrolled sideways when there are more
+   of them than there is room — a tool nobody can reach is worse than a
+   tool they have to slide to. */
+@media (max-width: 640px) {
+  .workspace {
+    /* Reversed rather than reordered: the rail stays first in the markup,
+       so it is still the first thing a keyboard or a reader arrives at. */
+    flex-direction: column-reverse;
+  }
+
+  .toolbar,
+  .toolbar.floating {
+    /* Back in the flow, wherever the rail was carried off to on a wider
+       window: a floating rail on a phone is a rail in the way, and the
+       left/top it was left at means nothing down here. */
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
+    max-height: none;
+    /* Clear of whatever the phone puts along its own bottom edge. */
+    padding: 0.35rem 0.4rem max(0.35rem, env(safe-area-inset-bottom));
+  }
+
+  /* Nothing to pick it up by: down here it has one place to be. */
+  .toolbar .tool.grip {
+    display: none;
+  }
+
+  /* The lines between sections stand up when the rail lies down. */
+  .tool-sep {
+    width: 1px;
+    height: auto;
+    align-self: stretch;
+    margin: 0.4rem 0.15rem;
+  }
+
+  /* The rail scrolls; the tools keep their size. A tool squeezed to a
+     third of a thumb is not a tool. */
+  .toolbar > *,
+  .toolbar .tool-group {
+    flex: 0 0 auto;
+  }
+
+  /* What the rail carries under its tools — the palette, the kept
+     brushes, a paint tool's width and edge — was laid out for a column:
+     the palette two swatches wide and as tall as it had swatches, and
+     everything else stretched to match. Lying down, that made the rail
+     133 pixels tall on a 390 screen. In a row, the rail is as tall as a
+     tool. */
+  .toolbar > * {
+    align-self: center;
+  }
+
+  .toolbar .palette {
+    max-width: none;
+    flex-wrap: nowrap;
+  }
+
+  /* Lying in a row, the swatches say what they are by where they sit. */
+  .toolbar .palette-caption {
+    display: none;
+  }
+
+  /* The shape tools' flyout opens upward: below the rail is off the
+     screen. */
+  .tool-flyout {
+    left: 0;
+    top: auto;
+    bottom: calc(100% + 0.35rem);
+  }
+}
+
+.panel-toggle {
+  margin-left: auto;
+}
+
+.panel-toggle.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+/* A hand's width of grab on the panel's own edge, sitting over the
+   border rather than taking room from the panel. */
+.panel-edge {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  width: 7px;
+  height: 100%;
+  cursor: ew-resize;
+  z-index: 5;
+}
+
+.panel-edge:hover {
+  background: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* The layers come first and stay where they are: picking one opens its
+   settings under the list rather than above it, where they pushed the
+   row just pressed half a screen down. A long list scrolls in its own
+   room so the settings under it are never more than the panel away. */
+.panel .layer-list {
+  max-height: max(12rem, 45vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.panel li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.32rem 0.35rem;
+  border-radius: 7px;
+  font-size: 0.84rem;
+  cursor: default;
+}
+
+.panel li:hover {
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+/* Row furniture stays quiet until the row matters: the eye and the kind
+   glyph are muted, and lift to full contrast on hover or selection. */
+.visibility {
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  flex: none;
+}
+
+.visibility:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+
+.layer-kind-icon {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  flex: none;
+}
+
+.panel li:hover .visibility,
+.panel li:hover .layer-kind-icon,
+.panel li.selected .visibility,
+.panel li.selected .layer-kind-icon {
+  color: var(--text);
+}
+
+.layer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* The Curves panel: a square graph to press and drag on. */
+.curve-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  align-items: flex-start;
+}
+.curve-editor {
+  display: block;
+  width: 100%;
+  max-width: 200px;
+  aspect-ratio: 1;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--field);
+  touch-action: none;
+  cursor: crosshair;
+}
+.curve-editor .grid {
+  stroke: currentColor;
+  opacity: 0.18;
+}
+.curve-editor .line {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+.curve-editor .pt {
+  fill: var(--accent);
+}
+
+/* The faces the engine draws with, so a caret on the canvas walks the
+   same glyphs. Each registered name is its own family. */
+@font-face {
+  font-family: "DejaVu Sans";
+  src: url("/fonts/DejaVuSans.ttf");
+}
+@font-face {
+  font-family: "DejaVu Sans Bold";
+  src: url("/fonts/DejaVuSans-Bold.ttf");
+}
+@font-face {
+  font-family: "DejaVu Serif";
+  src: url("/fonts/DejaVuSerif.ttf");
+}
+@font-face {
+  font-family: "DejaVu Sans Mono";
+  src: url("/fonts/DejaVuSansMono.ttf");
+}
+@font-face {
+  font-family: "DejaVu Sans Mono Oblique";
+  src: url("/fonts/DejaVuSansMono-Oblique.ttf");
+}
+
+/* Typing into a block on the canvas: the engine draws the letters, the
+   textarea only carries the caret and the selection over them. */
+.inline-text {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: transparent;
+  resize: none;
+  overflow: hidden;
+  z-index: 3;
+}
+/* A block the textarea cannot lay out as the engine does is typed as it
+   is seen here, over the panel's colour, and set when typing ends. */
+.inline-text.as-typed {
+  background: var(--panel);
+  box-shadow: 0 0 0 1px var(--border);
+}
+.inline-text::selection {
+  background: rgba(88, 130, 255, 0.35);
+}
+
+/* Reordering by drag: a line where the row would land, a frame on a
+   group it would go into, and the row being carried dimmed. */
+.panel ul li {
+  position: relative;
+  /* A swipe scrolls the list; a row lifts to be carried after a long
+     press (`ROW_LIFT_MS`), which keeps the swipe from then on. */
+  touch-action: pan-y;
+}
+.panel ul li.drop-above::before,
+.panel ul li.drop-below::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.panel ul li.drop-above::before {
+  top: -1px;
+}
+.panel ul li.drop-below::after {
+  bottom: -1px;
+}
+.panel ul li.drop-into {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+.panel ul li.dragging {
+  opacity: 0.5;
+}
+
+/* The draft offered back after a closed tab or a crash. */
+/* The engine could not start (a browser without WebAssembly SIMD): the
+   reason, over everything, since nothing else on the page can work. */
+.engine-failed {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  background: var(--bg);
+  color: var(--text);
+  text-align: center;
+}
+.engine-failed h1 {
+  margin: 0;
+  font-size: 1.3rem;
+}
+.engine-failed p {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.recover {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.35rem 0.8rem;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.85rem;
+}
+.recover button {
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  padding: 0.1rem 0.6rem;
+}
+
+.modal .row .hint {
+  font-size: 0.75rem;
+  opacity: 0.7;
+  white-space: nowrap;
+}
+
+/* A field's unit in the windows that write it bare (Repeat, Canvas
+   size), as quiet as a hint and as wide as the widest unit, so the
+   fields line up whether a row has one or not. */
+.modal .row > .unit {
+  min-width: 1.6rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+
+/* A unit after a field, as wide as the widest of them, so the fields
+   above and below one another line up. */
+.modal .row .hint.unit {
+  min-width: 1.6rem;
+}
+
+/* The page's size on paper, under the resolution that decides it,
+   lined up with the fields. */
+.modal .print-size {
+  text-align: right;
+  margin-top: -0.25rem;
+}
+
+/* A dialog saying what it is about to do differently from what was
+   asked. Not an error — nothing has gone wrong yet — so it reads as a
+   remark, not an alarm. */
+.modal-note {
+  margin: 0.1rem 0 0.3rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--note);
+}
+
+/* The lock sits beside the eye and is built like it; an unlocked one is
+   faint until the row is hovered, a locked one always shows. */
+.lock-toggle {
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  opacity: 0;
+}
+.panel li:hover .lock-toggle,
+.panel li.selected .lock-toggle,
+.lock-toggle[aria-pressed="true"] {
+  opacity: 1;
+}
+/* The document's palette, beside the colour being drawn with. */
+.palette {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+  max-width: 7rem;
+}
+/* A word over a strip of swatches in the rail: what the "+" adds to. */
+.palette-caption {
+  flex-basis: 100%;
+  margin-top: 0.25rem;
+  font-size: 0.5rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  text-align: center;
+  color: var(--muted);
+}
+
+.palette .swatch {
+  width: 1rem;
+  height: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0;
+  cursor: pointer;
+}
+/* The entry the picked layer's colour stands for: a colour reached for
+   by name has to look different from the same colour typed in, since only
+   one of them follows the palette. */
+.palette .swatch[aria-pressed="true"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.palette .swatch.add {
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+}
+.palette .swatch.add:hover {
+  color: var(--text);
+}
+/* The colours used lately: round, so they do not read as the document's
+   own palette — they are the person's, and nothing stands for them. */
+.palette.recent .swatch {
+  width: 0.8rem;
+  height: 0.8rem;
+  border-radius: 50%;
+}
+
+/* What a copy can differ in: one row per layer of the original. */
+.overrides {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.overrides .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.overrides button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+  flex: none;
+}
+
+/* The fold on a row that holds other layers; the empty span keeps the
+   rows that hold nothing lined up with the ones that do. */
+.fold {
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1.5rem;
+  flex: none;
+  border: none;
+  background: none;
+  padding: 0;
+  /* Stronger than the muted grey it was, which on the dark panel left
+     a group's arrow all but invisible beside its eye. */
+  color: color-mix(in srgb, var(--text) 70%, transparent);
+  cursor: pointer;
+}
+button.fold:hover {
+  color: var(--text);
+}
+
+/* What a live copy follows, with the way back to it. */
+.copy-of {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.copy-of button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 1px 6px;
+  cursor: pointer;
+}
+
+/* Where a layer inside a frame holds on: one picker per axis, side by
+   side like the geometry fields above them. */
+.pinning {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.pinning label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* The tones the graph is drawn over: filled shapes, faint enough that
+   the curve and its points stay the thing being read. */
+.histogram path {
+  opacity: 0.4;
+  mix-blend-mode: screen;
+}
+
+/* The Auto button sits under the histogram it reads, at the width of
+   the fields it fills in. */
+.auto-levels {
+  width: 100%;
+  margin-bottom: 0.35rem;
+}
+
+/* A text block's font: the name and the face on one line, the face
+   taking the rest of it, and the bold, italic and the rest on a line
+   under them. They had stood on three lines, the face's choice a
+   fixed width short of the panel's edge. */
+.layer-props .font-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem 0.4rem;
+}
+
+.layer-props .font-row > label { order: 0; }
+.layer-props .font-row > select { order: 1; flex: 1; min-width: 0; }
+.layer-props .font-row::before {
+  content: "";
+  order: 2;
+  flex-basis: 100%;
+}
+.layer-props .font-row > button {
+  order: 3;
+  display: grid;
+  place-items: center;
+  min-width: 1.75rem;
+  height: 1.6rem;
+  padding: 0 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.layer-props .font-row > button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.layer-props .font-row > button.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.layer-props .font-row > button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* And the path it runs along, beside its name. */
+.layer-props .along-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.layer-props .along-row > select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Auto levels and Auto colour dressed as the panel's other buttons
+   rather than as the browser's grey slabs. (Only these, by name: a
+   rule over every unnamed button in the panel also reached the
+   alignment and channel buttons, which have looks of their own.) */
+.layer-props button.auto-levels {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+
+.layer-props button.auto-levels:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+/* Waiting for the click that answers it, over the rule above. */
+.layer-props button.auto-levels.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+/* Waiting for the click that answers it. */
+.auto-levels.on {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--accent);
+}
+
+.levels-histogram {
+  width: 100%;
+  height: 44px;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: rgb(0 0 0 / 0.25);
+  margin-bottom: 4px;
+}
+
+/* The channel picker over a tone curve: four small buttons in the ink of
+   the channel each draws, the one in hand filled. */
+.curve-channels {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.curve-channels button {
+  flex: 1;
+  padding: 2px 0;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.curve-channels button.active {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+/* What a channel mixer's row adds to: muted at the picture's own
+   brightness, in the note colour when the channel is brighter or darker. */
+.mixer-total {
+  margin: 2px 0 4px;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.mixer-total.off {
+  color: var(--note);
+}
+/* The channels not being drawn on, behind the one that is. */
+.curve-editor .line.ghost {
+  opacity: 0.35;
+  stroke-width: 1;
+}
+
+/* The hook on a clipped row, sitting where the kind glyph would start so
+   the row's rhythm holds whether it is there or not. */
+.clip-mark {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  width: 0.9rem;
+  flex: none;
+}
+
+.lock-toggle[aria-pressed="true"] {
+  color: var(--accent);
+}
+
+/* The band dragged over the canvas to pick several layers at once. */
+/* Two rings under the pointer: where the brush stops, and where its
+   solid core ends. Drawn dark over light and light over dark, so it
+   reads on paint of any colour. */
+.brush-ring {
+  /* A dark halo under a light ring, so it reads on paint of any colour. */
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+}
+
+.brush-ring circle {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  opacity: 0.9;
+}
+
+.brush-ring circle.core {
+  stroke-dasharray: 3 3;
+  opacity: 0.6;
+}
+
+/* Where the clone reads from: a ring with a cross in it, so it reads as
+   a place rather than as another brush. */
+.clone-source circle,
+.clone-source path {
+  stroke-dasharray: 4 3;
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.5;
+  opacity: 0.85;
+}
+
+.clone-source path {
+  stroke-dasharray: none;
+}
+
+.brush-ring.erasing circle {
+  stroke-dasharray: 5 4;
+}
+
+.marquee-overlay rect {
+  fill: color-mix(in srgb, var(--accent) 12%, transparent);
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+/* The document's name, typed in the bar beside its size. */
+.doc-name {
+  /* It shrinks before the bar overflows: eight menu labels and every
+     chrome group at once come close to a wide window's width, and a bar
+     a few pixels too wide scrolls the whole page sideways — which slides
+     the canvas under the tool rail. The name is the thing that can give
+     up room without anything becoming unreachable. */
+  min-width: 3rem;
+  width: 9rem;
+  max-width: 14rem;
+  flex: 0 1 auto;
+  margin-left: auto;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: right;
+}
+.doc-name:hover {
+  border-color: var(--border);
+}
+.doc-name:focus {
+  border-color: var(--accent);
+  outline: none;
+  text-align: left;
+}
+
+/* The About window: three facts in a column. */
+.about-facts {
+  margin: 0.6rem 0 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.about-facts > div {
+  display: grid;
+  grid-template-columns: 5rem 1fr;
+  gap: 0.6rem;
+  font-size: 0.82rem;
+}
+
+.about-facts dt {
+  color: var(--muted);
+}
+
+.about-facts dd {
+  margin: 0;
+  /* The source's address is one long word; it breaks rather than
+     running past the window's edge. */
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.about-facts a {
+  color: var(--accent);
+}
+
+/* The sheet of keys and gestures: two columns of definition lists, the
+   key on the left in the font a key is written in. */
+.modal.keys {
+  /* Wider than the dialogs that only ask for a number or two: this one
+     is two columns of prose. */
+  width: min(92vw, 48rem);
+  max-height: 82vh;
+  overflow: auto;
+}
+.keys-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: 0.2rem 1.6rem;
+}
+.keys-columns h3 {
+  margin: 0.8rem 0 0.3rem;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.keys-columns dl {
+  margin: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+.keys-columns dl > div {
+  display: grid;
+  grid-template-columns: 10rem 1fr;
+  gap: 0.7rem;
+  align-items: baseline;
+  padding: 0.12rem 0;
+  font-size: 0.82rem;
+}
+.keys-columns dt {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+}
+.keys-columns dd {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* A finger is not a pointer: what a mouse can hit at ten pixels wants
+   twenty-odd from a fingertip, which is the difference between a canvas
+   that can be worked on a tablet and one that cannot. */
+@media (pointer: coarse) {
+  .handle,
+  .rot-handle,
+  .mask-handle,
+  .mask-move,
+  .grad-handle,
+  .grad-stop {
+    width: 22px;
+    height: 22px;
+  }
+
+  /* The sides' slimmer grips too, which out-rank the rule above. */
+  .handle.side.n,
+  .handle.side.s,
+  .handle.side.e,
+  .handle.side.w {
+    width: 22px;
+    height: 22px;
+  }
+
+  .anchor,
+  .curve-handle {
+    width: 18px;
+    height: 18px;
+  }
+
+  .guide-overlay .guide-hit {
+    stroke-width: 22;
+  }
+
+  /* The chrome, which had been left at its mouse sizes. A finger covers
+     about a centimetre and cannot see under itself, so what a mouse can
+     hit at five pixels a thumb cannot hit at all. */
+
+  /* The worst of them by far: the corner that opens the rest of a shared
+     slot was a five-pixel triangle — a hint to the eye and nothing at
+     all to a hand, which on a phone left the ellipse, the polygon, the
+     star and half the ways of selecting with no way to reach them. The
+     triangle stays exactly where it was, drawn now by a mark of its own,
+     and the *press* grows around it. Eighteen on a forty-four slot, so
+     the middle of the tool is still the tool's: a corner big enough to
+     swallow the button it sits on would be a different bug. */
+  .tool {
+    width: 44px;
+    height: 44px;
+  }
+
+  .tool-more {
+    right: 0;
+    bottom: 0;
+    width: 18px;
+    height: 18px;
+    border: none;
+  }
+
+  .tool-more::after {
+    content: "";
+    position: absolute;
+    right: 1px;
+    bottom: 1px;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-bottom: 5px solid var(--muted);
+  }
+
+  .tool-group:hover .tool-more::after {
+    border-bottom-color: var(--text);
+  }
+
+  /* And the bar's own: menu labels, the chrome buttons, the ink swatch
+     and the button that asks for the layers. The bar grows to hold what
+     it wraps, so giving these the height they need costs a row rather
+     than hiding one. */
+  .menu-label,
+  .chrome-button,
+  .panel-toggle,
+  .fill-swatch {
+    min-height: 40px;
+    min-width: 40px;
+  }
+
+  /* The two fields in the bar are typed into rather than pressed, but a
+     field has to be got into first, and a nineteen-pixel line is a poor
+     place to aim. */
+  .doc-name,
+  .zoom-field input {
+    min-height: 36px;
+  }
+
+  /* A palette colour is a sixteen-pixel chip, which is right beside a
+     mouse and half a finger wide. Said the way the rule it is answering
+     says it, or it loses to it. */
+  .palette .swatch {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+/* The export window and the preferences window.
+   Both are wider than the 20rem a `.modal` is by default: one lays
+   format buttons out in a row, the other has a rail of categories
+   beside its controls, and neither fits in a column meant for New
+   document's three fields. They stay inside the window all the same —
+   the width is a `min()` against the viewport, so a phone gets the
+   whole screen and nothing hangs off the ends. */
+.export-modal {
+  width: min(40rem, calc(100vw - 2rem));
+}
+
+/* The picture beside the settings. The two sit side by side while there
+   is room and stack when there is not, the picture first: it is what the
+   window is about. */
+.export-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.export-settings {
+  flex: 1 1 16rem;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.export-preview {
+  flex: 0 0 13rem;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+/* A checkerboard under the picture, so that what is transparent reads as
+   transparent rather than as the panel — a PNG keeps its alpha and a
+   JPEG flattens it onto white, and the difference is the point. */
+.export-preview img,
+.export-preview > span {
+  display: block;
+  width: 13rem;
+  height: 13rem;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background-color: var(--check-a);
+  background-image:
+    linear-gradient(45deg, var(--check-b) 25%, transparent 25%, transparent 75%, var(--check-b) 75%),
+    linear-gradient(45deg, var(--check-b) 25%, transparent 25%, transparent 75%, var(--check-b) 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 6px 6px;
+}
+
+.export-preview > span {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 0.5rem;
+  box-sizing: border-box;
+}
+
+.export-preview figcaption {
+  font-size: 0.7rem;
+  line-height: 1.3;
+  white-space: normal;
+}
+
+/* The formats, as a row rather than a column: five of them, each a
+   word, and which one is picked has to read at a glance. */
+.export-formats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+/* The exports kept by name, a row of chips above the formats. Empty
+   but for the + until one is kept, and small enough then to be passed
+   over. */
+.export-setups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.export-setups .setup {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.export-setups .setup.add {
+  color: var(--muted);
+  min-width: 1.6rem;
+}
+
+.export-setups .setup.add:hover {
+  color: var(--text);
+}
+
+.export-formats .preset,
+.export-scales .preset {
+  text-align: center;
+  padding: 0.3rem 0.6rem;
+}
+
+.export-scales {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+/* The sizes and what they come to: on one line where there is room,
+   and where there is not (a phone) the pixels go under the buttons
+   rather than past the window's edge. */
+.export-scale-row {
+  flex-wrap: wrap;
+}
+
+.export-scale-row .hint {
+  margin-left: auto;
+}
+
+/* On a phone the picture stacks over the settings: it stands in the
+   middle of the window rather than at its left, and the settings take
+   the whole width under it. */
+@media (max-width: 640px) {
+  .export-preview {
+    flex: 1 1 100%;
+    align-items: center;
+  }
+
+  .export-preview figcaption {
+    text-align: center;
+  }
+}
+
+.export-scales .preset:disabled,
+.export-formats .preset:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* What the file will be called and how big it comes out, on one line at
+   the foot of the window — the thing the whole dialog exists to tell
+   you before you commit to it. */
+.export-size {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.2rem 0 0;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  color: var(--muted);
+  min-height: 2.1rem;
+}
+
+.export-size span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-size strong {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.export-size .mask-button {
+  margin-left: auto;
+  flex: none;
+}
+
+.export-refusal {
+  color: var(--muted);
+  white-space: normal !important;
+}
+
+.prefs-modal {
+  width: min(42rem, calc(100vw - 2rem));
+}
+
+.prefs-body {
+  display: flex;
+  gap: 0.75rem;
+  align-items: stretch;
+}
+
+/* The rail of categories. Six groups is where a flat list stops being
+   readable and a rail starts earning its keep, which is the count every
+   application of this kind arrives at one way or another. */
+.prefs-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: none;
+  width: 9.5rem;
+  border-right: 1px solid var(--border);
+  padding-right: 0.5rem;
+}
+
+.prefs-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  cursor: pointer;
+}
+
+.prefs-tab:hover {
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.prefs-tab.active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent);
+}
+
+.prefs-tab svg {
+  flex: none;
+}
+
+/* The settings themselves. A fixed least-height so that moving between
+   a group of four and a group of one does not resize the window under
+   the pointer. */
+.prefs-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-height: 11rem;
+  /* A long page — the keys, every row of every menu — scrolls in its
+     own room, so the rail and the window's buttons stay put. */
+  max-height: calc(100vh - 10rem);
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+/* A setting is three columns — what it is, the control, and a remark —
+   so the controls line up down the page, and a remark too long for its
+   column wraps under itself rather than being cut at the window's edge
+   ("the windows and panels; the pa"). A choice is as wide as its
+   longest option, not a fixed seven rem that cut "As the system". */
+.prefs-pane label.row:not(.prefs-check) {
+  display: grid;
+  grid-template-columns: 8.5rem auto minmax(0, 1fr);
+  column-gap: 0.6rem;
+}
+
+.prefs-pane label.row:not(.prefs-check) > select,
+.prefs-pane label.row:not(.prefs-check) > input {
+  margin-left: 0;
+  width: auto;
+  max-width: 100%;
+}
+
+.prefs-pane label.row:not(.prefs-check) > input[type="number"] {
+  width: 5.5rem;
+}
+
+.prefs-pane label.row:not(.prefs-check) > input[type="range"] {
+  width: 9rem;
+}
+
+.prefs-pane .row .hint {
+  white-space: normal;
+  line-height: 1.3;
+}
+
+/* Appearance: a row of colours to choose from under a name, the
+   first of them "none of these" — the theme's own, or the accent's. */
+.prefs-pane .prefs-colours {
+  align-items: flex-start;
+}
+
+.prefs-colours-name {
+  flex: none;
+  width: 8.5rem;
+  padding-top: 0.2rem;
+}
+
+.prefs-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.prefs-swatch {
+  width: 1.35rem;
+  height: 1.35rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.prefs-swatch.active {
+  outline: 2px solid var(--text);
+  outline-offset: 2px;
+}
+
+/* None of these: a slash through the panel's own colour. */
+.prefs-swatch.none {
+  background: linear-gradient(
+    135deg,
+    transparent 44%,
+    var(--muted) 44% 56%,
+    transparent 56%
+  );
+}
+
+.prefs-pane .prefs-colours input[type="color"] {
+  width: 2rem;
+  height: 1.45rem;
+  padding: 1px;
+  margin-left: 0.2rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+}
+
+/* The choices together, live: a button that says yes, a picked
+   layer's row, a slider and a tick. */
+.prefs-preview {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-top: 0.3rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+.prefs-preview-row {
+  padding: 0.25rem 0.6rem;
+  border-radius: 7px;
+  font-size: 0.8rem;
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.prefs-preview input[type="range"] {
+  width: 6rem;
+}
+
+/* A checkbox reads left to right — the box, then what it means — which
+   is the other way round from every other row in a dialog, where the
+   label leads and the control is pushed to the right. */
+.prefs-pane .row.prefs-check {
+  gap: 0.45rem;
+}
+
+.prefs-pane .row.prefs-check input {
+  margin-left: 0;
+  width: auto;
+}
+
+.prefs-pane .row.prefs-check .hint {
+  margin-left: auto;
+}
+
+/* The tools, a section of the rail per box, two to a row. */
+.prefs-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.1rem 0.75rem;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.prefs-tools .prefs-tool {
+  font-size: 0.78rem;
+}
+
+.prefs-tools .prefs-tool svg {
+  color: var(--muted);
+  flex: none;
+}
+
+/* The key a tool answers to, as a button: press it and the next key
+   pressed is the tool's. Sized like the hint it replaced, so the rows
+   line up whether a tool's key can be changed or not. */
+/* The keys page: one column, since a chord's name is wider than a
+   letter, and a heading for each group of commands. */
+.prefs-chords {
+  grid-template-columns: 1fr;
+}
+
+.prefs-chord-group {
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 0.15rem 0 0.1rem;
+}
+
+.prefs-chords .prefs-key {
+  min-width: 6.5rem;
+}
+
+/* Where a menu row is found, after its name and quieter. */
+.prefs-path {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+/* Finding one row among every menu's: held at the top of the pane
+   while the rows go by under it. */
+.prefs-find {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 0 0 4px var(--panel);
+  margin: 0.15rem 0 0.3rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+}
+
+.prefs-tools .prefs-key {
+  margin-left: auto;
+  min-width: 2.2rem;
+  padding: 0.1rem 0.4rem;
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.prefs-tools .prefs-key:hover {
+  color: var(--text);
+}
+
+.prefs-tools .prefs-key.listening {
+  color: var(--text);
+  border-color: var(--accent);
+  animation: prefs-key-blink 1s steps(2) infinite;
+}
+
+@keyframes prefs-key-blink {
+  to {
+    border-color: var(--border);
+  }
+}
+
+/* A phone has no room for a rail beside the settings, so it goes above
+   them and scrolls sideways. */
+@media (max-width: 560px) {
+  .prefs-body {
+    flex-direction: column;
+  }
+
+  .prefs-rail {
+    flex-direction: row;
+    width: auto;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 0 0 0.5rem;
+  }
+
+  .prefs-tab span {
+    display: none;
+  }
+
+  /* No room for a third column: the remark goes under the control. */
+  .prefs-pane label.row:not(.prefs-check) {
+    grid-template-columns: 7rem minmax(0, 1fr);
+  }
+
+  .prefs-pane label.row:not(.prefs-check) > .hint {
+    grid-column: 2;
+  }
+}
+
+/* A plain remark inside a dialog — what a format does, what a setting
+   is for. Distinct from `.modal-note`, which is amber because it says
+   the dialog is about to do something other than what was asked; a
+   sentence explaining that a JPEG is lossy has nothing to caution
+   about, and reading as a warning is the wrong note entirely. */
+.modal-aside {
+  margin: 0.1rem 0 0.3rem;
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+/* The modifier keys a touch screen holds for you, at the canvas's
+   lower left, past the ruler. Small, since they sit over the picture,
+   but a finger's size to press. */
+.held-keys {
+  position: absolute;
+  left: 28px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+  touch-action: none;
+}
+
+.held-key {
+  min-width: 3.2rem;
+  height: 2.6rem;
+  padding: 0 0.6rem;
+  border-radius: 1.3rem;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.85rem;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.3);
+}
+
+.held-key.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text, #fff);
+}
+
+@media (max-width: 640px), (max-height: 500px) {
+  .held-keys {
+    left: 10px;
+    bottom: 10px;
+  }
+}
+
+/* A phone held upright: the layers come up from the bottom edge as a
+   sheet rather than across from the side, where they covered six tenths
+   of a 390-wide screen and the picture with it. Half the height, so the
+   page stays in sight above; pulled up by its grip, nearly all of it.
+   Held sideways the side overlay stays — there the width is what there
+   is to spare. */
+.sheet-grip {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .panel.overlay {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto !important;
+    max-width: none;
+    height: 56vh;
+    height: 56dvh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -12px 32px var(--shadow);
+    padding-top: 0;
+    padding-bottom: calc(0.6rem + env(safe-area-inset-bottom));
+    transition: height 160ms ease;
+  }
+
+  .panel.overlay.tall {
+    height: 92vh;
+    height: 92dvh;
+  }
+
+  .panel.overlay .panel-edge {
+    display: none;
+  }
+
+  /* The grip: a bar to pull, a finger's height, kept at the top while
+     what is under it scrolls. */
+  .panel.overlay .sheet-grip {
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    height: 28px;
+    margin: 0 -0.6rem 4px;
+    background: var(--panel);
+    touch-action: none;
+    cursor: grab;
+  }
+
+  .panel.overlay .sheet-grip::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 11px;
+    width: 40px;
+    height: 5px;
+    margin-left: -20px;
+    border-radius: 3px;
+    background: var(--muted);
+    opacity: 0.6;
+  }
+}
+
+/* Reading a slow file, and what one had that did not come across. */
+.recover.importing {
+  background: var(--panel);
+  color: var(--text);
+  border-bottom: 1px solid var(--accent);
+}
+.recover.import-notes span {
+  flex: 1;
+  min-width: 0;
+}
+
+/* The develop window: the photograph beside its settings, as wide as
+   the window allows; on a phone, the photograph above them. */
+.modal.develop {
+  width: min(64rem, calc(100vw - 2rem));
+}
+.develop-body {
+  display: flex;
+  gap: 1rem;
+  min-height: 0;
+}
+.develop-picture {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.develop-picture canvas {
+  width: 100%;
+  height: min(60vh, 34rem);
+  object-fit: contain;
+  background: var(--bg);
+  border-radius: 6px;
+}
+.develop-picture canvas.picking {
+  cursor: crosshair;
+}
+.develop-settings {
+  width: 15rem;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.develop-settings label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.8rem;
+}
+.develop-settings input[type="range"] {
+  width: 100%;
+}
+.develop-settings .props-head {
+  margin: 0.45rem 0 0;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--line, var(--border));
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+}
+.develop-settings .props-head:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+.develop-light {
+  display: flex;
+  gap: 0.4rem;
+}
+.develop-light select {
+  flex: 1;
+}
+.develop-light button.on {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+@media (max-width: 640px) {
+  .develop-body {
+    flex-direction: column;
+  }
+  .develop-settings {
+    width: auto;
+  }
+  .develop-picture canvas {
+    height: 40vh;
+  }
+}
+.develop-again {
+  align-self: flex-start;
+}
+.develop-settings .slider-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.develop-settings .slider-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The develop window's histogram, with a corner each for what is
+   clipped: lit when there is some, filled when it is being shown. */
+.develop-histogram {
+  position: relative;
+}
+.develop-histogram canvas {
+  display: block;
+  width: 100%;
+  height: 4rem;
+  background: #111;
+  border-radius: 4px;
+}
+.develop-histogram .clip {
+  position: absolute;
+  top: 3px;
+  width: 0.7rem;
+  height: 0.7rem;
+  padding: 0;
+  border: 1px solid #666;
+  border-radius: 2px;
+  background: transparent;
+}
+.develop-histogram .clip-low {
+  left: 3px;
+}
+.develop-histogram .clip-high {
+  right: 3px;
+}
+.develop-histogram .clip-low.hit {
+  border-color: #4a7dff;
+}
+.develop-histogram .clip-high.hit {
+  border-color: #ff4a4a;
+}
+.develop-histogram .clip-low.on {
+  background: #4a7dff;
+}
+.develop-histogram .clip-high.on {
+  background: #ff4a4a;
+}
+.develop-head-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem;
+  border-top: 1px solid var(--line, var(--border));
+  margin-top: 0.45rem;
+}
+.develop-head-row .props-head {
+  border-top: none;
+  margin-top: 0;
+}
+.develop-head-row button {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.6rem;
+}
+.modal.develop .modal-actions button.on {
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+.develop-count {
+  font-weight: 400;
+  color: var(--muted);
+}
+.develop-frame {
+  position: relative;
+}
+.develop-frame canvas {
+  display: block;
+}
+.develop-spot {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  border: 1px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.develop-loupe {
+  align-self: center;
+  background: var(--bg);
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+.develop-settings {
+  max-height: min(70vh, 40rem);
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+/* Develop settings kept by name, as chips above the histogram. */
+.develop-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.develop-presets .setup {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+.develop-presets .setup.add {
+  color: var(--muted);
+  min-width: 1.6rem;
+}
+.develop-presets .setup.add:hover {
+  color: var(--text);
+}
+.develop-others {
+  align-self: flex-start;
+}

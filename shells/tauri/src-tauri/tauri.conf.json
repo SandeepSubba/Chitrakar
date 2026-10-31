@@ -1,0 +1,170 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Chitrakar",
+  "version": "0.1.0",
+  "identifier": "com.chitrakar.app",
+  "build": {
+    "beforeDevCommand": "npm --prefix ../../app run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm --prefix ../../app run build",
+    "frontendDist": "../../../app/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Chitrakar",
+        "label": "main",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 500
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "GraphicsAndDesign",
+    "shortDescription": "Non-destructive photo and vector editor",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "chitra"
+        ],
+        "name": "Chitrakar document",
+        "description": "Chitrakar document",
+        "role": "Editor",
+        "rank": "Owner",
+        "mimeType": "application/x-chitrakar",
+        "exportedType": {
+          "identifier": "com.chitrakar.document",
+          "conformsTo": [
+            "public.data"
+          ]
+        }
+      },
+      {
+        "ext": [
+          "png"
+        ],
+        "name": "PNG image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/png"
+      },
+      {
+        "ext": [
+          "jpg",
+          "jpeg"
+        ],
+        "name": "JPEG image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/jpeg"
+      },
+      {
+        "ext": [
+          "webp"
+        ],
+        "name": "WebP image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/webp"
+      },
+      {
+        "ext": [
+          "svg"
+        ],
+        "name": "SVG drawing",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/svg+xml"
+      },
+      {
+        "ext": [
+          "tif",
+          "tiff"
+        ],
+        "name": "TIFF image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/tiff"
+      },
+      {
+        "ext": [
+          "psd",
+          "psb"
+        ],
+        "name": "Photoshop document",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/vnd.adobe.photoshop"
+      },
+      {
+        "ext": [
+          "pdf"
+        ],
+        "name": "PDF document",
+        "role": "Viewer",
+        "rank": "Alternate",
+        "mimeType": "application/pdf"
+      },
+      {
+        "ext": [
+          "ai"
+        ],
+        "name": "Illustrator document",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "application/postscript"
+      },
+      {
+        "ext": [
+          "dng",
+          "cr2",
+          "cr3",
+          "nef",
+          "arw",
+          "raf",
+          "orf",
+          "rw2",
+          "pef",
+          "srw"
+        ],
+        "name": "Camera raw photograph",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/x-dcraw"
+      },
+      {
+        "ext": [
+          "heic",
+          "heif"
+        ],
+        "name": "HEIC image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/heic"
+      },
+      {
+        "ext": [
+          "avif"
+        ],
+        "name": "AVIF image",
+        "role": "Editor",
+        "rank": "Alternate",
+        "mimeType": "image/avif"
+      }
+    ]
+  }
+}

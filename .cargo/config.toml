@@ -1,0 +1,19 @@
+# WebAssembly is built with SIMD (`simd128`): the engine, the PDF reader
+# and the raw reader. The compiler then turns the per-pixel loops (PNG
+# filtering and deflate, compositing, demosaicing, levels) into four lanes
+# at a time, which a module without it cannot do at all.
+#
+# It needs Chrome/Edge 91+, Firefox 89+ or Safari 16.4+ (iOS 16.4+), and
+# the webviews built on them; a browser without it cannot compile the
+# module, and the page says so rather than staying blank
+# (`app/src/engine.ts`, `wasmSupported`). Natively nothing changes: these
+# flags are only the wasm targets'.
+#
+# A `RUSTFLAGS` set in the environment replaces these rather than adding
+# to them, so a build that sets one must carry `-C target-feature=+simd128`
+# itself.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
+
+[target.wasm32-wasip1]
+rustflags = ["-C", "target-feature=+simd128"]
