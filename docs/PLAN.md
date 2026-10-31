@@ -10375,6 +10375,30 @@ without reading anything else.*
   by the reciprocal of the temperature the as-shot white comes to
   through the blend (`as_shot_matrix`, McCamy's formula, a few rounds);
   one is used as it is, the light nearest daylight's if there are more.
+  **A camera's tones** ✅. The plain development is the sensor's light
+  put at white and encoded, and beside a camera's own picture it looked
+  flat: its darkest hundredth at 13–46 of 255 where the camera's sits at
+  0–18. Every camera and raw developer lays a base curve under the
+  settings, so this does too (`RawDevelop::curve`, `base_curve`),
+  fitted rather than made up: 17 Fujis' and 8 Canons' own JPEGs, each
+  matched to the plain development quantile by quantile in linear
+  light with the medians laid on each other (so the camera's own choice
+  of exposure drops out), and the median taken in quarter stops. The
+  two makers agree within a few tenths of a stop — a shadow two stops
+  under the middle goes nearly four, a highlight a stop over goes a
+  stop and a third, and the top rolls into white — and the curve is
+  their mean, turned about each photograph's own middle (its median
+  brightness under its own balance, measured with the auto exposure,
+  `RawPhoto::measure`), so exposure moves tones along it. With it the
+  X-T3's darkest percentiles are 3/13/20 to the camera's 1/6/13 (they
+  were 15/34/42). It is under the window's own tone settings, which act
+  on what it gives. A new development has it (the window's defaults,
+  "Tone curve like the camera's" in its Tone group); a picture
+  developed before it has none, so Develop again is what it was — the
+  field is written whatever it says, and a layer's settings read back
+  strictly. What is left between ours and the camera is exposure, which
+  the camera meters its own way and this puts the brightest hundredth
+  at white; neither is the other's to copy.
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a

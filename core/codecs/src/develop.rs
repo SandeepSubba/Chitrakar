@@ -77,6 +77,9 @@ pub struct RawPhoto {
     /// camera's own balance — fixed for the photograph, so a change of
     /// white balance is not also a change of exposure.
     auto_gain: f32,
+    /// The photograph's middle: the median brightness under its own
+    /// balance at `auto_gain`, which the base curve turns about.
+    middle: f32,
     /// The lens corrections the camera wrote into the file, if any.
     pub(crate) lens: Option<Lens>,
     /// What a DNG's opcode list 3 says to do to the developed picture,
@@ -783,10 +786,11 @@ impl RawPhoto {
             to_srgb: camera_to_srgb(&m.xyz_to_cam),
             orientation: m.orientation,
             auto_gain: 1.0,
+            middle: MIDDLE,
             lens: None,
             dng: None,
         };
-        photo.auto_gain = photo.measure_gain();
+        (photo.auto_gain, photo.middle) = photo.measure();
         Ok(photo)
     }
 
@@ -822,7 +826,7 @@ impl RawPhoto {
     /// The exposure worked out again, once the sensor's values have
     /// changed (a DNG's gain maps).
     pub(crate) fn remeasure(&mut self) {
-        self.auto_gain = self.measure_gain();
+        (self.auto_gain, self.middle) = self.measure();
     }
 
     /// The developed size, after the camera's orientation.
@@ -848,25 +852,42 @@ impl RawPhoto {
     /// dcraw's exposure: the brightest hundredth at white, judged from
     /// every fourth site each way under the camera's own balance. Never
     /// darker than the sensor recorded, nor more than four stops brighter.
-    fn measure_gain(&self) -> f32 {
+    ///
+    /// And, under that gain, the photograph's middle: its median
+    /// brightness, which the base curve turns about (18% where there is
+    /// nothing to take one from).
+    fn measure(&self) -> (f32, f32) {
         let wb = self.as_shot;
-        let mut brightest = Vec::with_capacity((self.width / 4 + 1) * (self.height / 4 + 1));
+        let n = (self.width / 4 + 1) * (self.height / 4 + 1);
+        let (mut brightest, mut brightness) = (Vec::with_capacity(n), Vec::with_capacity(n));
         for y in (0..self.height).step_by(4) {
             for x in (0..self.width).step_by(4) {
                 let c = mul3(&self.to_srgb, self.demosaic_at(y, x, &wb));
                 brightest.push(c[0].max(c[1]).max(c[2]));
+                brightness.push(luma(c));
             }
         }
         if brightest.is_empty() {
-            return 1.0;
+            return (1.0, MIDDLE);
         }
         let at = (((brightest.len() as f32) * 0.99) as usize).min(brightest.len() - 1);
         let (_, p99, _) = brightest.select_nth_unstable_by(at, f32::total_cmp);
-        if *p99 > 1e-4 {
+        let gain = if *p99 > 1e-4 {
             (1.0 / *p99).clamp(1.0, 16.0)
         } else {
             1.0
-        }
+        };
+        let half = brightness.len() / 2;
+        let (_, median, _) = brightness.select_nth_unstable_by(half, f32::total_cmp);
+        let middle = *median * gain;
+        (
+            gain,
+            if middle > 1e-4 {
+                middle.min(1.0)
+            } else {
+                MIDDLE
+            },
+        )
     }
 
     /// The three colours at a site, balanced and clipped: its own, and each
@@ -1801,6 +1822,8 @@ struct Look {
     /// (fine in the shadows, where the eye is), up to four times white;
     /// empty when the curve is the identity.
     curve: Vec<f32>,
+    /// The base curve's middle, where it is laid under the rest.
+    base: Option<f32>,
     encode: chitrakar_color::Srgb8,
 }
 
@@ -1840,6 +1863,7 @@ impl Look {
             vibrance: unit(s.vibrance),
             saturation: unit(s.saturation),
             curve: Vec::new(),
+            base: s.curve.then_some(photo.middle),
             encode: chitrakar_color::Srgb8::new(),
         };
         if !look.tones_untouched() {
@@ -1866,15 +1890,16 @@ impl Look {
     }
 
     fn tones_untouched(&self) -> bool {
-        [
-            self.contrast,
-            self.highlights,
-            self.shadows,
-            self.whites,
-            self.blacks,
-        ]
-        .iter()
-        .all(|v| *v == 0.0)
+        self.base.is_none()
+            && [
+                self.contrast,
+                self.highlights,
+                self.shadows,
+                self.whites,
+                self.blacks,
+            ]
+            .iter()
+            .all(|v| *v == 0.0)
     }
 
     /// Balanced camera colours to an 8-bit sRGB pixel.
@@ -1914,6 +1939,7 @@ impl Look {
     /// The brightness curve, worked in a perceptual scale (a 2.2 power),
     /// where a stop at the bottom and a stop at the top are about as far.
     fn tone(&self, y: f32) -> f32 {
+        let y = self.base.map_or(y, |middle| base_curve(y, middle));
         let mut v = y.powf(1.0 / 2.2);
         // Highlights: pulled down, everything above the middle rolls off
         // and what was past white comes back under it; pushed up, the
@@ -1946,6 +1972,66 @@ impl Look {
         }
         v.max(0.0).powf(2.2)
     }
+}
+
+/// 18% grey, a photograph's middle where nothing says otherwise.
+const MIDDLE: f32 = 0.18;
+
+/// The base curve, in stops from a photograph's middle: where a tone that
+/// far from the middle in the plain development lands in the camera's own
+/// picture. Fitted to 25 photographs' own JPEGs — 17 Fujis, X-Trans I to
+/// V, and 8 Canons, 550D to 5D Mark III — by matching each picture's
+/// tones to the camera's, quantile by quantile, with the medians laid on
+/// each other so exposure drops out, and taking the median over them of
+/// the two makers' curves, which differ by a few tenths of a stop: a
+/// shadow two stops down goes nearly four, a highlight a stop up goes a
+/// stop and a third, and the top rolls into white.
+const BASE_CURVE: [(f32, f32); 15] = [
+    (-4.25, -6.4),
+    (-3.75, -5.9),
+    (-3.25, -5.26),
+    (-2.75, -4.7),
+    (-2.25, -3.91),
+    (-1.75, -3.04),
+    (-1.25, -2.04),
+    (-0.75, -1.135),
+    (-0.25, -0.3),
+    (0.25, 0.29),
+    (0.75, 0.875),
+    (1.25, 1.515),
+    (1.75, 2.025),
+    (2.25, 2.45),
+    (2.75, 2.77),
+];
+
+/// A brightness `y` through the base curve about `middle`: straight
+/// between the fitted points in stops, the middle itself where it was,
+/// and past the ends on as the last points go (a stop a stop below, half
+/// a stop a stop above).
+pub fn base_curve(y: f32, middle: f32) -> f32 {
+    if y <= 0.0 || middle <= 0.0 {
+        return y.max(0.0);
+    }
+    let x = (y / middle).log2();
+    let pts = &BASE_CURVE;
+    let stops = if x <= pts[0].0 {
+        pts[0].1 + (x - pts[0].0) * 1.1
+    } else if x >= pts[pts.len() - 1].0 {
+        pts[pts.len() - 1].1 + (x - pts[pts.len() - 1].0) * 0.5
+    } else {
+        // The middle is between the points either side of nought; it is
+        // held at nought itself so the photograph's middle stays put.
+        let i = pts.partition_point(|p| p.0 <= x);
+        let (a, b) = if x < 0.0 && i < pts.len() && pts[i].0 > 0.0 {
+            (pts[i - 1], (0.0, 0.0))
+        } else if x >= 0.0 && i > 0 && pts[i - 1].0 < 0.0 {
+            ((0.0, 0.0), pts[i])
+        } else {
+            (pts[i - 1], pts[i])
+        };
+        a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0)
+    };
+    middle * stops.exp2()
 }
 
 /// 18% grey on the perceptual scale the curve is worked in.
@@ -2157,6 +2243,69 @@ mod tests {
             }
         });
         crate::raw::unpack(&dng).unwrap()
+    }
+
+    #[test]
+    fn the_base_curve_turns_about_the_middle_deepens_shadows_and_rolls_into_white() {
+        let m = 0.12;
+        assert!((base_curve(m, m) - m).abs() < 1e-6, "the middle stays put");
+        let stops = |s: f32| (base_curve(m * s.exp2(), m) / m).log2();
+        assert!(stops(-2.0) < -3.4 && stops(-2.0) > -4.0, "{}", stops(-2.0));
+        assert!(stops(1.0) > 1.1 && stops(1.0) < 1.4, "{}", stops(1.0));
+        assert!(stops(3.0) < 3.0, "{}", stops(3.0));
+        // Rising everywhere, smooth enough that no step of a twentieth of
+        // a stop jumps.
+        let mut last = 0.0;
+        for i in 0..400 {
+            let x = -10.0 + i as f32 * 0.05;
+            let y = base_curve(m * x.exp2(), m);
+            assert!(y > last, "falls at {x} stops");
+            assert!(i == 0 || (y / last).log2() < 0.2, "jumps at {x}");
+            last = y;
+        }
+        assert_eq!(base_curve(0.0, m), 0.0);
+    }
+
+    #[test]
+    fn the_base_curve_deepens_the_shadows_and_leaves_the_middle() {
+        // A ramp from deep shadow to light, so there is a middle and
+        // tones either side of it.
+        let packed = sample::packed(120, 20, 4095, [1.0; 3], |x, _| {
+            [0.01 + 0.8 * (x as f32 / 119.0).powi(2); 3]
+        });
+        let photo = crate::raw::unpack(&packed).unwrap();
+        let plain = photo.develop(&RawDevelop::default());
+        let curved = photo.develop(&RawDevelop {
+            curve: true,
+            ..Default::default()
+        });
+        let at = |img: &SourceImage, x: u32| luma(img, x, 10);
+        assert!(
+            at(&curved, 12) < at(&plain, 12) - 8.0,
+            "{} against {}",
+            at(&curved, 12),
+            at(&plain, 12)
+        );
+        // Somewhere along the ramp the two are the same: its middle.
+        let crosses =
+            (1..119).any(|x| (at(&curved, x) - at(&plain, x)).abs() < 3.0 && at(&plain, x) > 40.0);
+        assert!(crosses);
+        assert!(photo.middle > 0.0 && photo.middle < 1.0);
+    }
+
+    #[test]
+    fn settings_from_before_the_curve_have_none_and_new_ones_say_so() {
+        let old: RawDevelop = serde_json::from_str(r#"{"exposure":0.5}"#).unwrap();
+        assert!(!old.curve);
+        let json = serde_json::to_string(&RawDevelop {
+            curve: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(json.contains("\"curve\":true"));
+        assert!(serde_json::to_string(&old)
+            .unwrap()
+            .contains("\"curve\":false"));
     }
 
     /// A lens of one curve each, straight from the middle to past the

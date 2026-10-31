@@ -722,6 +722,12 @@ pub struct RawDevelop {
     /// them), which are otherwise applied.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub uncorrected: bool,
+    /// The tones a camera's own pictures have, laid under the settings
+    /// above: deeper shadows and a soft roll into white about the
+    /// photograph's own middle (`develop::base_curve`). Off for a picture
+    /// developed before there was one, so it develops again as it was;
+    /// the develop window starts new ones with it on.
+    pub curve: bool,
 }
 
 impl RasterRef {

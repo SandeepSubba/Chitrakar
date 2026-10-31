@@ -64,6 +64,9 @@ check(clean.exposure === 5 && clean.contrast === 0 && clean.noise === 0, "held t
 check(clean.white[0] === 2000 && clean.white[1] === 150, "a white balance held to the slider's ends");
 check(d.cleanSettings({ white: [5000] }).white === undefined, "half a white balance is the camera's");
 check(d.cleanSettings(null).exposure === 0, "nothing is the defaults");
+check(d.cleanSettings(null).curve === true, "a new development has the camera's tone curve");
+check(d.cleanSettings({ curve: false }).curve === false, "a curve left off stays off");
+check(d.cleanSettings({ curve: "yes" }).curve === true, "a curve that is not a yes or a no is the default");
 const presets = d.cleanPresets([
   { name: "Warm", settings: { white: [6500, 10], vibrance: 20 } },
   { name: "Warm", settings: {} },

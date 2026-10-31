@@ -15090,6 +15090,19 @@ assert(
     `as shot, the camera's balance makes the card grey (${asShot})`,
   );
   assert((await win.locator('select[aria-label="Light"]').inputValue()) === "As shot", "starting from the camera's own light");
+  // A new development starts with the camera's tone curve; off is the
+  // plain development, which moves the card's tones (a two-tone card's
+  // middle is one of them, so the other is what moves).
+  const curveBox = win.locator('input[aria-label="Camera tone curve"]');
+  assert(await curveBox.isChecked(), "a new development has the camera's tone curve");
+  const curved = [await previewAt(0.25, 0.5), await previewAt(0.75, 0.5)];
+  await curveBox.uncheck();
+  await settle();
+  const plainTones = [await previewAt(0.25, 0.5), await previewAt(0.75, 0.5)];
+  const moved = Math.abs(curved[0][1] - plainTones[0][1]) + Math.abs(curved[1][1] - plainTones[1][1]);
+  assert(moved > 8, `the plain development is another set of tones (${curved.map((c) => c[1])} against ${plainTones.map((c) => c[1])})`);
+  await curveBox.check();
+  await settle();
   // Warmer: the temperature to correct for raised.
   await win.locator('input[aria-label="Temperature"]').fill("800");
   await settle();
@@ -15187,7 +15200,7 @@ assert(
   await settle();
   assert((await layerNames()).join() === "card.dng", `placed, it is one picture (${await layerNames()})`);
   const placedWarm = await canvasPixel(16, 16);
-  assert(placedWarm[0] > placedWarm[2] + 15, `developed in full as the window showed it (${placedWarm})`);
+  assert(placedWarm[0] > placedWarm[2] * 1.2, `developed in full as the window showed it (${placedWarm})`);
   const again = page.locator('button.develop-again');
   assert(await again.isVisible(), "a developed picture offers to be developed again");
 
@@ -15205,13 +15218,13 @@ assert(
   await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
   await settle();
   const cool = await canvasPixel(16, 16);
-  assert(cool[2] > cool[0] + 15, `developed again, cooler (${cool})`);
+  assert(cool[2] > cool[0] * 1.2, `developed again, cooler (${cool})`);
   assert((await layerNames()).join() === "card.dng", "the same layer, not another");
   assert((await page.locator(".history").innerText()).includes("Develop"), "history says it was developed");
   await page.keyboard.press("Control+z");
   await settle();
   const back = await canvasPixel(16, 16);
-  assert(back[0] > back[2] + 15, `one undo takes the new development back (${back})`);
+  assert(back[0] > back[2] * 1.2, `one undo takes the new development back (${back})`);
   // From the Layer menu too.
   await (await menuItem("Layer", "Develop again…")).click();
   await win.waitFor();

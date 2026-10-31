@@ -294,7 +294,10 @@ demosaic of its own (`x_trans_region`, judged by the ignored
 which `core/rawin` reads (`fuji_lens`), and a DNG its opcodes
 (`dng_opcodes`; `core/codecs/src/opcodes.rs`: gain maps, a vignette, a
 warp), which develop applies unless `RawDevelop::uncorrected` says not
-to (a DNG's list 2, the sensor's shading, always). Placed, the raw file is kept in the document
+to (a DNG's list 2, the sensor's shading, always). New developments lay
+a base curve fitted to cameras' own JPEGs under the settings
+(`RawDevelop::curve`, `base_curve`); a picture developed before it has
+none. Placed, the raw file is kept in the document
 (`Document::originals`, `originals/` in the zip) and the settings on
 the picture (`RasterRef::develop`), so Develop again is a `SetKind`
 with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and

@@ -8570,7 +8570,9 @@ export function App() {
       setDeveloping({
         name: layer.name,
         info: got.info,
-        initial: { ...RAW_DEFAULTS, ...got.settings },
+        // What the layer was developed with, as it was: a picture
+        // developed before there was a base curve has none.
+        initial: { ...RAW_DEFAULTS, ...got.settings, curve: got.settings.curve === true },
         layer: layer.id,
       });
     } catch (err) {
@@ -13588,7 +13590,7 @@ function RawDevelopDialog({
     return () => cancelAnimationFrame(frame);
   }, [s, session, before, spot]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected">, min: number, max: number, step: number, unit = "") => (
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve">, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
       <SliderHead label={label} value={s[k]} unit={unit} />
       <input
@@ -13787,6 +13789,18 @@ function RawDevelopDialog({
             {row("Shadows", "shadows", -100, 100, 1)}
             {row("Whites", "whites", -100, 100, 1)}
             {row("Blacks", "blacks", -100, 100, 1)}
+            <label
+              className="row check"
+              title="The tones the camera's own pictures have: deeper shadows and a soft roll into white, about the photograph's own middle. Off is the plain development"
+            >
+              <input
+                type="checkbox"
+                aria-label="Camera tone curve"
+                checked={!!s.curve}
+                onChange={(e) => setS((o) => ({ ...o, curve: e.target.checked }))}
+              />
+              Tone curve like the camera's
+            </label>
             <h3 className="props-head">Colour</h3>
             {row("Vibrance", "vibrance", -100, 100, 1)}
             {row("Saturation", "saturation", -100, 100, 1)}

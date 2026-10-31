@@ -21,6 +21,9 @@ export type RawSettings = {
   noise: number;
   /** Leave off the lens corrections the file carries (a Fuji's RAF). */
   uncorrected?: boolean;
+  /** The tones a camera's own pictures have, under the rest: on for a new
+   * development, off for one made before there was such a curve. */
+  curve?: boolean;
 };
 
 /** What the develop window starts from: the size, the camera's own
@@ -39,6 +42,7 @@ export const RAW_DEFAULTS: RawSettings = {
   saturation: 0,
   sharpen: 0,
   noise: 0,
+  curve: true,
 };
 
 /** Settings kept by name, to be given to another photograph in one
@@ -47,7 +51,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected">, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve">, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -75,6 +79,7 @@ export function cleanSettings(x: unknown): RawSettings {
     out.white = [Math.min(25000, Math.max(2000, w[0])), Math.min(150, Math.max(-150, w[1]))];
   }
   if (o.uncorrected === true) out.uncorrected = true;
+  if (typeof o.curve === "boolean") out.curve = o.curve;
   return out;
 }
 
@@ -102,7 +107,8 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
   return (
     keys.every((k) => p.settings[k] === s[k]) &&
     white(p.settings.white, s.white) &&
-    !!p.settings.uncorrected === !!s.uncorrected
+    !!p.settings.uncorrected === !!s.uncorrected &&
+    !!p.settings.curve === !!s.curve
   );
 }
 
