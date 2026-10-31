@@ -297,7 +297,9 @@ warp), which develop applies unless `RawDevelop::uncorrected` says not
 to (a DNG's list 2, the sensor's shading, always). New developments lay
 a base curve fitted to cameras' own JPEGs under the settings
 (`RawDevelop::curve`, `base_curve`); a picture developed before it has
-none. Placed, the raw file is kept in the document
+none. Kept sensor values have room above white (`WHITE` is half their
+range), which clipped highlights are rebuilt into once
+(`rebuild_highlights`, judged by the ignored `highlights_against_truth`). Placed, the raw file is kept in the document
 (`Document::originals`, `originals/` in the zip) and the settings on
 the picture (`RasterRef::develop`), so Develop again is a `SetKind`
 with one undo (smoke 9cn). HEIC/AVIF are the browser's to decode, and

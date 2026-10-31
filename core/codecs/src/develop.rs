@@ -39,6 +39,20 @@ use chitrakar_doc::RawDevelop;
 /// the odd 2×4 and 3×3).
 const TILE: usize = 12;
 
+/// Where white is in a photograph's kept values: half their range, so
+/// that what is put back above it — a clipped highlight rebuilt, a gain
+/// map's lift — has room. A sensor gives fourteen bits at most, so the
+/// sixteen kept lose nothing.
+const WHITE: f32 = 32767.0;
+
+/// A demosaic's estimate, held off below nothing only: what is above
+/// white is the highlight's own (`rebuild_highlights`), and the look
+/// takes it to white.
+#[inline]
+fn bound(v: f32) -> f32 {
+    v.max(0.0)
+}
+
 /// The sensor's picture, kept to be developed.
 #[derive(Clone)]
 pub struct RawPhoto {
@@ -47,7 +61,7 @@ pub struct RawPhoto {
     height: usize,
     /// 1 for a mosaic, 3 for a raw already RGB.
     cpp: usize,
-    /// Each sample, black off and white at 65535, cropped.
+    /// Each sample, black off and white at [`WHITE`], cropped.
     data: Vec<u16>,
     /// The filter's colour at each site of a `TILE`-square tile, from the
     /// crop's corner: 0 red, 1 green, 2 blue (3, a second green, as 1).
@@ -723,7 +737,7 @@ impl RawPhoto {
         // Rounded by adding a half and cutting, which for what is never
         // negative is `round` without its library call — the call kept the
         // loop from being vectorised, and was most of its time.
-        let scale = [0, 1, 2, 3].map(|k| 65535.0 / (m.white[k] - m.black[k]).max(1.0));
+        let scale = [0, 1, 2, 3].map(|k| WHITE / (m.white[k] - m.black[k]).max(1.0));
         let level =
             |v: f32, k: usize| (((v - m.black[k]) * scale[k]).clamp(0.0, 65535.0) + 0.5) as u16;
         const SQUARE: usize = 48;
@@ -790,6 +804,7 @@ impl RawPhoto {
             lens: None,
             dng: None,
         };
+        photo.rebuild_highlights();
         (photo.auto_gain, photo.middle) = photo.measure();
         Ok(photo)
     }
@@ -829,6 +844,132 @@ impl RawPhoto {
         (self.auto_gain, self.middle) = self.measure();
     }
 
+    /// Clipped highlights rebuilt from the colours that did not clip, as
+    /// darktable's "inpaint opposed" does: a site the sensor clipped keeps
+    /// at least what it reached, and is raised to what the other colours
+    /// round it say it would have been — their mean, in cube roots, moved
+    /// by how far this colour stood from the others where it did not clip
+    /// beside a clipped site (once for the photograph, a colour each).
+    /// Where every colour round a site clipped there is nothing to go by,
+    /// and all of them are put at the brightest clipped colour's level:
+    /// white, not the balance's own magenta that a darkened sky would
+    /// otherwise show.
+    fn rebuild_highlights(&mut self) {
+        let clipped = (WHITE * 0.995) as u16;
+        if !self.data.iter().any(|&v| v >= clipped) {
+            return;
+        }
+        let (w, h, cpp) = (self.width, self.height, self.cpp);
+        let gains = self.as_shot;
+        // The sites at (y, x): colour and index, one for a mosaic, three
+        // for a raw already RGB.
+        let sites =
+            |y: usize, x: usize| -> std::iter::Take<std::array::IntoIter<(usize, usize), 3>> {
+                let p = y * w + x;
+                let all = if cpp == 1 {
+                    [(self.color(y, x), p), (0, 0), (0, 0)]
+                } else {
+                    [(0, p * 3), (1, p * 3 + 1), (2, p * 3 + 2)]
+                };
+                all.into_iter().take(cpp)
+            };
+        let balanced = |i: usize, c: usize| self.data[i] as f32 / WHITE * gains[c];
+        // The mean of the other colours round (y, x), in cube roots: each
+        // colour's mean, then theirs. With `unclipped`, only what did not
+        // clip is asked.
+        let opposed = |y: usize, x: usize, c: usize, unclipped: bool| -> Option<f32> {
+            let (mut sum, mut n) = ([0f32; 3], [0u32; 3]);
+            for yy in y.saturating_sub(2)..(y + 3).min(h) {
+                for xx in x.saturating_sub(2)..(x + 3).min(w) {
+                    for (k, i) in sites(yy, xx) {
+                        if k != c && !(unclipped && self.data[i] >= clipped) {
+                            sum[k] += balanced(i, k);
+                            n[k] += 1;
+                        }
+                    }
+                }
+            }
+            let means: Vec<f32> = (0..3)
+                .filter(|&k| n[k] > 0)
+                .map(|k| (sum[k] / n[k] as f32).cbrt())
+                .collect();
+            (!means.is_empty()).then(|| means.iter().sum::<f32>() / means.len() as f32)
+        };
+        // The clipped sites, and the places beside them.
+        let mut todo = Vec::new();
+        let mut beside = vec![false; w * h];
+        for (i, _) in self.data.iter().enumerate().filter(|(_, v)| **v >= clipped) {
+            let (p, c) = (
+                i / cpp,
+                if cpp == 1 {
+                    self.color(i / w, i % w)
+                } else {
+                    i % 3
+                },
+            );
+            let (y, x) = (p / w, p % w);
+            todo.push((y, x, c, i));
+            // Two sites round: the nearest of its own colour in a Bayer
+            // filter are two away.
+            for yy in y.saturating_sub(2)..(y + 3).min(h) {
+                beside[yy * w + x.saturating_sub(2)..yy * w + (x + 3).min(w)].fill(true);
+            }
+        }
+        // How far each colour stands from the others, at the unclipped
+        // edges of what clipped.
+        let (mut off, mut count) = ([0f32; 3], [0u32; 3]);
+        for (p, _) in beside.iter().enumerate().filter(|(_, b)| **b) {
+            let (y, x) = (p / w, p % w);
+            for (c, i) in sites(y, x) {
+                if self.data[i] < clipped {
+                    if let Some(o) = opposed(y, x, c, true) {
+                        off[c] += balanced(i, c).cbrt() - o;
+                        count[c] += 1;
+                    }
+                }
+            }
+        }
+        let off = [0, 1, 2].map(|c| {
+            if count[c] > 0 {
+                off[c] / count[c] as f32
+            } else {
+                0.0
+            }
+        });
+        let top = gains[0].max(gains[1]).max(gains[2]);
+        // Whether every colour round (y, x) clipped.
+        let blown = |y: usize, x: usize, c: usize| {
+            let mut other = [false; 3];
+            let mut unclipped = [false; 3];
+            for yy in y.saturating_sub(1)..(y + 2).min(h) {
+                for xx in x.saturating_sub(1)..(x + 2).min(w) {
+                    for (k, i) in sites(yy, xx) {
+                        if k != c {
+                            other[k] = true;
+                            unclipped[k] |= self.data[i] < clipped;
+                        }
+                    }
+                }
+            }
+            !(0..3).any(|k| other[k] && unclipped[k])
+        };
+        let rebuilt: Vec<(usize, u16)> = todo
+            .iter()
+            .filter_map(|&(y, x, c, i)| {
+                let now = balanced(i, c);
+                let guess = if blown(y, x, c) {
+                    top
+                } else {
+                    (opposed(y, x, c, false)? + off[c]).max(0.0).powi(3)
+                };
+                (guess > now).then(|| (i, (guess / gains[c] * WHITE).min(65535.0) as u16))
+            })
+            .collect();
+        for (i, v) in rebuilt {
+            self.data[i] = v;
+        }
+    }
+
     /// The developed size, after the camera's orientation.
     pub fn size(&self) -> (u32, u32) {
         if self.orientation >= 5 && self.orientation <= 8 {
@@ -846,7 +987,7 @@ impl RawPhoto {
     /// A sample, as a fraction of white.
     #[inline]
     fn sample(&self, y: usize, x: usize, s: usize) -> f32 {
-        self.data[(y * self.width + x) * self.cpp + s] as f32 * (1.0 / 65535.0)
+        self.data[(y * self.width + x) * self.cpp + s] as f32 * (1.0 / WHITE)
     }
 
     /// dcraw's exposure: the brightest hundredth at white, judged from
@@ -890,14 +1031,15 @@ impl RawPhoto {
         )
     }
 
-    /// The three colours at a site, balanced and clipped: its own, and each
-    /// missing one the average of that colour's sites in the 3×3 round it —
-    /// or, where there are none (X-Trans), the 5×5. Clipped after the
-    /// balance, so where the sensor clipped every colour is one and white
-    /// through the matrix is white, rather than magenta.
+    /// The three colours at a site, balanced: its own, and each missing
+    /// one the average of that colour's sites in the 3×3 round it — or,
+    /// where there are none (X-Trans), the 5×5. Not held at white: what is
+    /// above it is either light the sensor caught under a colour's gain or
+    /// a clipped highlight rebuilt (`rebuild_highlights`), and the look
+    /// takes it to white by losing its colour.
     fn demosaic_at(&self, y: usize, x: usize, wb: &[f32; 3]) -> [f32; 3] {
         let site = |y: usize, x: usize, c: usize| {
-            (self.sample(y, x, if self.cpp == 3 { c } else { 0 }) * wb[c]).min(1.0)
+            self.sample(y, x, if self.cpp == 3 { c } else { 0 }) * wb[c]
         };
         if self.cpp == 3 {
             return [site(y, x, 0), site(y, x, 1), site(y, x, 2)];
@@ -941,7 +1083,7 @@ impl RawPhoto {
     /// `demosaic_at` does at the edges, and what its tile's lists stand
     /// for everywhere else.
     fn searched(&self, y: usize, x: usize, wb: &[f32; 3]) -> [f32; 3] {
-        let site = |y: usize, x: usize, c: usize| (self.sample(y, x, 0) * wb[c]).min(1.0);
+        let site = |y: usize, x: usize, c: usize| self.sample(y, x, 0) * wb[c];
         let own = self.color(y, x);
         let mut out = [0f32; 3];
         for (c, slot) in out.iter_mut().enumerate() {
@@ -1073,7 +1215,7 @@ impl RawPhoto {
             let samples = &self.data[y * w + fx0..y * w + fx1];
             let mut t = fx0 % TILE;
             for (v, &raw) in row.iter_mut().zip(samples) {
-                *v = (raw as f32 * (1.0 / 65535.0) * wb[tile_row[t] as usize]).min(1.0);
+                *v = raw as f32 * (1.0 / WHITE) * wb[tile_row[t] as usize];
                 t = if t + 1 == TILE { 0 } else { t + 1 };
             }
         }
@@ -1163,7 +1305,7 @@ impl RawPhoto {
                 sum += (site[n] - green[n]) * weight;
                 weights += weight;
             }
-            (g + sum / weights).clamp(0.0, 1.0)
+            bound(g + sum / weights)
         };
         // Red and blue at the greens the second green reads.
         each(span(5)).for_each(|(i, p, own)| {
@@ -1191,7 +1333,7 @@ impl RawPhoto {
                     * weight;
                 weights += weight;
             }
-            let again = (site[i] + sum / weights).clamp(0.0, 1.0);
+            let again = bound(site[i] + sum / weights);
             second[i] = 0.5 * (green[i] + again);
         });
         // The region: the full road ten sites in from the edges, the
@@ -1256,7 +1398,7 @@ impl RawPhoto {
                     fold(x as isize + dx, w) as usize,
                 )
             };
-            (self.data[yy * self.width + xx] as f32 * (1.0 / 65535.0) * wb[colour(yy, xx)]).min(1.0)
+            self.data[yy * self.width + xx] as f32 * (1.0 / WHITE) * wb[colour(yy, xx)]
         };
         // Each of the thirteen sites read once, and summed in the same
         // order as the weights below were first written.
@@ -1266,7 +1408,7 @@ impl RawPhoto {
         let cross2 = nn + ss + ww + ee;
         let diag1 = at(-1, -1) + at(-1, 1) + at(1, -1) + at(1, 1);
         let own = colour(y, x);
-        let clamp = |v: f32| v.clamp(0.0, 1.0);
+        let clamp = bound;
         if own == 1 {
             // A green site: red and blue lie either side of it, one pair
             // along its row and the other along its column.
@@ -1700,10 +1842,7 @@ pub fn auto_tone(photo: &RawPhoto, preview: &RawPreview, s: &RawDevelop) -> RawD
         .cam
         .iter()
         .map(|c| {
-            let c = mul3(
-                &look.to_srgb,
-                [0, 1, 2].map(|k| (c[k] * look.wb[k]).min(1.0)),
-            );
+            let c = mul3(&look.to_srgb, [0, 1, 2].map(|k| c[k] * look.wb[k]));
             luma(c.map(|v| (v * look.gain).max(0.0)))
         })
         .collect();
@@ -1751,7 +1890,7 @@ impl RawPreview {
         let mut sites: Vec<[f32; 3]> = self
             .cam
             .iter()
-            .map(|c| [0, 1, 2].map(|k| (c[k] * look.wb[k]).min(1.0)))
+            .map(|c| [0, 1, 2].map(|k| c[k] * look.wb[k]))
             .collect();
         // The lens's corrections as the develop makes them, at the
         // preview's size: they are in fractions of the picture.
@@ -2856,6 +2995,229 @@ mod tests {
             new_colour < old_colour * 0.25,
             "{new_colour} against {old_colour}"
         );
+    }
+
+    /// A mosaic of `scene` (balanced light, by site, any brightness)
+    /// taken under `gains` and clipped where a sensor clips.
+    fn clipped_photo(
+        w: usize,
+        h: usize,
+        gains: [f32; 3],
+        scene: impl Fn(usize, usize) -> [f32; 3],
+    ) -> RawPhoto {
+        let bayer = |y: usize, x: usize| [[0usize, 1], [1, 2]][y % 2][x % 2];
+        let data: Vec<u16> = (0..w * h)
+            .map(|i| {
+                let (y, x) = (i / w, i % w);
+                let c = bayer(y, x);
+                ((scene(y, x)[c] / gains[c]).clamp(0.0, 1.0) * 65535.0).round() as u16
+            })
+            .collect();
+        RawPhoto::from_mosaic(&Mosaic {
+            width: w,
+            height: h,
+            cpp: 1,
+            data: &data,
+            color_at: &bayer,
+            black: [0.0; 4],
+            white: [65535.0; 4],
+            wb: [gains[0], gains[1], gains[2], f32::NAN],
+            xyz_to_cam: [[0.0; 3]; 4],
+            crops: [0; 4],
+            orientation: 1,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_highlight_blown_in_every_colour_is_white_and_darkens_to_grey() {
+        // A sky past what every colour of the sensor could hold, under a
+        // balance whose own colour (2, 1, 1.6) is a strong magenta.
+        let photo = clipped_photo(40, 30, [2.0, 1.0, 1.6], |_, x| {
+            if x < 20 {
+                [0.3; 3]
+            } else {
+                [9.0; 3]
+            }
+        });
+        let s = RawDevelop {
+            exposure: -3.0,
+            ..Default::default()
+        };
+        let img = photo.develop(&s);
+        let p = px(&img, 30, 15);
+        assert!(
+            p[0].abs_diff(p[1]) <= 2 && p[1].abs_diff(p[2]) <= 2,
+            "the blown sky darkened is grey, {p:?}"
+        );
+        let bright = px(&photo.develop(&RawDevelop::default()), 30, 15);
+        assert_eq!(bright, [255, 255, 255]);
+    }
+
+    #[test]
+    fn light_past_white_under_a_colour_s_gain_is_kept() {
+        // Red at 0.8 of what the sensor holds, under a gain of two: 1.6
+        // balanced, which the sensor did not clip and is kept as it is.
+        let photo = clipped_photo(20, 20, [2.0, 1.0, 1.6], |_, _| [1.6, 0.5, 0.4]);
+        let mut got = Vec::new();
+        photo.region(
+            (0, 20, 0, 20),
+            &photo.as_shot.clone(),
+            &mut Planes::default(),
+            &mut got,
+        );
+        let p = got[10 * 20 + 10];
+        assert!(
+            (p[0] - 1.6).abs() < 0.01 && (p[1] - 0.5).abs() < 0.01,
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn a_highlight_clipped_in_one_colour_comes_back_nearer_the_light_it_was() {
+        // A warm glow rising past where red clips; green and blue never
+        // do. Rebuilt, red keeps rising with them, a little short of the
+        // truth, where held at white it would stop at one.
+        let scene = |_: usize, x: usize| {
+            let v = 0.2 + x as f32 * 0.014;
+            [v * 3.0, v, v * 0.7]
+        };
+        let photo = clipped_photo(48, 24, [2.0, 1.0, 1.6], scene);
+        let mut got = Vec::new();
+        photo.region(
+            (0, 24, 0, 48),
+            &photo.as_shot.clone(),
+            &mut Planes::default(),
+            &mut got,
+        );
+        for x in [38usize, 42, 45] {
+            let (p, t) = (got[12 * 48 + x], scene(12, x));
+            assert!(t[0] / 2.0 > 1.0, "red clipped at {x}");
+            assert!(
+                p[0] > 2.0 && (p[0] - t[0]).abs() < (2.0 - t[0]).abs(),
+                "at {x}: red {} for {}",
+                p[0],
+                t[0]
+            );
+            assert!((p[1] - t[1]).abs() < 0.05, "green as it was at {x}");
+        }
+    }
+
+    /// How close clipped highlights come back: each truth file (see
+    /// `demosaic_against_truth`) taken a stop over under a strong white
+    /// balance, clipped where a sensor clips, developed through Bayer's
+    /// pattern (X-Trans's with `PAT` set), and held against the truth,
+    /// tone-mapped, where clipping touched it; and how far from grey what
+    /// clipped in every colour comes out. Run by name, `--ignored
+    /// --nocapture`. Before the highlights were rebuilt (everything held
+    /// at white after the balance) the five Canon truths came to error
+    /// 0.028–0.093 and colour 0.035–0.18; rebuilt, 0.005–0.034 and
+    /// 0.011–0.066.
+    #[test]
+    #[ignore]
+    fn highlights_against_truth() {
+        let Ok(files) = std::env::var("CHITRAKAR_TEST_TRUTH") else {
+            return;
+        };
+        const XTRANS: [[usize; 6]; 6] = [
+            [1, 1, 0, 1, 1, 2],
+            [1, 1, 2, 1, 1, 0],
+            [2, 0, 1, 0, 2, 1],
+            [1, 1, 2, 1, 1, 0],
+            [1, 1, 0, 1, 1, 2],
+            [0, 2, 1, 2, 0, 1],
+        ];
+        let xtrans = std::env::var("PAT").is_ok();
+        let bayer = move |y: usize, x: usize| {
+            if xtrans {
+                XTRANS[y % 6][x % 6]
+            } else {
+                [[0usize, 1], [1, 2]][y % 2][x % 2]
+            }
+        };
+        let gains = [2.0f32, 1.0, 1.6];
+        let tone = |v: f32| v / (1.0 + v);
+        for file in files.split(',') {
+            let bytes = std::fs::read(file).unwrap();
+            let w = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+            let h = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+            let mut truth: Vec<f32> = bytes[8..]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            // A stop over what put the brightest thousandth at white.
+            let mut hi: Vec<f32> = truth
+                .chunks_exact(3)
+                .map(|p| p[0].max(p[1]).max(p[2]))
+                .collect();
+            hi.sort_by(f32::total_cmp);
+            let k = 2.0 / hi[hi.len() * 999 / 1000].max(1e-6);
+            truth.iter_mut().for_each(|v| *v *= k);
+            let data: Vec<u16> = (0..w * h)
+                .map(|i| {
+                    let c = bayer(i / w, i % w);
+                    ((truth[i * 3 + c] / gains[c]).min(1.0) * 65535.0).round() as u16
+                })
+                .collect();
+            let photo = RawPhoto::from_mosaic(&Mosaic {
+                width: w,
+                height: h,
+                cpp: 1,
+                data: &data,
+                color_at: &bayer,
+                black: [0.0; 4],
+                white: [65535.0; 4],
+                wb: [gains[0], gains[1], gains[2], f32::NAN],
+                xyz_to_cam: [[0.0; 3]; 4],
+                crops: [0; 4],
+                orientation: 1,
+            })
+            .unwrap();
+            let mut got = Vec::new();
+            photo.region(
+                (0, h, 0, w),
+                &photo.as_shot.clone(),
+                &mut Planes::default(),
+                &mut got,
+            );
+            let (mut err, mut colour, mut n) = (0f64, 0f64, 0usize);
+            // Where every colour clipped: how far from grey it comes out,
+            // as a share of its brightness (what a darkening shows).
+            let (mut tint, mut blown) = (0f64, 0usize);
+            for i in 0..w * h {
+                if (0..3).all(|c| truth[i * 3 + c] / gains[c] > 1.0) {
+                    let g = got[i];
+                    let m = (g[0] + g[1] + g[2]) / 3.0;
+                    tint += (((g[0] - m).abs() + (g[1] - m).abs() + (g[2] - m).abs()) / m.max(1e-6))
+                        as f64;
+                    blown += 1;
+                }
+            }
+            for y in 4..h - 4 {
+                for x in 4..w - 4 {
+                    let i = y * w + x;
+                    let t = [0, 1, 2].map(|c| truth[i * 3 + c]);
+                    if !(0..3).any(|c| t[c] / gains[c] > 1.0) {
+                        continue;
+                    }
+                    let (a, b) = (got[i].map(tone), t.map(tone));
+                    err += (0..3).map(|c| ((a[c] - b[c]) as f64).abs()).sum::<f64>() / 3.0;
+                    colour += (((a[0] - a[1]) - (b[0] - b[1])).abs()
+                        + ((a[2] - a[1]) - (b[2] - b[1])).abs())
+                        as f64;
+                    n += 1;
+                }
+            }
+            println!(
+                "{}: {} clipped px, error {:.4}, colour {:.4}; {} blown, tint {:.3}",
+                file.rsplit('/').next().unwrap(),
+                n,
+                err / n.max(1) as f64,
+                colour / n.max(1) as f64,
+                blown,
+                tint / blown.max(1) as f64
+            );
+        }
     }
 
     /// How close each demosaic comes to a photograph whose every colour

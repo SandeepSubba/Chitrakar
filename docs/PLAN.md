@@ -10399,6 +10399,36 @@ without reading anything else.*
   strictly. What is left between ours and the camera is exposure, which
   the camera meters its own way and this puts the brightest hundredth
   at white; neither is the other's to copy.
+  **Highlights rebuilt** ✅. Every balanced value used to be held at
+  white, for the good reason that a highlight blown in every colour is
+  the balance's own colour (2 : 1 : 1.6, a magenta) and a darkened sky
+  would show it; but that also cut light the sensor had caught — red at
+  0.8 of full under a gain of two is 1.6, and was made 1 — and held
+  every demosaic's estimate at white besides. Now the kept values have
+  room above white (white is half their range, `WHITE`; a sensor gives
+  fourteen bits, so sixteen lose nothing) and a highlight is rebuilt
+  once, as the photograph is kept (`rebuild_highlights`, after
+  darktable's "inpaint opposed"): a site the sensor clipped keeps what
+  it reached and is raised to the cube-root mean of the other colours
+  round it, moved by how far its colour stood from them at the
+  unclipped sites two round what clipped; where every colour round it
+  clipped there is nothing to go by and all go to the brightest clipped
+  colour's level — white, not magenta. Judged by
+  `highlights_against_truth` (ignored; a truth file a stop over under a
+  2 : 1 : 1.6 balance, clipped where a sensor clips): error in the
+  clipped parts 0.028–0.093 before, 0.005–0.034 rebuilt, colour
+  0.035–0.18 before and 0.011–0.066 rebuilt, through Bayer and X-Trans
+  alike; three tests hold the cases (a sky blown in every colour
+  darkens to grey, light past white under a gain is kept, a glow
+  clipped in red comes back nearer what it was). On a Canon M5's sky,
+  white as developed, two stops down shows its clouds and its blue
+  where it was flat grey. 0.17 s for a 24-megapixel photograph with a
+  hundredth of it clipped. Where two colours of three clipped (a lamp
+  in a 6D's frame) the rebuilt core can come out a little warm once
+  darkened; developed as it is, it is white. A first try that rebuilt
+  every clipped site from its neighbours, blown ones too, made blown
+  skies more coloured than leaving them alone, and is why blown sites
+  are put at white.
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a

@@ -1,6 +1,7 @@
 //! A photograph with every colour measured at every pixel, for judging a
 //! demosaic: each 2×2 block of a Bayer raw (one red, two greens, one
-//! blue) becomes one pixel, black off, balanced as shot, white at one.
+//! blue) becomes one pixel, black off, balanced as shot, white at one
+//! before the balance (so a colour under a gain above one can pass it).
 //! Written as `w h` (u32 LE) then linear RGB f32 LE.
 //!
 //! `cargo run --release -p chitrakar-raw-in --example truth -- IN.CR2 OUT.bin`
@@ -46,7 +47,7 @@ fn main() {
                 }
             }
             for k in 0..3 {
-                let val = (rgb[k] / n[k] * wb[k] / g).min(1.0);
+                let val = rgb[k] / n[k] * wb[k] / g;
                 out.extend(val.to_le_bytes());
             }
         }
