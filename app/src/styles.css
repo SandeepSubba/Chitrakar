@@ -1487,6 +1487,31 @@ body {
   stroke-dasharray: 4 3;
 }
 
+.pen-overlay .pen-path {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
+.pen-overlay .pen-rubber {
+  stroke: var(--accent);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  opacity: 0.8;
+}
+
+.pen-overlay .pen-handle {
+  stroke: var(--accent);
+  stroke-width: 1;
+}
+
+.pen-overlay .pen-knob,
+.pen-overlay .pen-anchor {
+  fill: #fff;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+
 .pen-overlay .pen-first {
   fill: none;
   stroke: var(--accent);

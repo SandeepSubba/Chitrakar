@@ -1813,6 +1813,21 @@ export function App() {
   const strokeEnd = useRef<[number, number] | null>(null);
   /** Pen tool: anchors of the path being drawn, in doc coordinates. */
   const [penPoints, setPenPoints] = useState<[number, number][]>([]);
+  /** The pen's curve handles, one per anchor beside `penPoints`:
+   * `[in_x, in_y, out_x, out_y]` from the anchor, nought for a corner —
+   * the same shape a path keeps them in. A drag on a new anchor pulls
+   * them out, as it does in every editor with a pen. */
+  const [penHandles, setPenHandles] = useState<[number, number, number, number][]>([]);
+  /** The anchor a pen drag is pulling handles out of, and where it is. */
+  const penDragRef = useRef<{ index: number; x: number; y: number } | null>(null);
+  /** The line from the last anchor to the pointer, moved by hand rather
+   * than through state so a pointer crossing the canvas does not draw
+   * the whole editor again at every step. */
+  const penRubberRef = useRef<SVGLineElement>(null);
+  // Anything that lets go of the anchors lets go of their handles too.
+  useEffect(() => {
+    if (penPoints.length === 0) setPenHandles([]);
+  }, [penPoints]);
   /** A draft from an earlier visit, offered back until it is taken or
    * thrown away; and the draft-writer, a breath after the last change.
    * `saveTick` is bumped on every refresh, so the draft follows the
@@ -2717,10 +2732,14 @@ export function App() {
    * open polylines get a stroke. Anchors normalize to a (0,0) origin with
    * the offset carried by the node transform. */
   const finishPath = useCallback(
-    (closed: boolean) => {
+    (closed: boolean, upTo?: number) => {
       if (!session) return;
-      setPenPoints((pts) => {
-        if (pts.length < (closed ? 3 : 2)) return pts;
+      // Read from what is drawn rather than inside a state updater: an
+      // updater may be run twice, and this one adds a layer.
+      const pts = penPoints.slice(0, upTo ?? penPoints.length);
+      const hs = pts.map((_, i) => penHandles[i] ?? ([0, 0, 0, 0] as [number, number, number, number]));
+      {
+        if (pts.length < (closed ? 3 : 2)) return;
         const minX = Math.min(...pts.map((p) => p[0]));
         const minY = Math.min(...pts.map((p) => p[1]));
         const points = pts.map(
@@ -2740,7 +2759,9 @@ export function App() {
                       points,
                       closed,
                       smooth: false,
-                      handles: [],
+                      // Only where a drag pulled some out: a path of
+                      // corners is written as it always was.
+                      handles: hs.some((h) => h.some((v) => v !== 0)) ? hs : [],
                       subpaths: [],
                     },
                   },
@@ -2766,10 +2787,12 @@ export function App() {
             ),
           },
         });
-        return [];
-      });
+        setPenPoints([]);
+        setPenHandles([]);
+        penDragRef.current = null;
+      }
     },
-    [session, layers, fill, cmyk, run],
+    [session, layers, fill, cmyk, run, penPoints, penHandles],
   );
 
   // Keyboard: tool shortcuts, undo/redo, space-to-pan, escape-to-cancel.
@@ -2863,6 +2886,13 @@ export function App() {
           setShowKeys(false);
           return;
         }
+        // A path being drawn with the pen is kept, as Illustrator, Affinity
+        // and Figma keep it: Escape ends it where it is. Only a single
+        // anchor, which is no path yet, is let go of.
+        if (tool === "Pen" && penPoints.length >= 2) {
+          finishPath(false);
+          return;
+        }
         cancelGesture();
         // Escape lets go of the region first when there is one and a
         // marquee is in hand: that is what the key was last used for,
@@ -2926,6 +2956,8 @@ export function App() {
     redo,
     cancelGesture,
     finishPath,
+    tool,
+    penPoints,
     selectAll,
     deselect,
     deselectAll,
@@ -3685,6 +3717,13 @@ export function App() {
 
   /** A double-click on a picked text block opens it for typing in place. */
   const onCanvasDoubleClick = (e: React.MouseEvent) => {
+    // A double-click ends a pen path where it is, as in Illustrator and
+    // Affinity: the first press put the last anchor down, and the
+    // second (refused at the press) is the word to stop.
+    if (tool === "Pen") {
+      if (penPoints.length >= 2) finishPath(false);
+      return;
+    }
     if (tool !== "Move" || !session || selected === null) return;
     // Double-clicking a picked path's outline puts an anchor on it,
     // which is what the gesture means in every vector editor. A block of
@@ -4219,7 +4258,16 @@ export function App() {
           e.shiftKey && last
             ? onEighths(last, [x, y])
             : snapPoint(x, y, ...snapTargets([]), e.ctrlKey || e.metaKey);
+        // The second press of a double-click lands where the first did:
+        // it finishes the path (onCanvasDoubleClick) rather than adding
+        // an anchor on top of the last one.
+        if (last && e.detail >= 2 && Math.hypot(ax - last[0], ay - last[1]) < 4 / view.zoom) {
+          return;
+        }
         setPenPoints((pts) => [...pts, [ax, ay]]);
+        setPenHandles((hs) => [...hs, [0, 0, 0, 0]]);
+        penDragRef.current = { index: penPoints.length, x: ax, y: ay };
+        (e.target as Element).setPointerCapture(e.pointerId);
       }
       return;
     }
@@ -4428,6 +4476,29 @@ export function App() {
       const at = docPoint(e);
       lastPointer.current = at;
       measureAt(at[0], at[1], e.altKey && e.buttons === 0);
+    }
+    if (tool === "Pen") {
+      const [x, y] = docPoint(e);
+      const pull = penDragRef.current;
+      if (pull) {
+        // Dragged further than a wobble, the anchor becomes smooth: the
+        // handle out follows the pointer and the one in mirrors it.
+        const [ox, oy] = [x - pull.x, y - pull.y];
+        if (Math.hypot(ox, oy) * view.zoom > 3) {
+          setPenHandles((hs) =>
+            hs.map((h, i) => (i === pull.index ? [-ox, -oy, ox, oy] : h)),
+          );
+        }
+        return;
+      }
+      const last = penPoints[penPoints.length - 1];
+      const line = penRubberRef.current;
+      if (line && last) {
+        line.setAttribute("x1", String(view.x + last[0] * view.zoom));
+        line.setAttribute("y1", String(view.y + last[1] * view.zoom));
+        line.setAttribute("x2", String(view.x + x * view.zoom));
+        line.setAttribute("y2", String(view.y + y * view.zoom));
+      }
     }
     const knifeFrom = knifeRef.current;
     if (knifeFrom) {
@@ -4801,6 +4872,10 @@ export function App() {
     if (e && ignoredRef.current.has(e.pointerId)) return;
     if (e?.pointerType === "touch") clearLong();
     if (pinchRef.current) return;
+    if (penDragRef.current) {
+      penDragRef.current = null;
+      return;
+    }
     if (knifeRef.current) {
       const line = knifeLine;
       knifeRef.current = null;
@@ -6345,6 +6420,13 @@ export function App() {
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
+        // With a path half drawn, the key takes back its last anchor —
+        // what it does in every pen tool — and never the picked layer.
+        if (tool === "Pen" && penPoints.length > 0) {
+          setPenPoints((pts) => pts.slice(0, -1));
+          setPenHandles((hs) => hs.slice(0, -1));
+          return;
+        }
         deleteSelected();
       }
     };
@@ -11550,14 +11632,53 @@ export function App() {
           )}
           {penPoints.length > 0 && (
             <svg className="pen-overlay" aria-hidden="true">
-              <polyline
-                points={penPoints
-                  .map(
-                    (p) =>
-                      `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
-                  )
-                  .join(" ")}
-              />
+              {tool === "Pen" ? (
+                <>
+                  {/* The path as it will be, curves and all. */}
+                  <path
+                    className="pen-path"
+                    d={penPoints
+                      .map((p, i) => {
+                        const sx = (q: [number, number]) =>
+                          `${view.x + q[0] * view.zoom},${view.y + q[1] * view.zoom}`;
+                        if (i === 0) return `M${sx(p)}`;
+                        const prev = penPoints[i - 1];
+                        const out = penHandles[i - 1] ?? [0, 0, 0, 0];
+                        const inn = penHandles[i] ?? [0, 0, 0, 0];
+                        if (out.every((v) => v === 0) && inn.every((v) => v === 0)) return `L${sx(p)}`;
+                        return `C${sx([prev[0] + out[2], prev[1] + out[3]])} ${sx([p[0] + inn[0], p[1] + inn[1]])} ${sx(p)}`;
+                      })
+                      .join(" ")}
+                  />
+                  <line ref={penRubberRef} className="pen-rubber" x1={-9} y1={-9} x2={-9} y2={-9} />
+                  {penPoints.map((p, i) => {
+                    const h = penHandles[i];
+                    const [cx, cy] = [view.x + p[0] * view.zoom, view.y + p[1] * view.zoom];
+                    return (
+                      <g key={i}>
+                        {h && h.some((v) => v !== 0) && (
+                          <>
+                            <line className="pen-handle" x1={cx + h[0] * view.zoom} y1={cy + h[1] * view.zoom}
+                              x2={cx + h[2] * view.zoom} y2={cy + h[3] * view.zoom} />
+                            <circle className="pen-knob" cx={cx + h[0] * view.zoom} cy={cy + h[1] * view.zoom} r={3} />
+                            <circle className="pen-knob" cx={cx + h[2] * view.zoom} cy={cy + h[3] * view.zoom} r={3} />
+                          </>
+                        )}
+                        <rect className="pen-anchor" x={cx - 3} y={cy - 3} width={6} height={6} />
+                      </g>
+                    );
+                  })}
+                </>
+              ) : (
+                <polyline
+                  points={penPoints
+                    .map(
+                      (p) =>
+                        `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
+                    )
+                    .join(" ")}
+                />
+              )}
               {/* Only the pen closes a path by clicking its first anchor;
                   a brush stroke reuses the preview line but not that mark. */}
               {tool === "Pen" && (

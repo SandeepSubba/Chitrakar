@@ -10568,6 +10568,20 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **The pen, as other editors have it** ✅ (reported: "pen tool doesn't
+  work"). It worked by its own rules — a press per corner, Enter or the
+  first anchor to finish — and broke everyone else's: a drag made a
+  corner rather than a curve, nothing showed after the first press, a
+  double-click put an anchor on top of the last, and Escape threw the
+  path away. Now a drag on a new anchor pulls out mirrored handles (the
+  path's own `handles`, so the curve is a curve in the file), a line
+  follows the pointer from the last anchor (moved on the element, not
+  through state, so crossing the canvas does not draw the editor again),
+  a double-click, Enter or Escape ends the path and keeps it, a lone
+  anchor is still let go of by Escape, and Backspace takes back the last
+  anchor rather than deleting the picked layer. `finishPath` no longer
+  adds its layer from inside a state updater, which React may run twice.
+  Smoke 9cp (8p now asks the lone anchor).
   **The menus, audited against Photoshop, Affinity and Illustrator** ✅
   (after Select, November 2026). Every row keeps its id, so a key a
   person gave one still reaches it; names and places changed. **Layer**

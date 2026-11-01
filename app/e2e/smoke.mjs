@@ -1798,15 +1798,15 @@ assert(px[3] === 255, "polyline vertex stroked");
 px = await canvasPixel(500, 60);
 assert(px[3] === 0, "open path interior not filled");
 
-// 8p. Escape abandons an in-progress pen path.
+// 8p. Escape lets go of a lone anchor, which is no path yet. (A path of
+// two anchors or more it keeps, as other editors do: 9cp.)
 await penClick(700, 40);
-await penClick(760, 100);
 await page.keyboard.press("Escape");
 await page.waitForTimeout(150);
 await pickTool("Move");
 assert(
   (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
-  "escape discarded the in-progress path",
+  "escape let go of the lone anchor",
 );
 
 // 8q. Group the two pen paths (ctrl-click multi-select), one undo ungroups.
@@ -19553,6 +19553,67 @@ assert(
   await launched.close();
   assert(shellErrors.length === 0, `nothing went wrong on the way (${shellErrors.join(" | ")})`);
   await shell.close();
+}
+
+// 9cp. The pen as Illustrator, Affinity and Figma have it. A drag on a
+// new anchor pulls out its handles, so the path curves; a line follows
+// the pointer from the last anchor, so the next segment can be seen
+// before it is put down; a double-click, Enter or Escape ends the path
+// and keeps it; Backspace takes back the last anchor and never the
+// picked layer. Before, a drag made a corner, nothing showed after the
+// first press, a double-click added an anchor on top of the last, and
+// Escape threw the path away.
+{
+  await newDocument(800, 600, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 800) * b.width, b.y + (y / 600) * b.height];
+  const paths = () => page.locator(".panel ul li", { hasText: "Path" }).count();
+  await pickTool("Pen");
+  // The line to the pointer, after the first press.
+  await page.mouse.click(...at(100, 300));
+  await page.mouse.move(...at(250, 250), { steps: 3 });
+  const rubber = page.locator(".pen-overlay .pen-rubber");
+  const [rx1, rx2] = await rubber.evaluate((l) => [Number(l.getAttribute("x1")), Number(l.getAttribute("x2"))]);
+  assert(Math.abs(rx2 - rx1 - (150 * b.width) / 800) < 3, `a line follows the pointer from the last anchor (${rx1} to ${rx2})`);
+  // Pressed at (400, 300) and dragged up: the handle out points up and
+  // the one in points down, so the segment from the first anchor bows
+  // down — through (250, 337) — and the straight line's middle is clear.
+  await page.mouse.move(...at(400, 300));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  assert((await page.locator(".pen-overlay .pen-knob").count()) === 2, "the dragged anchor shows its two handles");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  assert((await paths()) === 1, "Enter ends the path");
+  const onCurve = await canvasPixel(250, 337);
+  const chord = await canvasPixel(250, 300);
+  assert(onCurve[3] > 100 && chord[3] === 0, `the drag made a curve, not a corner (curve ${onCurve}, chord ${chord})`);
+  // A double-click ends the path where it is, with no anchor doubled.
+  await page.mouse.click(...at(100, 500));
+  await page.mouse.dblclick(...at(300, 520));
+  await page.waitForTimeout(300);
+  assert((await paths()) === 2, "a double-click ends the path");
+  assert((await page.locator(".pen-overlay").count()) === 0, "and nothing is left half drawn");
+  // Escape keeps a path of two anchors.
+  await page.mouse.click(...at(500, 500));
+  await page.mouse.click(...at(700, 520));
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(300);
+  assert((await paths()) === 3, "Escape ends the path and keeps it");
+  // Backspace takes back the last anchor, and leaves the layers alone.
+  await page.mouse.click(...at(100, 100));
+  await page.mouse.click(...at(200, 100));
+  await page.mouse.click(...at(300, 150));
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(150);
+  assert((await page.locator(".pen-overlay .pen-anchor").count()) === 2, "Backspace takes back the last anchor");
+  assert((await paths()) === 3, "and deletes no layer");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  assert((await paths()) === 4, "the rest still ends as a path");
+  await pickTool("Move");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });
