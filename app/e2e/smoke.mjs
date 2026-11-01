@@ -15242,6 +15242,11 @@ assert(
   assert(await page.evaluate(() => crossOriginIsolated), "the page is cross-origin isolated");
   const threads = Number(await page.evaluate(() => document.documentElement.dataset.developThreads ?? "0"));
   assert(threads >= 2, `developed on the worker's threads (${threads})`);
+  // And read by the raw reader's threaded build, whose threads rawler
+  // decodes a compressed file's strips on (the DNG here has none, but it
+  // is read by the same module, started the same way).
+  const readers = Number(await page.evaluate(() => document.documentElement.dataset.rawThreads ?? "0"));
+  assert(readers >= 2, `read by the threaded raw reader (${readers} threads)`);
   assert((await layerNames()).join() === "card.dng", "the same layer, not another");
   assert((await page.locator(".history").innerText()).includes("Develop"), "history says it was developed");
   await page.keyboard.press("Control+z");

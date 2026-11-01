@@ -298,7 +298,18 @@ too, and the engine is handed the pixels by `place_rgba`) and
 for WASI by `npm run build:wasm-raw` and run in a worker,
 `app/src/rawWorker.ts` + `src/raw.ts`, since rawler relies on catching
 its own panics and a WASM module cannot — the worker is retired on any
-failure; it hands the engine the mosaic packed, `raw::unpack`). A raw
+failure; it hands the engine the mosaic packed, `raw::unpack`). On a
+cross-origin isolated page the reader is the `wasm32-wasip1-threads`
+build instead, and rawler decodes Fuji's compressed RAF (and Canon's
+CR3, Panasonic's RW2) a strip to a thread. `src/rawWorker.ts` hosts
+WASI threads over shared memory: the page makes `src/rawThread.ts`
+workers and channels them to the reader. Each waits on a slot of a
+shared array, because a thread is started from inside a read, when the
+reader cannot hand a message on, so `thread-spawn` writes the slot and
+wakes it. RAYON_NUM_THREADS tells rayon how many there are. Built as a
+library, the module is started by calling `__wasi_init_tp` and
+`__wasm_call_ctors` (exported in `.cargo/config.toml`); without the
+first, every lock spins. A raw
 file opens in the develop window (`RawDevelopDialog`):
 `develop.rs` keeps the sensor's values (`RawPhoto`) and develops them
 with `RawDevelop` — white balance in kelvin and tint through the

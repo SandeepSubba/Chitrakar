@@ -10493,6 +10493,27 @@ without reading anything else.*
   its own thread as before. The previews the sliders move stay on the
   page (they are small); unpacking and rebuilding highlights stay on
   one thread.
+  **Raw files read on every core** ✅. Timed from picking the file to
+  the develop window in the built app, an X-T5's compressed RAF took
+  3.8 s, 2.5 s of it rawler decoding on the reader's one thread. rawler
+  decodes Fuji's compressed strips (and CR3's, RW2's) with rayon
+  already, so the reader is built a second time for
+  `wasm32-wasip1-threads`. Its worker hosts WASI threads: the page
+  makes the thread workers, each instantiates the module over the
+  shared memory and waits on a slot of a shared array, and
+  `thread-spawn` fills the slot and wakes it. The threads are not
+  started by a message, because a busy worker's message is not handed
+  on until it is done; that was the first hang. The second was
+  start-up: built as a library, the module has no `_initialize`, so
+  the worker calls `__wasi_init_tp` (the main thread's own record,
+  which every lock reads its owner from; without it they spin) and the
+  constructors itself. Measured warm: X-T5 reader 2.5 → 1.2 s, open
+  3.8 → 2.0 s, and the packed mosaic is the native reader's to the
+  byte. An X-T3's uncompressed RAF and a 6D's CR2 take rawler's serial
+  path and are as they were (about 1.2 s and 0.8 s to open). A thread
+  that fails fails the read and retires them all (smoke 9cn's damaged
+  file). Without cross-origin isolation the plain reader reads as
+  before.
   **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
   the reports for dnglab (filter patterns, Kodak's balance, Canon
   sRAW's black taken off twice, Fuji's orientation, the S23, the
