@@ -1101,6 +1101,29 @@ impl Session {
         }
     }
 
+    /// Fold the newest step in the history into the one before it, under
+    /// the older one's name, so that two steps a person took as one
+    /// undo as one. Alt-dragging a copy off a layer is that: the copy is
+    /// made where the original stands and the drag carries it off, which
+    /// is two commands and one thing done — and one Undo should take the
+    /// copy away, not leave it standing on the original. False when there
+    /// are not two steps to fold.
+    pub fn merge_last(&mut self) -> bool {
+        self.commit_preview();
+        if self.undo.len() < 2 {
+            return false;
+        }
+        let (Some(newer), Some(older)) = (self.undo.pop(), self.undo.pop()) else {
+            return false;
+        };
+        // Undone newest first: the drag taken back, then the copy.
+        self.undo.push(HistoryEntry {
+            inverse: Command::Batch(vec![newer.inverse, older.inverse]),
+            label: older.label,
+        });
+        true
+    }
+
     /// Abort the gesture, restoring the pre-gesture state. Returns false if
     /// no preview was active.
     pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
@@ -20575,6 +20598,41 @@ mod tests {
             (b[2] - 40.0).abs() < 0.6,
             "the left one, still its own width: {b:?}"
         );
+    }
+
+    /// Two steps folded into one undo as one, and redo as one.
+    #[test]
+    fn two_steps_folded_undo_and_redo_as_one() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let id = add_rect(&mut session, "a", 40.0, 30.0);
+        let copies = session.duplicate_nodes(&[id], false).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copies[0],
+                transform: Transform {
+                    e: 100.0,
+                    ..session.transform_of(copies[0]).unwrap()
+                },
+            })
+            .unwrap();
+        let before = session.history_labels().0.len();
+        assert!(session.merge_last());
+        assert_eq!(session.history_labels().0.len(), before - 1);
+        let root = session.document().root();
+        let count = |s: &Session| s.document().children_of(root).unwrap().len();
+        assert_eq!(count(&session), 2);
+        session.undo().unwrap();
+        assert_eq!(count(&session), 1, "one undo takes the moved copy away");
+        session.redo().unwrap();
+        assert_eq!(count(&session), 2);
+        assert_eq!(
+            session.transform_of(copies[0]).unwrap().e,
+            100.0,
+            "and redo puts it back where it was carried"
+        );
+        // Nothing to fold into.
+        let mut lone = Session::new(10, 10, ColorMode::Rgb);
+        assert!(!lone.merge_last());
     }
 
     /// A matte handed in by something that looked at the picture.

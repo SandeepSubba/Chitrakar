@@ -1146,7 +1146,6 @@ body {
   cursor: crosshair;
 }
 
-.pen-overlay,
 /* A layer's own picture, in place of the glyph that says what kind it
    is. Checkered behind it, so a transparent layer reads as transparent
    rather than as the panel's own background. */
@@ -1184,6 +1183,11 @@ body {
   cursor: crosshair;
 }
 
+/* The pen's path as it is drawn sits over the page with the other
+   overlays. Its name had come loose from this list onto the layer
+   thumbnail's rule — eighteen pixels square, checkered, in the flow —
+   which a browser that clips an SVG to its box drew as nothing. */
+.pen-overlay,
 .brush-ring,
 .marquee-overlay,
 .snap-overlay,
@@ -1465,6 +1469,32 @@ body {
   font-size: 0.68rem;
 }
 
+/* A kept crop frame's handles: white, as the frame is, so they read on
+   any photograph. */
+.crop-handle {
+  fill: #fff;
+  stroke: rgb(0 0 0 / 0.6);
+  stroke-width: 1;
+}
+
+/* Crop and Cancel under the ratio, as narrow as it. */
+.tool-commit {
+  width: 2.4rem;
+  padding: 0.2rem 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.62rem;
+  cursor: pointer;
+}
+
+.tool-commit.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+
 .crop-frame {
   fill: none;
   stroke: #fff;
@@ -1485,6 +1515,14 @@ body {
   stroke: var(--accent);
   stroke-width: 1.5;
   stroke-dasharray: 4 3;
+}
+
+/* The zoom tool's box, while it is being dragged. */
+.zoom-box {
+  position: absolute;
+  pointer-events: none;
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .pen-overlay .pen-path {

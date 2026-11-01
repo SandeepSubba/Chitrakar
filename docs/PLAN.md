@@ -10568,6 +10568,28 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **Every tool driven as a person from Photoshop or Illustrator would** ✅
+  (after the pen). Each tool was put through what those programs do with
+  it, in a fresh document; Rect, Line, Text, Frame, Paint, Eraser, Fill,
+  Wand, Hand, the marquee with shift and alt, zoom's click and alt-click
+  and the arrow keys' nudge already answered. Four did not. **Alt-drag**
+  copied in two history steps, so one Undo left the copy standing on the
+  original: `Session::merge_last` folds the move into the copying
+  (one step, undone and redone as one). The **zoom tool** zoomed on the
+  press, so a drag could not ask for a box: a press now waits, a click
+  steps in and a box dragged round something fills the window with it.
+  A **brush click** made nothing and a shift-click nothing: a click
+  leaves a dot and a shift-click a straight stroke from where the last
+  ended. And **Crop** cut the page the moment the pointer let go: the
+  frame is kept now, moved by its inside and resized by any edge (eight
+  handles mark the corners and middles), held to the page and to the
+  ratio, and taken by Enter, a double-click in it or the bar's Crop;
+  Escape, Cancel or another tool lets it go, and it stays on the picture
+  as the view moves. On the way, the pen's overlay rule had come loose
+  from the overlays' list onto the layer thumbnail's (eighteen pixels
+  square, in the flow): Chromium drew past it, a browser that clips an
+  SVG to its box would have drawn the pen's path as nothing. Smoke 9cq,
+  9cr (the older crop blocks now press Enter).
   **The pen, as other editors have it** ✅ (reported: "pen tool doesn't
   work"). It worked by its own rules — a press per corner, Enter or the
   first anchor to finish — and broke everyone else's: a drag made a

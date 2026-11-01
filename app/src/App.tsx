@@ -770,6 +770,12 @@ interface View {
 
 interface ToolDrag {
   tool: Tool;
+  /** The drag began by making copies (alt), so its move and the copying
+   * are one step in the history. */
+  duplicated?: boolean;
+  /** Shift was held at the press: for the brush, a click joins on to
+   * where the last stroke ended. */
+  shift?: boolean;
   startX: number;
   startY: number;
   lastX: number;
@@ -1824,6 +1830,12 @@ export function App() {
    * than through state so a pointer crossing the canvas does not draw
    * the whole editor again at every step. */
   const penRubberRef = useRef<SVGLineElement>(null);
+  /** A box being dragged with the zoom tool, in the viewport's own
+   * pixels: where it began and where the pointer is. */
+  const zoomBoxRef = useRef<[number, number, number, number] | null>(null);
+  /** Where the brush's last stroke ended, for a shift-click to join on. */
+  const brushEndRef = useRef<[number, number] | null>(null);
+  const [zoomBox, setZoomBox] = useState<[number, number, number, number] | null>(null);
   // Anything that lets go of the anchors lets go of their handles too.
   useEffect(() => {
     if (penPoints.length === 0) setPenHandles([]);
@@ -1941,9 +1953,25 @@ export function App() {
     at: number;
   } | null>(null);
   /** The crop frame being dragged, in host coordinates: [x0, y0, x1, y1]. */
-  const [cropRect, setCropRect] = useState<
+  /** The crop's frame, `[x, y, w, h]` on the page: drawn by a drag and
+   * then kept — moved by its inside, resized by its handles — until Enter,
+   * a double-click in it or the bar's Crop takes it, as in Photoshop,
+   * Affinity and Lightroom. It used to be taken the moment the pointer
+   * let go, with no second look. */
+  const [cropFrame, setCropFrame] = useState<
     [number, number, number, number] | null
   >(null);
+  /** A kept frame being moved or resized: which edges follow the pointer
+   * (all four for a move), where the press was and the frame it began. */
+  const cropEditRef = useRef<{
+    edges: { l: boolean; r: boolean; t: boolean; b: boolean };
+    from: [number, number];
+    frame0: [number, number, number, number];
+  } | null>(null);
+  // A frame belongs to the crop tool: putting it down lets it go.
+  useEffect(() => {
+    if (tool !== "Crop") setCropFrame(null);
+  }, [tool]);
   /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
   const [multiSel, setMultiSel] = useState<NodeId[]>([]);
   /** The region being dragged out, while it is being dragged. Only the
@@ -2725,6 +2753,8 @@ export function App() {
     knifeRef.current = null;
     setKnifeLine(null);
     setPenPoints([]);
+    setCropFrame(null);
+    cropEditRef.current = null;
     if (session.cancel_preview()) refresh(session);
   }, [session, refresh]);
 
@@ -3724,6 +3754,11 @@ export function App() {
       if (penPoints.length >= 2) finishPath(false);
       return;
     }
+    // A double-click in a kept crop frame takes it.
+    if (tool === "Crop") {
+      if (cropFrame) applyCrop();
+      return;
+    }
     if (tool !== "Move" || !session || selected === null) return;
     // Double-clicking a picked path's outline puts an anchor on it,
     // which is what the gesture means in every vector editor. A block of
@@ -3845,9 +3880,26 @@ export function App() {
     }
     // The zoom tool looks closer at where it is pressed, and steps back
     // from there with alt held — the convention every editor shares.
+    if (tool === "Crop" && cropFrame) {
+      const [hx, hy] = canvasPoint(e);
+      const edges = cropEdgesAt(hx, hy);
+      if (edges) {
+        cropEditRef.current = { edges, from: [x, y], frame0: cropFrame };
+        (e.target as Element).setPointerCapture(e.pointerId);
+        return;
+      }
+    }
     if (tool === "Zoom") {
       const [hx, hy] = canvasPoint(e);
-      zoomAt(hx, hy, e.altKey ? 0.8 : 1.25);
+      // Alt steps back at once. Otherwise the press waits to see whether
+      // it is a click, which steps in, or a drag, whose box is then
+      // filled with the window — Photoshop's and Illustrator's zoom.
+      if (e.altKey) {
+        zoomAt(hx, hy, 0.8);
+        return;
+      }
+      zoomBoxRef.current = [hx, hy, hx, hy];
+      (e.target as Element).setPointerCapture(e.pointerId);
       return;
     }
     // The gradient tool drags a ramp across a shape: the one under the
@@ -4280,6 +4332,7 @@ export function App() {
       moved: false,
       stroke: tool === "Brush" ? [[x, y]] : undefined,
       widths: tool === "Brush" ? [1] : undefined,
+      shift: e.shiftKey,
       lastAt: performance.now(),
     };
     if (tool === "Eyedropper") {
@@ -4351,12 +4404,14 @@ export function App() {
       if (together.length === 1) setMultiSel([]);
       // Alt drags a copy and leaves the original where it was: the copies
       // are made where they stand, and the drag carries them off. Two
-      // history entries — the move, then the duplicate under it.
+      // commands, folded into one step when the drag ends, so one Undo
+      // takes the copy away rather than leaving it on the original.
       if (e.altKey) {
         try {
           const copies = Array.from(
             session.duplicate_nodes(new Float64Array(together), false),
           );
+          drag.duplicated = true;
           target = copies[Math.max(0, together.indexOf(target))];
           together = copies;
           setMultiSel(copies.length > 1 ? copies : []);
@@ -4422,6 +4477,101 @@ export function App() {
     return [x, y, cw, ch];
   };
 
+  /** Take the kept frame: the document becomes that rectangle and every
+   * layer shifts with it, so what was framed stays framed. One step to
+   * undo. */
+  const applyCrop = () => {
+    if (!session || !cropFrame) return;
+    const [bx, by, bw, bh] = cropFrame;
+    const cx = Math.round(bx);
+    const cy = Math.round(by);
+    const cw = Math.round(bx + bw) - cx;
+    const ch = Math.round(by + bh) - cy;
+    setCropFrame(null);
+    if (cw < 1 || ch < 1) return;
+    try {
+      session.resize_canvas(cw, ch, -cx, -cy);
+    } catch (err) {
+      alert(`Crop: ${err}`);
+      return;
+    }
+    setDocumentSize(cw, ch);
+    refresh(session);
+    fitView();
+    setTool("Move");
+  };
+
+  /** What a press does to a kept crop frame: the edges a handle there
+   * moves, all four inside it (a move), or null outside (a new frame). */
+  const cropEdgesAt = (hx: number, hy: number) => {
+    if (!cropFrame) return null;
+    const [fx, fy] = [view.x + cropFrame[0] * view.zoom, view.y + cropFrame[1] * view.zoom];
+    const [fw, fh] = [cropFrame[2] * view.zoom, cropFrame[3] * view.zoom];
+    const reach = 8;
+    const near = (v: number, at: number) => Math.abs(v - at) <= reach;
+    const within = (v: number, lo: number, hi: number) => v >= lo - reach && v <= hi + reach;
+    if (!within(hx, fx, fx + fw) || !within(hy, fy, fy + fh)) return null;
+    const edges = {
+      l: near(hx, fx),
+      r: near(hx, fx + fw) && !near(hx, fx),
+      t: near(hy, fy),
+      b: near(hy, fy + fh) && !near(hy, fy),
+    };
+    // On an edge, anywhere along it, as in Photoshop — the handles mark
+    // the corners and middles but the whole edge is held. Anywhere else
+    // inside: the whole frame moves.
+    if (edges.l || edges.r || edges.t || edges.b) return edges;
+    if (hx >= fx && hx <= fx + fw && hy >= fy && hy <= fy + fh) {
+      return { l: true, r: true, t: true, b: true };
+    }
+    return null;
+  };
+
+  /** The frame as a press on it has dragged it: moved whole, or its
+   * edges carried, held to the page and to the ratio in hand. */
+  const editedCrop = (
+    edit: NonNullable<typeof cropEditRef.current>,
+    x: number,
+    y: number,
+  ): [number, number, number, number] => {
+    const [W, H] = docSize;
+    const [dx, dy] = [x - edit.from[0], y - edit.from[1]];
+    let [fx, fy, fw, fh] = edit.frame0;
+    const { l, r, t, b } = edit.edges;
+    if (l && r && t && b) {
+      fx = Math.min(Math.max(fx + dx, 0), W - fw);
+      fy = Math.min(Math.max(fy + dy, 0), H - fh);
+      return [fx, fy, fw, fh];
+    }
+    let [x0, y0, x1, y1] = [fx, fy, fx + fw, fy + fh];
+    if (l) x0 = Math.min(Math.max(x0 + dx, 0), x1 - 1);
+    if (r) x1 = Math.max(Math.min(x1 + dx, W), x0 + 1);
+    if (t) y0 = Math.min(Math.max(y0 + dy, 0), y1 - 1);
+    if (b) y1 = Math.max(Math.min(y1 + dy, H), y0 + 1);
+    const ratio = cropRatioOf(cropRatio, docSize);
+    if (ratio) {
+      // The side the handle moved decides; the other follows from the
+      // ratio, about the frame's middle when the handle was on an edge,
+      // and held inside the page.
+      const sideways = l || r;
+      let [w, h] = [x1 - x0, y1 - y0];
+      if (sideways && !(t || b)) h = w / ratio;
+      else if (!sideways) w = h * ratio;
+      else if (w / h > ratio) w = h * ratio;
+      else h = w / ratio;
+      const fit = Math.min(1, W / w, H / h);
+      [w, h] = [w * fit, h * fit];
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      x0 = l && !r ? x1 - w : r && !l ? x0 : cx - w / 2;
+      y0 = t && !b ? y1 - h : b && !t ? y0 : cy - h / 2;
+      x0 = Math.min(Math.max(x0, 0), W - w);
+      y0 = Math.min(Math.max(y0, 0), H - h);
+      return [x0, y0, w, h];
+    }
+    return [x0, y0, x1 - x0, y1 - y0];
+  };
+
   /** The distances from what is picked to what is at `(x, y)`, with alt
    * held and the Move tool in hand and nothing being dragged. Over
    * another layer they are to that layer; over nothing, or over what is
@@ -4476,6 +4626,18 @@ export function App() {
       const at = docPoint(e);
       lastPointer.current = at;
       measureAt(at[0], at[1], e.altKey && e.buttons === 0);
+    }
+    if (cropEditRef.current) {
+      const [x, y] = docPoint(e);
+      setCropFrame(editedCrop(cropEditRef.current, x, y));
+      return;
+    }
+    if (zoomBoxRef.current) {
+      const [hx, hy] = canvasPoint(e);
+      const box: [number, number, number, number] = [zoomBoxRef.current[0], zoomBoxRef.current[1], hx, hy];
+      zoomBoxRef.current = box;
+      setZoomBox(box);
+      return;
     }
     if (tool === "Pen") {
       const [x, y] = docPoint(e);
@@ -4730,16 +4892,9 @@ export function App() {
       }
     }
     if (drag.tool === "Crop") {
-      // Show the frame where it is being dragged, in host coordinates so
-      // it sits over the canvas without a transform of its own.
-      const toHost = (x: number, y: number): [number, number] => [
-        view.x + x * view.zoom,
-        view.y + y * view.zoom,
-      ];
-      const [bx, by, bw, bh] = cropBox(drag);
-      const [ax, ay] = toHost(bx, by);
-      const [cx, cy] = toHost(bx + bw, by + bh);
-      setCropRect([ax, ay, cx, cy]);
+      // The frame where it is being dragged, on the page; the overlay
+      // carries it to the screen.
+      setCropFrame(cropBox(drag));
       drag.moved = true;
       return;
     }
@@ -4876,6 +5031,33 @@ export function App() {
       penDragRef.current = null;
       return;
     }
+    if (cropEditRef.current) {
+      cropEditRef.current = null;
+      return;
+    }
+    const zb = zoomBoxRef.current;
+    if (zb) {
+      zoomBoxRef.current = null;
+      setZoomBox(null);
+      const [w, h] = [Math.abs(zb[2] - zb[0]), Math.abs(zb[3] - zb[1])];
+      const host = hostRef.current;
+      if (w < 6 || h < 6 || !host) {
+        zoomAt(zb[0], zb[1], 1.25);
+        return;
+      }
+      // The box, in the document's own units, filled with the window.
+      setView((v) => {
+        const [x0, y0] = [(Math.min(zb[0], zb[2]) - v.x) / v.zoom, (Math.min(zb[1], zb[3]) - v.y) / v.zoom];
+        const [dw, dh] = [w / v.zoom, h / v.zoom];
+        const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min(host.clientWidth / dw, host.clientHeight / dh)));
+        return {
+          zoom,
+          x: host.clientWidth / 2 - (x0 + dw / 2) * zoom,
+          y: host.clientHeight / 2 - (y0 + dh / 2) * zoom,
+        };
+      });
+      return;
+    }
     if (knifeRef.current) {
       const line = knifeLine;
       knifeRef.current = null;
@@ -4954,7 +5136,6 @@ export function App() {
     toolDragRef.current = null;
     setGuides({ x: [], y: [] });
     setSpacing([]);
-    setCropRect(null);
     if (!drag || !session) return;
 
     if (drag.region) {
@@ -5004,16 +5185,32 @@ export function App() {
 
     if (drag.tool === "Move") {
       // The document already holds the previewed position; seal the gesture.
-      if (drag.moved && session.commit_preview()) refresh(session);
+      if (drag.moved && session.commit_preview()) {
+        if (drag.duplicated) session.merge_last();
+        refresh(session);
+      }
       return;
     }
 
     if (drag.tool === "Brush") {
       setPenPoints([]);
-      const kept = simplifyStroke(drag.stroke ?? [], BRUSH_TOLERANCE);
+      let stroke = drag.stroke ?? [];
+      let strokeWidths = drag.widths ?? [];
+      if (!drag.moved && stroke.length > 0) {
+        // A click, rather than a drag. With shift, a straight stroke from
+        // where the last one ended — how a rule is drawn with a brush in
+        // every painting program; without, a dot, which is what a brush
+        // put to the page and lifted leaves.
+        const [px, py] = stroke[0];
+        const from = brushEndRef.current;
+        stroke = drag.shift && from ? [from, [px, py]] : [[px, py], [px + 0.01, py]];
+        strokeWidths = [1, 1];
+      }
+      const kept = simplifyStroke(stroke, BRUSH_TOLERANCE);
       if (kept.length < 2) return;
-      const pts = kept.map((i) => drag.stroke![i]);
-      const widths = kept.map((i) => drag.widths?.[i] ?? 1);
+      const pts = kept.map((i) => stroke[i]);
+      const widths = kept.map((i) => strokeWidths[i] ?? 1);
+      brushEndRef.current = pts[pts.length - 1];
       // Anchors are stored relative to the stroke's own origin, like every
       // other path, so the node's transform carries its position.
       const minX = Math.min(...pts.map((p) => p[0]));
@@ -5072,30 +5269,15 @@ export function App() {
       drag.tool === "Line"
         ? Math.hypot(w, h) >= MIN_SIZE
         : w >= MIN_SIZE && h >= MIN_SIZE;
-    if (!enough) return;
     if (drag.tool === "Crop") {
-      // Crop to the frame that was drawn — the same box, worked out by
-      // the same function, so what was shown is what is taken. The
-      // document becomes that rectangle and every layer shifts with it,
-      // so what was framed stays framed.
-      const [bx, by, bw, bh] = cropBox(drag);
-      const cx = Math.round(bx);
-      const cy = Math.round(by);
-      const cw = Math.round(bx + bw) - cx;
-      const ch = Math.round(by + bh) - cy;
-      if (cw < 1 || ch < 1) return;
-      try {
-        session.resize_canvas(cw, ch, -cx, -cy);
-      } catch (err) {
-        alert(`Crop: ${err}`);
-        return;
-      }
-      setDocumentSize(cw, ch);
-      refresh(session);
-      fitView();
-      setTool("Move");
+      // The frame is kept, not taken: it can be moved and resized, and
+      // Enter, a double-click in it or the bar's Crop takes it. A press
+      // that drew nothing lets any frame go.
+      const box = cropBox(drag);
+      setCropFrame(enough && box[2] >= 1 && box[3] >= 1 ? box : null);
       return;
     }
+    if (!enough) return;
     if (drag.tool === "Frame") {
       // A frame is put on the page whole: its size is what was dragged,
       // and it goes under everything already there so it does not cover
@@ -6417,6 +6599,12 @@ export function App() {
           default:
             break;
         }
+      }
+      // Enter takes a kept crop frame.
+      if (!typing && e.key === "Enter" && tool === "Crop" && cropFrame) {
+        e.preventDefault();
+        applyCrop();
+        return;
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
@@ -10992,6 +11180,18 @@ export function App() {
               ))}
             </select>
           )}
+          {/* A kept frame is taken, or let go, here as well as by Enter
+              and Escape — for a hand without a keyboard. */}
+          {tool === "Crop" && cropFrame && (
+            <>
+              <button type="button" className="tool-commit primary" onClick={applyCrop} title="Crop to the frame (Enter)">
+                Crop
+              </button>
+              <button type="button" className="tool-commit" onClick={() => setCropFrame(null)} title="Let the frame go (Escape)">
+                Cancel
+              </button>
+            </>
+          )}
           <input
             ref={fillWell}
             type="color"
@@ -11491,7 +11691,17 @@ export function App() {
             onPointerMove={onCanvasPointerMove}
             onPointerUp={onCanvasPointerUp}
           />
-          {cropRect && (
+          {cropFrame && (() => {
+            // The frame on the screen, from where it is on the page, so it
+            // stays on the picture as the view is zoomed and moved.
+            const cropRect = [
+              view.x + cropFrame[0] * view.zoom,
+              view.y + cropFrame[1] * view.zoom,
+              view.x + (cropFrame[0] + cropFrame[2]) * view.zoom,
+              view.y + (cropFrame[1] + cropFrame[3]) * view.zoom,
+            ];
+            const [mx, my] = [(cropRect[0] + cropRect[2]) / 2, (cropRect[1] + cropRect[3]) / 2];
+            return (
             <svg className="crop-overlay" aria-hidden="true">
               {/* Four panels dimming everything the crop would discard,
                   which is how the framing reads at a glance. */}
@@ -11542,8 +11752,17 @@ export function App() {
                   y2={cropRect[1] + ((cropRect[3] - cropRect[1]) * n) / 3}
                 />
               ))}
+              {/* The eight handles, at the corners and the edges' middles. */}
+              {[
+                [cropRect[0], cropRect[1]], [mx, cropRect[1]], [cropRect[2], cropRect[1]],
+                [cropRect[0], my], [cropRect[2], my],
+                [cropRect[0], cropRect[3]], [mx, cropRect[3]], [cropRect[2], cropRect[3]],
+              ].map(([hx, hy], i) => (
+                <rect key={`k${i}`} className="crop-handle" x={hx - 4} y={hy - 4} width={8} height={8} />
+              ))}
             </svg>
-          )}
+            );
+          })()}
           {levelLine && (
             <svg className="level-overlay" aria-hidden="true">
               <line
@@ -11629,6 +11848,18 @@ export function App() {
                 />
               ))}
             </svg>
+          )}
+          {zoomBox && (
+            <div
+              className="zoom-box"
+              aria-hidden="true"
+              style={{
+                left: Math.min(zoomBox[0], zoomBox[2]),
+                top: Math.min(zoomBox[1], zoomBox[3]),
+                width: Math.abs(zoomBox[2] - zoomBox[0]),
+                height: Math.abs(zoomBox[3] - zoomBox[1]),
+              }}
+            />
           )}
           {penPoints.length > 0 && (
             <svg className="pen-overlay" aria-hidden="true">
@@ -13355,12 +13586,12 @@ const keyHelp = (
         ["Alt-click (brush)", "Take the colour under the brush"],
         ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
         [k("Text"), "Text"],
-        [k("Crop"), "Crop"],
+        [k("Crop"), "Crop — drag a frame, adjust it, Enter or double-click to take it"],
         [k("Eyedropper"), "Eyedropper — take the colour under the cursor"],
         [k("Gradient"), "Gradient — drag across a shape; alt for a radial one, shift holds the angle"],
         [shifted("Gradient"), "Fill — give the layer under a press the ink in hand; alt for its stroke; a press on nothing fills what is picked out"],
         [k("Hand"), "Hand — drag the view about"],
-        [k("Zoom"), "Zoom — click to look nearer, alt-click to step back"],
+        [k("Zoom"), "Zoom — click to look nearer, drag a box to fill the window with it, alt-click to step back"],
       ],
     ],
   [

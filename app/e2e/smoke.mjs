@@ -4080,6 +4080,14 @@ assert(
     "the crop frame shows while dragging",
   );
   await page.mouse.up();
+  await page.waitForTimeout(300);
+  // Let go, the frame is kept rather than taken: it can be looked at,
+  // moved and resized first (9cr), and Enter takes it.
+  assert(
+    (await page.locator(".crop-frame").count()) === 1 && (await page.isVisible("text=RGB, 600×400")),
+    "let go, the frame stays and the page is not cut yet",
+  );
+  await page.keyboard.press("Enter");
   await page.waitForTimeout(400);
   assert(
     await page.isVisible("text=RGB, 400×200"),
@@ -4115,6 +4123,8 @@ assert(
     { steps: 8 },
   );
   await page.mouse.up();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Enter");
   await page.waitForTimeout(400);
   assert(
     await page.isVisible("text=RGB, 200×50"),
@@ -5534,17 +5544,15 @@ assert(
     (await canvasPixel(160, 320))[3] === 255 && (await canvasPixel(420, 320))[3] === 255,
     "the original stayed and the copy came along",
   );
+  // The copying and the drag are one thing done, so one step (9cq): it
+  // used to take two Undos, and the first left the copy on the original.
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(150);
   assert(
-    (await canvasPixel(420, 320))[3] === 0 && (await canvasPixel(160, 320))[3] === 255,
-    "one undo takes the drag back",
-  );
-  await page.keyboard.press("Control+z");
-  await page.waitForTimeout(150);
-  assert(
-    (await page.locator(".panel ul li .layer-name").allTextContents()).every((n) => !n.trim().endsWith("copy")),
-    "and the next takes the copy",
+    (await canvasPixel(420, 320))[3] === 0 &&
+      (await canvasPixel(160, 320))[3] === 255 &&
+      (await page.locator(".panel ul li .layer-name").allTextContents()).every((n) => !n.trim().endsWith("copy")),
+    "one undo takes the copy and its drag back together",
   );
 
   await page.keyboard.press("Control+z");
@@ -10311,6 +10319,8 @@ assert(
     "with the thirds drawn on it",
   );
   await page.mouse.up();
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Enter");
   await page.waitForTimeout(400);
   const page1 = await page.locator("#engine-page").boundingBox();
   assert(
@@ -10347,8 +10357,8 @@ assert(
   );
   await page.mouse.up();
   await page.waitForTimeout(400);
-  await page.keyboard.press("Control+z");
-  await page.waitForTimeout(400);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
   await pickTool("Move");
 }
 
@@ -19614,6 +19624,179 @@ assert(
   await page.waitForTimeout(300);
   assert((await paths()) === 4, "the rest still ends as a path");
   await pickTool("Move");
+}
+
+// 9cq. The tools as other editors have them, found by driving each one
+// as a person from Photoshop, Illustrator or Affinity would. An alt-drag
+// copy is one step to undo, not two that left the copy on the original;
+// the zoom tool fills the window with a box dragged round what is to be
+// looked at; a brush click leaves a dot and a shift-click a straight
+// stroke from where the last one ended; and the pen's path sits over the
+// page, the whole of it — its rule had come loose onto the layer
+// thumbnail's, eighteen pixels square, which a browser that clips an
+// SVG to its box showed as nothing.
+{
+  await newDocument(800, 600, "rgb");
+  let b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 800) * b.width, b.y + (y / 600) * b.height];
+  const names = () => page.locator(".panel ul li .layer-name").allTextContents();
+  const dragDoc = async (x0, y0, x1, y1, mods = []) => {
+    for (const m of mods) await page.keyboard.down(m);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 8 });
+    await page.mouse.up();
+    for (const m of mods) await page.keyboard.up(m);
+    await page.waitForTimeout(300);
+  };
+  // Alt-drag: one step.
+  await pickTool("Rect");
+  await dragDoc(100, 100, 200, 180);
+  await pickTool("Move");
+  await page.mouse.click(...at(150, 140));
+  await page.waitForTimeout(150);
+  await dragDoc(150, 140, 350, 140, ["Alt"]);
+  assert((await names()).length === 2, `alt-drag carries off a copy (${await names()})`);
+  const history = await page.locator(".history li, [aria-label='History'] li").allTextContents();
+  assert(
+    history.filter((h) => /Duplicate|Transform/.test(h)).length === 1,
+    `and it is one step in the history (${history.join(" | ")})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await names()).length === 1, `one undo takes the copy away (${await names()})`);
+  await page.keyboard.press("Control+Shift+z");
+  await page.waitForTimeout(250);
+  assert((await names()).length === 2, "and one redo brings it back");
+  // The zoom tool's box.
+  await pickTool("Zoom");
+  const zoom = async () => Number(await page.locator('input[aria-label="Zoom"]').inputValue());
+  const zc = await zoom();
+  await page.mouse.click(...[b.x + b.width / 2, b.y + b.height / 2]);
+  await page.waitForTimeout(250);
+  const z0 = await zoom();
+  assert(z0 > zc, `a click with the zoom tool steps in (${zc} → ${z0})`);
+  b = await page.locator("#engine-page").boundingBox();
+  await page.mouse.move(...at(380, 280));
+  await page.mouse.down();
+  await page.mouse.move(...at(420, 320), { steps: 6 });
+  assert(await page.locator(".zoom-box").isVisible(), "the zoom tool shows the box being dragged");
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const z1 = await zoom();
+  assert(z1 > z0 * 5, `a box dragged with the zoom tool fills the window (${z0} → ${z1})`);
+  await page.keyboard.press("Control+0");
+  await page.waitForTimeout(300);
+  b = await page.locator("#engine-page").boundingBox();
+  // The brush: a dot, then a straight stroke on shift.
+  await pickTool("Brush");
+  const before = (await names()).length;
+  await page.mouse.click(...at(300, 450));
+  await page.waitForTimeout(300);
+  assert((await names()).length === before + 1, `a brush click leaves a dot (${await names()})`);
+  await page.keyboard.down("Shift");
+  await page.mouse.click(...at(600, 450));
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(300);
+  assert((await names()).length === before + 2, "a shift-click a stroke");
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(200);
+  const w = Number(await page.locator('.layer-props input[aria-label="Width"], .layer-props input').nth(2).inputValue());
+  assert(w > 250, `from where the last stroke ended to the click (${w} wide)`);
+  // The pen's overlay covers the page.
+  await pickTool("Pen");
+  await page.mouse.click(...at(100, 300));
+  const overlay = await page.locator(".pen-overlay").evaluate((el) => {
+    const cs = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    return { position: cs.position, w: r.width, h: r.height, bg: cs.backgroundImage };
+  });
+  assert(
+    overlay.position === "absolute" && overlay.w > 300 && overlay.h > 300 && overlay.bg === "none",
+    `the pen's path is drawn over the whole canvas (${JSON.stringify(overlay)})`,
+  );
+  await page.keyboard.press("Escape");
+  await pickTool("Move");
+}
+
+// 9cr. A crop frame is kept until it is taken, as in Photoshop, Affinity
+// and Lightroom: drawn, it can be moved by its inside and resized by its
+// eight handles, held to the page and to the ratio; Enter, a double-click
+// in it or the bar's Crop takes it; Escape, Cancel or another tool lets
+// it go. It used to be taken the moment the pointer let go.
+{
+  await newDocument(800, 600, "rgb");
+  let b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 800) * b.width, b.y + (y / 600) * b.height];
+  const facts = () => page.textContent(".doc-facts");
+  const frameBox = () => page.locator(".crop-frame").boundingBox();
+  const dragDoc = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  await pickTool("Crop");
+  await page.locator('select[aria-label="Crop ratio"]').selectOption("Free");
+  await dragDoc(100, 100, 400, 300);
+  assert((await page.locator(".crop-handle").count()) === 8, "a kept frame has eight handles");
+  assert(await page.locator('button.tool-commit:text-is("Crop")').isVisible(), "and the bar offers to take it");
+  // Moved by its inside.
+  const f0 = await frameBox();
+  await dragDoc(250, 200, 350, 250);
+  const f1 = await frameBox();
+  assert(
+    Math.abs(f1.x - f0.x - (100 * b.width) / 800) < 3 && Math.abs(f1.width - f0.width) < 2,
+    `dragged by its inside, the frame moves whole (${f0.x} → ${f1.x})`,
+  );
+  // Resized by its right edge's handle: now 300 wide at x 200..500 → 600.
+  await dragDoc(500, 300, 600, 300);
+  const f2 = await frameBox();
+  assert(
+    Math.abs(f2.width - f1.width - (100 * b.width) / 800) < 3 && Math.abs(f2.height - f1.height) < 2,
+    `its right handle widens it (${f1.width} → ${f2.width})`,
+  );
+  // Held to the page: dragged far past the edge, it stops there.
+  await dragDoc(600, 300, 900, 300);
+  const f3 = await frameBox();
+  assert(Math.abs(f3.x + f3.width - (b.x + b.width)) < 3, "and stops at the page's edge");
+  // Escape lets it go, the page untouched.
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".crop-frame").count()) === 0 && (await facts()).includes("800×600"),
+    "Escape lets the frame go and leaves the page",
+  );
+  // Double-click in it takes it.
+  await dragDoc(100, 100, 500, 400);
+  await page.mouse.dblclick(...at(300, 250));
+  await page.waitForTimeout(400);
+  assert((await facts()).includes("400×300"), `a double-click in the frame takes it (${await facts()})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(400);
+  b = await page.locator("#engine-page").boundingBox();
+  // The bar's Crop takes it too; with 1:1 a corner keeps it square.
+  await pickTool("Crop");
+  await page.locator('select[aria-label="Crop ratio"]').selectOption("1:1");
+  await dragDoc(100, 100, 300, 300);
+  await dragDoc(300, 300, 420, 340);
+  const sq = await frameBox();
+  assert(Math.abs(sq.width - sq.height) < 3, `held to 1:1, a corner keeps it square (${sq.width}x${sq.height})`);
+  await page.click('button.tool-commit:text-is("Crop")');
+  await page.waitForTimeout(400);
+  const [w, h] = (await facts()).match(/(\d+)×(\d+)/).slice(1).map(Number);
+  assert(w === h && w > 200, `the bar's Crop takes it, square (${w}×${h})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  // Another tool lets a frame go.
+  await pickTool("Crop");
+  await page.locator('select[aria-label="Crop ratio"]').selectOption("Free");
+  b = await page.locator("#engine-page").boundingBox();
+  await dragDoc(100, 100, 300, 300);
+  await pickTool("Move");
+  assert((await page.locator(".crop-frame").count()) === 0, "putting the crop tool down lets its frame go");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

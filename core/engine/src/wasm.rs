@@ -95,6 +95,11 @@ impl WasmSession {
         self.inner.commit_preview()
     }
 
+    /// Fold the newest history step into the one before it.
+    pub fn merge_last(&mut self) -> bool {
+        self.inner.merge_last()
+    }
+
     /// Abort the preview gesture, restoring pre-gesture state.
     pub fn cancel_preview(&mut self) -> Result<bool, JsError> {
         self.inner.cancel_preview().map_err(to_js)
