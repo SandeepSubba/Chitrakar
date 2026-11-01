@@ -87,7 +87,7 @@ check(!claimable("shift+mod+k"), "modifiers out of order are not a chord");
   let k = giveChord({ command: "duplicate" }, "", {}, {});
   check(k.commandKeys.duplicate === "", "a command given none says so");
   const b = boundChords(k.commandKeys, k.menuKeys);
-  check(b.of.duplicate === "" && b.byChord["mod+d"] === undefined, "and nothing runs it");
+  check(b.of.duplicate === "" && b.byChord["mod+j"] === undefined, "and nothing runs it");
   k = giveChord({ row: "a" }, "mod+alt+9", k.commandKeys, k.menuKeys);
   k = giveChord({ row: "a" }, "", k.commandKeys, k.menuKeys);
   check(!("a" in k.menuKeys), "a row given none is forgotten");

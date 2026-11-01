@@ -876,6 +876,23 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// `pick_matte_png` for a matte already in hand as grey bytes,
+    /// `width` by `height` (the browser's subject model hands back one).
+    pub fn pick_matte_grey(
+        &mut self,
+        grey: &[u8],
+        width: u32,
+        height: u32,
+        confine: f64,
+        feather: f64,
+        how: &str,
+    ) -> Result<(), JsError> {
+        let confine = (confine >= 0.0).then(|| NodeId(confine as u64));
+        self.inner
+            .pick_matte(grey, width, height, confine, feather as f32, how)
+            .map_err(to_js)
+    }
+
     /// Pick out the whole page.
     pub fn pick_all(&mut self) -> Result<(), JsError> {
         self.inner.pick_all().map_err(to_js)

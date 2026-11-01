@@ -29,12 +29,14 @@ export const COMMANDS = [
   { id: "copy", label: "Copy", group: "Edit", chord: "mod+c" },
   { id: "paste", label: "Paste", group: "Edit", chord: "mod+v" },
   // The one that fires while a field has the caret, as it always has.
-  { id: "duplicate", label: "Duplicate", group: "Edit", chord: "mod+d", typing: true },
+  // Ctrl+J, as Photoshop and Affinity have it: Ctrl+D is Deselect.
+  { id: "duplicate", label: "Duplicate", group: "Edit", chord: "mod+j", typing: true },
   { id: "copy-style", label: "Copy style", group: "Edit", chord: "mod+alt+c" },
   { id: "paste-style", label: "Paste style", group: "Edit", chord: "mod+alt+v" },
   { id: "find-replace", label: "Find and replace…", group: "Edit", chord: "mod+f" },
   { id: "select-all", label: "Select all", group: "Select", chord: "mod+a" },
-  { id: "pick-inverse", label: "Pick out the rest instead", group: "Select", chord: "mod+shift+i" },
+  { id: "deselect", label: "Deselect", group: "Select", chord: "mod+d" },
+  { id: "pick-inverse", label: "Inverse", group: "Select", chord: "mod+shift+i" },
   { id: "group", label: "Group", group: "Layer", chord: "mod+g" },
   { id: "ungroup", label: "Ungroup", group: "Layer", chord: "mod+shift+g" },
   { id: "clip", label: "Clip to the layer below", group: "Layer", chord: "mod+alt+g" },

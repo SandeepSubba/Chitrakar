@@ -109,8 +109,17 @@ one has been put at `~/.cache/chitrakar/u2net.onnx` or named by
 `CHITRAKAR_SUBJECT_MODEL` — looked for and never committed: it is 176 MB,
 and the 4.6 MB version that would fit was measured on the same
 photographs and is not good enough to ship. Then the engine's own
-colour-based `Session::pick_subject`, which is what the browser gets and
-what answers when nothing else can.
+colour-based `Session::pick_subject`, which answers when nothing else
+can. In a browser, Select › Subject offers the same U^2-Net once, with
+its size said (`app/src/subject.ts`). It is fetched from Hugging Face,
+pinned to a commit and checked against its SHA-256, kept in Cache
+Storage, and run by onnxruntime-web (`onnxruntime-web/wasm`, threads and
+SIMD) in `src/subjectWorker.ts`. Its 320×320 matte goes to
+`pick_matte_grey`. Declining, or `prefs.subjectQuick`, keeps the colour
+pick; Preferences › Selection downloads and removes it (smoke 9al5,
+with a one-node stand-in model in the cache). tract ran it at 4.3 s a
+photograph natively against onnxruntime's 0.3, which is why the browser
+does not use tract.
 
 `app/e2e/runs.test.mjs` unit-tests `src/runs.ts` — the byte arithmetic
 behind styling part of a text block — without a browser: `npm run

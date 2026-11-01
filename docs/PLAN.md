@@ -10514,6 +10514,26 @@ without reading anything else.*
   that fails fails the read and retires them all (smoke 9cn's damaged
   file). Without cross-origin isolation the plain reader reads as
   before.
+  **The Select menu, as people expect it** ✅. Short names in
+  Photoshop's and Affinity's order: All layers (Ctrl+A), Deselect
+  (Ctrl+D: the selection first, then the layers), Inverse
+  (Ctrl+Shift+I), Whole page, Subject, then Similar layers ▸, From
+  layer ▸ and Modify ▸ Feather. What is done with a selection moved to
+  where those programs keep it: Fill selection and Stroke selection… in
+  Edit, Reveal selection and Hide selection in Layer › Mask, Crop to
+  selection in Page. "Pick out nothing" went, since it was Deselect.
+  Duplicate moved to Ctrl+J, as in Photoshop and Affinity. The rows'
+  ids are unchanged, so chords people gave them still hold.
+  **Select › Subject, by a model, in the browser** ✅. Compared on eight
+  COCO photographs and a painted portrait: BiRefNet-lite (MIT) picks
+  subjects best (a crowd, a presenter on a screen) but takes 7 s a
+  photograph natively at its fixed 1024×1024; U²-Net (Apache-2.0) is as
+  good on everything but those two and takes 0.3 s with onnxruntime,
+  against 4.3 s with tract. So the browser gets U²-Net through
+  onnxruntime-web in a worker, offered once with its size (176 MB),
+  fetched from a pinned Hugging Face commit, checked against its
+  SHA-256 and kept in Cache Storage. The colour pick stays for anyone
+  who declines (smoke 9al4) and as the fallback (9al5).
   **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
   the reports for dnglab (filter patterns, Kodak's balance, Canon
   sRAW's black taken off twice, Fuji's orientation, the S23, the

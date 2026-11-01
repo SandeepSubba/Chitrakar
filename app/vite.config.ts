@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defaultClientConditions, defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { readFileSync } from "node:fs";
 
@@ -31,4 +31,8 @@ export default defineConfig({
   // The raw reader's worker loads its module with a dynamic import, which
   // a worker bundled as a classic script cannot do.
   worker: { format: "es" },
+  // onnxruntime-web (the subject model's runtime) as its separate files
+  // rather than one bundle: it starts its threads by spawning its own
+  // script, and bundled into the worker that script would be the worker.
+  resolve: { conditions: ["onnxruntime-web-use-extern-wasm", ...defaultClientConditions] },
 });

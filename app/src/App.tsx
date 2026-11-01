@@ -79,6 +79,7 @@ import {
   lensProfileTexts,
 } from "./lensProfiles";
 import { developElsewhere, startDeveloper } from "./developer";
+import { SUBJECT_MODEL, fetchSubjectModel, hasSubjectModel, subjectMatte } from "./subject";
 import {
   Adjustment,
   BlendMode,
@@ -1245,7 +1246,7 @@ const sub = (
 const COMMAND_ROWS = new Set([
   "new", "open", "save", "save-as", "export", "export-png", "undo", "redo",
   "cut", "copy", "paste", "duplicate", "copy-style", "paste-style",
-  "find-replace", "select-all", "pick-inverse", "bring-front", "send-back",
+  "find-replace", "select-all", "deselect", "pick-inverse", "bring-front", "send-back",
   "group", "ungroup", "clip", "zoom-in", "zoom-out", "actual-size", "fit",
   "prefs", "keys",
 ]);
@@ -1328,6 +1329,11 @@ export function App() {
   const [straightenOpen, setStraightenOpen] = useState(false);
   /** Edit › Find and replace, open. */
   const [findOpen, setFindOpen] = useState(false);
+  /** The picture Select › Subject was asked about, while the subject
+   * model is being offered; and the fraction of it fetched, while it is. */
+  const [subjectOffer, setSubjectOffer] = useState<number | null>(null);
+  const [subjectFetched, setSubjectFetched] = useState<number | null>(null);
+  const [subjectAskNoMore, setSubjectAskNoMore] = useState(false);
   /** The angle the straighten panel is showing, and whether it is
    * waiting for a line to be drawn along something level. */
   const [straightenBy, setStraightenBy] = useState(0);
@@ -2344,12 +2350,19 @@ export function App() {
       alert(`Select: ${err}`);
     }
   };
-  const pickNothing = () => {
-    if (session?.pick_none()) refresh(session);
-  };
   const pickInverse = () => {
     if (session?.pick_inverse()) refresh(session);
   };
+  /** Deselect, as Ctrl+D does in Photoshop: the selection picked out of
+   * the page first, when there is one; otherwise the picked layers. */
+  const deselectAll = useCallback(() => {
+    if (session?.pick_none()) {
+      refresh(session);
+      return;
+    }
+    setSelected(null);
+    setMultiSel([]);
+  }, [session, refresh]);
   /** The other way round: the shape the picked layer covers, come back
    * out into the page as a region. It is how a photograph is held to
    * the shape of the words over it — no marquee can be dragged into
@@ -2524,6 +2537,23 @@ export function App() {
         console.warn("the system's subject matte was not available:", err);
       }
     }
+    // In a browser, the subject model where it has been fetched; offered
+    // once (its size said) where it has not, unless the person said they
+    // would rather pick by colour.
+    if (!isTauri()) {
+      if (await hasSubjectModel()) {
+        if (await subjectFromModel(id)) return;
+      } else if (!prefs.subjectQuick) {
+        setSubjectOffer(id);
+        return;
+      }
+    }
+    subjectByColour(id);
+  };
+  /** The colour pick: the engine's own, quick, and what answers when
+   * there is no model to ask. */
+  const subjectByColour = (id: number) => {
+    if (!session) return;
     try {
       // The softness rides along in the pick rather than following it,
       // so one press of the button is one thing to undo.
@@ -2531,6 +2561,27 @@ export function App() {
       refresh(session);
     } catch (err) {
       alert(`Select subject: ${err}`);
+    }
+  };
+  /** The subject model's matte for the page, held to picture `id`; false
+   * when the model could not answer, for the colour pick to. */
+  const subjectFromModel = async (id: number): Promise<boolean> => {
+    if (!session) return false;
+    setImporting("Finding the subject…");
+    try {
+      // Shrunk on the way: the model works at 320 pixels whatever it is
+      // given, and the matte is stretched back over the page.
+      const across = Math.max(session.width, session.height);
+      const page = session.export_png_at(Math.min(1, 1280 / across), 0, 0, 0, 0);
+      const { matte, side } = await subjectMatte(page);
+      session.pick_matte_grey(matte, side, side, id, selectionFeather, "replace");
+      refresh(session);
+      return true;
+    } catch (err) {
+      console.warn("the subject model did not answer:", err);
+      return false;
+    } finally {
+      setImporting(null);
     }
   };
   /** Choose the softness of what is picked, in its own window.
@@ -2836,6 +2887,10 @@ export function App() {
         e.preventDefault();
         pickInverse();
       }
+      if (!typing && fired === "deselect") {
+        e.preventDefault();
+        deselectAll();
+      }
       // "?" opens the sheet of shortcuts, and closes it again — by its
       // chord, or by "?" wherever a keyboard puts it while the chord is
       // still the one it shipped with.
@@ -2873,6 +2928,7 @@ export function App() {
     finishPath,
     selectAll,
     deselect,
+    deselectAll,
     showKeys,
     zoomBy,
     zoomTo,
@@ -9153,6 +9209,11 @@ export function App() {
         item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
         item("delete", "trash", "Delete", deleteSelected, "Del"),
         SEP,
+        // What a selection is filled or outlined with, as Photoshop's
+        // Edit menu has them.
+        item("fill-picked", "fill", "Fill selection", fillSelection),
+        item("stroke-picked", "pen", "Stroke selection…", openStroke),
+        SEP,
         item("copy-style", "copy", "Copy style", copyStyle, hint("copy-style")),
         item("paste-style", "paste", "Paste style", pasteStyle, hint("paste-style")),
         SEP,
@@ -9163,38 +9224,29 @@ export function App() {
       id: "select",
       label: "Select",
       entries: [
-        // Two different things live here, and the separators are what
-        // says so. Picking *layers* in the panel is one; picking a
-        // *region* out of the page is the other. They used to sit in
-        // Edit with a single rule between them, which said they were
-        // the same kind of thing as cut and paste. They are not.
-        item("select-all", "selectAll", "Select all layers", selectAll, hint("select-all")),
-        item("deselect", "check", "Deselect", deselect, "Esc"),
-        item("same-fill", "fill", "Select the same fill colour", () => selectAlike("fill")),
-        item("same-stroke", "line", "Select the same stroke colour", () => selectAlike("stroke")),
-        item("same-kind", "layers", "Select the same kind of layer", () => selectAlike("kind")),
+        // Short names in the order Photoshop and Affinity put them, a
+        // word or two each. Layers are picked in the panel or with All
+        // layers; a *selection* is a region picked out of the page,
+        // which Deselect lets go of first. What is done with a
+        // selection lives where those programs keep it: Fill and
+        // Stroke in Edit, the two masks in Layer › Mask, Crop in Page.
+        item("select-all", "selectAll", "All layers", selectAll, hint("select-all")),
+        item("deselect", "check", "Deselect", deselectAll, hint("deselect")),
+        item("pick-inverse", "marqueeEllipse", "Inverse", pickInverse, hint("pick-inverse")),
+        item("pick-page", "marquee", "Whole page", pickWholePage),
         SEP,
-        item("pick-page", "marquee", "Pick out the whole page", pickWholePage),
-        item("pick-inverse", "marqueeEllipse", "Pick out the rest instead", pickInverse, hint("pick-inverse")),
-        item("pick-nothing", "lasso", "Pick out nothing", pickNothing),
+        item("pick-subject", "wand", "Subject", pickSubject),
+        sub("similar", "layers", "Similar layers", [
+          item("same-fill", "fill", "Same fill colour", () => selectAlike("fill")),
+          item("same-stroke", "line", "Same stroke colour", () => selectAlike("stroke")),
+          item("same-kind", "layers", "Same kind of layer", () => selectAlike("kind")),
+        ]),
+        sub("from-layer", "marquee", "From layer", [
+          item("pick-from-layer", "wand", "Layer's shape", pickFromLayer),
+          item("pick-layer-mask", "mask", "Layer's mask", pickLayerMask),
+        ]),
         SEP,
-        // The three that work the region out from the picture rather
-        // than from a drag.
-        item("pick-subject", "wand", "Pick out the subject of this picture", pickSubject),
-        item("pick-from-layer", "wand", "Pick out what this layer covers", pickFromLayer),
-        item("pick-layer-mask", "marquee", "Pick out this layer's mask", pickLayerMask),
-        SEP,
-        // And what a region is *for*, once there is one.
-        item("feather", "mask", "Feather…", openFeather),
-        item("fill-picked", "fill", "Fill what is picked", fillSelection),
-        item("stroke-picked", "pen", "Stroke what is picked…", openStroke),
-        item("mask-from-picked", "mask", "Mask this layer with what is picked", () =>
-          maskFromSelection(false),
-        ),
-        item("hide-picked", "trash", "Hide what is picked, from this layer", () =>
-          maskFromSelection(true),
-        ),
-        item("crop-to-picked", "crop", "Crop the page to what is picked", cropToSelection),
+        sub("modify", "feather", "Modify", [item("feather", "mask", "Feather…", openFeather)]),
       ],
     },
     {
@@ -9265,6 +9317,9 @@ export function App() {
         sub("mask", "mask", "Mask", [
           item("mask-rect", "mask", "Rectangle mask", () => addMask("rect")),
           item("mask-ellipse", "mask", "Ellipse mask", () => addMask("ellipse")),
+          // Photoshop's Reveal and Hide Selection.
+          item("mask-from-picked", "mask", "Reveal selection", () => maskFromSelection(false)),
+          item("hide-picked", "trash", "Hide selection", () => maskFromSelection(true)),
           ...(selectedLayer && selectedMask !== null
             ? [
                 SEP,
@@ -9338,6 +9393,7 @@ export function App() {
         item("scale-page", "fit", "Scale the page…", () => setScalePageOpen(true)),
         // Cut away the edge round the artwork: clear pixels where the
         // corner is clear, the corner's colour where it is painted.
+        item("crop-to-picked", "crop", "Crop to selection", cropToSelection),
         item("trim-page", "crop", "Trim to the artwork", () => {
           if (!session) return;
           try {
@@ -9738,39 +9794,39 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={pickWholePage}
-            title="Pick out the whole page"
-            aria-label="Pick out the whole page"
+            title="Select the whole page"
+            aria-label="Select the whole page"
           >
             <Icon name="marquee" />
           </button>
           <button
             className="chrome-button icon-only"
             onClick={pickInverse}
-            title={tip("Pick out the rest instead", "pick-inverse")}
-            aria-label="Pick out the rest instead"
+            title={tip("Inverse — select what the selection leaves out", "pick-inverse")}
+            aria-label="Inverse"
           >
             <Icon name="selectInverse" />
           </button>
           <button
             className="chrome-button icon-only"
-            onClick={pickNothing}
-            title="Pick out nothing (Esc)"
-            aria-label="Pick out nothing"
+            onClick={deselectAll}
+            title={tip("Deselect", "deselect")}
+            aria-label="Deselect"
           >
             <Icon name="selectNone" />
           </button>
           <button
             className="chrome-button icon-only"
             onClick={pickSubject}
-            title="Pick out the subject of this picture"
-            aria-label="Pick out the subject"
+            title="Select the subject of this picture"
+            aria-label="Subject"
           >
             <Icon name="wand" />
           </button>
           <button
             className="chrome-button icon-only"
             onClick={openFeather}
-            title="Soften the edge of what is picked…"
+            title="Feather — soften the selection's edge…"
             aria-label="Feather"
           >
             <Icon name="feather" />
@@ -10153,6 +10209,91 @@ export function App() {
             refresh(session!);
           }}
         />
+      )}
+      {subjectOffer !== null && (
+        <div className="modal-scrim">
+          <div
+            className="modal subject-offer"
+            role="dialog"
+            aria-label="Select subject"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <h2>Select subject</h2>
+            <p>
+              To select a subject the way a person would — the whole person with
+              their hair and hands, a white shirt against a white wall, everyone in
+              a group — the editor can use a subject model. It is{" "}
+              {Math.round(SUBJECT_MODEL.bytes / 1e6)} MB, downloaded once and kept
+              in this browser.
+            </p>
+            <p className="modal-aside">
+              Without it the subject is picked by colour, which is quicker but can
+              miss parts that look like the background. The model is U²-Net
+              (Apache-2.0), fetched from Hugging Face.
+            </p>
+            {subjectFetched !== null ? (
+              <div className="row" aria-label="Downloading the subject model">
+                <progress max={1} value={subjectFetched} />
+                <span className="hint">{Math.round(subjectFetched * 100)}%</span>
+              </div>
+            ) : (
+              <label className="row check">
+                <input
+                  type="checkbox"
+                  checked={subjectAskNoMore}
+                  onChange={(e) => setSubjectAskNoMore(e.target.checked)}
+                  aria-label="Don't ask again"
+                />
+                Don't ask again — pick by colour
+              </label>
+            )}
+            <div className="modal-actions">
+              <button
+                disabled={subjectFetched !== null}
+                onClick={() => {
+                  setSubjectOffer(null);
+                  setSubjectAskNoMore(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                disabled={subjectFetched !== null}
+                onClick={() => {
+                  const id = subjectOffer;
+                  setSubjectOffer(null);
+                  if (subjectAskNoMore) setPrefs({ subjectQuick: true });
+                  setSubjectAskNoMore(false);
+                  subjectByColour(id);
+                }}
+              >
+                Pick by colour
+              </button>
+              <button
+                className="primary"
+                disabled={subjectFetched !== null || subjectAskNoMore}
+                onClick={async () => {
+                  const id = subjectOffer;
+                  setSubjectFetched(0);
+                  try {
+                    await fetchSubjectModel(setSubjectFetched);
+                  } catch (err) {
+                    setSubjectFetched(null);
+                    setSubjectOffer(null);
+                    alert(`The subject model could not be downloaded: ${err instanceof Error ? err.message : err}. The subject is picked by colour instead.`);
+                    subjectByColour(id);
+                    return;
+                  }
+                  setSubjectFetched(null);
+                  setSubjectOffer(null);
+                  if (!(await subjectFromModel(id))) subjectByColour(id);
+                }}
+              >
+                Download ({Math.round(SUBJECT_MODEL.bytes / 1e6)} MB)
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       {findOpen && (
         <FindReplaceDialog
@@ -10652,8 +10793,8 @@ export function App() {
           {SELECT_TOOLS.includes(tool as never) && (
             <button
               className="chrome-button icon-only"
-              aria-label="Pick out the subject of this picture"
-              title="Pick out the subject of the picked picture, by reading the background off its edges"
+              aria-label="Select subject"
+              title="Select the subject of this picture"
               onClick={pickSubject}
             >
               <Icon name="wand" />
@@ -13131,7 +13272,8 @@ const keyHelp = (
       [c("select-all"), "Select all — the page with a marquee in hand, else every layer"],
       ["M", "Pick a region out of the page (shift+M for the ellipse, the lasso and the wand)"],
       ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
-      [c("pick-inverse"), "Pick out the rest instead"],
+      [c("deselect"), "Deselect — the selection first, then the layers"],
+      [c("pick-inverse"), "Inverse — select everything the selection leaves out"],
       [
         "Click a kept region",
         "Pick it out again; shift adds it, alt takes it away, both keep the overlap, ctrl-click forgets it",

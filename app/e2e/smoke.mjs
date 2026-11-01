@@ -71,6 +71,9 @@ await mkdir(OUT, { recursive: true });
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
+  // onnxruntime's glue (the subject model's runtime) is a module named
+  // .mjs, which a browser will not run served as anything else.
+  ".mjs": "text/javascript",
   ".css": "text/css",
   ".wasm": "application/wasm",
 };
@@ -1626,7 +1629,8 @@ await page.screenshot({ path: join(OUT, "editor3.png") });
 // it is visible, and Delete removes a layer from the keyboard.
 {
   const before = await page.locator(".panel ul li").count();
-  await page.keyboard.press("Control+d");
+  // Ctrl+J, as Photoshop and Affinity have it: Ctrl+D deselects.
+  await page.keyboard.press("Control+j");
   await page.waitForTimeout(250);
   assert(
     (await page.locator(".panel ul li").count()) === before + 1,
@@ -3306,12 +3310,12 @@ assert(
     await page.keyboard.press("Escape");
   }
   // Picking things is its own menu now, so that is where this lives.
-  for (const item of ["Select all layers", "Deselect", "Pick out the whole page"]) {
+  for (const item of ["All layers", "Deselect", "Whole page"]) {
     const found = await menuItem("Select", item);
     assert((await found.count()) >= 1, `the Select menu offers ${item}`);
     await page.keyboard.press("Escape");
   }
-  await menuClick("Select", "Select all layers");
+  await menuClick("Select", "All layers");
   await page.waitForTimeout(250);
   assert(
     (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 2,
@@ -3327,6 +3331,15 @@ assert(
   assert(
     (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 0,
     "escape dropped it again",
+  );
+  // Ctrl+D deselects, as it does in Photoshop and Affinity.
+  await menuClick("Select", "All layers");
+  await page.waitForTimeout(200);
+  await page.keyboard.press("Control+d");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator(".panel ul li.selected, .panel ul li.multi").count()) === 0,
+    "ctrl+D deselected the layers",
   );
   await page.keyboard.press("Control+a");
   await page.waitForTimeout(250);
@@ -4748,7 +4761,7 @@ assert(
   await box(40, 40, 100, 100);
   await box(120, 40, 180, 100);
   await pickTool("Move");
-  await menuClick("Select", "Select all layers");
+  await menuClick("Select", "All layers");
   await page.waitForTimeout(150);
   await page.click('button[aria-label="Group selected layers (ctrl-click to select several)"]');
   await page.waitForTimeout(250);
@@ -4830,7 +4843,7 @@ assert(
   };
   const group = async () => {
     await pickTool("Move");
-    await menuClick("Select", "Select all layers");
+    await menuClick("Select", "All layers");
     await page.waitForTimeout(150);
     await page.click(
       'button[aria-label="Group selected layers (ctrl-click to select several)"]',
@@ -5044,7 +5057,7 @@ assert(
   await page.mouse.up();
   await page.waitForTimeout(250);
   await pickTool("Move");
-  await menuClick("Select", "Select all layers");
+  await menuClick("Select", "All layers");
   await page.waitForTimeout(150);
   const filled = async (x, y) => (await canvasPixel(x, y))[3] === 255;
   assert((await filled(150, 175)) && !(await filled(150, 340)), "the rect is left, the ellipse right");
@@ -7630,7 +7643,7 @@ assert(
 
   await rows.last().click();
   await page.waitForTimeout(150);
-  await menuClick("Select", "Select the same fill colour");
+  await menuClick("Select", "Same fill colour");
   assert((await picked()) === 2, `the other red is picked with it, the locked one not (${await picked()})`);
   // Given a colour from the palette, every picked shape takes it.
   await setColor("Fill colour", "#22aa44");
@@ -7658,7 +7671,7 @@ assert(
 
   await rows.last().click();
   await page.waitForTimeout(150);
-  await menuClick("Select", "Select the same kind of layer");
+  await menuClick("Select", "Same kind of layer");
   assert((await picked()) === 3, `every shape that can be clicked (${await picked()})`);
 }
 
@@ -8581,7 +8594,7 @@ assert(
   await page.mouse.move(...at(240, 150), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(250);
-  await menuClick("Select", "Stroke what is picked…");
+  await menuClick("Edit", "Stroke selection…");
   await page.waitForSelector('[role=dialog][aria-label="Stroke"]');
   await page.locator('input[aria-label="Stroke width"]').fill("8");
   await page.selectOption('select[aria-label="Stroke side"]', "inside");
@@ -9910,8 +9923,13 @@ assert(
         const cx = r.x + r.width / 2;
         const cy = r.y + r.height / 2;
         // Off the screen is a different question — a rail that scrolls
-        // holds tools past its end on purpose.
-        if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) continue;
+        // holds tools past its end on purpose — and so is a control the
+        // window's edge cuts through: a list that scrolls (History) has
+        // its last row half past the bottom, and a point on the window's
+        // very edge is not one a browser hit-tests reliably, so whether it
+        // counted depended on how tall the system's fonts set the rows
+        // above it.
+        if (r.left < 0 || r.top < 0 || r.right > window.innerWidth || r.bottom > window.innerHeight) continue;
         const at = document.elementFromPoint(cx, cy);
         if (at && (b === at || b.contains(at) || at.contains(b))) continue;
         const name =
@@ -11387,7 +11405,7 @@ assert(
   );
 
   // Duplicate reaches both, and the copies are what is picked after.
-  await page.keyboard.press("Control+d");
+  await page.keyboard.press("Control+j");
   await page.waitForTimeout(400);
   assert((await rows()) === 5, `duplicate copies both (${await rows()})`);
   assert((await picked()) === 2, "and the two copies are what is picked");
@@ -11876,7 +11894,7 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...at(200, 150));
   await page.waitForTimeout(250);
-  await menuClick("Select", "Mask this layer with what is picked");
+  await menuClick("Layer", "Reveal selection");
   await page.waitForTimeout(450);
   assert(await isRed(120, 130), "the layer still shows inside the region");
   assert(!(await isRed(300, 250)), "and is held back everywhere outside it");
@@ -11885,11 +11903,11 @@ assert(
   assert(await isRed(300, 250), "one undo hands the layer back");
 
   // Picking out the rest instead swaps the two.
-  await menuClick("Select", "Pick out the rest instead");
+  await menuClick("Select", "Inverse");
   await page.waitForTimeout(300);
   await page.mouse.click(...at(200, 150));
   await page.waitForTimeout(200);
-  await menuClick("Select", "Mask this layer with what is picked");
+  await menuClick("Layer", "Reveal selection");
   await page.waitForTimeout(450);
   assert(
     !(await isRed(120, 130)),
@@ -11911,7 +11929,7 @@ assert(
   // and let go of the one above before drawing it, since that one was
   // left inside out and so covers very nearly the whole page: a drag
   // starting inside what is picked moves it rather than picking again.
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(250);
   await page.keyboard.press("m");
   await page.waitForTimeout(150);
@@ -11919,7 +11937,7 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...at(200, 150));
   await page.waitForTimeout(200);
-  await menuClick("Select", "Hide what is picked, from this layer");
+  await menuClick("Layer", "Hide selection");
   await page.waitForTimeout(450);
   assert(!(await isRed(120, 130)), "what is picked is hidden");
   assert(await isRed(300, 250), "and the rest of the layer shows");
@@ -11930,7 +11948,7 @@ assert(
   // a lasso is the only way to draw that shape at all.
   const rows = await page.locator(".panel ul li .layer-name").count();
   await setColor("Fill colour", "#2244dd");
-  await menuClick("Select", "Fill what is picked");
+  await menuClick("Edit", "Fill selection");
   await page.waitForTimeout(450);
   assert(
     (await page.locator(".panel ul li .layer-name").count()) === rows + 1,
@@ -11950,7 +11968,7 @@ assert(
   };
   const wasShape = await shape();
   assert(wasShape > 1, `the page starts wider than it is tall (${wasShape})`);
-  await menuClick("Select", "Crop the page to what is picked");
+  await menuClick("Page", "Crop to selection");
   await page.waitForTimeout(500);
   const nowShape = await shape();
   assert(nowShape < 1, `and the crop leaves it taller than wide (${nowShape})`);
@@ -11961,7 +11979,7 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(400);
 
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(300);
   assert(
     (await page.locator(".ants").count()) === 0,
@@ -12062,7 +12080,7 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...fat(150, 100));
   await page.waitForTimeout(250);
-  await menuClick("Select", "Mask this layer with what is picked");
+  await menuClick("Layer", "Reveal selection");
   await page.waitForTimeout(450);
   // Across the region's own edge at x=60: whole well inside, nothing
   // well outside, and part way through in between — which a hard edge
@@ -12228,7 +12246,7 @@ assert(
   assert(!(await painted(320)), "and stopped at its edge");
 
   // Letting go of the region changes nothing about the stroke.
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(350);
   assert(
     (await page.locator(".ants").count()) === 0,
@@ -12286,7 +12304,7 @@ assert(
   await pickTool("Select");
   await page.waitForTimeout(250);
   assert(
-    await page.locator('button[aria-label="Pick out the subject of this picture"]').isVisible(),
+    await page.locator('button[aria-label="Select subject"]').isVisible(),
     "the subject pick is offered while a way of selecting is in hand",
   );
   assert(
@@ -12294,7 +12312,18 @@ assert(
     "and how readily a colour counts as background",
   );
 
-  await page.click('button[aria-label="Pick out the subject of this picture"]');
+  // The first time, in a browser, the subject model is offered with its
+  // size said; this block is about the colour pick, so it says no and
+  // asks not to be asked again (9al5 takes the model).
+  await page.click('button[aria-label="Select subject"]');
+  const offer = page.locator('[role="dialog"][aria-label="Select subject"]');
+  await offer.waitFor();
+  assert(
+    (await offer.locator("button.primary").textContent()).includes("176 MB"),
+    "the subject model is offered with its size",
+  );
+  await offer.locator('input[aria-label="Don\'t ask again"]').check();
+  await offer.locator('button:text-is("Pick by colour")').click();
   await page.waitForTimeout(700);
   assert((await page.locator(".ants").count()) === 1, "a subject was picked out");
   const antBox = async () => {
@@ -12350,7 +12379,7 @@ assert(
   await page.keyboard.press("Escape");
   await page.locator(".panel ul li", { hasText: "Rect 1" }).first().click();
   await page.waitForTimeout(200);
-  await menuClick("Select", "Pick out the subject of this picture");
+  await menuClick("Select", "Subject");
   await page.waitForTimeout(700);
   assert(
     (await page.locator(".ants").count()) === 1,
@@ -12391,13 +12420,116 @@ assert(
     "nothing is picked in the panel, which is the case being asked about",
   );
   await page.click(
-    'button[aria-label="Pick out the subject of this picture"]',
+    'button[aria-label="Select subject"]',
   );
   await page.waitForTimeout(900);
   assert(
     (await page.locator(".ants").count()) === 1,
     "with one picture here and none picked, the pick found it anyway",
   );
+}
+
+// 9al5. The subject by a model, in a browser: offered once with its size,
+// fetched from where it is pinned and checked against its digest before
+// it is kept, then run by onnxruntime in a worker. The real model is
+// 176 MB, so the download is answered here by bytes that are not it
+// (refused, and the colour pick answers), and the cache is given a model
+// of one node that hands back the picture's red: the background here is
+// the red one, so the model's answer is the background — what the colour
+// pick would never say, and how its answer is told from the colour
+// pick's.
+{
+  const MODEL_URL =
+    "https://huggingface.co/BritishWerewolf/U-2-Net/resolve/c08042b462485d8597c89d3ce831d00be8582c5c/onnx/model.onnx";
+  const RED =
+    "CAgSD2NoaXRyYWthci1zbW9rZTq6AQopCgVpbnB1dAoGc3RhcnRzCgRlbmRzCgRheGVzEgVtYXR0ZSIFU2xpY2USA3JlZCoWCAEQB0IGc3RhcnRzSggAAAAAAAAAACoUCAEQB0IEZW5kc0oIAQAAAAAAAAAqFAgBEAdCBGF4ZXNKCAEAAAAAAAAAWiEKBWlucHV0EhgKFggBEhIKAggBCgIIAwoDCMACCgMIwAJiIQoFbWF0dGUSGAoWCAESEgoCCAEKAggBCgMIwAIKAwjAAkIECgAQDQ==";
+  await newDocument(400, 300, "rgb");
+  const shot = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 200;
+    c.height = 150;
+    const g = c.getContext("2d");
+    g.fillStyle = "#e6dcd2";
+    g.fillRect(0, 0, 200, 150);
+    g.fillStyle = "#2d3f6b";
+    g.fillRect(70, 40, 60, 70);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles('input[accept^="image/*,"]', {
+    name: "model.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(shot, "base64"),
+  });
+  await page.waitForTimeout(700);
+  await page.keyboard.press("Escape");
+  // 9al4 asked not to be offered it; Preferences › Selection is where
+  // that is taken back, and where the model's state is said.
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-rail button[aria-label="Selection"]');
+  await page.waitForTimeout(300);
+  const prefsWin = page.locator('[role=dialog][aria-label="Preferences"]');
+  assert(
+    (await prefsWin.textContent()).includes("Download (176 MB)"),
+    "the model is not kept yet, and can be downloaded from here",
+  );
+  await prefsWin.locator('input[aria-label="Offer the subject model"]').check();
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
+
+  // A download that is not the model is refused, and the colour pick
+  // answers instead.
+  await page.route(MODEL_URL, (route) =>
+    route.fulfill({ status: 200, body: Buffer.alloc(4096, 7), headers: { "access-control-allow-origin": "*" } }),
+  );
+  lastDialog = "";
+  await pickTool("Select");
+  await page.click('button[aria-label="Select subject"]');
+  const offer = page.locator('[role="dialog"][aria-label="Select subject"]');
+  await offer.waitFor();
+  await offer.locator("button.primary").click();
+  await page.waitForTimeout(1500);
+  assert(lastDialog.includes("not the one expected"), `a download that is not the model is refused (${lastDialog})`);
+  assert((await offer.count()) === 0 && (await page.locator(".ants").count()) === 1, "and the colour pick answered");
+  await page.unroute(MODEL_URL);
+  await menuClick("Select", "Deselect");
+  await page.waitForTimeout(300);
+  assert((await page.locator(".ants").count()) === 0, "the colour pick is let go of");
+
+  // A model kept: asked without being offered, and answered by it.
+  await page.evaluate(
+    async ([url, b64]) => {
+      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const cache = await caches.open("chitrakar-models");
+      await cache.put(url, new Response(bytes));
+    },
+    [MODEL_URL, RED],
+  );
+  await page.click('button[aria-label="Select subject"]');
+  await page.waitForFunction(() => document.querySelectorAll(".ants polygon").length >= 2, null, { timeout: 30000 });
+  assert((await offer.count()) === 0, "with the model kept it is not offered again");
+  const polys = await page.$$eval(".ants polygon", (els) => els.map((el) => el.getAttribute("points")));
+  const pts = polys.join(" ").trim().split(/\s+/).map((p) => p.split(",").map(Number));
+  const xs = pts.map((p) => p[0]);
+  const view = await page.locator("#engine-page").boundingBox();
+  const across = (Math.max(...xs) - Math.min(...xs)) / view.width;
+  // The picture is half the page across and its dark box 30% of that:
+  // the model's answer (the light, red background) spans the picture.
+  assert(across > 0.4, `the model answered, not the colour pick (${across.toFixed(3)} across)`);
+  assert(polys.length >= 2, "its answer is the picture with the box left out");
+
+  // And Preferences says it is kept, and gives the space back.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-rail button[aria-label="Selection"]');
+  await page.waitForTimeout(400);
+  assert((await prefsWin.textContent()).includes("Downloaded"), "the model is said to be kept");
+  await prefsWin.locator('button:text-is("Remove")').click();
+  await page.waitForTimeout(400);
+  assert((await prefsWin.textContent()).includes("Download (176 MB)"), "and removing it gives the space back");
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
 }
 
 // 9am. A region taken from a layer rather than dragged out. The other
@@ -12432,7 +12564,7 @@ assert(
   );
   await page.waitForTimeout(400);
 
-  await menuClick("Select", "Pick out what this layer covers");
+  await menuClick("Select", "Layer's shape");
   await page.waitForTimeout(400);
   const rings = await page.locator(".ants polygon").count();
   assert(rings === 2, `two boxes clear of each other are two rings (${rings})`);
@@ -12456,7 +12588,7 @@ assert(
   // It is a region like any other from there: fill it, and the paint
   // lands on both boxes and nowhere between them.
   await setColor("Fill colour", "#3366cc");
-  await menuClick("Select", "Fill what is picked");
+  await menuClick("Edit", "Fill selection");
   await page.waitForTimeout(450);
   const isBlue = async (x, y) => {
     const [r, g, bl] = await canvasPixel(x, y);
@@ -12771,7 +12903,7 @@ assert(
     await pickTool("Move");
     await page.mouse.click(...at(100, 100));
     await page.waitForTimeout(250);
-    await menuClick("Select", "Mask this layer with what is picked");
+    await menuClick("Layer", "Reveal selection");
     await page.waitForTimeout(450);
   };
   await holdTheLayer();
@@ -12779,7 +12911,7 @@ assert(
   assert(!(await isRed(220, 100)), "and not outside it");
   // Let the region go — with a select tool in hand, since Escape means
   // whichever of the two the tool is about — and pick the layer again.
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(350);
   assert(
     (await page.locator(".ants").count()) === 0,
@@ -12791,7 +12923,7 @@ assert(
 
   // Take the mask back out as a region, grow it, and hand it back: the
   // layer shows further than it did, which no handle on a mask can do.
-  await menuClick("Select", "Pick out this layer's mask");
+  await menuClick("Select", "Layer's mask");
   await page.waitForTimeout(400);
   assert((await page.locator(".ants").count()) === 1, "the mask came out");
   await page.keyboard.press("m");
@@ -13058,7 +13190,7 @@ assert(
   );
 
   // Let it go, and the page is read whole again.
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(500);
   assert((await drawn()) === whole, "the page's own reading comes back");
 
@@ -15553,7 +15685,7 @@ assert(
   // Enough layers that the list runs past the bottom of the panel.
   for (let i = 0; i < 3; i++) {
     await tp.keyboard.press("Control+a");
-    await tp.keyboard.press("Control+d");
+    await tp.keyboard.press("Control+j");
     await tp.waitForTimeout(250);
   }
   await tp.keyboard.press("Escape");
@@ -15985,9 +16117,9 @@ assert(
   await pickTool("Move");
   await page.mouse.click(...at(80, 70));
   await page.waitForTimeout(250);
-  await menuClick("Select", "Mask this layer with what is picked");
+  await menuClick("Layer", "Reveal selection");
   await page.waitForTimeout(400);
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(250);
 
   // Where the mask's edge is: inside it the layer shows, outside it does
@@ -16114,7 +16246,7 @@ assert(
   );
 
   // Letting go of the region changes nothing: the stroke carries it.
-  await menuClick("Select", "Pick out nothing");
+  await menuClick("Select", "Deselect");
   await page.waitForTimeout(300);
   assert(
     !(await covered(80, 150)) && (await covered(320, 150)),
@@ -16677,10 +16809,10 @@ assert(
   await page.setViewportSize({ width: 1500, height: 900 });
   await page.waitForTimeout(300);
   for (const label of [
-    "Pick out the whole page",
-    "Pick out the rest instead",
-    "Pick out nothing",
-    "Pick out the subject",
+    "Select the whole page",
+    "Inverse",
+    "Deselect",
+    "Subject",
     "Feather",
   ]) {
     assert(
@@ -16689,10 +16821,10 @@ assert(
     );
   }
   const ants = () => page.locator(".ants").count();
-  await page.click('button[aria-label="Pick out the whole page"]');
+  await page.click('button[aria-label="Select the whole page"]');
   await page.waitForTimeout(400);
   assert((await ants()) === 1, "the whole page is picked from the bar");
-  await page.click('button[aria-label="Pick out the rest instead"]');
+  await page.click('button[aria-label="Inverse"]');
   await page.waitForTimeout(400);
   assert(
     (await page.locator(".ants polygon").count()) === 2,
@@ -16707,15 +16839,21 @@ assert(
   );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(250);
-  await page.click('button[aria-label="Pick out nothing"]');
+  await page.click('button[aria-label="Deselect"]');
   await page.waitForTimeout(400);
   assert((await ants()) === 0, "and letting go of it works from the bar too");
+  // And Ctrl+D lets go of a selection first, leaving the picked layers.
+  await page.click('button[aria-label="Select the whole page"]');
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Control+d");
+  await page.waitForTimeout(300);
+  assert((await ants()) === 0, "ctrl+D let go of the selection");
 
   // They go with the other two groups when the window is narrow.
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(400);
   assert(
-    !(await page.locator('button[aria-label="Pick out nothing"]').isVisible()),
+    !(await page.locator('button[aria-label="Deselect"]').isVisible()),
     "on a phone they are put away with the rest",
   );
   await page.setViewportSize({ width: 1400, height: 900 });

@@ -24,6 +24,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon, type IconName } from "./icons";
+import { SUBJECT_MODEL, fetchSubjectModel, forgetSubjectModel, hasSubjectModel } from "./subject";
 import { isTauri } from "./nativeMenu";
 import {
   COMMANDS,
@@ -157,6 +158,13 @@ export function PreferencesDialog({
   onClose: () => void;
 }) {
   const [group, setGroup] = useState<Group>(initialGroup ?? "general");
+  /** Whether the subject model is kept in this browser (null while it is
+   * being looked for), and how much of it is fetched while it is. */
+  const [subjectKept, setSubjectKept] = useState<boolean | null>(null);
+  const [subjectFetched, setSubjectFetched] = useState<number | null>(null);
+  useEffect(() => {
+    if (group === "selection" && !isTauri()) void hasSubjectModel().then(setSubjectKept);
+  }, [group]);
   const lensInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (group === "raw") onListLensFiles?.();
@@ -753,10 +761,69 @@ export function PreferencesDialog({
                 </label>
                 <p className="modal-aside">
                   Higher takes in more of what surrounds the subject. Only the
-                  app's own colour-based pick reads this — where the system has
-                  a model of its own, that is asked first and answers on its
-                  own terms.
+                  colour pick reads this — a subject model answers on its own
+                  terms.
                 </p>
+                {!isTauri() && (
+                  <>
+                    <div className="row">
+                      <span>Subject model</span>
+                      {subjectFetched !== null ? (
+                        <>
+                          <progress max={1} value={subjectFetched} />
+                          <span className="hint">{Math.round(subjectFetched * 100)}%</span>
+                        </>
+                      ) : subjectKept ? (
+                        <>
+                          <span className="hint">Downloaded</span>
+                          <button
+                            className="mask-button"
+                            onClick={async () => {
+                              await forgetSubjectModel();
+                              setSubjectKept(false);
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="mask-button"
+                          disabled={subjectKept === null}
+                          onClick={async () => {
+                            setSubjectFetched(0);
+                            try {
+                              await fetchSubjectModel(setSubjectFetched);
+                              setSubjectKept(true);
+                            } catch (err) {
+                              alert(`The subject model could not be downloaded: ${err instanceof Error ? err.message : err}`);
+                            } finally {
+                              setSubjectFetched(null);
+                            }
+                          }}
+                        >
+                          Download ({Math.round(SUBJECT_MODEL.bytes / 1e6)} MB)
+                        </button>
+                      )}
+                    </div>
+                    <label className="row check">
+                      <input
+                        type="checkbox"
+                        checked={!prefs.subjectQuick}
+                        onChange={(e) => setPrefs({ subjectQuick: !e.target.checked })}
+                        aria-label="Offer the subject model"
+                      />
+                      Offer the model when selecting a subject
+                    </label>
+                    <p className="modal-aside">
+                      Select › Subject picks the way a person would with the model —
+                      the whole person, everyone in a group, a white shirt against a
+                      white wall. It is U²-Net (Apache-2.0), downloaded once from
+                      Hugging Face and kept in this browser. Without it the subject
+                      is picked by colour.
+                    </p>
+                  </>
+                )}
               </>
             )}
 

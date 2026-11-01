@@ -126,6 +126,9 @@ export type Prefs = {
   feather: number;
   /** How readily the subject pick lets go of a colour, 0–1. */
   subjectTolerance: number;
+  /** Select › Subject in the browser picks by colour without offering
+   * the subject model (`subject.ts`): asked for, not the default. */
+  subjectQuick: boolean;
   /** The tools put away from the rail. They are still there — behind
    * the slot at the rail's end, and on their keys — but not in the way.
    * A list of what is *hidden* rather than what is shown, so a tool
@@ -207,6 +210,7 @@ export const DEFAULTS: Prefs = {
   pdfCropMarks: false,
   feather: 0,
   subjectTolerance: 0.5,
+  subjectQuick: false,
   hiddenTools: [],
   toolKeys: {},
   commandKeys: {},
