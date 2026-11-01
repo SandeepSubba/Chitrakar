@@ -29,7 +29,15 @@ export type RawSettings = {
 /** What the develop window starts from: the size, the camera's own
  * white balance as a temperature and tint, and whether the file carries
  * lens corrections. */
-export type RawInfo = { width: number; height: number; asShot: [number, number]; lens?: boolean };
+export type RawInfo = {
+  width: number;
+  height: number;
+  asShot: [number, number];
+  lens?: boolean;
+  /** The lens profile the corrections came from (lensfun's name for the
+   * lens), where the file carried none of its own. */
+  lensProfile?: string;
+};
 
 export const RAW_DEFAULTS: RawSettings = {
   exposure: 0,

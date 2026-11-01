@@ -23,6 +23,8 @@ tiff = "0.9"
 # wasm32 has no filesystem for; text needs only the bundled face.
 usvg = { version = "0.48", default-features = false, features = ["text"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# lensfun's XML lens profiles; already here for usvg.
+roxmltree = "0.21"
 
 [dev-dependencies]
 # The shared fixture: every command there is, applied and then put

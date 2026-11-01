@@ -19,7 +19,7 @@
 //! site of the 48 by 48 square from the sensor's corner (a byte each,
 //! which every pattern repeats within); whether the samples are whole
 //! numbers (0) or floats (1); and the samples, u16 or f32. Version 2
-//! (what is written now) goes on with the lens corrections the file
+//! goes on with the lens corrections the file
 //! carries: a count `n` (u32, nought for none), then `n` radii from the
 //! middle as fractions of the half-diagonal, and at each the distortion
 //! (per cent), red's and blue's scale against green (fractions), and the
@@ -27,7 +27,11 @@
 //! Version 3 goes on with what a DNG says should be done to it: where the
 //! photograph's crop starts inside the DNG's active area, and that area's
 //! width and height (four u32), then opcode list 2 and opcode list 3 as
-//! the file has them, each a length (u32) and its bytes.
+//! the file has them, each a length (u32) and its bytes. Version 4 goes
+//! on with how the photograph was taken, for finding its lens among lens
+//! profiles: the camera's make and model and the lens's make and model,
+//! each a length (u32) and UTF-8, then the focal length (mm), f-number
+//! and distance focused at (m) as f32, each nought where not said.
 
 use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
 
@@ -57,6 +61,7 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
         ],
         list2,
         list3,
+        shot: Shot::default(),
     };
     // The camera's colours from XYZ, measured under daylight where the file
     // (or rawler's tables) has it, otherwise under whatever light it was;
@@ -102,15 +107,17 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // the camera was held; its own reading of the file's EXIF has it
     // (6 or 8 for a photograph taken upright). Asked only when the
     // decoder has nothing better to say.
+    let params = rawler::decoders::RawDecodeParams::default();
+    let meta = rawler::get_decoder(&source)
+        .and_then(|d| d.raw_metadata(&source, &params))
+        .ok();
     let from_exif = || {
-        let params = rawler::decoders::RawDecodeParams::default();
-        rawler::get_decoder(&source)
-            .and_then(|d| d.raw_metadata(&source, &params))
-            .ok()
+        meta.as_ref()
             .and_then(|m| m.exif.orientation)
             .filter(|o| (2..=8).contains(o))
             .map_or(1, u32::from)
     };
+    extras.shot = shot_of(&raw, meta.as_ref());
     let orientation = match raw.orientation {
         O::HorizontalFlip => 2,
         O::Rotate180 => 3,
@@ -442,7 +449,7 @@ fn pack(
     };
     let mut out = Vec::with_capacity(4 + 4 * 5 + 4 * 24 + 16 + PATTERN * PATTERN + 1 + bytes);
     out.extend_from_slice(b"CKRW");
-    for v in std::iter::once(3u32).chain(size) {
+    for v in std::iter::once(4u32).chain(size) {
         out.extend_from_slice(&v.to_le_bytes());
     }
     for v in levels.iter().flatten().chain(xyz_to_cam) {
@@ -495,7 +502,73 @@ fn pack(
         out.extend_from_slice(&(list.len() as u32).to_le_bytes());
         out.extend_from_slice(list);
     }
+    let shot = &extras.shot;
+    for text in [
+        &shot.camera_make,
+        &shot.camera_model,
+        &shot.lens_make,
+        &shot.lens_model,
+    ] {
+        let text = &text.as_bytes()[..text.len().min(255)];
+        out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        out.extend_from_slice(text);
+    }
+    for v in [shot.focal, shot.aperture, shot.distance] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
     out
+}
+
+/// How a photograph was taken, as far as finding its lens in a database
+/// of lens profiles goes: the camera and lens by name, the focal length
+/// (mm), the f-number and the distance focused at (m), each nought where
+/// the file does not say.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Shot {
+    pub camera_make: String,
+    pub camera_model: String,
+    pub lens_make: String,
+    pub lens_model: String,
+    pub focal: f32,
+    pub aperture: f32,
+    pub distance: f32,
+}
+
+/// The camera, from rawler's own names for it (its make without "Co.,
+/// Ltd" and the like); the lens and settings from the file's EXIF, or
+/// rawler's table of lenses where the EXIF does not name it.
+fn shot_of(raw: &rawler::RawImage, meta: Option<&rawler::decoders::RawMetadata>) -> Shot {
+    let number = |r: Option<rawler::formats::tiff::Rational>| {
+        r.filter(|r| r.d != 0)
+            .map(|r| r.n as f32 / r.d as f32)
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0)
+    };
+    let clean = |s: &str| {
+        s.trim_matches(|c: char| c == '\0' || c.is_whitespace())
+            .to_string()
+    };
+    let exif = meta.map(|m| &m.exif);
+    let described = meta.and_then(|m| m.lens.as_ref());
+    Shot {
+        camera_make: clean(&raw.clean_make),
+        camera_model: clean(&raw.clean_model),
+        lens_make: exif
+            .and_then(|e| e.lens_make.as_deref())
+            .map(clean)
+            .filter(|s| !s.is_empty())
+            .or_else(|| described.map(|l| clean(&l.lens_make)))
+            .unwrap_or_default(),
+        lens_model: exif
+            .and_then(|e| e.lens_model.as_deref())
+            .map(clean)
+            .filter(|s| !s.is_empty())
+            .or_else(|| described.map(|l| clean(&l.lens_name)))
+            .unwrap_or_default(),
+        focal: number(exif.and_then(|e| e.focal_length)),
+        aperture: number(exif.and_then(|e| e.fnumber)),
+        distance: number(exif.and_then(|e| e.subject_distance)),
+    }
 }
 
 /// What goes after the samples: the lens's corrections a Fuji carries;
@@ -507,6 +580,7 @@ pub struct Extras {
     pub frame: [u32; 4],
     pub list2: Vec<u8>,
     pub list3: Vec<u8>,
+    pub shot: Shot,
 }
 
 /// A DNG's opcode lists 2 and 3 (tags 51009 and 51022) as its raw
@@ -1240,6 +1314,17 @@ mod tests {
         for end in 0..file.len() {
             let _ = fuji_crop_mode(&file[..end]);
         }
+    }
+
+    #[test]
+    fn how_a_photograph_was_taken_is_packed_for_its_lens_to_be_found() {
+        let file = chitrakar_codecs::develop::sample::dng(8, 8, 4095, [1.0; 3], |_, _| [0.5; 3]);
+        let photo = chitrakar_codecs::raw::unpack(&read(&file).unwrap()).unwrap();
+        let shot = photo.shot().expect("version 4 says how it was taken");
+        assert_eq!(shot.lens_model, "Test 35mm f/2");
+        assert_eq!(shot.lens_make, "Chitrakar");
+        assert_eq!((shot.focal, shot.aperture, shot.distance), (35.0, 4.0, 0.0));
+        assert!(!shot.camera_model.is_empty());
     }
 
     #[test]

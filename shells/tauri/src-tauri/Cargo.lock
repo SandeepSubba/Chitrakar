@@ -619,6 +619,7 @@ dependencies = [
  "flate2",
  "image",
  "image-webp",
+ "roxmltree",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

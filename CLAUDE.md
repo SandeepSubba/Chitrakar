@@ -216,7 +216,7 @@ machine belongs in the document and goes through a `Command`. The
 panel's width and the toolbar's position deliberately stay on their own
 keys: they are written on every frame of a drag.
 
-`PreferencesDialog.tsx` (Ctrl+,) is a rail of nine groups over that
+`PreferencesDialog.tsx` (Ctrl+,) is a rail of ten groups over that
 object; its Appearance page picks the theme (`prefs.theme`: system, dark
 or light — every chrome colour is a token on `:root` in `styles.css`,
 the light set sits under `:root[data-theme="light"]`, and the app
@@ -294,7 +294,12 @@ demosaic of its own (`x_trans_region`, judged by the ignored
 which `core/rawin` reads (`fuji_lens`), and a DNG its opcodes
 (`dng_opcodes`; `core/codecs/src/opcodes.rs`: gain maps, a vignette, a
 warp), which develop applies unless `RawDevelop::uncorrected` says not
-to (a DNG's list 2, the sensor's shading, always). New developments lay
+to (a DNG's list 2, the sensor's shading, always). A file with none of
+its own (a Canon's) is looked up by the lens it names in lensfun's
+profiles (`core/codecs/src/lensfun.rs`, given by `Session::add_lens_profiles`):
+the database is CC BY-SA and never committed, so the person adds its
+XML in Preferences › Camera raw (`app/src/lensProfiles.ts`, IndexedDB)
+and the shell reads the system's (`system_lens_profiles`). New developments lay
 a base curve fitted to cameras' own JPEGs under the settings
 (`RawDevelop::curve`, `base_curve`); a picture developed before it has
 none. Kept sensor values have room above white (`WHITE` is half their

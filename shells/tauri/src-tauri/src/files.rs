@@ -172,6 +172,70 @@ pub fn already_there(paths: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// One of lensfun's database files, by its name, for the page to give
+/// the engine.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LensFile {
+    pub name: String,
+    pub text: String,
+}
+
+/// Where a system keeps lensfun's lens database: its update tool's
+/// folders first (newer than what came with the system), then the
+/// packaged ones, newest format first. Linux's packages, Homebrew's on
+/// either kind of Mac, and a build installed under /usr/local.
+pub fn lensfun_folders(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for version in ["version_2", "version_1"] {
+        if let Some(home) = home {
+            out.push(home.join(".local/share/lensfun/updates").join(version));
+        }
+        out.push(Path::new("/var/lib/lensfun-updates").join(version));
+        for root in ["/usr/share", "/usr/local/share", "/opt/homebrew/share"] {
+            out.push(Path::new(root).join("lensfun").join(version));
+        }
+    }
+    for root in ["/usr/share", "/usr/local/share", "/opt/homebrew/share"] {
+        out.push(Path::new(root).join("lensfun"));
+    }
+    out
+}
+
+/// The XML files of the first of `folders` that has any: one database,
+/// not two versions of it laid over each other. Nothing past 64 MB.
+pub fn lens_files_in(folders: &[PathBuf]) -> Vec<LensFile> {
+    for folder in folders {
+        let Ok(entries) = fs::read_dir(folder) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")))
+            .collect();
+        paths.sort();
+        let mut out = Vec::new();
+        let mut total = 0;
+        for path in paths {
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
+            total += text.len();
+            if total > 64 << 20 {
+                break;
+            }
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            out.push(LensFile {
+                name: name.unwrap_or_default(),
+                text,
+            });
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    Vec::new()
+}
+
 fn has_extension(name: &str, ext: &str) -> bool {
     Path::new(name)
         .extension()
@@ -216,6 +280,31 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_first_folder_with_lens_files_is_the_one_read() {
+        let root = std::env::temp_dir().join(format!("chitrakar-lensfun-{}", std::process::id()));
+        let (empty, kept, later) = (root.join("empty"), root.join("kept"), root.join("later"));
+        for d in [&empty, &kept, &later] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(empty.join("notes.txt"), "not a database").unwrap();
+        fs::write(kept.join("slr-canon.xml"), "<lensdatabase/>").unwrap();
+        fs::write(kept.join("mil-canon.XML"), "<lensdatabase/>").unwrap();
+        fs::write(later.join("slr-nikon.xml"), "<lensdatabase/>").unwrap();
+        let got = lens_files_in(&[root.join("missing"), empty, kept, later]);
+        let names: Vec<_> = got.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["mil-canon.XML", "slr-canon.xml"]);
+        assert_eq!(got[0].text, "<lensdatabase/>");
+        assert!(lens_files_in(&[root.join("missing")]).is_empty());
+        let folders = lensfun_folders(Some(Path::new("/home/a")));
+        assert_eq!(
+            folders[0],
+            Path::new("/home/a/.local/share/lensfun/updates/version_2")
+        );
+        assert!(folders.contains(&PathBuf::from("/usr/share/lensfun/version_2")));
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn png() -> Vec<Filter> {
         vec![Filter {

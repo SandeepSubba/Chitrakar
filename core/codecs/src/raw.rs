@@ -138,7 +138,7 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
     }
     let head = cur.u32s(5)?;
     let version = head[0];
-    if !(1..=3).contains(&version) {
+    if !(1..=4).contains(&version) {
         return Err(bad(format!("a packed mosaic of version {version}")));
     }
     let (width, height, cpp, orientation) = (
@@ -253,6 +253,33 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
                 photo.dng = Some((frame, three));
             }
         }
+    }
+    // Version 4: how it was taken, which a lens profile is found by.
+    if version >= 4 {
+        let mut text = || -> Result<String, CodecError> {
+            let n = cur.u32s(1)?[0] as usize;
+            if n > 255 {
+                return Err(bad("a name longer than a camera's"));
+            }
+            Ok(String::from_utf8_lossy(cur.take(n)?).into_owned())
+        };
+        let (camera_make, camera_model, lens_make, lens_model) =
+            (text()?, text()?, text()?, text()?);
+        let f: Vec<f32> = cur
+            .take(12)?
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .map(|v| if v.is_finite() && v > 0.0 { v } else { 0.0 })
+            .collect();
+        photo.shot = Some(crate::lensfun::Shot {
+            camera_make,
+            camera_model,
+            lens_make,
+            lens_model,
+            focal: f[0],
+            aperture: f[1],
+            distance: f[2],
+        });
     }
     Ok(photo)
 }

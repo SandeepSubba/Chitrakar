@@ -71,6 +71,7 @@ import {
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
+import { addLensFiles, forgetLensFile, giveLensProfiles, lensFiles } from "./lensProfiles";
 import {
   Adjustment,
   BlendMode,
@@ -1601,6 +1602,8 @@ export function App() {
   /** The picture the trace window is open on, if it is. */
   const [traceFor, setTraceFor] = useState<{ id: number; name: string } | null>(null);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  /** The lens profile files, as the Preferences window lists them. */
+  const [lensList, setLensList] = useState<{ name: string; lenses: number; system?: boolean }[]>([]);
   const [showAbout, setShowAbout] = useState(false);
   /** Which page the preferences window opens on: a row that is about
    * the tools opens it on the tools. */
@@ -8485,6 +8488,7 @@ export function App() {
     await nextPaint();
     try {
       const packed = await readRaw(next.bytes);
+      await giveLensProfiles(session);
       const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
       setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
     } catch (err) {
@@ -8531,7 +8535,9 @@ export function App() {
       await nextPaint();
       try {
         const was: [number, number] = [session.width, session.height];
-        session.raw_open(await readRaw(next.bytes), next.bytes, next.name);
+        const packed = await readRaw(next.bytes);
+        await giveLensProfiles(session);
+        session.raw_open(packed, next.bytes, next.name);
         placed(session.place_raw(json), was);
       } catch (err) {
         alert(`Could not develop ${next.name}: ${err}`);
@@ -8562,7 +8568,9 @@ export function App() {
     setImporting(`Reading ${layer.name}…`);
     try {
       const file = session.raw_original(layer.id);
-      session.raw_open(await readRaw(file), file, layer.name);
+      const packed = await readRaw(file);
+      await giveLensProfiles(session);
+      session.raw_open(packed, file, layer.name);
       const got = JSON.parse(session.raw_open_layer(layer.id)) as {
         info: RawInfo;
         settings: Partial<RawSettings>;
@@ -8602,7 +8610,9 @@ export function App() {
         setImporting(`Developing ${t.name} (${i + 1} of ${others.length})…`);
         await nextPaint();
         const file = session.raw_original(t.id);
-        session.raw_open(await readRaw(file), file, t.name);
+        const packed = await readRaw(file);
+        await giveLensProfiles(session);
+        session.raw_open(packed, file, t.name);
         session.stage_redevelop(t.id, settings);
       }
     } catch (err) {
@@ -10237,6 +10247,21 @@ export function App() {
             }
           }}
           onClearScreenIcc={clearScreenProfile}
+          lensFiles={lensList}
+          onListLensFiles={() => void lensFiles(session).then(setLensList)}
+          onAddLensFiles={async (picked) => {
+            if (!session) return;
+            const { refused } = await addLensFiles(session, picked);
+            setLensList(await lensFiles(session));
+            if (refused.length > 0)
+              alert(
+                `${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} not one of lensfun's database files, and ${refused.length === 1 ? "was" : "were"} not added.`,
+              );
+          }}
+          onForgetLensFile={async (name) => {
+            await forgetLensFile(name);
+            setLensList(await lensFiles(session));
+          }}
           onClose={() => setPrefsOpen(false)}
         />
       )}
@@ -13819,7 +13844,11 @@ function RawDevelopDialog({
                 <h3 className="props-head">Lens</h3>
                 <label
                   className="row check"
-                  title="The distortion, colour fringes and dark corners the camera wrote into the file are put right, as the camera's own pictures are"
+                  title={
+                    info.lensProfile
+                      ? "The distortion, colour fringes and dark corners lensfun measured for this lens are put right, at the focal length and aperture the photograph was taken at"
+                      : "The distortion, colour fringes and dark corners the camera wrote into the file are put right, as the camera's own pictures are"
+                  }
                 >
                   <input
                     type="checkbox"
@@ -13830,8 +13859,13 @@ function RawDevelopDialog({
                       setS(e.target.checked ? rest : { ...rest, uncorrected: true });
                     }}
                   />
-                  Corrections from the camera
+                  {info.lensProfile ? "Corrections from lensfun" : "Corrections from the camera"}
                 </label>
+                {info.lensProfile && (
+                  <p className="modal-aside" aria-label="Lens profile">
+                    {info.lensProfile}
+                  </p>
+                )}
               </>
             )}
           </div>

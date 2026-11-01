@@ -4129,3 +4129,30 @@ button.fold:hover {
 .develop-others {
   align-self: flex-start;
 }
+
+/* Preferences › Camera raw: the lens profile files, a row each. */
+.lens-files {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+.lens-files li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.lens-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lens-file-count {
+  color: var(--muted);
+  font-size: 0.9em;
+  white-space: nowrap;
+}

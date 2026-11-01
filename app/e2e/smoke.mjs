@@ -15012,7 +15012,7 @@ assert(
 // file is a DNG written here: a grey card under a warm light, whose
 // camera sees in sRGB's own primaries.
 {
-  const dng = (w, h, neutral, scene) => {
+  const dng = (w, h, neutral, scene, lens = null) => {
     const le16 = (v) => { const b = Buffer.alloc(2); b.writeUInt16LE(v); return b; };
     const le32 = (v) => { const b = Buffer.alloc(4); b.writeUInt32LE(v >>> 0); return b; };
     const pixels = Buffer.alloc(w * h * 2);
@@ -15029,6 +15029,15 @@ assert(
       [272, 2, 5, Buffer.from("Test\0")], [273, 4, 1, le32(0)], [274, 3, 1, le16(1)], [277, 3, 1, le16(1)],
       [278, 4, 1, le32(h)], [279, 4, 1, le32(w * h * 2)],
       [33421, 3, 2, Buffer.concat([le16(2), le16(2)])], [33422, 1, 4, Buffer.from([0, 1, 1, 2])],
+      // How it was taken, as a camera that writes no corrections says it:
+      // f-number, focal length and the lens's name.
+      ...(lens
+        ? [
+            [33437, 5, 1, Buffer.concat([le32(lens.f * 10), le32(10)])],
+            [37386, 5, 1, Buffer.concat([le32(lens.focal), le32(1)])],
+            [42036, 2, lens.model.length + 1, Buffer.from(lens.model + "\0")],
+          ]
+        : []),
       [50706, 1, 4, Buffer.from([1, 4, 0, 0])], [50717, 4, 1, le32(4095)],
       [50721, 10, 9, Buffer.concat(matrix.flatMap((v) => { const b = Buffer.alloc(8); b.writeInt32LE(v, 0); b.writeInt32LE(10000, 4); return [b]; }))],
       [50728, 5, 3, Buffer.concat(neutral.map((v) => Buffer.concat([le32(Math.round(v * 1e6)), le32(1e6)])))],
@@ -15315,10 +15324,15 @@ assert(
         super.onmessage = (e) => {
           const p = e.data && e.data.packed;
           if (!p) return fn(e);
-          // The packing ends with the lens's count (nought), a DNG's frame
-          // and its two opcode lists (empty): the lens goes after the count.
+          // After the samples come the lens's count (nought), a DNG's frame,
+          // its two opcode lists and how it was taken: the lens goes after
+          // the count. The head is CKRW, five u32 (version, width,
+          // height, samples per site, orientation), 24 f32, four u32, the
+          // 48 by 48 pattern and the samples' kind.
           const lens = new Float32Array([0, 1.2, 0, 0, 0, 0, 0, 0, 100, 40]);
-          const at = p.length - 28;
+          const v = new DataView(p.buffer, p.byteOffset, p.byteLength);
+          const head = 4 + 20 + 96 + 16 + 48 * 48;
+          const at = head + 1 + v.getUint32(8, true) * v.getUint32(12, true) * v.getUint32(16, true) * (p[head] === 0 ? 2 : 4);
           const out = new Uint8Array(p.length + 40);
           out.set(p.subarray(0, at));
           new DataView(out.buffer).setUint32(at, 2, true);
@@ -15356,6 +15370,79 @@ assert(
   await win.waitFor();
   await settle();
   assert((await win.locator('input[aria-label="Lens corrections"]').count()) === 0, "a file without a lens offers none");
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+
+  // A Canon's raw file carries no corrections but names its lens, and
+  // lensfun's profile for it — added in Preferences › Camera raw, since
+  // the database cannot be shipped — puts them right. The DNG here names
+  // a lens of its own and the profile is written here in lensfun's form:
+  // its corners at 40% of the middle's light.
+  const lensed = dng(64, 32, [0.8, 1.0, 0.6], (x) => (x < 32 ? [0.18, 0.18, 0.18] : [0.6, 0.6, 0.6]), {
+    model: "Test 35mm f/2",
+    focal: 35,
+    f: 4,
+  });
+  const openLensed = async () => {
+    await page.setInputFiles('input[accept^="image/*,"]', { name: "lensed.dng", mimeType: "", buffer: lensed });
+    await win.waitFor();
+    await settle();
+  };
+  await openLensed();
+  assert((await win.locator('input[aria-label="Lens corrections"]').count()) === 0, "no profile, nothing offered");
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+  const prefsRaw = async () => {
+    await page.keyboard.press("Control+Comma");
+    await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+    await page.click('.prefs-rail button[aria-label="Camera raw"]');
+    await page.waitForTimeout(200);
+  };
+  const profile = `<lensdatabase version="2"><lens><maker>Chitrakar</maker><model>Test 35mm f/2</model>
+    <cropfactor>1</cropfactor><calibration>
+    <vignetting model="pa" focal="35" aperture="4" distance="1000" k1="-0.6" k2="0" k3="0"/>
+    </calibration></lens></lensdatabase>`;
+  await prefsRaw();
+  assert((await page.locator('[role=dialog][aria-label="Preferences"]').textContent()).includes("None yet"), "no profiles to start with");
+  lastDialog = "";
+  await page.setInputFiles('input[aria-label="Lens profile files"]', [
+    { name: "test-lenses.xml", mimeType: "text/xml", buffer: Buffer.from(profile) },
+    { name: "notes.xml", mimeType: "text/xml", buffer: Buffer.from("<notes/>") },
+  ]);
+  await page.waitForTimeout(400);
+  const listed = await page.locator('[aria-label="Lens profile list"]').textContent();
+  assert(listed.includes("test-lenses.xml") && listed.includes("1 lens"), `the file is listed with its lens (${listed})`);
+  assert(!listed.includes("notes.xml") && lastDialog.includes("notes.xml"), `a file that is not a database is refused and said (${lastDialog})`);
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await settle();
+  // Given to a new document's engine as much as this one's.
+  await newDocument(200, 150, "rgb");
+  await openLensed();
+  const profiled = win.locator('input[aria-label="Lens corrections"]');
+  assert((await profiled.count()) === 1 && (await profiled.isChecked()), "the profile's corrections are offered, on");
+  const named = await win.locator('[aria-label="Lens profile"]').textContent();
+  assert(named === "Test 35mm f/2", `and say whose they are (${named})`);
+  const lifted = await corner();
+  await profiled.uncheck();
+  await settle();
+  const dark = await corner();
+  assert(lifted > dark + 15, `the profile lifts the corners (${dark} off, ${lifted} on)`);
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+  // Kept on this machine: the list is the same after the page is
+  // reloaded, and forgetting the file takes the corrections away.
+  await page.reload();
+  await page.waitForSelector("#engine-canvas");
+  await page.waitForTimeout(700);
+  await prefsRaw();
+  assert((await page.locator('[aria-label="Lens profile list"]').textContent()).includes("test-lenses.xml"), "kept across a reload");
+  await page.click('button[aria-label="Forget test-lenses.xml"]');
+  await page.waitForTimeout(300);
+  assert((await page.locator('[role=dialog][aria-label="Preferences"]').textContent()).includes("None yet"), "and forgotten");
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await settle();
+  await openLensed();
+  assert((await win.locator('input[aria-label="Lens corrections"]').count()) === 0, "forgotten, nothing offered");
   await win.locator('button:text-is("Cancel")').click();
   await settle();
 }
@@ -16977,7 +17064,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
   assert(
     (await page.locator(".prefs-tab").allTextContents()).join(",") ===
-      "General,Appearance,Tools,Keys,Guides & grid,Selection,Colour,New documents,Export",
+      "General,Appearance,Tools,Keys,Guides & grid,Selection,Colour,New documents,Export,Camera raw",
     "the settings are grouped rather than listed",
   );
 

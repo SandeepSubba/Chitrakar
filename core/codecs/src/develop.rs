@@ -99,6 +99,9 @@ pub struct RawPhoto {
     /// What a DNG's opcode list 3 says to do to the developed picture,
     /// and where the photograph sits in the area it was written for.
     pub(crate) dng: Option<(Frame, Vec<Op>)>,
+    /// How it was taken, where the file said: what a lens profile is
+    /// looked up by.
+    pub(crate) shot: Option<crate::lensfun::Shot>,
 }
 
 /// A lens's corrections as the camera wrote them for one photograph (a
@@ -803,6 +806,7 @@ impl RawPhoto {
             middle: MIDDLE,
             lens: None,
             dng: None,
+            shot: None,
         };
         photo.rebuild_highlights();
         (photo.auto_gain, photo.middle) = photo.measure();
@@ -825,6 +829,17 @@ impl RawPhoto {
     /// a Fuji's, or a DNG's vignette, gain map or warp.
     pub fn has_lens(&self) -> bool {
         self.lens.as_ref().is_some_and(Lens::usable) || self.dng.is_some()
+    }
+
+    /// How the photograph was taken, if the file said.
+    pub fn shot(&self) -> Option<&crate::lensfun::Shot> {
+        self.shot.as_ref()
+    }
+
+    /// Corrections for a lens the file does not carry itself (from a lens
+    /// profile), applied as the file's own would be.
+    pub fn give_lens(&mut self, lens: Lens) {
+        self.lens = Some(lens);
     }
 
     /// The straightening to develop with, for the photograph drawn at
@@ -2312,6 +2327,12 @@ pub mod sample {
         entries.push((279, 4, 1, long(w * h * 2)));
         entries.push((33421, 3, 2, [short(2), short(2)].concat()));
         entries.push((33422, 1, 4, vec![0, 1, 1, 2]));
+        // How it was taken: f/4 at 35 mm through a lens named for a test.
+        let rational = |n: u32, d: u32| [n.to_le_bytes(), d.to_le_bytes()].concat();
+        entries.push((33437, 5, 1, rational(4, 1)));
+        entries.push((37386, 5, 1, rational(35, 1)));
+        entries.push((42035, 2, 10, b"Chitrakar\0".to_vec()));
+        entries.push((42036, 2, 14, b"Test 35mm f/2\0".to_vec()));
         entries.push((50706, 1, 4, vec![1, 4, 0, 0]));
         entries.push((50717, 4, 1, long(white as u32)));
         entries.push((

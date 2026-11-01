@@ -1368,7 +1368,7 @@ impl WasmSession {
 
     /// Take a camera's raw file to develop: its mosaic as the raw module
     /// (in its worker) packed it, and the file. JSON `{width, height,
-    /// asShot: [kelvin, tint]}`. Kept until placed or `raw_close`.
+    /// asShot: [kelvin, tint], lens, lensProfile?}`. Kept until placed or `raw_close`.
     pub fn raw_open(
         &mut self,
         packed: &[u8],
@@ -1377,6 +1377,21 @@ impl WasmSession {
     ) -> Result<String, JsError> {
         let info = self.inner.raw_open(packed, file, name).map_err(to_js)?;
         serde_json::to_string(&info).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Add one of lensfun's XML files to the lens profiles a raw file
+    /// without corrections of its own is looked up in; how many lens
+    /// calibrations it held (see `Session::add_lens_profiles`).
+    pub fn add_lens_profiles(&mut self, xml: &str) -> Result<u32, JsError> {
+        self.inner
+            .add_lens_profiles(xml)
+            .map(|n| n as u32)
+            .map_err(to_js)
+    }
+
+    /// Forget every lens profile.
+    pub fn clear_lens_profiles(&mut self) {
+        self.inner.clear_lens_profiles();
     }
 
     /// The raw file a layer was developed from, for the raw module to read

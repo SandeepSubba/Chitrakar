@@ -402,6 +402,9 @@ pub struct Session {
     import_notes: Vec<String>,
     /// A camera's raw file open in the develop window.
     raw: Option<OpenRaw>,
+    /// Lens profiles from lensfun's database, as the page was given them:
+    /// what a raw file without corrections of its own is looked up in.
+    lens_profiles: chitrakar_codecs::lensfun::Profiles,
     /// Developments waiting to go into the history as one step.
     staged_develop: Vec<Command>,
     /// The PNG each picture was last saved as, for the next save (and the
@@ -496,6 +499,7 @@ impl Session {
             last_touched: None,
             import_notes: Vec::new(),
             raw: None,
+            lens_profiles: Default::default(),
             staged_develop: Vec::new(),
             written: Default::default(),
             proof_cms: None,
@@ -9068,9 +9072,19 @@ impl Session {
         file: impl Into<Vec<u8>>,
         name: &str,
     ) -> Result<RawInfo, EngineError> {
-        let photo = chitrakar_codecs::raw::unpack(packed)
+        let mut photo = chitrakar_codecs::raw::unpack(packed)
             .map_err(|e| EngineError::BadCommand(e.to_string()))?;
-        let info = RawInfo::of(&photo);
+        // A file that carries no corrections of its own (a Canon's) gets
+        // its lens's from a profile, where there is one for it.
+        let lens_profile = match photo.shot() {
+            Some(shot) if !photo.has_lens() => self.lens_profiles.lens_for(shot),
+            _ => None,
+        }
+        .map(|matched| {
+            photo.give_lens(matched.lens);
+            matched.name
+        });
+        let info = RawInfo::of(&photo, lens_profile.as_deref());
         // Taken rather than copied: a raw file is tens of megabytes.
         let file = file.into();
         self.raw = Some(OpenRaw {
@@ -9079,8 +9093,23 @@ impl Session {
             bytes: Some(file),
             photo,
             preview: None,
+            lens_profile,
         });
         Ok(info)
+    }
+
+    /// Add one of lensfun's XML files to the lens profiles raw files are
+    /// looked up in; how many lens calibrations it held. Profiles are the
+    /// person's, not the document's: they come from lensfun's database,
+    /// which is CC BY-SA and is not shipped, and last until the window
+    /// closes (the page gives them again when it opens).
+    pub fn add_lens_profiles(&mut self, xml: &str) -> Result<usize, EngineError> {
+        self.lens_profiles.add(xml).map_err(EngineError::BadCommand)
+    }
+
+    /// Forget every lens profile.
+    pub fn clear_lens_profiles(&mut self) {
+        self.lens_profiles = Default::default();
     }
 
     /// The raw file a layer was developed from, and its name: for the
@@ -9104,7 +9133,10 @@ impl Session {
             .as_ref()
             .filter(|r| r.original == developed.original)
             .ok_or_else(|| EngineError::BadCommand("the raw file has not been read".into()))?;
-        Ok((RawInfo::of(&raw.photo), developed.settings))
+        Ok((
+            RawInfo::of(&raw.photo, raw.lens_profile.as_deref()),
+            developed.settings,
+        ))
     }
 
     /// How a layer was developed, if it came from a raw file.
@@ -9983,6 +10015,8 @@ struct OpenRaw {
     /// The smaller photograph the window develops as a slider moves, and
     /// the size it was made for.
     preview: Option<(u32, RawPreview)>,
+    /// The lens profile its corrections came from, if they did.
+    lens_profile: Option<String>,
 }
 
 /// What the develop window starts from.
@@ -9994,19 +10028,24 @@ pub struct RawInfo {
     pub height: u32,
     /// The camera's own white balance, as a temperature and tint.
     pub as_shot: [f32; 2],
-    /// Whether the file carries lens corrections (a Fuji's RAF), which
-    /// the window offers to leave off.
+    /// Whether there are lens corrections (a Fuji's RAF, a DNG's own, or
+    /// a lens profile's), which the window offers to leave off.
     pub lens: bool,
+    /// The lens profile they came from, by the lens's name, where the
+    /// file carried none itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lens_profile: Option<String>,
 }
 
 impl RawInfo {
-    fn of(photo: &RawPhoto) -> RawInfo {
+    fn of(photo: &RawPhoto, lens_profile: Option<&str>) -> RawInfo {
         let (width, height) = photo.size();
         RawInfo {
             width,
             height,
             as_shot: photo.as_shot_white(),
             lens: photo.has_lens(),
+            lens_profile: lens_profile.map(str::to_string),
         }
     }
 }
@@ -10430,6 +10469,71 @@ mod tests {
         })
     }
 
+    /// Where a packed mosaic's samples end: its head (`CKRW`, five u32,
+    /// 24 f32, four u32, the pattern, the kind) and the samples.
+    fn after_samples(packed: &[u8]) -> usize {
+        let u = |i: usize| u32::from_le_bytes(packed[4 + i * 4..8 + i * 4].try_into().unwrap());
+        let head = 4 + 20 + 96 + 16 + chitrakar_raw_in::PATTERN * chitrakar_raw_in::PATTERN;
+        let size = if packed[head] == 0 { 2 } else { 4 };
+        head + 1 + (u(1) * u(2) * u(3)) as usize * size
+    }
+
+    #[test]
+    fn a_raw_file_without_corrections_gets_its_lens_from_a_profile() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        let file = grey_card_dng();
+        let packed = chitrakar_raw_in::read(&file).unwrap();
+        let open = |s: &mut Session| s.raw_open(&packed, &file[..], "card.dng").unwrap();
+        assert!(!open(&mut s).lens, "nothing to go by");
+        // The card says it was taken at 35 mm, f/4, through "Test 35mm
+        // f/2" on Chitrakar's "Test" camera.
+        let xml = r#"<lensdatabase version="2">
+            <lens>
+                <maker>Chitrakar</maker>
+                <model>Test 35mm f/2</model>
+                <cropfactor>1</cropfactor>
+                <calibration>
+                    <distortion model="poly3" focal="35" k1="-0.02"/>
+                    <vignetting model="pa" focal="35" aperture="4" distance="1000" k1="-0.6" k2="0" k3="0"/>
+                </calibration>
+            </lens>
+        </lensdatabase>"#;
+        assert_eq!(s.add_lens_profiles(xml).unwrap(), 1);
+        assert!(s.add_lens_profiles("not a database").is_err());
+        let info = open(&mut s);
+        assert!(info.lens);
+        assert_eq!(info.lens_profile.as_deref(), Some("Test 35mm f/2"));
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(json.contains("\"lensProfile\":\"Test 35mm f/2\""), "{json}");
+        // The corners lifted, and the switch leaves them as they were.
+        let corner = |img: &SourceImage| img.rgba8[0] as i32;
+        let on = s.raw_preview(&RawDevelop::default(), 40).unwrap();
+        let off = s
+            .raw_preview(
+                &RawDevelop {
+                    uncorrected: true,
+                    ..Default::default()
+                },
+                40,
+            )
+            .unwrap();
+        assert!(
+            corner(&on) > corner(&off) + 10,
+            "{} on, {} off",
+            corner(&on),
+            corner(&off)
+        );
+        // Reopened from the layer, it says where its corrections came from.
+        let id = s.place_raw(&RawDevelop::default()).unwrap();
+        assert_eq!(
+            s.raw_open_layer(id).unwrap().0.lens_profile.as_deref(),
+            Some("Test 35mm f/2")
+        );
+        // Without profiles a file says nothing of one.
+        s.clear_lens_profiles();
+        assert!(open(&mut s).lens_profile.is_none());
+    }
+
     fn picture_of(s: &Session, id: NodeId) -> chitrakar_doc::RasterRef {
         match &s.doc.node(id).unwrap().kind {
             NodeKind::Raster(r) => r.clone(),
@@ -10472,9 +10576,10 @@ mod tests {
         // The same card as a file carrying a lens: dark corners, a barrel.
         let file = grey_card_dng();
         let mut packed = chitrakar_raw_in::read(&file).unwrap();
-        // Packed with no lens: its count (nought), then a DNG's frame and
-        // two empty opcode lists. The lens goes after the count.
-        let tail = packed.split_off(packed.len() - 28);
+        // Packed with no lens: its count (nought) right after the samples,
+        // then a DNG's frame, two empty opcode lists and how it was taken.
+        // The lens goes after the count.
+        let tail = packed.split_off(after_samples(&packed));
         assert_eq!(tail[..4], 0u32.to_le_bytes(), "packed with no lens");
         packed.extend_from_slice(&2u32.to_le_bytes());
         for v in [0.0f32, 1.2, -1.0, -5.0, 0.0, 0.0, 0.0, 0.0, 100.0, 50.0] {

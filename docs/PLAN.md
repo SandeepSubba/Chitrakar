@@ -10440,6 +10440,41 @@ without reading anything else.*
   ones (6D 0.046 → 0.034, but 200D, 5D III and M5 worse); and offsets
   per 128-site tile rather than one for the photograph (550D and 5D III
   better, 5D II 0.053 → 0.086). The 6D's warm core stays as noted.
+  **Canon's lens corrections, from lensfun** ✅. A CR2 or CR3 carries
+  no corrections the way a Fuji's RAF does, but it names its lens, focal
+  length and aperture, which the raw reader now packs (version 4:
+  camera and lens by name, focal, f-number, distance). lensfun's
+  database has a profile for every lens in the Canon survey, and
+  `core/codecs/src/lensfun.rs` reads its XML (roxmltree, already in
+  the build for usvg) and turns a profile into the same `Lens` a RAF
+  gives, so it is developed by the same steps and the develop window's
+  Lens switch leaves it off just the same, naming the profile
+  (`RawInfo::lens_profile`). The models are lensfun's own — `ptlens`,
+  `poly3`, `poly5` distortion; `linear` and `poly3` fringes; `pa`
+  vignetting — in its own units (half the calibration frame's shorter
+  side; its corner for vignetting), interpolated between calibrated
+  focal lengths as its library does (a Hermite spline; inverse-distance
+  weighting over focal, aperture and distance), with its rule that a
+  calibration holds for a frame no more than 4% bigger. Checked against
+  lensfun's library itself (0.3.4, through lensfunpy, on its bundled
+  database) for nine Canon lens and body pairs, calibrated focal
+  lengths and between: distortion within 0.13% of the frame at worst
+  (0.01–0.06% for most), fringes within a ten-thousandth, light within
+  0.23%. The database is CC BY-SA 3.0, which a GPL-3.0 program cannot
+  carry, so nothing of it is committed or shipped: Preferences › Camera
+  raw takes a person's files (kept in IndexedDB, `app/src/lensProfiles.ts`)
+  and the desktop shell also reads the system's copy
+  (`system_lens_profiles`: lensfun's update folders, then
+  /usr/share, /usr/local/share and Homebrew's). The engine is given the
+  set just before a raw file is opened, so a new document's session has
+  it too (smoke 9cn: refused non-database, kept across a reload,
+  forgotten). Fisheyes are left out, and a lens's off-centre optical
+  axis (lensfun's `<center>`) is not read.
+  **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
+  the reports for dnglab (filter patterns, Kodak's balance, Canon
+  sRAW's black taken off twice, Fuji's orientation, the S23, the
+  unordered matrices, and Fuji's lens tables as a request). Not posted;
+  each is worked around in `core/rawin` and stays so until a fix lands.
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a

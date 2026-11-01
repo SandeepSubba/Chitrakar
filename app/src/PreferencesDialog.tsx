@@ -60,7 +60,8 @@ export type PrefGroup =
   | "selection"
   | "colour"
   | "new"
-  | "export";
+  | "export"
+  | "raw";
 type Group = PrefGroup;
 
 const GROUPS: { id: Group; label: string; icon: IconName }[] = [
@@ -73,6 +74,7 @@ const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "colour", label: "Colour", icon: "proof" },
   { id: "new", label: "New documents", icon: "newDoc" },
   { id: "export", label: "Export", icon: "export" },
+  { id: "raw", label: "Camera raw", icon: "image" },
 ];
 
 /** Colours to reach for as an accent or for the sliders: chosen to
@@ -128,6 +130,10 @@ export function PreferencesDialog({
   onLoadScreenIcc,
   onDisplayP3,
   onClearScreenIcc,
+  lensFiles = [],
+  onListLensFiles,
+  onAddLensFiles,
+  onForgetLensFile,
   menuRows = [],
   onClose,
 }: {
@@ -142,9 +148,21 @@ export function PreferencesDialog({
   onLoadScreenIcc: () => void;
   onDisplayP3: () => void;
   onClearScreenIcc: () => void;
+  /** lensfun's database files the editor reads lens profiles from: a
+   * person's own, and in the desktop shell the system's. */
+  lensFiles?: { name: string; lenses: number; system?: boolean }[];
+  onListLensFiles?: () => void;
+  onAddLensFiles?: (files: File[]) => void;
+  onForgetLensFile?: (name: string) => void;
   onClose: () => void;
 }) {
   const [group, setGroup] = useState<Group>(initialGroup ?? "general");
+  const lensInput = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (group === "raw") onListLensFiles?.();
+    // Listed again each time the page is opened, not on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group]);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
@@ -763,6 +781,67 @@ export function PreferencesDialog({
                     </button>
                   )}
                 </div>
+              </>
+            )}
+
+            {group === "raw" && (
+              <>
+                <p className="modal-aside">
+                  A raw file from a camera that writes no lens corrections
+                  into it (Canon, Nikon, Sony, and others) can be put right
+                  from lensfun's lens profiles: distortion, colour fringes
+                  and dark corners, at the focal length and aperture the
+                  photograph was taken at. They are not included with the
+                  editor — lensfun's database is shared under CC BY-SA 3.0 —
+                  so add the files for your cameras: lensfun's{" "}
+                  <code>data/db</code> folder, such as{" "}
+                  <code>slr-canon.xml</code> and <code>mil-canon.xml</code>.
+                  Fuji's and DNG files carry their own corrections and do
+                  not need them.
+                </p>
+                <div className="row">
+                  <span>Lens profiles</span>
+                  <button className="mask-button" onClick={() => lensInput.current?.click()}>
+                    Add files…
+                  </button>
+                  <input
+                    ref={lensInput}
+                    type="file"
+                    accept=".xml,application/xml,text/xml"
+                    multiple
+                    hidden
+                    aria-label="Lens profile files"
+                    onChange={(e) => {
+                      const picked = Array.from(e.target.files ?? []);
+                      e.target.value = "";
+                      if (picked.length > 0) onAddLensFiles?.(picked);
+                    }}
+                  />
+                </div>
+                {lensFiles.length === 0 ? (
+                  <p className="modal-aside">None yet.</p>
+                ) : (
+                  <ul className="lens-files" aria-label="Lens profile list">
+                    {lensFiles.map((f) => (
+                      <li key={`${f.system ? "system" : "mine"}:${f.name}`}>
+                        <span className="lens-file-name">{f.name}</span>
+                        <span className="lens-file-count">
+                          {f.lenses} {f.lenses === 1 ? "lens" : "lenses"}
+                          {f.system ? " · this computer's" : ""}
+                        </span>
+                        {!f.system && (
+                          <button
+                            className="mask-button"
+                            aria-label={`Forget ${f.name}`}
+                            onClick={() => onForgetLensFile?.(f.name)}
+                          >
+                            Forget
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </>
             )}
 

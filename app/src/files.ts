@@ -158,6 +158,11 @@ export async function writeFiles(
  * opened yet. Each is handed out once. */
 export const openedFiles = () => call<string[]>("opened_files");
 
+/** lensfun's lens database where the system keeps one (see
+ * `lensProfiles.ts`): each XML file by its name. */
+export const systemLensProfiles = () =>
+  call<{ name: string; text: string }[]>("system_lens_profiles");
+
 /** The question asked before writing over files already in a folder. */
 export function replacing(there: string[]): string {
   const names = there.map(baseName);

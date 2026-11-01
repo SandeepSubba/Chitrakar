@@ -222,6 +222,15 @@ fn opened_files(waiting: tauri::State<'_, opening::Waiting>) -> Vec<String> {
     waiting.take()
 }
 
+/// lensfun's lens database where this system keeps one, for raw files
+/// that carry no lens corrections of their own (a Canon's). Read on a
+/// thread of its own: it is some megabytes.
+#[tauri::command]
+async fn system_lens_profiles() -> Vec<files::LensFile> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    files::lens_files_in(&files::lensfun_folders(home.as_deref()))
+}
+
 /// Smoke-test command: create an engine session natively and report on it.
 /// Replaced by real native-engine plumbing if/when a platform needs the
 /// native render path.
@@ -302,6 +311,7 @@ pub fn run() {
             join_path,
             already_there,
             opened_files,
+            system_lens_profiles,
             gpu::gpu_start,
             gpu::gpu_sync,
             gpu::gpu_picture,
