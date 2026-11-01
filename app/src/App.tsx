@@ -69,6 +69,8 @@ import {
   samePreset,
   cleanCurve,
   autoChannels,
+  cleanMixer,
+  MIXER_BANDS,
   type CurveKey,
   sliderToKelvin,
 } from "./develop";
@@ -14104,6 +14106,8 @@ function RawDevelopDialog({
   const [bins, setBins] = useState<Uint32Array | null>(null);
   /** The window filling the screen, or the size it was given. */
   const [big, setBig] = useState(false);
+  /** Which of the colour mixer's three the sliders are showing. */
+  const [mixing, setMixing] = useState<0 | 1 | 2>(0);
   /** The picture's box, so a window made bigger develops a bigger
    * preview and puts the spot's mark back where it belongs. */
   const [boxSize, setBoxSize] = useState<[number, number]>([0, 0]);
@@ -14200,7 +14204,7 @@ function RawDevelopDialog({
     return () => cancelAnimationFrame(frame);
   }, [s, session, before, spot]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | CurveKey>, min: number, max: number, step: number, unit = "") => (
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | CurveKey>, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
       {/* The value can be typed as well as dragged: a slider a few
           hundred pixels long for ten stops is a twentieth of a stop a
@@ -14453,6 +14457,53 @@ function RawDevelopDialog({
             {row("Dehaze", "dehaze", -100, 100, 1)}
             {row("Vibrance", "vibrance", -100, 100, 1)}
             {row("Saturation", "saturation", -100, 100, 1)}
+            <h3 className="props-head">Colour mixer</h3>
+            {/* Lightroom's HSL: a band of colour at a time — a sky deepened
+                without the grass, a face warmed without the wall. Hue,
+                saturation or luminance, one at a time across all eight. */}
+            <div className="develop-mixing" role="group" aria-label="Colour mixer shows">
+              {(["Hue", "Saturation", "Luminance"] as const).map((name, i) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={mixing === i ? "active" : undefined}
+                  aria-pressed={mixing === i}
+                  onClick={() => setMixing(i as 0 | 1 | 2)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            {MIXER_BANDS.map(([band, colour], i) => {
+              const value = s.mixer?.[i]?.[mixing] ?? 0;
+              const give = (v: number) =>
+                setS((o) => {
+                  const m = (o.mixer ?? MIXER_BANDS.map(() => [0, 0, 0] as [number, number, number])).map(
+                    (b) => [...b] as [number, number, number],
+                  );
+                  m[i][mixing] = v;
+                  return { ...o, mixer: cleanMixer(m) };
+                });
+              const label = `${band} ${["hue", "saturation", "luminance"][mixing]}`;
+              return (
+                <label key={band} className="develop-band" onDoubleClick={() => give(0)} title="Double-click to put it back">
+                  <span className="slider-head">
+                    <span>{band}</span>
+                    <span className="slider-value">{value}</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={-100}
+                    max={100}
+                    step={1}
+                    value={value}
+                    style={{ accentColor: colour }}
+                    onChange={(e) => give(Number(e.target.value))}
+                    aria-label={label}
+                  />
+                </label>
+              );
+            })}
             <h3 className="props-head">Tone curve</h3>
             {/* The same curves as a Curves layer, drawn over the developed
                 preview's tones: the tones as they will be seen, after

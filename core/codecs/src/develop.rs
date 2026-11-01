@@ -2042,6 +2042,8 @@ struct Look {
     /// against the square root of the value, so a pixel reads three
     /// tables rather than taking six powers; empty where there is none.
     channel_luts: [Vec<f32>; 3],
+    /// The colour mixer, each setting -1 to 1; `None` when all are nought.
+    mixer: Option<[[f32; 3]; 8]>,
     encode: chitrakar_color::Srgb8,
 }
 
@@ -2095,6 +2097,10 @@ impl Look {
                     })
                     .collect()
             }),
+            mixer: {
+                let m = s.mixer.map(|band| band.map(unit));
+                m.iter().flatten().any(|v| *v != 0.0).then_some(m)
+            },
             encode: chitrakar_color::Srgb8::new(),
         };
         if !look.tones_untouched() {
@@ -2167,6 +2173,9 @@ impl Look {
             };
             let k = ((1.0 + self.saturation) * (1.0 + self.vibrance * (1.0 - colourful))).max(0.0);
             c = c.map(|v| (y + (v - y) * k).max(0.0));
+        }
+        if let Some(mixer) = &self.mixer {
+            c = mix(c, mixer);
         }
         for (v, lut) in c.iter_mut().zip(&self.channel_luts) {
             if lut.is_empty() {
@@ -2270,6 +2279,82 @@ impl Look {
 
 /// 18% grey, a photograph's middle where nothing says otherwise.
 const MIDDLE: f32 = 0.18;
+
+/// Where each of the colour mixer's eight bands sits on the hue circle,
+/// in degrees: red, orange, yellow, green, aqua, blue, purple, magenta —
+/// unevenly, as Lightroom has them, closer together where the eye tells
+/// more colours apart (the warm ones a face and a sunset are made of).
+const BAND_HUES: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 225.0, 270.0, 315.0];
+
+/// A linear colour through the colour mixer (`mixer` is each band's hue,
+/// saturation and luminance, -1 to 1). Worked on the square roots of the
+/// channels, which stand in for how the eye sees them: a pixel's hue is
+/// shared between the two bands either side of it by how near it is to
+/// each, so the weights add to one and no colour sits in a seam; and how
+/// much of the change it takes is how much colour it has, all of it from
+/// about a third of full saturation up, none near grey — a white wall
+/// does not darken because the sky's blue was taken down.
+fn mix(c: [f32; 3], mixer: &[[f32; 3]; 8]) -> [f32; 3] {
+    let p = c.map(|v| v.max(0.0).sqrt());
+    let hi = p[0].max(p[1]).max(p[2]);
+    let lo = p[0].min(p[1]).min(p[2]);
+    if hi <= 0.0 || hi - lo < 1e-6 {
+        return c;
+    }
+    let sat = (hi - lo) / hi;
+    let d = hi - lo;
+    let mut hue = if hi == p[0] {
+        60.0 * ((p[1] - p[2]) / d)
+    } else if hi == p[1] {
+        60.0 * ((p[2] - p[0]) / d + 2.0)
+    } else {
+        60.0 * ((p[0] - p[1]) / d + 4.0)
+    };
+    if hue < 0.0 {
+        hue += 360.0;
+    }
+    // The two bands either side, and the share of each.
+    let next = BAND_HUES.iter().position(|b| *b > hue).unwrap_or(8);
+    let (a, b) = ((next + 7) % 8, next % 8);
+    let (ha, hb) = (BAND_HUES[a], if next == 8 { 360.0 } else { BAND_HUES[b] });
+    let t = ((hue - ha) / (hb - ha)).clamp(0.0, 1.0);
+    let take = |k: usize| mixer[a][k] * (1.0 - t) + mixer[b][k] * t;
+    // Nothing below a twentieth of full colour — a white wall with the
+    // light's own tint on it is still a white wall — and all of it from
+    // about a third up, eased in between.
+    let t = ((sat - 0.05) / 0.3).clamp(0.0, 1.0);
+    let reach = t * t * (3.0 - 2.0 * t);
+    let (dh, ds, dl) = (take(0) * reach, take(1) * reach, take(2) * reach);
+    if dh == 0.0 && ds == 0.0 && dl == 0.0 {
+        return c;
+    }
+    // Hue turned up to thirty degrees either way, its saturation and
+    // value kept.
+    let mut q = p;
+    if dh != 0.0 {
+        let hue = (hue + dh * 30.0).rem_euclid(360.0);
+        let chroma = hi * sat;
+        let x = chroma * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+        let m = hi - chroma;
+        let (r, g, b) = match (hue / 60.0) as u32 {
+            0 => (chroma, x, 0.0),
+            1 => (x, chroma, 0.0),
+            2 => (0.0, chroma, x),
+            3 => (0.0, x, chroma),
+            4 => (x, 0.0, chroma),
+            _ => (chroma, 0.0, x),
+        };
+        q = [r + m, g + m, b + m];
+    }
+    // Saturation scaled about the colour's own brightness, so a colour
+    // taken to grey is a grey as bright as it looked — to grey at the
+    // bottom of the slider, twice as colourful at the top.
+    let y = 0.2126 * q[0] + 0.7152 * q[1] + 0.0722 * q[2];
+    q = q.map(|v| (y + (v - y) * (1.0 + ds)).max(0.0));
+    // Luminance: up to about a stop and a half darker, a stop lighter.
+    let k = 1.0 + dl * if dl < 0.0 { 0.45 } else { 0.35 };
+    q.map(|v| (v * k) * (v * k))
+}
 
 /// Steps in a channel curve's table.
 const CHANNEL_STEPS: usize = 1024;
@@ -4090,6 +4175,62 @@ mod tests {
         let pv_plain = photo.preview(32).develop(&photo, &base);
         let k = (mid / 2) * 4 + 2 * pv.width as usize * 4;
         assert!(pv.rgba8[k] > pv_plain.rgba8[k] + 10);
+    }
+
+    #[test]
+    fn the_colour_mixer_moves_one_band_and_leaves_grey_alone() {
+        let (red, blue, grey) = ([0.5, 0.04, 0.04], [0.04, 0.08, 0.5], [0.2, 0.2, 0.2]);
+        let mut m = [[0.0f32; 3]; 8];
+        // Blue's luminance down, as for a deeper sky.
+        m[5][2] = -1.0;
+        let out = mix(blue, &m);
+        assert!(super::luma(out) < super::luma(blue) * 0.6, "{out:?}");
+        assert_eq!(mix(red, &m), red, "red is not in the blue band");
+        assert_eq!(mix(grey, &m), grey, "grey is in no band");
+        // Red's saturation all the way down: a grey, as bright as the red
+        // looked rather than as bright as its brightest channel.
+        let mut m = [[0.0f32; 3]; 8];
+        m[0][1] = -1.0;
+        let out = mix(red, &m);
+        assert!(
+            (out[0] - out[1]).abs() < 1e-4 && (out[1] - out[2]).abs() < 1e-4,
+            "{out:?}"
+        );
+        let seen = |c: [f32; 3]| 0.2126 * c[0].sqrt() + 0.7152 * c[1].sqrt() + 0.0722 * c[2].sqrt();
+        assert!(
+            (seen(out) - seen(red)).abs() < 0.01,
+            "{} against {}",
+            seen(out),
+            seen(red)
+        );
+        // Green's hue turned up: towards aqua, so blue rises against red.
+        let green = [0.05, 0.5, 0.06];
+        let mut m = [[0.0f32; 3]; 8];
+        m[3][0] = 1.0;
+        let out = mix(green, &m);
+        assert!(out[2] > green[2] * 2.0 && out[1] > out[2], "{out:?}");
+        // A hue between two bands takes from both: orange-red moves with
+        // red's saturation by half or so.
+        let between = [0.5, 0.15, 0.04];
+        let mut m = [[0.0f32; 3]; 8];
+        m[0][1] = -1.0;
+        let out = mix(between, &m);
+        let chroma = |c: [f32; 3]| c[0].sqrt() - c[2].sqrt();
+        assert!(chroma(out) < chroma(between) * 0.8 && chroma(out) > chroma(between) * 0.2);
+        // And untouched settings, through the whole development, change
+        // nothing.
+        let photo = grey_card([0.8, 1.0, 0.6]);
+        let base = RawDevelop {
+            curve: true,
+            ..Default::default()
+        };
+        let mut mixed = base.clone();
+        mixed.mixer[5][2] = -100.0;
+        assert_eq!(
+            photo.develop(&base).rgba8,
+            photo.develop(&mixed).rgba8,
+            "a grey card has nothing in the blue band"
+        );
     }
 
     #[test]

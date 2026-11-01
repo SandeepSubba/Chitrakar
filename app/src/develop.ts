@@ -35,7 +35,37 @@ export type RawSettings = {
   red_curve?: [number, number][];
   green_curve?: [number, number][];
   blue_curve?: [number, number][];
+  /** The colour mixer: hue, saturation and luminance, -100 to 100, for
+   * each of the eight bands in `MIXER_BANDS`. Absent is untouched. */
+  mixer?: [number, number, number][];
 };
+
+/** The colour mixer's bands, as Lightroom names them, with a colour to
+ * draw each slider in. */
+export const MIXER_BANDS: [string, string][] = [
+  ["Red", "#e5484d"],
+  ["Orange", "#f76b15"],
+  ["Yellow", "#ffc53d"],
+  ["Green", "#30a46c"],
+  ["Aqua", "#12a594"],
+  ["Blue", "#3e63dd"],
+  ["Purple", "#8e4ec6"],
+  ["Magenta", "#d6409f"],
+];
+
+/** The mixer read from somewhere that might say anything: eight bands of
+ * three numbers held to -100..100; anything else, or all nought, is none. */
+export function cleanMixer(x: unknown): [number, number, number][] | undefined {
+  if (!Array.isArray(x) || x.length !== 8) return undefined;
+  const out: [number, number, number][] = [];
+  for (const band of x) {
+    if (!Array.isArray(band) || band.length !== 3 || !band.every((v) => typeof v === "number" && Number.isFinite(v))) {
+      return undefined;
+    }
+    out.push(band.map((v: number) => Math.min(100, Math.max(-100, v))) as [number, number, number]);
+  }
+  return out.some((b) => b.some((v) => v !== 0)) ? out : undefined;
+}
 
 /** The four drawn curves' names in the settings. */
 export const CURVE_KEYS = ["tone_curve", "red_curve", "green_curve", "blue_curve"] as const;
@@ -76,7 +106,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | CurveKey>, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -111,6 +141,8 @@ export function cleanSettings(x: unknown): RawSettings {
     const points = cleanCurve(o[k]);
     if (points) out[k] = points;
   }
+  const mixer = cleanMixer(o.mixer);
+  if (mixer) out.mixer = mixer;
   return out;
 }
 
@@ -182,7 +214,8 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     white(p.settings.white, s.white) &&
     !!p.settings.uncorrected === !!s.uncorrected &&
     !!p.settings.curve === !!s.curve &&
-    CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null))
+    CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null)) &&
+    JSON.stringify(p.settings.mixer ?? null) === JSON.stringify(s.mixer ?? null)
   );
 }
 

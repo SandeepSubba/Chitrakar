@@ -4078,6 +4078,21 @@ button.fold:hover {
   gap: 0.4rem;
 }
 
+/* The colour mixer's choice of hue, saturation or luminance. */
+.develop-mixing {
+  display: flex;
+  gap: 0.25rem;
+}
+.develop-mixing button {
+  flex: 1;
+  font-size: 0.72rem;
+  padding: 0.2rem 0;
+}
+.develop-mixing button.active {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
 /* A setting's number, typed into where it is shown. */
 .develop-number {
   width: 3.6rem;

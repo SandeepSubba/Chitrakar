@@ -104,6 +104,13 @@ check(
   check(auto.green_curve === undefined, "and green, already full, left straight");
 }
 
+// The colour mixer read back: eight bands of three, held to the sliders.
+const mixed = d.cleanSettings({ mixer: Array.from({ length: 8 }, (_, i) => (i === 5 ? [0, 0, -250] : [0, 0, 0])) });
+check(mixed.mixer && mixed.mixer[5][2] === -100, `a mixer held to its sliders (${JSON.stringify(mixed.mixer)})`);
+check(d.cleanSettings({ mixer: Array.from({ length: 8 }, () => [0, 0, 0]) }).mixer === undefined, "an untouched mixer is none");
+check(d.cleanSettings({ mixer: [[1, 2, 3]] }).mixer === undefined, "and one of the wrong shape is none");
+check(d.MIXER_BANDS.length === 8, "eight bands");
+
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));
   process.exit(1);

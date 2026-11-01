@@ -747,6 +747,15 @@ pub struct RawDevelop {
     pub green_curve: Vec<[f32; 2]>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub blue_curve: Vec<[f32; 2]>,
+    /// The colour mixer: hue, saturation and luminance, -100 to 100, for
+    /// each of eight bands of colour — red, orange, yellow, green, aqua,
+    /// blue, purple, magenta, as Lightroom names them. All nought is none.
+    #[serde(skip_serializing_if = "untouched_mixer")]
+    pub mixer: [[f32; 3]; 8],
+}
+
+fn untouched_mixer(m: &[[f32; 3]; 8]) -> bool {
+    m.iter().flatten().all(|v| *v == 0.0)
 }
 
 impl RasterRef {

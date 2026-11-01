@@ -15386,6 +15386,26 @@ assert(
   await win.locator('button[aria-label="Restore the window"]').click();
   await settle();
   assert((await win.evaluate((el) => getComputedStyle(el).resize)) === "both", "restored, its corner resizes it");
+  // The colour mixer: the card made warm, then the warm bands' saturation
+  // taken all the way down — it is grey again, as bright as it was.
+  await win.locator('input[aria-label="Temperature"]').fill("800");
+  await settle();
+  const warmCard = await previewAt(0.25, 0.5);
+  assert(warmCard[0] > warmCard[2] + 15, `a warm card to take the colour out of (${warmCard})`);
+  await win.locator('.develop-mixing button:text-is("Saturation")').click();
+  for (const band of ["Red", "Orange", "Yellow"]) {
+    await win.locator(`input[aria-label="${band} saturation"]`).fill("-100");
+  }
+  await settle();
+  const unwarmed = await previewAt(0.25, 0.5);
+  assert(
+    // At least halved: a tint this pale is near grey, and the mixer eases
+    // off towards grey so a white wall keeps its white.
+    Math.abs(unwarmed[0] - unwarmed[2]) < (warmCard[0] - warmCard[2]) / 2,
+    `the warm bands' saturation down takes the warmth out (${warmCard} to ${unwarmed})`,
+  );
+  await win.locator('button:text-is("Reset")').click();
+  await settle();
   // Detail is judged at the photograph's own size: the square follows a
   // click on the photograph, and sharpening changes what is in it.
   const loupe = win.locator('canvas[aria-label="At its own size"]');

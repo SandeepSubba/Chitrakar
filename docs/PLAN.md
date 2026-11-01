@@ -10568,6 +10568,19 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **A colour mixer in the develop window** ✅ (Lightroom's HSL):
+  hue, saturation and luminance for eight bands — red, orange, yellow,
+  green, aqua, blue, purple, magenta, unevenly round the circle as
+  Lightroom has them (`RawDevelop::mixer`, `develop::mix`). A pixel's
+  hue is shared between the two bands either side of it, so nothing sits
+  in a seam; the hue is turned in HSV (up to thirty degrees), saturation
+  scaled about the colour's own brightness (a red taken to grey is as
+  bright as it looked — HSV's own value made it far brighter), and
+  luminance moved up to about a stop and a half. It eases in from a
+  twentieth of full colour to a third, so a white wall tinted by the
+  light does not darken when the sky's blue is taken down (seen on the
+  X-T5's overcast street before that easing was added). On the eye's
+  scale (square roots), applied before the channel curves. Smoke 9cn.
   **The develop window, put through its sliders** ✅ (reported: no
   curve; exposure blows out quickly; make the window resizable). Each
   slider was developed at -100, -50, 0, +50 and +100 on an X-T5 RAF and
