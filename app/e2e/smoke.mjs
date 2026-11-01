@@ -15344,6 +15344,48 @@ assert(
   await win.locator('input[aria-label="Dehaze"]').fill("0");
   await settle();
   assert(JSON.stringify(await previewAt(0.25, 0.5)) === JSON.stringify(unhazed), "and nought is the picture as it was");
+  // A tone curve, drawn over the preview's tones: the middle pulled up
+  // brightens the darker grey; double-clicking the point takes it away.
+  const curve = win.locator('svg[aria-label="Tone curve"]');
+  assert(await curve.isVisible(), "the develop window has a tone curve");
+  await curve.scrollIntoViewIfNeeded();
+  const cb = await curve.boundingBox();
+  await page.mouse.move(cb.x + cb.width * 0.4, cb.y + cb.height * 0.6);
+  await page.mouse.down();
+  await page.mouse.move(cb.x + cb.width * 0.4, cb.y + cb.height * 0.3, { steps: 6 });
+  await page.mouse.up();
+  await settle();
+  const curvedUp = await previewAt(0.25, 0.5);
+  assert(curvedUp[1] > unhazed[1] + 15, `the curve pulled up brightens the picture (${unhazed} to ${curvedUp})`);
+  await win.locator('button:text-is("Reset")').click();
+  await settle();
+  // A value typed rather than dragged.
+  await win.locator('input[aria-label="Exposure value"]').fill("0.5");
+  await settle();
+  assert(
+    (await win.locator('input[aria-label="Exposure"]').inputValue()) === "0.5",
+    "a setting's value can be typed",
+  );
+  await win.locator('input[aria-label="Exposure value"]').fill("0");
+  await settle();
+  // The window fills the screen and comes back; the preview grows with it.
+  const small = await win.boundingBox();
+  const smallPic = await win.locator('canvas[aria-label="Developed picture"]').evaluate((c) => c.width);
+  await win.locator('button[aria-label="Fill the screen"]').click();
+  await settle();
+  await page.waitForTimeout(300);
+  const large = await win.boundingBox();
+  const largePic = await win.locator('canvas[aria-label="Developed picture"]').evaluate((c) => c.width);
+  assert(large.width > small.width + 50 && large.height >= small.height, `Fill screen makes the window bigger (${small.width}x${small.height} → ${large.width}x${large.height})`);
+  assert(largePic >= smallPic, `and the preview is developed for it (${smallPic} → ${largePic})`);
+  assert(
+    (await win.evaluate((el) => getComputedStyle(el).resize)) === "none" &&
+      (await win.locator('button[aria-label="Restore the window"]').count()) === 1,
+    "filled, it is not resized by its corner, and offers to come back",
+  );
+  await win.locator('button[aria-label="Restore the window"]').click();
+  await settle();
+  assert((await win.evaluate((el) => getComputedStyle(el).resize)) === "both", "restored, its corner resizes it");
   // Detail is judged at the photograph's own size: the square follows a
   // click on the photograph, and sharpening changes what is in it.
   const loupe = win.locator('canvas[aria-label="At its own size"]');

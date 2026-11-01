@@ -79,6 +79,31 @@ check(d.cleanPresets("x").length === 0, "a list or nothing");
 check(d.samePreset(presets[1], { ...d.RAW_DEFAULTS, contrast: -40 }), "a preset is in hand when every setting is its");
 check(!d.samePreset(presets[1], { ...d.RAW_DEFAULTS, contrast: -40, white: [5000, 0] }), "and not when the light differs");
 
+// Drawn curves read back: held to the square, in order, and the straight
+// line is no curve.
+const curved = d.cleanSettings({ tone_curve: [[1, 1.4], [0, -1], [0.5, 0.7]] });
+check(JSON.stringify(curved.tone_curve) === "[[0,0],[0.5,0.7],[1,1]]", `a curve held and put in order (${JSON.stringify(curved.tone_curve)})`);
+check(d.cleanSettings({ red_curve: [[0, 0], [1, 1]] }).red_curve === undefined, "a straight curve is none");
+check(d.cleanSettings({ blue_curve: [[0, 0], ["x", 1]] }).blue_curve === undefined, "a curve that is not numbers is none");
+check(d.cleanSettings({ green_curve: Array.from({ length: 40 }, (_, i) => [i / 40, i / 40]) }).green_curve === undefined, "nor one of forty points");
+check(
+  !d.samePreset({ name: "x", settings: { ...d.RAW_DEFAULTS } }, { ...d.RAW_DEFAULTS, tone_curve: [[0, 0], [0.5, 0.6], [1, 1]] }),
+  "a preset is not in hand when the curve differs",
+);
+// Each channel to its own ends: a picture whose red stops short of white
+// and whose blue starts above black.
+{
+  const px = new Uint8ClampedArray(4 * 1000);
+  for (let i = 0; i < 1000; i++) {
+    const t = i / 999;
+    px.set([Math.round(t * 200), Math.round(t * 255), Math.round(30 + t * 225), 255], i * 4);
+  }
+  const auto = d.autoChannels(d.histogram(px));
+  check(auto.red_curve && Math.abs(auto.red_curve[1][0] - 200 / 255) < 0.01, `red stretched to where it stops (${JSON.stringify(auto.red_curve)})`);
+  check(auto.blue_curve && Math.abs(auto.blue_curve[0][0] - 30 / 255) < 0.01, `blue from where it starts (${JSON.stringify(auto.blue_curve)})`);
+  check(auto.green_curve === undefined, "and green, already full, left straight");
+}
+
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));
   process.exit(1);

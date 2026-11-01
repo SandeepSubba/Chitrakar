@@ -264,7 +264,7 @@ impl Presence {
                 let base = a * p + b;
                 // Most in the middle tones, none at black or white.
                 let middle = (4.0 * p * (1.0 - p)).clamp(0.0, 1.0);
-                let p2 = (p + self.clarity * (p - base) * middle).clamp(0.0, 1.0);
+                let p2 = (p + 1.6 * self.clarity * (p - base) * middle).clamp(0.0, 1.0);
                 let k = p2.powf(2.2) / y;
                 c = c.map(|v| v * k);
             }

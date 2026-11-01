@@ -28,7 +28,18 @@ export type RawSettings = {
   /** The tones a camera's own pictures have, under the rest: on for a new
    * development, off for one made before there was such a curve. */
   curve?: boolean;
+  /** The tone curve drawn in the window, and one a channel: `[in, out]`
+   * points from nought to one, as a Curves layer keeps them. Absent is
+   * straight. */
+  tone_curve?: [number, number][];
+  red_curve?: [number, number][];
+  green_curve?: [number, number][];
+  blue_curve?: [number, number][];
 };
+
+/** The four drawn curves' names in the settings. */
+export const CURVE_KEYS = ["tone_curve", "red_curve", "green_curve", "blue_curve"] as const;
+export type CurveKey = (typeof CURVE_KEYS)[number];
 
 /** What the develop window starts from: the size, the camera's own
  * white balance as a temperature and tint, and whether the file carries
@@ -65,7 +76,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve">, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -96,6 +107,52 @@ export function cleanSettings(x: unknown): RawSettings {
   }
   if (o.uncorrected === true) out.uncorrected = true;
   if (typeof o.curve === "boolean") out.curve = o.curve;
+  for (const k of CURVE_KEYS) {
+    const points = cleanCurve(o[k]);
+    if (points) out[k] = points;
+  }
+  return out;
+}
+
+/** A drawn curve read from somewhere that might say anything: two to
+ * thirty-two points, each two numbers held to nought to one, in order of
+ * their input; anything else, or the straight line, is no curve. */
+export function cleanCurve(x: unknown): [number, number][] | undefined {
+  if (!Array.isArray(x) || x.length < 2 || x.length > 32) return undefined;
+  const points: [number, number][] = [];
+  for (const p of x) {
+    if (!Array.isArray(p) || p.length !== 2 || !p.every((v) => typeof v === "number" && Number.isFinite(v))) {
+      return undefined;
+    }
+    points.push([Math.min(1, Math.max(0, p[0])), Math.min(1, Math.max(0, p[1]))]);
+  }
+  points.sort((a, b) => a[0] - b[0]);
+  return points.every(([a, b]) => Math.abs(a - b) < 1e-6) ? undefined : points;
+}
+
+/** Each channel taken to its own ends, from the developed preview's
+ * histogram: a thousandth of the picture left outside at each end, so a
+ * speck of dust is not what decides where a channel's black is. What
+ * pulls a colour cast out without being told what is grey — a channel
+ * curve each, two points, the plainest curve that says it; a channel
+ * with nothing to stretch is left straight. */
+export function autoChannels(h: Histogram): Partial<Record<CurveKey, [number, number][]>> {
+  const ends = (bins: Uint32Array): [number, number] | null => {
+    let total = 0;
+    for (const n of bins) total += n;
+    if (total === 0) return null;
+    const cut = total / 1000;
+    let lo = 0;
+    for (let seen = 0; lo < 255 && seen + bins[lo] <= cut; lo++) seen += bins[lo];
+    let hi = 255;
+    for (let seen = 0; hi > 0 && seen + bins[hi] <= cut; hi--) seen += bins[hi];
+    return hi - lo >= 8 ? [lo / 255, hi / 255] : null;
+  };
+  const out: Partial<Record<CurveKey, [number, number][]>> = {};
+  for (const [key, bins] of [["red_curve", h.r], ["green_curve", h.g], ["blue_curve", h.b]] as const) {
+    const e = ends(bins);
+    if (e && (e[0] > 0.004 || e[1] < 0.996)) out[key] = [[e[0], 0], [e[1], 1]];
+  }
   return out;
 }
 
@@ -124,7 +181,8 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     keys.every((k) => p.settings[k] === s[k]) &&
     white(p.settings.white, s.white) &&
     !!p.settings.uncorrected === !!s.uncorrected &&
-    !!p.settings.curve === !!s.curve
+    !!p.settings.curve === !!s.curve &&
+    CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null))
   );
 }
 

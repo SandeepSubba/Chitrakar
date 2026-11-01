@@ -697,7 +697,7 @@ pub struct Developed {
 /// is pixels. Every value at zero (and no white balance) is the plain
 /// development: the camera's own balance, the brightest hundredth at
 /// white. The tone settings run -100 to 100, as Lightroom's do.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RawDevelop {
     /// The light's temperature in kelvin and a tint (green minus,
@@ -734,6 +734,19 @@ pub struct RawDevelop {
     /// developed before there was one, so it develops again as it was;
     /// the develop window starts new ones with it on.
     pub curve: bool,
+    /// The tone curve drawn in the develop window: `(in, out)` points on
+    /// the picture's own scale, nought to one, as a Curves layer keeps
+    /// them, laid on the tones after everything above. Empty is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tone_curve: Vec<[f32; 2]>,
+    /// The same, a channel at a time, after the tone curve: what takes a
+    /// cast out of the shadows and not the highlights.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub red_curve: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub green_curve: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blue_curve: Vec<[f32; 2]>,
 }
 
 impl RasterRef {

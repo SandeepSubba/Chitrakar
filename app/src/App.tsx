@@ -67,6 +67,9 @@ import {
   type RawInfo,
   type RawSettings,
   samePreset,
+  cleanCurve,
+  autoChannels,
+  type CurveKey,
   sliderToKelvin,
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
@@ -14096,7 +14099,22 @@ function RawDevelopDialog({
   const [before, setBefore] = useState(false);
   const [showClip, setShowClip] = useState<{ high: boolean; low: boolean }>({ high: false, low: false });
   const [clipped, setClipped] = useState<{ high: number; low: number }>({ high: 0, low: 0 });
+  /** The developed preview's tones, for the tone curve to be drawn over,
+   * as four runs of 256 (red, green, blue, and a run left empty). */
+  const [bins, setBins] = useState<Uint32Array | null>(null);
+  /** The window filling the screen, or the size it was given. */
+  const [big, setBig] = useState(false);
+  /** The picture's box, so a window made bigger develops a bigger
+   * preview and puts the spot's mark back where it belongs. */
+  const [boxSize, setBoxSize] = useState<[number, number]>([0, 0]);
   const canvas = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const c = canvas.current;
+    if (!c || typeof ResizeObserver === "undefined") return;
+    const watch = new ResizeObserver(() => setBoxSize([c.clientWidth, c.clientHeight]));
+    watch.observe(c);
+    return () => watch.disconnect();
+  }, []);
   const graph = useRef<HTMLCanvasElement>(null);
   const loupe = useRef<HTMLCanvasElement>(null);
   /** Where the square at its own size is taken, as fractions of the
@@ -14143,6 +14161,11 @@ function RawDevelopDialog({
       const pixels = new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4);
       const hist = histogram(pixels);
       setClipped({ high: hist.high, low: hist.low });
+      const runs = new Uint32Array(1024);
+      runs.set(hist.r, 0);
+      runs.set(hist.g, 256);
+      runs.set(hist.b, 512);
+      setBins(runs);
       const g = graph.current;
       const gx = g?.getContext("2d");
       if (g && gx) drawHistogram(gx, hist, g.width, g.height);
@@ -14154,7 +14177,7 @@ function RawDevelopDialog({
       setFit({ ox: (c.clientWidth - w * k) / 2, oy: (c.clientHeight - h * k) / 2, w: w * k, h: h * k });
     });
     return () => cancelAnimationFrame(frame);
-  }, [s, session, before, showClip]);
+  }, [s, session, before, showClip, boxSize]);
   // The square at its own size: Detail is judged here, since a preview
   // made smaller shows neither sharpening nor noise.
   useEffect(() => {
@@ -14177,9 +14200,32 @@ function RawDevelopDialog({
     return () => cancelAnimationFrame(frame);
   }, [s, session, before, spot]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve">, min: number, max: number, step: number, unit = "") => (
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | CurveKey>, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
-      <SliderHead label={label} value={s[k]} unit={unit} />
+      {/* The value can be typed as well as dragged: a slider a few
+          hundred pixels long for ten stops is a twentieth of a stop a
+          pixel, and a hand wants an exact number sometimes. */}
+      <span className="slider-head">
+        <span>{label}</span>
+        <span className="slider-value">
+          <input
+            type="number"
+            className="develop-number"
+            min={min}
+            max={max}
+            step={step}
+            value={Math.round(s[k] * 100) / 100}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) set(k, Math.min(max, Math.max(min, v)));
+            }}
+            onKeyDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+            aria-label={`${label} value`}
+          />
+          {unit}
+        </span>
+      </span>
       <input
         type="range"
         min={min}
@@ -14218,14 +14264,28 @@ function RawDevelopDialog({
   return (
     <div className="modal-scrim" onPointerDown={onCancel}>
       <div
-        className="modal develop"
+        className={big ? "modal develop big" : "modal develop"}
         role="dialog"
         aria-label="Develop"
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <h2>
-          Develop {name}
-          {count && <span className="develop-count"> — {count[0]} of {count[1]}</span>}
+        <h2 className="develop-title">
+          <span>
+            Develop {name}
+            {count && <span className="develop-count"> — {count[0]} of {count[1]}</span>}
+          </span>
+          {/* The window is resized by its corner; this fills the screen
+              with it, and puts it back. */}
+          <button
+            type="button"
+            className="develop-size"
+            aria-pressed={big}
+            aria-label={big ? "Restore the window" : "Fill the screen"}
+            title={big ? "Restore the window" : "Fill the screen (the corner resizes it)"}
+            onClick={() => setBig((b) => !b)}
+          >
+            {big ? "Restore" : "Fill screen"}
+          </button>
         </h2>
         <div className="develop-body">
           <div className="develop-picture">
@@ -14393,6 +14453,46 @@ function RawDevelopDialog({
             {row("Dehaze", "dehaze", -100, 100, 1)}
             {row("Vibrance", "vibrance", -100, 100, 1)}
             {row("Saturation", "saturation", -100, 100, 1)}
+            <h3 className="props-head">Tone curve</h3>
+            {/* The same curves as a Curves layer, drawn over the developed
+                preview's tones: the tones as they will be seen, after
+                everything above. */}
+            <CurvesPanel
+              curves={{
+                points: s.tone_curve ?? [
+                  [0, 0],
+                  [1, 1],
+                ],
+                red: s.red_curve ?? [],
+                green: s.green_curve ?? [],
+                blue: s.blue_curve ?? [],
+              }}
+              bins={bins}
+              onEdit={(c) =>
+                setS((o) => ({
+                  ...o,
+                  tone_curve: cleanCurve(c.points),
+                  red_curve: cleanCurve(c.red),
+                  green_curve: cleanCurve(c.green),
+                  blue_curve: cleanCurve(c.blue),
+                }))
+              }
+              onGestureEnd={() => {}}
+              onAutoColour={() => {
+                // Measured on the picture without the channel curves it
+                // has now, which are what this replaces.
+                const bare = { ...s, red_curve: undefined, green_curve: undefined, blue_curve: undefined };
+                try {
+                  const out = session.raw_preview(JSON.stringify(bare), 480);
+                  const view = new DataView(out.buffer, out.byteOffset, 8);
+                  const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+                  const hist = histogram(new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4));
+                  setS({ ...bare, ...autoChannels(hist) });
+                } catch {
+                  // No preview to measure: nothing changes.
+                }
+              }}
+            />
             <h3 className="props-head">Detail</h3>
             <canvas
               ref={loupe}

@@ -323,7 +323,9 @@ file opens in the develop window (`RawDevelopDialog`):
 `develop.rs` keeps the sensor's values (`RawPhoto`) and develops them
 with `RawDevelop` — white balance in kelvin and tint through the
 camera's matrix, exposure, highlights, shadows, whites, blacks,
-contrast, Presence (clarity and dehaze, `core/codecs/src/presence.rs`:
+contrast (with a shoulder into white on new developments), a tone
+curve and one a channel (`tone_curve` and kin, Curves' own `curve_lut`),
+Presence (clarity and dehaze, `core/codecs/src/presence.rs`:
 worked out on a ~1024-pixel copy and laid on any size, so the preview,
 the whole development and the square agree), vibrance, saturation, and
 Detail (sharpening, noise reduction, judged in a 1:1 square from

@@ -3994,11 +3994,45 @@ button.fold:hover {
 /* The develop window: the photograph beside its settings, as wide as
    the window allows; on a phone, the photograph above them. */
 .modal.develop {
-  width: min(64rem, calc(100vw - 2rem));
+  /* Resized by its corner, as a window is; never past the screen, and
+     never so small that the settings and the picture cannot both be
+     seen. The picture and the settings share what it is given. */
+  width: min(72rem, calc(100vw - 2rem));
+  height: min(48rem, calc(100vh - 2rem));
+  min-width: min(36rem, calc(100vw - 2rem));
+  min-height: min(26rem, calc(100vh - 2rem));
+  max-width: calc(100vw - 1rem);
+  max-height: calc(100vh - 1rem);
+  resize: both;
+  overflow: hidden;
+}
+/* Filling the screen: the size it was given is set aside, not lost. */
+.modal.develop.big {
+  width: calc(100vw - 1rem) !important;
+  height: calc(100vh - 1rem) !important;
+  resize: none;
+}
+.develop-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.develop-title > span:first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.develop-size {
+  font-size: 0.72rem;
+  font-weight: normal;
+  padding: 0.2rem 0.55rem;
 }
 .develop-body {
   display: flex;
   gap: 1rem;
+  flex: 1;
   min-height: 0;
 }
 .develop-picture {
@@ -4010,7 +4044,7 @@ button.fold:hover {
 }
 .develop-picture canvas {
   width: 100%;
-  height: min(60vh, 34rem);
+  height: 100%;
   object-fit: contain;
   background: var(--bg);
   border-radius: 6px;
@@ -4019,11 +4053,47 @@ button.fold:hover {
   cursor: crosshair;
 }
 .develop-settings {
-  width: 15rem;
+  /* Wider as the window is: a longer slider is a finer one. */
+  width: clamp(15rem, 30%, 26rem);
   flex: none;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.4rem;
+}
+/* In the develop window the curve takes the column's width: the bigger
+   the window, the finer a point can be placed. And a box ticked sits
+   beside its words, not over them. */
+.develop-settings .curve-editor {
+  max-width: none;
+}
+.develop-settings .curve-row {
+  display: block;
+}
+.develop-settings label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* A setting's number, typed into where it is shown. */
+.develop-number {
+  width: 3.6rem;
+  padding: 0 0.15rem;
+  text-align: right;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.develop-number:hover,
+.develop-number:focus {
+  border-color: var(--border);
+  background: var(--bg);
 }
 .develop-settings label {
   display: flex;
@@ -4066,6 +4136,15 @@ button.fold:hover {
   }
   .develop-settings {
     width: auto;
+    overflow-y: visible;
+  }
+  .modal.develop {
+    resize: none;
+    height: calc(100vh - 2rem);
+    overflow-y: auto;
+  }
+  .develop-body {
+    flex: none;
   }
   .develop-picture canvas {
     height: 40vh;
@@ -4150,6 +4229,8 @@ button.fold:hover {
 }
 .develop-frame {
   position: relative;
+  flex: 1;
+  min-height: 0;
 }
 .develop-frame canvas {
   display: block;

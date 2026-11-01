@@ -10568,6 +10568,34 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **The develop window, put through its sliders** ✅ (reported: no
+  curve; exposure blows out quickly; make the window resizable). Each
+  slider was developed at -100, -50, 0, +50 and +100 on an X-T5 RAF and
+  a 6D CR2 and looked at, with what went to white and black counted.
+  **Exposure**: the base curve had no shoulder — past its top, tones
+  went straight to white, so +1 EV clipped 41% of the 6D's still life
+  and +0.5 13%. A shoulder (tanh, from about a stop and a half above
+  middle grey, smooth at the knee) now rolls them into white: no pixel
+  of either photograph reaches pure white at +2 EV, and the tablecloth
+  and the cube's white face keep their texture
+  (`a_stop_more_does_not_take_the_bright_tones_to_white`). **Shadows**
+  sank by an amount, so -100 put 40% of the X-T5's frame at pure black;
+  it sinks by a share now (0.3%). **Whites** stretched the whole range,
+  so it moved the photograph; it carries the top by the square of how
+  high a tone is. **Blacks** keeps its clip, a little softer. **Vibrance**
+  judged colourfulness in linear light, where a muted colour reads half
+  saturated, and barely moved; it is judged as the eye sees it now.
+  **Clarity** is 1.6 times as strong. All of these only on a development
+  with the base curve, so one made before develops as it was. A **tone
+  curve** (`RawDevelop::tone_curve`, and `red_curve`, `green_curve`,
+  `blue_curve`), the Curves layer's own panel and interpolation
+  (`chitrakar_render::curve_lut`) drawn over the preview's histogram,
+  laid on the tones as they will be seen, with Auto colour stretching
+  each channel to its ends (`autoChannels`, measured without the channel
+  curves it replaces). The **window** resizes by its corner (the picture
+  takes the room, and a preview developed for the new size), fills the
+  screen and comes back, its settings column widens with it — a longer
+  slider is a finer one — and every value can be typed. Smoke 9cn.
   **Every tool driven as a person from Photoshop or Illustrator would** ✅
   (after the pen). Each tool was put through what those programs do with
   it, in a fresh document; Rect, Line, Text, Frame, Paint, Eraser, Fill,

@@ -9256,7 +9256,7 @@ impl Session {
             &name,
             Some(Developed {
                 original,
-                settings: *settings,
+                settings: settings.clone(),
             }),
         )
     }
@@ -9356,7 +9356,7 @@ impl Session {
         (new.width, new.height) = (img.width, img.height);
         new.develop = Some(Developed {
             original: developed.original,
-            settings: *settings,
+            settings: settings.clone(),
         });
         Ok(Command::SetKind {
             id,

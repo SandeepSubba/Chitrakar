@@ -1895,7 +1895,7 @@ pub fn auto_tone(photo: &RawPhoto, preview: &RawPreview, s: &RawDevelop) -> RawD
         })
         .collect();
     if ys.is_empty() {
-        return *s;
+        return s.clone();
     }
     let key = (ys.iter().map(|y| (y + 1e-4).ln()).sum::<f32>() / ys.len() as f32).exp();
     let ev = (0.18 / key).log2().clamp(-2.0, 2.0);
@@ -1919,7 +1919,7 @@ pub fn auto_tone(photo: &RawPhoto, preview: &RawPreview, s: &RawDevelop) -> RawD
         contrast: 0.0,
         whites: 0.0,
         blacks: 0.0,
-        ..*s
+        ..s.clone()
     }
 }
 
@@ -2034,6 +2034,14 @@ struct Look {
     curve: Vec<f32>,
     /// The base curve's middle, where it is laid under the rest.
     base: Option<f32>,
+    /// The tone curve drawn in the window, tabled on the picture's own
+    /// scale (`chitrakar_render::curve_lut`, as a Curves layer has it);
+    /// empty when there is none.
+    tone_lut: Vec<f32>,
+    /// The channel curves, each tabled from linear light to linear light
+    /// against the square root of the value, so a pixel reads three
+    /// tables rather than taking six powers; empty where there is none.
+    channel_luts: [Vec<f32>; 3],
     encode: chitrakar_color::Srgb8,
 }
 
@@ -2074,6 +2082,19 @@ impl Look {
             saturation: unit(s.saturation),
             curve: Vec::new(),
             base: s.curve.then_some(photo.middle),
+            tone_lut: drawn_curve(&s.tone_curve),
+            channel_luts: [&s.red_curve, &s.green_curve, &s.blue_curve].map(|points| {
+                let lut = drawn_curve(points);
+                if lut.is_empty() {
+                    return lut;
+                }
+                (0..=CHANNEL_STEPS)
+                    .map(|i| {
+                        let linear = (i as f32 / CHANNEL_STEPS as f32).powi(2);
+                        read_lut(&lut, linear.powf(1.0 / 2.2)).powf(2.2)
+                    })
+                    .collect()
+            }),
             encode: chitrakar_color::Srgb8::new(),
         };
         if !look.tones_untouched() {
@@ -2101,6 +2122,7 @@ impl Look {
 
     fn tones_untouched(&self) -> bool {
         self.base.is_none()
+            && self.tone_lut.is_empty()
             && [
                 self.contrast,
                 self.highlights,
@@ -2132,9 +2154,33 @@ impl Look {
         let y = luma(c);
         if self.saturation != 0.0 || self.vibrance != 0.0 {
             let (hi, lo) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
-            let colourful = if hi > 0.0 { (hi - lo) / hi } else { 0.0 };
+            // How colourful a pixel is, judged as the eye sees it (the
+            // square root stands in for the 2.2 power): in linear light a
+            // muted colour reads as half saturated already, and Vibrance,
+            // which is for the muted ones, barely moved anything.
+            let colourful = if hi <= 0.0 {
+                0.0
+            } else if self.base.is_some() {
+                (hi.sqrt() - lo.max(0.0).sqrt()) / hi.sqrt()
+            } else {
+                (hi - lo) / hi
+            };
             let k = ((1.0 + self.saturation) * (1.0 + self.vibrance * (1.0 - colourful))).max(0.0);
             c = c.map(|v| (y + (v - y) * k).max(0.0));
+        }
+        for (v, lut) in c.iter_mut().zip(&self.channel_luts) {
+            if lut.is_empty() {
+                continue;
+            }
+            // Past white (before it is taken to white below) the curve's
+            // top carries on as it was.
+            *v = if *v >= 1.0 {
+                *v - 1.0 + lut[CHANNEL_STEPS]
+            } else {
+                let at = v.max(0.0).sqrt() * CHANNEL_STEPS as f32;
+                let i = (at as usize).min(CHANNEL_STEPS - 1);
+                lut[i] + (lut[i + 1] - lut[i]) * (at - i as f32)
+            };
         }
         to_white(c)
     }
@@ -2157,21 +2203,66 @@ impl Look {
             let t = (v - 0.5) * 2.0;
             v += self.highlights * 0.15 * (std::f32::consts::PI * t).sin();
         }
-        // Whites and blacks move the ends: where white is reached, and
-        // where black stops.
-        let white = 1.0 - self.whites * 0.25;
-        let black = -self.blacks * 0.1;
-        v = (v - black) / (white - black);
-        // Shadows: the lower tones lifted or sunk, most at a third, none
-        // at black or past the middle's far side.
-        if self.shadows != 0.0 && (0.0..1.0).contains(&v) {
-            let w = v * (1.0 - v) * (1.0 - v) * 6.75;
-            v += self.shadows * 0.25 * w;
+        if self.base.is_none() {
+            // As a development made before the base curve had them, so
+            // that one develops again as it was.
+            let white = 1.0 - self.whites * 0.25;
+            let black = -self.blacks * 0.1;
+            v = (v - black) / (white - black);
+            if self.shadows != 0.0 && (0.0..1.0).contains(&v) {
+                let w = v * (1.0 - v) * (1.0 - v) * 6.75;
+                v += self.shadows * 0.25 * w;
+            }
+        } else {
+            // Whites: the top of the range carried up or down, by the
+            // square of how high a tone is — the middle moves a little,
+            // the shadows not at all. (It was a stretch of the whole
+            // range, so taking the whites down took the photograph down.)
+            if self.whites != 0.0 && v > 0.0 {
+                v *= 1.0 + self.whites * 0.3 * v.min(1.5) * v.min(1.5);
+            }
+            // Blacks: where black stops — pulled down, the darkest tones
+            // go to black; pushed up, black lifts and the rest follows
+            // less the higher it is.
+            let black = -self.blacks * 0.08;
+            v = ((v - black) / (1.0 - black)).max(0.0);
+            // Shadows: the lower tones lifted or sunk, most at about a
+            // third. Sunk by a share of what they are rather than by an
+            // amount, so they darken and never cross into black — at the
+            // end of the slider a deep shadow loses about a stop and a
+            // half. (By an amount, -100 put two fifths of a photograph at
+            // pure black.)
+            if self.shadows > 0.0 && (0.0..1.0).contains(&v) {
+                v += self.shadows * 0.22 * 6.75 * v * (1.0 - v) * (1.0 - v);
+            } else if self.shadows < 0.0 && (0.0..1.0).contains(&v) {
+                v *= 1.0 + self.shadows * 0.55 * (1.0 - v).powi(3);
+            }
         }
         // Contrast: an S about middle grey (18%, as a light meter takes
         // it), the ends held; never so steep that the curve turns back.
         if self.contrast != 0.0 && (0.0..=1.0).contains(&v) {
             v += self.contrast * 1.8 * v * (1.0 - v) * (v - MIDDLE_GREY);
+        }
+        // A shoulder into white, as film has and Lightroom's curve has:
+        // above the knee the tones are drawn together and come towards
+        // white without reaching it, rather than going on straight until
+        // they hit it. Without one, everything past the top of the base
+        // curve went to white at once, and a stop of exposure took a
+        // fifth of a photograph with it. With it, a stop more clips only
+        // what was already nearly white. Smooth at the knee (the slope
+        // carries on through it), and only on a development that has
+        // the base curve, so one made before develops as it was.
+        if self.base.is_some() && v > SHOULDER {
+            v = SHOULDER + (1.0 - SHOULDER) * ((v - SHOULDER) / (1.0 - SHOULDER)).tanh();
+        }
+        // The drawn curve last, on the tones as they will be seen — the
+        // ones the window's histogram is drawn from.
+        if !self.tone_lut.is_empty() {
+            v = if v >= 1.0 {
+                v - 1.0 + read_lut(&self.tone_lut, 1.0)
+            } else {
+                read_lut(&self.tone_lut, v)
+            };
         }
         v.max(0.0).powf(2.2)
     }
@@ -2179,6 +2270,32 @@ impl Look {
 
 /// 18% grey, a photograph's middle where nothing says otherwise.
 const MIDDLE: f32 = 0.18;
+
+/// Steps in a channel curve's table.
+const CHANNEL_STEPS: usize = 1024;
+
+/// A curve drawn in the develop window, tabled as a Curves layer tables
+/// one; empty when it has fewer than two points or is the diagonal, so a
+/// curve put back to straight costs nothing.
+fn drawn_curve(points: &[[f32; 2]]) -> Vec<f32> {
+    let finite = points.iter().all(|p| p[0].is_finite() && p[1].is_finite());
+    if points.len() < 2 || !finite || points.iter().all(|p| (p[0] - p[1]).abs() < 1e-4) {
+        return Vec::new();
+    }
+    chitrakar_render::curve_lut(points)
+}
+
+/// A curve's table read at `x` in nought to one, between its steps.
+fn read_lut(lut: &[f32], x: f32) -> f32 {
+    let last = lut.len() - 1;
+    let at = x.clamp(0.0, 1.0) * last as f32;
+    let i = (at as usize).min(last - 1);
+    lut[i] + (lut[i + 1] - lut[i]) * (at - i as f32)
+}
+
+/// Where the shoulder into white begins, on the perceptual scale `tone`
+/// works in: about a stop and a half above middle grey.
+const SHOULDER: f32 = 0.75;
 
 /// The base curve, in stops from a photograph's middle: where a tone that
 /// far from the middle in the plain development lands in the camera's own
@@ -2608,7 +2725,7 @@ mod tests {
         let on = photo.develop(&s);
         let off = photo.develop(&RawDevelop {
             uncorrected: true,
-            ..s
+            ..s.clone()
         });
         let (middle, corner) = ((60, 40), (4, 4));
         assert!(luma(&off, corner.0, corner.1) < luma(&off, middle.0, middle.1) - 20.0);
@@ -2747,7 +2864,7 @@ mod tests {
         photo.lens = Some(lens_of([-3.0, -6.0], [100.0, 60.0], 0.01, -0.01));
         let off = photo.develop(&RawDevelop {
             uncorrected: true,
-            ..s
+            ..s.clone()
         });
         assert_eq!(plain.rgba8, off.rgba8);
         assert_ne!(plain.rgba8, photo.develop(&s).rgba8);
@@ -3869,6 +3986,110 @@ mod tests {
                 .sum::<f32>()
         };
         assert!(lower(&full) < lower(&before));
+    }
+
+    /// A ramp from black to well past white across the frame, for the
+    /// shoulder and the curves to be read off.
+    fn ramp() -> RawPhoto {
+        let dng = sample::packed(64, 8, 4095, [1.0; 3], |x, _| [x as f32 / 64.0 * 0.9; 3]);
+        crate::raw::unpack(&dng).unwrap()
+    }
+
+    #[test]
+    fn a_stop_more_does_not_take_the_bright_tones_to_white() {
+        let photo = ramp();
+        let at = |s: &RawDevelop| {
+            let img = photo.develop(s);
+            (0..64)
+                .map(|x| img.rgba8[(4 * 64 + x) * 4 + 1])
+                .collect::<Vec<u8>>()
+        };
+        let plain = at(&RawDevelop {
+            curve: true,
+            ..Default::default()
+        });
+        let up = at(&RawDevelop {
+            curve: true,
+            exposure: 1.0,
+            ..Default::default()
+        });
+        // A stop up is brighter all along the ramp...
+        assert!(
+            plain.iter().zip(&up).skip(4).all(|(a, b)| b >= a),
+            "{plain:?}\n{up:?}"
+        );
+        // ...but nothing that was not already bright reaches white: the
+        // tones are drawn together under it rather than cut off.
+        let white = |r: &[u8]| r.iter().filter(|v| **v >= 254).count();
+        for (a, b) in plain.iter().zip(&up) {
+            assert!(
+                *a >= 220 || *b < 254,
+                "{a} went to white at +1\n{plain:?}\n{up:?}"
+            );
+        }
+        // A development without the base curve, made before there was a
+        // shoulder, is as it was: it clips.
+        let old = at(&RawDevelop {
+            exposure: 1.0,
+            ..Default::default()
+        });
+        assert!(white(&old) > white(&up));
+    }
+
+    #[test]
+    fn the_drawn_curves_move_the_tones_and_the_channels() {
+        let photo = ramp();
+        let row = |s: &RawDevelop| {
+            let img = photo.develop(s);
+            img.rgba8[(4 * 64) * 4..(5 * 64) * 4].to_vec()
+        };
+        let base = RawDevelop {
+            curve: true,
+            ..Default::default()
+        };
+        let plain = row(&base);
+        // The middle raised: brighter in the middle, the ends held.
+        let lifted = row(&RawDevelop {
+            tone_curve: vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]],
+            ..base.clone()
+        });
+        let g = |r: &[u8], x: usize| r[x * 4 + 1] as i32;
+        let mid = (0..64).find(|x| g(&plain, *x) >= 110).unwrap();
+        assert!(
+            g(&lifted, mid) > g(&plain, mid) + 20,
+            "{} → {}",
+            g(&plain, mid),
+            g(&lifted, mid)
+        );
+        assert!((g(&lifted, 0) - g(&plain, 0)).abs() <= 2);
+        // A straight curve is no curve at all.
+        assert_eq!(
+            row(&RawDevelop {
+                tone_curve: vec![[0.0, 0.0], [1.0, 1.0]],
+                ..base.clone()
+            }),
+            plain
+        );
+        // The red channel raised in the middle: warmer there, green and
+        // blue untouched.
+        let warm = row(&RawDevelop {
+            red_curve: vec![[0.0, 0.0], [0.5, 0.65], [1.0, 1.0]],
+            ..base.clone()
+        });
+        assert!(warm[mid * 4] as i32 > plain[mid * 4] as i32 + 15);
+        assert!((warm[mid * 4 + 1] as i32 - plain[mid * 4 + 1] as i32).abs() <= 1);
+        assert!((warm[mid * 4 + 2] as i32 - plain[mid * 4 + 2] as i32).abs() <= 1);
+        // And the preview agrees with the development.
+        let pv = photo.preview(32).develop(
+            &photo,
+            &RawDevelop {
+                red_curve: vec![[0.0, 0.0], [0.5, 0.65], [1.0, 1.0]],
+                ..base.clone()
+            },
+        );
+        let pv_plain = photo.preview(32).develop(&photo, &base);
+        let k = (mid / 2) * 4 + 2 * pv.width as usize * 4;
+        assert!(pv.rgba8[k] > pv_plain.rgba8[k] + 10);
     }
 
     #[test]
