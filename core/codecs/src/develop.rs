@@ -3181,6 +3181,9 @@ mod tests {
                 &mut got,
             );
             let (mut err, mut colour, mut n) = (0f64, 0f64, 0usize);
+            // By how many colours clipped: colour off as developed, and
+            // two stops down (where a rebuilt colour shows).
+            let (mut by, mut dark, mut nby) = ([0f64; 4], [0f64; 4], [0usize; 4]);
             // Where every colour clipped: how far from grey it comes out,
             // as a share of its brightness (what a darkening shows).
             let (mut tint, mut blown) = (0f64, 0usize);
@@ -3206,6 +3209,14 @@ mod tests {
                         + ((a[2] - a[1]) - (b[2] - b[1])).abs())
                         as f64;
                     n += 1;
+                    let off = |a: [f32; 3], b: [f32; 3]| {
+                        (((a[0] - a[1]) - (b[0] - b[1])).abs()
+                            + ((a[2] - a[1]) - (b[2] - b[1])).abs()) as f64
+                    };
+                    let k = (0..3).filter(|&c| t[c] / gains[c] > 1.0).count();
+                    by[k] += off(a, b);
+                    dark[k] += off(got[i].map(|v| tone(v / 4.0)), t.map(|v| tone(v / 4.0)));
+                    nby[k] += 1;
                 }
             }
             println!(
@@ -3217,6 +3228,14 @@ mod tests {
                 blown,
                 tint / blown.max(1) as f64
             );
+            for k in 1..4 {
+                println!(
+                    "  {k} clipped: {} px, colour {:.4}, two stops down {:.4}",
+                    nby[k],
+                    by[k] / nby[k].max(1) as f64,
+                    dark[k] / nby[k].max(1) as f64
+                );
+            }
         }
     }
 

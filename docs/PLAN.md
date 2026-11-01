@@ -10429,6 +10429,17 @@ without reading anything else.*
   every clipped site from its neighbours, blown ones too, made blown
   skies more coloured than leaving them alone, and is why blown sites
   are put at white.
+  The harness now splits its colour error by how many colours clipped,
+  as developed and two stops down. Where two of three clipped it is
+  0.033–0.084 (one: 0.008–0.055; all three: 0.034–0.20). Three ways of
+  doing better there were measured on seven Canon pictures and none
+  was kept, since each helped some and hurt others: going by the
+  unclipped colours alone, each with its own offset (blown parts
+  noticeably more coloured, the M5's two-clipped error 0.041 → 0.077);
+  a second pass reading the first's rebuilt values rather than clipped
+  ones (6D 0.046 → 0.034, but 200D, 5D III and M5 worse); and offsets
+  per 128-site tile rather than one for the photograph (550D and 5D III
+  better, 5D II 0.053 → 0.086). The 6D's warm core stays as noted.
   **Big photographs, measured.** Opening, placing and keeping a
   39–51-megapixel raw in the page, profiled: the engine's unpacking
   read each site's colour through a closure and rounded through a
