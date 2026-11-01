@@ -10551,6 +10551,23 @@ without reading anything else.*
   the wrong side against 1.8%, and 0.9 s against 0.36. So U²-Net stays
   and the matte goes in as the model gives it; a better answer is a
   better model, not a filter.
+  **Clarity and Dehaze in the develop window** ✅ (a Presence group with
+  Vibrance and Saturation, as Lightroom has it; `core/codecs/src/presence.rs`).
+  Clarity is midtone contrast at a hundredth of the picture: the
+  difference between brightness and a self-guided filter of it (edge-
+  aware, so a roof against the sky gets no halo), drawn out or, negative,
+  smoothed. Dehaze is the dark channel prior: the air's light read off
+  the haziest thousandth, the transmission refined by a guided filter,
+  the veil taken off in linear light; negative lays one on, a quarter of
+  the air's light at most (at first 60%, which was fog). Both are smooth
+  over the picture, so they are worked out once on a ~1024-pixel copy
+  (`RawPhoto::preview`) and carried up as the fast guided filter's lines,
+  drawn through each pixel's own brightness: no buffer grows with the
+  photograph, and the slider's preview, the whole development and the
+  1:1 square agree (`presence_is_the_same_in_the_square_the_develop_and_the_preview`,
+  smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
+  does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
+  the preview 0.11 → 0.13–0.16 s.
   **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
   the reports for dnglab (filter patterns, Kodak's balance, Canon
   sRAW's black taken off twice, Fuji's orientation, the S23, the

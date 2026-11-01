@@ -14005,7 +14005,9 @@ function RawDevelopDialog({
               />
               Tone curve like the camera's
             </label>
-            <h3 className="props-head">Colour</h3>
+            <h3 className="props-head">Presence</h3>
+            {row("Clarity", "clarity", -100, 100, 1)}
+            {row("Dehaze", "dehaze", -100, 100, 1)}
             {row("Vibrance", "vibrance", -100, 100, 1)}
             {row("Saturation", "saturation", -100, 100, 1)}
             <h3 className="props-head">Detail</h3>

@@ -11,6 +11,7 @@ pub mod develop;
 pub mod lensfun;
 pub mod opcodes;
 pub mod pdf;
+mod presence;
 pub mod psd;
 pub mod psd_export;
 pub mod raw;

@@ -713,6 +713,12 @@ pub struct RawDevelop {
     pub blacks: f32,
     pub vibrance: f32,
     pub saturation: f32,
+    /// Presence: contrast in the middle tones at a scale of about a
+    /// hundredth of the picture, edge-aware, -100 to 100.
+    pub clarity: f32,
+    /// Presence: the veil of air over what is far away taken off, or
+    /// (negative) put on, -100 to 100.
+    pub dehaze: f32,
     /// Detail: an unsharp mask on the brightness, 0 to 150.
     pub sharpen: f32,
     /// Detail: edge-aware smoothing, colour hardest, 0 to 100.

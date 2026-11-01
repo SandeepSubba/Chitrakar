@@ -15,6 +15,10 @@ export type RawSettings = {
   blacks: number;
   vibrance: number;
   saturation: number;
+  /** Presence: contrast in the middle tones, edge-aware, -100 to 100. */
+  clarity: number;
+  /** Presence: the veil of air taken off (or put on), -100 to 100. */
+  dehaze: number;
   /** Detail: unsharp mask on the brightness, 0 to 150. */
   sharpen: number;
   /** Detail: edge-aware smoothing, 0 to 100. */
@@ -48,6 +52,8 @@ export const RAW_DEFAULTS: RawSettings = {
   blacks: 0,
   vibrance: 0,
   saturation: 0,
+  clarity: 0,
+  dehaze: 0,
   sharpen: 0,
   noise: 0,
   curve: true,
@@ -68,6 +74,8 @@ const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve
   blacks: [-100, 100],
   vibrance: [-100, 100],
   saturation: [-100, 100],
+  clarity: [-100, 100],
+  dehaze: [-100, 100],
   sharpen: [0, 150],
   noise: [0, 100],
 };

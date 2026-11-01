@@ -15317,6 +15317,18 @@ assert(
   const ev = Number(await win.locator('input[aria-label="Exposure"]').inputValue());
   assert(ev < 1, `Auto takes the exposure back down (${ev})`);
   assert((await win.locator('select[aria-label="Light"]').inputValue()) === "Custom", "and leaves the light alone");
+  // Presence: Dehaze reads the light grey as the air and takes its veil
+  // off the darker grey, which comes out deeper; nought is as it was.
+  // Clarity is there beside it (a flat card has no texture for it).
+  assert(await win.locator('input[aria-label="Clarity"]').isVisible(), "Clarity is in the develop window");
+  const unhazed = await previewAt(0.25, 0.5);
+  await win.locator('input[aria-label="Dehaze"]').fill("80");
+  await settle();
+  const dehazed = await previewAt(0.25, 0.5);
+  assert(dehazed[1] < unhazed[1] - 4, `Dehaze deepens what is under the veil (${unhazed} to ${dehazed})`);
+  await win.locator('input[aria-label="Dehaze"]').fill("0");
+  await settle();
+  assert(JSON.stringify(await previewAt(0.25, 0.5)) === JSON.stringify(unhazed), "and nought is the picture as it was");
   // Detail is judged at the photograph's own size: the square follows a
   // click on the photograph, and sharpening changes what is in it.
   const loupe = win.locator('canvas[aria-label="At its own size"]');

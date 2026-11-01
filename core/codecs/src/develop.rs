@@ -1454,6 +1454,7 @@ impl RawPhoto {
         let lens = self.lens_for(s);
         let light = lens.map(Lens::light_table);
         let dng = self.dng_for(s);
+        let presence = self.presence_for(s);
         upright
             .par_chunks_mut((BAND * w * 4).max(1))
             .enumerate()
@@ -1469,8 +1470,17 @@ impl RawPhoto {
                     if let Some((frame, ops)) = dng {
                         dng_shade(ops, frame, band, (y0, y1, 0, w), (1.0, 1.0));
                     }
-                    for (px, out) in band.iter().zip(rows.chunks_exact_mut(4)) {
-                        let c = look.finish(*px);
+                    for (k, (px, out)) in band.iter().zip(rows.chunks_exact_mut(4)).enumerate() {
+                        let mut c = look.finish_linear(*px);
+                        if let Some(p) = &presence {
+                            let (x, y) = (k % w, y0 + k / w);
+                            c = to_white(p.apply(
+                                c,
+                                (x as f32 + 0.5) / w as f32,
+                                (y as f32 + 0.5) / h as f32,
+                            ));
+                        }
+                        let c = look.encode(c);
                         out.copy_from_slice(&[c[0], c[1], c[2], 255]);
                     }
                 },
@@ -1539,8 +1549,18 @@ impl RawPhoto {
         if let Some((frame, ops)) = self.dng_for(s) {
             dng_shade(ops, frame, &mut sites, (my0, my1, mx0, mx1), (1.0, 1.0));
         }
-        for (site, out) in sites.iter().zip(px.chunks_exact_mut(4)) {
-            let c = look.finish(*site);
+        let presence = self.presence_for(s);
+        for (k, (site, out)) in sites.iter().zip(px.chunks_exact_mut(4)).enumerate() {
+            let mut c = look.finish_linear(*site);
+            if let Some(p) = &presence {
+                let (x, y) = (mx0 + k % mw, my0 + k / mw);
+                c = to_white(p.apply(
+                    c,
+                    (x as f32 + 0.5) / self.width as f32,
+                    (y as f32 + 0.5) / self.height as f32,
+                ));
+            }
+            let c = look.encode(c);
             out.copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
         let px = detail(&px, mw, mh, s.sharpen, s.noise).unwrap_or(px);
@@ -1555,6 +1575,18 @@ impl RawPhoto {
             height: height as u32,
             rgba8,
         }
+    }
+
+    /// Clarity and Dehaze for these settings, worked out on a copy of
+    /// the photograph about 1024 pixels across; `None` when both are
+    /// nought.
+    fn presence_for(&self, s: &RawDevelop) -> Option<crate::presence::Presence> {
+        if s.clarity == 0.0 && s.dehaze == 0.0 {
+            return None;
+        }
+        let small = self.preview(1024);
+        let linear = small.linear(self, s);
+        crate::presence::Presence::new(&linear, small.width, small.height, s.clarity, s.dehaze)
     }
 
     /// A smaller picture to develop as a slider moves: blocks of sites
@@ -1903,6 +1935,41 @@ impl RawPreview {
     pub fn develop(&self, photo: &RawPhoto, s: &RawDevelop) -> SourceImage {
         let look = Look::new(photo, s);
         let (pw, ph) = (self.width, self.height);
+        let mut linear = self.linear_with(photo, s, &look);
+        // Presence worked out on the preview itself: its reach is a
+        // fraction of the picture, so it is the same at any size.
+        if let Some(p) = crate::presence::Presence::new(&linear, pw, ph, s.clarity, s.dehaze) {
+            for (k, c) in linear.iter_mut().enumerate() {
+                let (u, v) = (
+                    ((k % pw) as f32 + 0.5) / pw as f32,
+                    ((k / pw) as f32 + 0.5) / ph as f32,
+                );
+                *c = to_white(p.apply(*c, u, v));
+            }
+        }
+        let mut upright = vec![0u8; pw * ph * 4];
+        for (i, c) in linear.iter().enumerate() {
+            let c = look.encode(*c);
+            upright[i * 4..i * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+        let geometry = photo.straighten(s, pw, ph);
+        let (width, height, rgba8) =
+            orient_through(upright, pw, ph, photo.orientation, geometry.as_ref());
+        SourceImage {
+            width: width as u32,
+            height: height as u32,
+            rgba8,
+        }
+    }
+
+    /// The preview finished in linear light, before Presence and before
+    /// it is turned upright.
+    fn linear(&self, photo: &RawPhoto, s: &RawDevelop) -> Vec<[f32; 3]> {
+        self.linear_with(photo, s, &Look::new(photo, s))
+    }
+
+    fn linear_with(&self, photo: &RawPhoto, s: &RawDevelop, look: &Look) -> Vec<[f32; 3]> {
+        let (pw, ph) = (self.width, self.height);
         let mut sites: Vec<[f32; 3]> = self
             .cam
             .iter()
@@ -1920,19 +1987,7 @@ impl RawPreview {
             );
             dng_shade(ops, frame, &mut sites, (0, ph, 0, pw), scale);
         }
-        let mut upright = vec![0u8; pw * ph * 4];
-        for (i, c) in sites.iter().enumerate() {
-            let c = look.finish(*c);
-            upright[i * 4..i * 4 + 4].copy_from_slice(&[c[0], c[1], c[2], 255]);
-        }
-        let geometry = photo.straighten(s, pw, ph);
-        let (width, height, rgba8) =
-            orient_through(upright, pw, ph, photo.orientation, geometry.as_ref());
-        SourceImage {
-            width: width as u32,
-            height: height as u32,
-            rgba8,
-        }
+        sites.iter().map(|c| look.finish_linear(*c)).collect()
     }
 
     /// Where a point of the upright preview was before the camera's turn.
@@ -2057,12 +2112,18 @@ impl Look {
             .all(|v| *v == 0.0)
     }
 
-    /// Balanced camera colours to an 8-bit sRGB pixel.
-    fn finish(&self, cam: [f32; 3]) -> [u8; 3] {
+    /// A linear colour, nought to one, as the eight bits written.
+    fn encode(&self, c: [f32; 3]) -> [u8; 3] {
+        c.map(|v| self.encode.channel(v.clamp(0.0, 1.0)))
+    }
+
+    /// Balanced camera colours finished in linear light, nought to one,
+    /// before they are eight bits: where Presence (`presence.rs`) is laid on.
+    fn finish_linear(&self, cam: [f32; 3]) -> [f32; 3] {
         let mut c = mul3(&self.to_srgb, cam).map(|v| (v * self.gain).max(0.0));
         let y = luma(c);
         if y <= 0.0 {
-            return [0, 0, 0];
+            return [0.0; 3];
         }
         if !self.curve.is_empty() {
             let y2 = self.curve_at(y);
@@ -2075,20 +2136,7 @@ impl Look {
             let k = ((1.0 + self.saturation) * (1.0 + self.vibrance * (1.0 - colourful))).max(0.0);
             c = c.map(|v| (y + (v - y) * k).max(0.0));
         }
-        // A colour brighter than white goes to white by losing its colour,
-        // as film does, rather than by losing a channel, which turns a
-        // bright sky cyan and a face yellow.
-        let hi = c[0].max(c[1]).max(c[2]);
-        if hi > 1.0 {
-            let y = luma(c);
-            c = if y >= 1.0 {
-                [1.0; 3]
-            } else {
-                let t = (hi - 1.0) / (hi - y);
-                c.map(|v| v + (y - v) * t)
-            };
-        }
-        c.map(|v| self.encode.channel(v.clamp(0.0, 1.0)))
+        to_white(c)
     }
 
     /// The brightness curve, worked in a perceptual scale (a 2.2 power),
@@ -2193,6 +2241,23 @@ pub fn base_curve(y: f32, middle: f32) -> f32 {
 const MIDDLE_GREY: f32 = 0.459_1;
 
 #[inline]
+/// A colour brighter than white taken to white by losing its colour, as
+/// film does, rather than by losing a channel, which turns a bright sky
+/// cyan and a face yellow.
+fn to_white(c: [f32; 3]) -> [f32; 3] {
+    let hi = c[0].max(c[1]).max(c[2]);
+    if hi <= 1.0 {
+        return c;
+    }
+    let y = luma(c);
+    if y >= 1.0 {
+        [1.0; 3]
+    } else {
+        let t = (hi - 1.0) / (hi - y);
+        c.map(|v| v + (y - v) * t)
+    }
+}
+
 fn luma(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
@@ -3748,6 +3813,62 @@ mod tests {
         // Held inside the picture at the corner.
         let corner = photo.develop_square(&s, 1.0, 1.0, 8);
         assert_eq!((corner.width, corner.height), (8, 8));
+    }
+
+    /// Clarity and Dehaze are worked out on a small copy and laid on the
+    /// photograph at any size, so the square at its own size is the
+    /// development there with them as without, and the preview is the
+    /// same picture smaller.
+    #[test]
+    fn presence_is_the_same_in_the_square_the_develop_and_the_preview() {
+        // Grey steps with a fine check on them, and a bright band of
+        // "sky" for the air to be read off.
+        let dng = sample::packed(96, 64, 4095, [1.0; 3], |x, y| {
+            if y < 8 {
+                return [0.7, 0.72, 0.75];
+            }
+            let base = 0.06 + 0.04 * (x / 24) as f32;
+            let tex = if (x / 2 + y / 2) % 2 == 0 { 1.2 } else { 0.85 };
+            [base * tex, base * tex * 0.9, base * tex * 0.8]
+        });
+        let photo = crate::raw::unpack(&dng).unwrap();
+        let plain = RawDevelop::default();
+        let s = RawDevelop {
+            clarity: 80.0,
+            dehaze: 60.0,
+            ..Default::default()
+        };
+        let (before, full) = (photo.develop(&plain), photo.develop(&s));
+        assert_ne!(before.rgba8, full.rgba8, "presence changed nothing");
+        let sq = photo.develop_square(&s, 0.5, 0.6, 16);
+        // Centred on (48, 38): its top left is (40, 30).
+        for (x, y) in [(0, 0), (15, 15), (7, 9)] {
+            let a = &full.rgba8[(((30 + y) * 96 + 40 + x) * 4) as usize..][..4];
+            let b = &sq.rgba8[((y * 16 + x) * 4) as usize..][..4];
+            assert_eq!(a, b, "at {x},{y}");
+        }
+        // The preview, made two to one, is the development averaged —
+        // near enough, since it is worked out on its own blocks.
+        let preview = photo.preview(48).develop(&photo, &s);
+        let (pw, ph) = (preview.width as usize, preview.height as usize);
+        assert_eq!((pw, ph), (48, 32));
+        let mean =
+            |img: &[u8]| img.chunks(4).map(|p| p[1] as f32).sum::<f32>() / (img.len() / 4) as f32;
+        let full_mean = mean(&full.rgba8);
+        let preview_mean = mean(&preview.rgba8);
+        assert!(
+            (full_mean - preview_mean).abs() < 6.0,
+            "{full_mean} against {preview_mean}"
+        );
+        // And the dehazed picture is deeper than the plain one where it
+        // is not sky: the veil taken off.
+        let lower = |img: &SourceImage| {
+            img.rgba8[(16 * 96 * 4)..]
+                .chunks(4)
+                .map(|p| p[1] as f32)
+                .sum::<f32>()
+        };
+        assert!(lower(&full) < lower(&before));
     }
 
     #[test]
