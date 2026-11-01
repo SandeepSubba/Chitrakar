@@ -33,6 +33,7 @@ use crate::opcodes::{Frame, GainMap, Op};
 use crate::raw::{camera_to_srgb, orient, Mosaic, Sample};
 use crate::{CodecError, SourceImage};
 use chitrakar_doc::RawDevelop;
+use rayon::prelude::*;
 
 /// The tile a colour filter's pattern is read into: twelve each way is a
 /// whole number of every pattern there is (2×2 Bayer, 6×6 X-Trans, and
@@ -427,53 +428,40 @@ fn orient_through(
     let Some(geometry) = geometry.filter(|_| w >= 2 && h >= 2) else {
         return orient(px, w, h, o);
     };
-    let swap = (5..=8).contains(&o);
-    let (ow, oh) = if swap { (h, w) } else { (w, h) };
-    let mut out = vec![0u8; px.len()];
     let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
     // Source positions in 256ths of a pixel, kept short of the far edges
     // by a 256th so that the four neighbours are always there.
     let (most_x, most_y) = (((w - 1) * 256 - 1) as f32, ((h - 1) * 256 - 1) as f32);
     let (hw256, hh256) = ((hw - 0.5) * 256.0, (hh - 0.5) * 256.0);
     let (right, down) = (4, w * 4);
-    // Where (x, y) of the photograph goes in the turned picture, as a
-    // start for each row and a step along it.
-    let place = |x: usize, y: usize| match o {
-        2 => (w - 1 - x, y),
-        3 => (w - 1 - x, h - 1 - y),
-        4 => (x, h - 1 - y),
-        5 => (y, x),
-        6 => (h - 1 - y, x),
-        7 => (h - 1 - y, w - 1 - x),
-        8 => (y, w - 1 - x),
-        _ => (x, y),
-    };
-    let index = |(nx, ny): (usize, usize)| (ny * ow + nx) as isize * 4;
-    let step = index(place(1, 0)) - index(place(0, 0));
-    // Walked in the photograph's own rows, so that what each point reads
-    // is near what the last one read; written where `orient` puts it.
-    for y in 0..h {
-        let qy = y as f32 + 0.5 - hh;
-        let mut to = index(place(0, y));
-        for x in 0..w {
-            let qx = x as f32 + 0.5 - hw;
-            let from = geometry.sources(qx, qy);
-            let at_out = to as usize;
-            let pixel: [u8; 3] = std::array::from_fn(|c| {
-                // Pixel centres are at the halves.
-                let fx = (from[c][0] * 256.0 + hw256).clamp(0.0, most_x) as u32;
-                let fy = (from[c][1] * 256.0 + hh256).clamp(0.0, most_y) as u32;
-                let (tx, ty) = (fx & 255, fy & 255);
-                let at = ((fy >> 8) as usize * w + (fx >> 8) as usize) * 4 + c;
-                let top = px[at] as u32 * (256 - tx) + px[at + right] as u32 * tx;
-                let bottom = px[at + down] as u32 * (256 - tx) + px[at + down + right] as u32 * tx;
-                ((top * (256 - ty) + bottom * ty + 32768) >> 16) as u8
-            });
-            out[at_out..at_out + 4].copy_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
-            to += step;
-        }
-    }
-    (ow, oh, out)
+    // Straightened in the photograph's own rows, so that what each point
+    // reads is near what the last one read, a row to a thread; then
+    // turned as `orient` turns a picture.
+    let mut straight = vec![0u8; w * h * 4];
+    straight
+        .par_chunks_mut(w * 4)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let qy = y as f32 + 0.5 - hh;
+            for (x, out) in row.chunks_exact_mut(4).enumerate() {
+                let qx = x as f32 + 0.5 - hw;
+                let from = geometry.sources(qx, qy);
+                let pixel: [u8; 3] = std::array::from_fn(|c| {
+                    // Pixel centres are at the halves.
+                    let fx = (from[c][0] * 256.0 + hw256).clamp(0.0, most_x) as u32;
+                    let fy = (from[c][1] * 256.0 + hh256).clamp(0.0, most_y) as u32;
+                    let (tx, ty) = (fx & 255, fy & 255);
+                    let at = ((fy >> 8) as usize * w + (fx >> 8) as usize) * 4 + c;
+                    let top = px[at] as u32 * (256 - tx) + px[at + right] as u32 * tx;
+                    let bottom =
+                        px[at + down] as u32 * (256 - tx) + px[at + down + right] as u32 * tx;
+                    ((top * (256 - ty) + bottom * ty + 32768) >> 16) as u8
+                });
+                out.copy_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+        });
+    drop(px);
+    orient(straight, w, h, o)
 }
 
 /// Lift a DNG's vignette and its gain maps off the sites of a region
@@ -1458,28 +1446,35 @@ impl RawPhoto {
         let (w, h) = (self.width, self.height);
         let mut upright = vec![0u8; w * h * 4];
         // In bands, so X-Trans's working planes are a band's, not the
-        // photograph's.
+        // photograph's; and the bands on as many threads as there are
+        // (one after another where there is one, as in a page that is not
+        // cross-origin isolated). Each band is the same whichever thread
+        // develops it, so the picture is too.
         const BAND: usize = 128;
         let lens = self.lens_for(s);
         let light = lens.map(Lens::light_table);
-        let (mut planes, mut band) = (Planes::default(), Vec::new());
-        for y0 in (0..h).step_by(BAND) {
-            let y1 = (y0 + BAND).min(h);
-            self.region((y0, y1, 0, w), &look.wb, &mut planes, &mut band);
-            if let Some(light) = &light {
-                brighten(light, &mut band, (w, h), (y0, y1, 0, w));
-            }
-            if let Some((frame, ops)) = self.dng_for(s) {
-                dng_shade(ops, frame, &mut band, (y0, y1, 0, w), (1.0, 1.0));
-            }
-            for (px, out) in band
-                .iter()
-                .zip(upright[y0 * w * 4..y1 * w * 4].chunks_exact_mut(4))
-            {
-                let c = look.finish(*px);
-                out.copy_from_slice(&[c[0], c[1], c[2], 255]);
-            }
-        }
+        let dng = self.dng_for(s);
+        upright
+            .par_chunks_mut((BAND * w * 4).max(1))
+            .enumerate()
+            .for_each_init(
+                || (Planes::default(), Vec::new()),
+                |(planes, band), (i, rows)| {
+                    let y0 = i * BAND;
+                    let y1 = (y0 + BAND).min(h);
+                    self.region((y0, y1, 0, w), &look.wb, planes, band);
+                    if let Some(light) = &light {
+                        brighten(light, band, (w, h), (y0, y1, 0, w));
+                    }
+                    if let Some((frame, ops)) = dng {
+                        dng_shade(ops, frame, band, (y0, y1, 0, w), (1.0, 1.0));
+                    }
+                    for (px, out) in band.iter().zip(rows.chunks_exact_mut(4)) {
+                        let c = look.finish(*px);
+                        out.copy_from_slice(&[c[0], c[1], c[2], 255]);
+                    }
+                },
+            );
         let upright = detail(&upright, w, h, s.sharpen, s.noise).unwrap_or(upright);
         let geometry = self.straighten(s, w, h);
         let (width, height, rgba8) =
@@ -1733,71 +1728,77 @@ pub fn detail(rgba: &[u8], w: usize, h: usize, sharpen: f32, noise: f32) -> Opti
             (-(d * d) / (2.0 * range * range)).exp()
         })
         .collect();
-    for top in (0..h).step_by(BAND) {
-        let bottom = (top + BAND).min(h);
-        let (r0, r1) = (top.saturating_sub(reach), (bottom + reach).min(h));
-        let rows = r1 - r0;
-        let n = rows * w;
-        let (mut y, mut cb, mut cr) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
-        for i in 0..n {
-            let p = &rgba[(r0 * w + i) * 4..(r0 * w + i) * 4 + 3];
-            let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
-            let l = 0.299 * r + 0.587 * g + 0.114 * b;
-            y[i] = l;
-            cb[i] = b - l;
-            cr[i] = r - l;
-        }
-        if noise > 0.0 {
-            for ch in [&mut cb, &mut cr] {
-                let blurred = tent(ch, w, rows, radius);
-                for (v, b) in ch.iter_mut().zip(blurred) {
-                    *v += (b - *v) * noise.sqrt();
-                }
+    // Each band reads the picture as it came and writes only its own
+    // rows, so the bands go on as many threads as there are.
+    out.par_chunks_mut(BAND * w * 4)
+        .enumerate()
+        .for_each(|(i, rows_out)| {
+            let top = i * BAND;
+            let bottom = (top + BAND).min(h);
+            let (r0, r1) = (top.saturating_sub(reach), (bottom + reach).min(h));
+            let rows = r1 - r0;
+            let n = rows * w;
+            let (mut y, mut cb, mut cr) = (vec![0f32; n], vec![0f32; n], vec![0f32; n]);
+            for i in 0..n {
+                let p = &rgba[(r0 * w + i) * 4..(r0 * w + i) * 4 + 3];
+                let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+                let l = 0.299 * r + 0.587 * g + 0.114 * b;
+                y[i] = l;
+                cb[i] = b - l;
+                cr[i] = r - l;
             }
-            let src = y.clone();
-            for ly in 0..rows {
-                let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
-                for x in 0..w {
-                    let (left, right) = (x.saturating_sub(1), (x + 1).min(w - 1));
-                    let c = src[ly * w + x];
-                    let (mut sum, mut weight) = (0f32, 0f32);
-                    for (yy, ky) in [(up, 0.5f32), (ly, 1.0), (down, 0.5)] {
-                        let row = &src[yy * w..yy * w + w];
-                        for (xx, kx) in [(left, 0.5f32), (x, 1.0), (right, 0.5)] {
-                            let v = row[xx];
-                            let k = ky * kx * like[(((v - c).abs() * 4.0) as usize).min(1023)];
-                            sum += k * v;
-                            weight += k;
+            if noise > 0.0 {
+                for ch in [&mut cb, &mut cr] {
+                    let blurred = tent(ch, w, rows, radius);
+                    for (v, b) in ch.iter_mut().zip(blurred) {
+                        *v += (b - *v) * noise.sqrt();
+                    }
+                }
+                let src = y.clone();
+                for ly in 0..rows {
+                    let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
+                    for x in 0..w {
+                        let (left, right) = (x.saturating_sub(1), (x + 1).min(w - 1));
+                        let c = src[ly * w + x];
+                        let (mut sum, mut weight) = (0f32, 0f32);
+                        for (yy, ky) in [(up, 0.5f32), (ly, 1.0), (down, 0.5)] {
+                            let row = &src[yy * w..yy * w + w];
+                            for (xx, kx) in [(left, 0.5f32), (x, 1.0), (right, 0.5)] {
+                                let v = row[xx];
+                                let k = ky * kx * like[(((v - c).abs() * 4.0) as usize).min(1023)];
+                                sum += k * v;
+                                weight += k;
+                            }
                         }
+                        y[ly * w + x] = c + (sum / weight - c) * noise;
                     }
-                    y[ly * w + x] = c + (sum / weight - c) * noise;
                 }
             }
-        }
-        for py in top..bottom {
-            let ly = py - r0;
-            let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
-            for px in 0..w {
-                let c = ly * w + px;
-                let mut l = y[c];
-                if sharpen > 0.0 {
-                    let (left, right) = (px.saturating_sub(1), (px + 1).min(w - 1));
-                    let mut blur = 0f32;
-                    for (yy, ky) in [(up, 0.25f32), (ly, 0.5), (down, 0.25)] {
-                        let row = &y[yy * w..yy * w + w];
-                        blur += ky * (0.25 * row[left] + 0.5 * row[px] + 0.25 * row[right]);
+            for py in top..bottom {
+                let ly = py - r0;
+                let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
+                for px in 0..w {
+                    let c = ly * w + px;
+                    let mut l = y[c];
+                    if sharpen > 0.0 {
+                        let (left, right) = (px.saturating_sub(1), (px + 1).min(w - 1));
+                        let mut blur = 0f32;
+                        for (yy, ky) in [(up, 0.25f32), (ly, 0.5), (down, 0.25)] {
+                            let row = &y[yy * w..yy * w + w];
+                            blur += ky * (0.25 * row[left] + 0.5 * row[px] + 0.25 * row[right]);
+                        }
+                        l += (l - blur) * sharpen * 2.0;
                     }
-                    l += (l - blur) * sharpen * 2.0;
+                    let (b, r) = (cb[c] + l, cr[c] + l);
+                    let g = (l - 0.299 * r - 0.114 * b) / 0.587;
+                    let at = ((py - top) * w + px) * 4;
+                    let o = &mut rows_out[at..at + 3];
+                    o[0] = r.round().clamp(0.0, 255.0) as u8;
+                    o[1] = g.round().clamp(0.0, 255.0) as u8;
+                    o[2] = b.round().clamp(0.0, 255.0) as u8;
                 }
-                let (b, r) = (cb[c] + l, cr[c] + l);
-                let g = (l - 0.299 * r - 0.114 * b) / 0.587;
-                let o = &mut out[(py * w + px) * 4..(py * w + px) * 4 + 3];
-                o[0] = r.round().clamp(0.0, 255.0) as u8;
-                o[1] = g.round().clamp(0.0, 255.0) as u8;
-                o[2] = b.round().clamp(0.0, 255.0) as u8;
             }
-        }
-    }
+        });
     Some(out)
 }
 
@@ -2483,6 +2484,43 @@ mod tests {
     fn luma(img: &SourceImage, x: u32, y: u32) -> f32 {
         let p = px(img, x, y);
         0.3 * p[0] as f32 + 0.59 * p[1] as f32 + 0.11 * p[2] as f32
+    }
+
+    #[test]
+    fn a_photograph_developed_on_many_threads_is_the_one_developed_on_one() {
+        // X-Trans and Bayer, through a lens, turned, with Detail: every
+        // stage that runs a band or a row to a thread. Bands of 128 rows,
+        // so a photograph of several.
+        let scene = |x: usize, y: usize| {
+            let v = ((x * 7 + y * 13) % 97) as f32 / 97.0;
+            [0.2 + 0.6 * v, 0.3 + 0.4 * (1.0 - v), 0.5 * v]
+        };
+        let mut x_trans = x_trans_photo(150, 300, scene);
+        x_trans.orientation = 6;
+        let mut bayer =
+            crate::raw::unpack(&sample::packed(150, 300, 4095, [0.8, 1.0, 0.6], |x, y| {
+                scene(x as usize, y as usize)
+            }))
+            .unwrap();
+        bayer.orientation = 3;
+        let s = RawDevelop {
+            sharpen: 60.0,
+            noise: 40.0,
+            ..Default::default()
+        };
+        for mut photo in [x_trans, bayer] {
+            photo.lens = Some(lens_of([0.0, -4.0], [100.0, 50.0], 0.001, -0.001));
+            let on = |threads: usize| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap()
+                    .install(|| photo.develop(&s))
+            };
+            let (one, many) = (on(1), on(4));
+            assert_eq!((one.width, one.height), (many.width, many.height));
+            assert!(one.rgba8 == many.rgba8, "the same bytes");
+        }
     }
 
     #[test]

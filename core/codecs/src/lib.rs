@@ -34,6 +34,13 @@ pub use svg::export_svg;
 pub use svg_import::{import_svg, ImportedSvg};
 pub use tiff_export::{export_cmyk_tiff, TiffError};
 
+/// How many threads the engine's parallel work runs on: the machine's
+/// cores natively, the worker pool in the threaded WebAssembly build,
+/// one in the plain one.
+pub fn threads() -> usize {
+    rayon::current_num_threads()
+}
+
 use chitrakar_color::LinearRgba;
 use image::ImageFormat;
 

@@ -6,6 +6,15 @@ import { readFileSync } from "node:fs";
  * window. */
 const { version } = JSON.parse(readFileSync("./package.json", "utf8"));
 
+/** The two headers that make the page cross-origin isolated, which is
+ * what lets the develop worker's threaded engine share its memory
+ * (`src/developer.ts`). The shell sends them too (tauri.conf.json), and
+ * the service worker adds them where a host does not. */
+const ISOLATION = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+};
+
 export default defineConfig({
   plugins: [react()],
   define: { __APP_VERSION__: JSON.stringify(version) },
@@ -13,7 +22,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    headers: ISOLATION,
   },
+  preview: { headers: ISOLATION },
   // Relative asset paths so the bundle works from Tauri's frontendDist.
   base: "./",
   clearScreen: false,

@@ -71,7 +71,14 @@ import {
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
-import { addLensFiles, forgetLensFile, giveLensProfiles, lensFiles } from "./lensProfiles";
+import {
+  addLensFiles,
+  forgetLensFile,
+  giveLensProfiles,
+  lensFiles,
+  lensProfileTexts,
+} from "./lensProfiles";
+import { developElsewhere, startDeveloper } from "./developer";
 import {
   Adjustment,
   BlendMode,
@@ -8474,6 +8481,14 @@ export function App() {
   /** How many have gone through the window in this run, for "2 of 3". */
   const rawDone = useRef(0);
 
+  /** The open raw file's packed mosaic, for the develop worker to develop
+   * in full when the window's settings are taken (`developer.ts`). */
+  const rawPacked = useRef<Uint8Array | null>(null);
+  /** A packed mosaic developed in full with `json` by the develop worker,
+   * or `null` where it cannot be (the page's own engine develops it). */
+  const developedElsewhere = async (packed: Uint8Array | null, name: string, json: string) =>
+    packed ? developElsewhere(packed, name, json, await lensProfileTexts()) : null;
+
   /** The next raw file waiting, read and shown in the develop window. */
   const openNextRaw = async () => {
     const next = rawQueue.current.shift();
@@ -8490,6 +8505,9 @@ export function App() {
       const packed = await readRaw(next.bytes);
       await giveLensProfiles(session);
       const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
+      rawPacked.current = packed;
+      // The pool's workers start while the sliders are moved.
+      void startDeveloper();
       setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
     } catch (err) {
       alert(
@@ -8518,17 +8536,25 @@ export function App() {
     await nextPaint();
     try {
       const was: [number, number] = [session.width, session.height];
+      const got = await developedElsewhere(rawPacked.current, d.name, json);
       if (d.layer === null) {
-        placed(session.place_raw(json), was);
+        placed(
+          got
+            ? session.place_raw_pixels(got.rgba, got.width, got.height, json)
+            : session.place_raw(json),
+          was,
+        );
         rawDone.current += 1;
       } else {
-        session.redevelop(d.layer, json);
+        if (got) session.redevelop_pixels(d.layer, got.rgba, got.width, got.height, json);
+        else session.redevelop(d.layer, json);
         refresh(session);
       }
     } catch (err) {
       alert(`Could not develop ${d.name}: ${err}`);
     } finally {
       session.raw_close();
+      rawPacked.current = null;
     }
     for (const next of left) {
       setImporting(`Developing ${next.name}${of(rawDone.current + 1)}…`);
@@ -8538,7 +8564,13 @@ export function App() {
         const packed = await readRaw(next.bytes);
         await giveLensProfiles(session);
         session.raw_open(packed, next.bytes, next.name);
-        placed(session.place_raw(json), was);
+        const got = await developedElsewhere(packed, next.name, json);
+        placed(
+          got
+            ? session.place_raw_pixels(got.rgba, got.width, got.height, json)
+            : session.place_raw(json),
+          was,
+        );
       } catch (err) {
         alert(`Could not develop ${next.name}: ${err}`);
       } finally {
@@ -8553,6 +8585,7 @@ export function App() {
     const d = developing;
     setDeveloping(null);
     session?.raw_close();
+    rawPacked.current = null;
     if (d?.layer === null) {
       rawDone.current += 1;
       void openNextRaw();
@@ -8571,6 +8604,8 @@ export function App() {
       const packed = await readRaw(file);
       await giveLensProfiles(session);
       session.raw_open(packed, file, layer.name);
+      rawPacked.current = packed;
+      void startDeveloper();
       const got = JSON.parse(session.raw_open_layer(layer.id)) as {
         info: RawInfo;
         settings: Partial<RawSettings>;
@@ -8613,7 +8648,9 @@ export function App() {
         const packed = await readRaw(file);
         await giveLensProfiles(session);
         session.raw_open(packed, file, t.name);
-        session.stage_redevelop(t.id, settings);
+        const got = await developedElsewhere(packed, t.name, settings);
+        if (got) session.stage_redevelop_pixels(t.id, got.rgba, got.width, got.height, settings);
+        else session.stage_redevelop(t.id, settings);
       }
     } catch (err) {
       alert(`Could not develop every picture: ${err}`);

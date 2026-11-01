@@ -15,6 +15,9 @@ app/src/wasm-pkg/
 app/src/wasm-pdf/
 # And the raw reader's, run in a worker when a raw file is opened
 app/src/wasm-raw/
+# And the engine's threaded build, run by the develop worker (served as
+# it is, so it lives in public/)
+app/public/wasm-threads/
 
 # Editors / OS
 .DS_Store

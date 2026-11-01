@@ -155,3 +155,13 @@ export async function forgetLensFile(name: string): Promise<void> {
   }
   version += 1;
 }
+
+/** The profiles' texts, for the develop worker's engine: the same array
+ * for as long as the set is the same, so the worker is sent them again
+ * only when it changes. */
+let texts: { at: number; list: string[] } | null = null;
+export async function lensProfileTexts(): Promise<string[]> {
+  const list = await all();
+  if (texts?.at !== version) texts = { at: version, list: list.map((f) => f.text) };
+  return texts.list;
+}

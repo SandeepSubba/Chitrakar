@@ -25,6 +25,10 @@ usvg = { version = "0.48", default-features = false, features = ["text"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # lensfun's XML lens profiles; already here for usvg.
 roxmltree = "0.21"
+# Developing a raw file a band to a thread. On a WebAssembly build without
+# threads it runs each band in turn on the calling thread; the engine's
+# threaded build gives it a pool of workers (wasm-bindgen-rayon).
+rayon = "1"
 
 [dev-dependencies]
 # The shared fixture: every command there is, applied and then put

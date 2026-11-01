@@ -619,6 +619,7 @@ dependencies = [
  "flate2",
  "image",
  "image-webp",
+ "rayon",
  "roxmltree",
  "serde",
  "serde_json",

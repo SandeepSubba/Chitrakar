@@ -61,6 +61,25 @@ build that sets one must carry `-C target-feature=+simd128` itself.
 `node tools/bench/engine/run.mjs --io` times a photograph's way in and
 out (decode, save, a raw opened and developed); without `--io`, frames.
 
+A raw file's full development runs on every core: `RawPhoto::develop`
+and `detail` run their bands with rayon, and the lens warp its rows
+(natively that is all there is to it). In the browser the page keeps
+the plain engine, and a develop worker (`src/developWorker.ts`, driven
+by `src/developer.ts`) loads the engine's threaded build, whose memory
+is shared with a pool of workers (wasm-bindgen-rayon). It has to be a
+worker, because rayon's threads wait for one another and a page's
+thread may not wait. The page sends the packed mosaic and settings,
+then places the pixels it gets back (`place_raw_pixels` and its kin).
+`npm run build:wasm-threads` (`app/tools/build-threads.mjs`) builds it
+on the pinned toolchain: RUSTC_BOOTSTRAP for `-Z build-std` (hence
+rust-src in rust-toolchain.toml), its own target folder, and the
+shared-memory linker flags. It writes to `app/public/wasm-threads`,
+served unbundled, because a bundler breaks the pool's self-spawning.
+Shared memory needs a cross-origin isolated page, so the dev server,
+the smoke harness, the benches, the shell (`tauri.conf.json`) and the
+service worker all send COOP/COEP. A page without them develops on its
+own thread as before (smoke 9cn checks the threads).
+
 In the desktop shell a document has a file: Save writes back to it,
 Save as and Open use the system's panels, exports ask where (a folder
 for several files), and File › Open recent keeps `prefs.recent`.

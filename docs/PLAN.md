@@ -10470,6 +10470,29 @@ without reading anything else.*
   it too (smoke 9cn: refused non-database, kept across a reload,
   forgotten). Fisheyes are left out, and a lens's off-centre optical
   axis (lensfun's `<center>`) is not read.
+  **A raw file developed on every core** ✅. The full development's
+  three stages already went in bands of rows: demosaic and tone,
+  Detail, and the lens warp. Each band writes only its own rows, so
+  they now run with rayon (the warp straightens a row to a thread,
+  then turns the picture). The bytes are the same on one thread as on
+  four (`a_photograph_developed_on_many_threads_is_the_one_developed_on_one`).
+  Natively, on four cores, develop went 0.81 → 0.27 s for a 6D, 3.2 →
+  0.85 s for an X-T3 and 5.0 → 1.26 s for an X-T5. In the browser,
+  rayon cannot run on the page, whose thread may not wait on others.
+  So a develop worker loads a threaded build of the engine (shared
+  memory, wasm-bindgen-rayon's pool, `app/tools/build-threads.mjs` on
+  the pinned toolchain), and the page's engine places what it sends
+  back (`raw_develop`, `place_raw_pixels`, `redevelop_pixels`,
+  `stage_redevelop_pixels`). Measured there with a pool of one and of
+  four: X-T3 4.0 → 1.3 s, X-T5 6.4 → 2.1 s, and the page stays
+  responsive meanwhile. It needs a cross-origin isolated page, so every
+  server of the page sends COOP/COEP: the dev server, the harness, the
+  benches, the shell's `tauri.conf.json` and the service worker, which
+  adds them for hosts that cannot. Without them, or if the worker
+  fails or does not start within twenty seconds, the page develops on
+  its own thread as before. The previews the sliders move stay on the
+  page (they are small); unpacking and rebuilding highlights stay on
+  one thread.
   **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
   the reports for dnglab (filter patterns, Kodak's balance, Canon
   sRAW's black taken off twice, Fuji's orientation, the S23, the

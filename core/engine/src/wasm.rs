@@ -1464,6 +1464,62 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Develop the open raw file in full and hand back its pixels (RGBA,
+    /// the size `raw_open` said) without placing it: the develop worker's
+    /// half, on as many threads as its pool has.
+    pub fn raw_develop(&self, settings: &str) -> Result<Vec<u8>, JsError> {
+        let s = raw_settings(settings)?;
+        self.inner
+            .raw_develop(&s)
+            .map(|img| img.rgba8)
+            .map_err(to_js)
+    }
+
+    /// Place the open raw file as the develop worker developed it.
+    pub fn place_raw_pixels(
+        &mut self,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        settings: &str,
+    ) -> Result<f64, JsError> {
+        let s = raw_settings(settings)?;
+        self.inner
+            .place_raw_developed(image_of(rgba, width, height), &s)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// `redevelop`, as the develop worker developed it.
+    pub fn redevelop_pixels(
+        &mut self,
+        id: f64,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        settings: &str,
+    ) -> Result<(), JsError> {
+        let s = raw_settings(settings)?;
+        self.inner
+            .redevelop_developed(NodeId(id as u64), image_of(rgba, width, height), &s)
+            .map_err(to_js)
+    }
+
+    /// `stage_redevelop`, as the develop worker developed it.
+    pub fn stage_redevelop_pixels(
+        &mut self,
+        id: f64,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        settings: &str,
+    ) -> Result<(), JsError> {
+        let s = raw_settings(settings)?;
+        self.inner
+            .stage_redevelop_developed(NodeId(id as u64), image_of(rgba, width, height), &s)
+            .map_err(to_js)
+    }
+
     /// Develop a layer's raw file again with new settings (one undo step).
     pub fn redevelop(&mut self, id: f64, settings: &str) -> Result<(), JsError> {
         let s = raw_settings(settings)?;
@@ -1778,6 +1834,28 @@ pub fn display_p3_profile() -> Vec<u8> {
 #[wasm_bindgen]
 pub fn engine_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// How many threads the engine's parallel work (developing a raw file)
+/// runs on: the worker pool in the threaded build, once
+/// `initThreadPool` has made it; one otherwise.
+#[wasm_bindgen]
+pub fn engine_threads() -> u32 {
+    chitrakar_codecs::threads() as u32
+}
+
+/// The threaded build's pool: `initThreadPool(n)` from the page, awaited
+/// once before anything parallel runs.
+#[cfg(feature = "threads")]
+pub use wasm_bindgen_rayon::init_thread_pool;
+
+/// Pixels from the page, as the engine keeps a picture.
+fn image_of(rgba8: Vec<u8>, width: u32, height: u32) -> chitrakar_codecs::SourceImage {
+    chitrakar_codecs::SourceImage {
+        width,
+        height,
+        rgba8,
+    }
 }
 
 /// Develop settings from the page.

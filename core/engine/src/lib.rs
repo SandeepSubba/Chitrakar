@@ -9181,11 +9181,48 @@ impl Session {
     /// placed; the file goes into the document beside it, so it can be
     /// developed again.
     pub fn place_raw(&mut self, settings: &RawDevelop) -> Result<NodeId, EngineError> {
+        let img = self.raw_develop(settings)?;
+        self.place_raw_developed(img, settings)
+    }
+
+    /// The open raw file developed in full with `settings`, and not
+    /// placed: what the page's develop worker makes, on as many threads
+    /// as it has (a page's own thread may not wait on others), for
+    /// `place_raw_developed` and its kin to put in the document.
+    pub fn raw_develop(&self, settings: &RawDevelop) -> Result<SourceImage, EngineError> {
         let raw = self
             .raw
             .as_ref()
             .ok_or_else(|| EngineError::BadCommand("no raw file is open".into()))?;
-        let img = raw.photo.develop(settings);
+        Ok(raw.photo.develop(settings))
+    }
+
+    /// A development made elsewhere, checked against the open raw file:
+    /// the size it develops to, four bytes a pixel.
+    fn developed_elsewhere(&self, img: &SourceImage) -> Result<(), EngineError> {
+        let raw = self
+            .raw
+            .as_ref()
+            .ok_or_else(|| EngineError::BadCommand("no raw file is open".into()))?;
+        let (w, h) = raw.photo.size();
+        if (img.width, img.height) != (w, h) || img.rgba8.len() != w as usize * h as usize * 4 {
+            return Err(EngineError::BadCommand(format!(
+                "a development {}×{} of a photograph that develops to {w}×{h}",
+                img.width, img.height
+            )));
+        }
+        Ok(())
+    }
+
+    /// Place the open raw file as developed elsewhere (`raw_develop`, in
+    /// the develop worker) with `settings`, as `place_raw` places its own.
+    pub fn place_raw_developed(
+        &mut self,
+        img: SourceImage,
+        settings: &RawDevelop,
+    ) -> Result<NodeId, EngineError> {
+        self.developed_elsewhere(&img)?;
+        let raw = self.raw.as_ref().expect("checked above");
         let name = raw.name.clone();
         let original = match &raw.bytes {
             Some(bytes) => self.doc.add_original(&name, bytes.clone()),
@@ -9205,8 +9242,31 @@ impl Session {
     /// changes and nothing else — where it is, its size on the page, its
     /// corners, mask and effects — in one step of history.
     pub fn redevelop(&mut self, id: NodeId, settings: &RawDevelop) -> Result<(), EngineError> {
-        let cmd = self.redevelop_command(id, settings)?;
+        let cmd = self.redevelop_command(id, settings, None)?;
         self.apply_labeled(cmd, Some("Develop".into()))
+    }
+
+    /// `redevelop` with the development made elsewhere (`raw_develop`).
+    pub fn redevelop_developed(
+        &mut self,
+        id: NodeId,
+        img: SourceImage,
+        settings: &RawDevelop,
+    ) -> Result<(), EngineError> {
+        let cmd = self.redevelop_command(id, settings, Some(img))?;
+        self.apply_labeled(cmd, Some("Develop".into()))
+    }
+
+    /// `stage_redevelop` with the development made elsewhere.
+    pub fn stage_redevelop_developed(
+        &mut self,
+        id: NodeId,
+        img: SourceImage,
+        settings: &RawDevelop,
+    ) -> Result<(), EngineError> {
+        let cmd = self.redevelop_command(id, settings, Some(img))?;
+        self.staged_develop.push(cmd);
+        Ok(())
     }
 
     /// How a layer was developed: the settings it carries.
@@ -9224,7 +9284,7 @@ impl Session {
         id: NodeId,
         settings: &RawDevelop,
     ) -> Result<(), EngineError> {
-        let cmd = self.redevelop_command(id, settings)?;
+        let cmd = self.redevelop_command(id, settings, None)?;
         self.staged_develop.push(cmd);
         Ok(())
     }
@@ -9248,16 +9308,23 @@ impl Session {
     }
 
     /// The command that gives a layer its raw file developed with
-    /// `settings`: a new picture, everything else about the layer kept.
+    /// `settings` (here, or elsewhere as `img`): a new picture, everything
+    /// else about the layer kept.
     fn redevelop_command(
         &mut self,
         id: NodeId,
         settings: &RawDevelop,
+        img: Option<SourceImage>,
     ) -> Result<Command, EngineError> {
         let developed = self.developed(id)?;
         self.raw_open_layer(id)?;
-        let raw = self.raw.as_ref().expect("opened above");
-        let img = raw.photo.develop(settings);
+        let img = match img {
+            Some(img) => {
+                self.developed_elsewhere(&img)?;
+                img
+            }
+            None => self.raw_develop(settings)?,
+        };
         let NodeKind::Raster(old) = &self.doc.node(id)?.kind else {
             unreachable!("developed() said it is a picture");
         };
@@ -10476,6 +10543,57 @@ mod tests {
         let head = 4 + 20 + 96 + 16 + chitrakar_raw_in::PATTERN * chitrakar_raw_in::PATTERN;
         let size = if packed[head] == 0 { 2 } else { 4 };
         head + 1 + (u(1) * u(2) * u(3)) as usize * size
+    }
+
+    #[test]
+    fn a_development_made_elsewhere_is_placed_as_one_made_here() {
+        let mut s = Session::new(10, 10, ColorMode::Rgb);
+        read_card(&mut s);
+        let settings = RawDevelop {
+            exposure: 0.5,
+            ..Default::default()
+        };
+        // What the develop worker hands back, placed: the same picture,
+        // the same file kept, the same settings carried.
+        let copy = |img: &SourceImage, width: u32| SourceImage {
+            width,
+            height: img.height,
+            rgba8: img.rgba8.clone(),
+        };
+        let img = s.raw_develop(&settings).unwrap();
+        let elsewhere = s
+            .place_raw_developed(copy(&img, img.width), &settings)
+            .unwrap();
+        let here = s.place_raw(&settings).unwrap();
+        let (a, b) = (picture_of(&s, elsewhere), picture_of(&s, here));
+        assert_eq!(
+            s.doc.resource(&a.resource_id).unwrap().rgba8,
+            s.doc.resource(&b.resource_id).unwrap().rgba8
+        );
+        assert_eq!(a.develop, b.develop);
+        // Pixels of another size are not this photograph's.
+        let wrong = copy(&img, img.width - 1);
+        assert!(s
+            .place_raw_developed(copy(&wrong, wrong.width), &settings)
+            .is_err());
+        assert!(s.redevelop_developed(here, wrong, &settings).is_err());
+        // Developed again elsewhere: one step, undone in one.
+        let darker = RawDevelop {
+            exposure: -1.0,
+            ..settings
+        };
+        let before = picture_of(&s, here);
+        let img = s.raw_develop(&darker).unwrap();
+        s.redevelop_developed(here, img, &darker).unwrap();
+        assert_eq!(picture_of(&s, here).develop.unwrap().settings, darker);
+        s.undo().unwrap();
+        assert_eq!(picture_of(&s, here), before);
+        // And staged with others, as Develop others like this does.
+        let img = s.raw_develop(&darker).unwrap();
+        s.stage_redevelop_developed(elsewhere, img, &darker)
+            .unwrap();
+        assert_eq!(s.commit_staged_develop().unwrap(), 1);
+        assert_eq!(picture_of(&s, elsewhere).develop.unwrap().settings, darker);
     }
 
     #[test]

@@ -20,6 +20,24 @@ self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 
 const ours = (url) => new URL(url).origin === self.location.origin;
+
+// Every file of ours goes out with the two headers that make the page
+// cross-origin isolated, which is what lets it share memory between
+// threads (the develop worker's engine, `developer.ts`). A host that
+// sends them already (the dev server, the desktop shell) is not changed;
+// a host that cannot (most that serve static files) gets them here, from
+// the first visit the worker is in charge of.
+const ISOLATION = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+  "Cross-Origin-Resource-Policy": "same-origin",
+};
+function isolated(res) {
+  if (!res || res.status === 0 || res.type === "opaque" || res.type === "opaqueredirect") return res;
+  const headers = new Headers(res.headers);
+  for (const [k, v] of Object.entries(ISOLATION)) headers.set(k, v);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
 const named = (url) => /\/assets\//.test(new URL(url).pathname);
 
 // A share from another app's share sheet arrives as a form posted here
@@ -49,37 +67,37 @@ self.addEventListener("fetch", (e) => {
     return;
   }
   if (req.method !== "GET" || !ours(req.url)) return;
-  e.respondWith(
-    (async () => {
-      const cache = await caches.open(CACHE);
-      if (named(req.url)) {
-        const kept = await cache.match(req);
-        if (kept) return kept;
-        const got = await fetch(req);
-        if (got.ok) await cache.put(req, got.clone());
-        return got;
-      }
-      try {
-        const got = await fetch(req);
-        if (got.ok) await cache.put(req, got.clone());
-        // A host that has no page at an address with a query in it — the
-        // share's "?shared=1" — still has the page.
-        if (!got.ok && req.mode === "navigate") {
-          const page = await cache.match(new URL("./", self.location.href).href);
-          if (page) return page;
-        }
-        return got;
-      } catch (err) {
-        // A navigation to the page under any query is the page.
-        const kept =
-          (await cache.match(req, { ignoreSearch: true })) ??
-          (req.mode === "navigate" ? await cache.match(new URL("./", self.location.href).href) : undefined);
-        if (kept) return kept;
-        throw err;
-      }
-    })(),
-  );
+  e.respondWith(answer(req).then(isolated));
 });
+
+async function answer(req) {
+  const cache = await caches.open(CACHE);
+  if (named(req.url)) {
+    const kept = await cache.match(req);
+    if (kept) return kept;
+    const got = await fetch(req);
+    if (got.ok) await cache.put(req, got.clone());
+    return got;
+  }
+  try {
+    const got = await fetch(req);
+    if (got.ok) await cache.put(req, got.clone());
+    // A host that has no page at an address with a query in it — the
+    // share's "?shared=1" — still has the page.
+    if (!got.ok && req.mode === "navigate") {
+      const page = await cache.match(new URL("./", self.location.href).href);
+      if (page) return page;
+    }
+    return got;
+  } catch (err) {
+    // A navigation to the page under any query is the page.
+    const kept =
+      (await cache.match(req, { ignoreSearch: true })) ??
+      (req.mode === "navigate" ? await cache.match(new URL("./", self.location.href).href) : undefined);
+    if (kept) return kept;
+    throw err;
+  }
+}
 
 self.addEventListener("message", (e) => {
   const urls = Array.isArray(e.data?.keep) ? e.data.keep.filter((u) => typeof u === "string" && ours(u)) : [];

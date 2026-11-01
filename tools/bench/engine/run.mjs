@@ -25,7 +25,7 @@ const srv = http.createServer(async (q, r) => {
   if (p0 === "/favicon.ico") { r.writeHead(204).end(); return; }
   const p = p0.startsWith("/pkg/") ? join(pkg, p0.slice(5)) : join(here, p0);
   if (process.env.BENCH_DEBUG) console.log("serve", p0, "->", p);
-  try { const body = await readFile(p); r.writeHead(200, { "content-type": types[extname(p)] || "application/octet-stream" }); r.end(body); } catch { r.writeHead(404).end(); }
+  try { const body = await readFile(p); r.writeHead(200, { "content-type": types[extname(p)] || "application/octet-stream", "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" }); r.end(body); } catch { r.writeHead(404).end(); }
 });
 await new Promise((r) => srv.listen(0, r));
 const port = srv.address().port;

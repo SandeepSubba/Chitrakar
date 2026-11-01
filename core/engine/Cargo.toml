@@ -25,6 +25,14 @@ serde_json.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+# The threaded build's pool of workers (`threads`): rayon's threads made
+# of Web Workers over the module's shared memory. Only in the build the
+# app loads when its page is cross-origin isolated (`npm run
+# build:wasm-threads`); the plain build runs rayon's work on one thread.
+wasm-bindgen-rayon = { version = "1.3", optional = true }
+
+[features]
+threads = ["dep:wasm-bindgen-rayon"]
 
 # The shared fixture is a test dependency: it goes into the tests here
 # and nowhere near the wasm module the app ships.

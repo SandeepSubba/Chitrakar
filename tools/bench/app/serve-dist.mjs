@@ -10,5 +10,5 @@ const types = { ".html": "text/html", ".js": "text/javascript", ".wasm": "applic
 http.createServer(async (q, r) => {
   const p0 = q.url.split("?")[0];
   const p = join(root, p0 === "/" ? "/index.html" : p0);
-  try { const body = await readFile(p); r.writeHead(200, { "content-type": types[extname(p)] || "application/octet-stream" }); r.end(body); } catch { r.writeHead(404).end(); }
+  try { const body = await readFile(p); r.writeHead(200, { "content-type": types[extname(p)] || "application/octet-stream", "cross-origin-opener-policy": "same-origin", "cross-origin-embedder-policy": "require-corp" }); r.end(body); } catch { r.writeHead(404).end(); }
 }).listen(port, () => console.log(`serving app/dist on ${port}`));

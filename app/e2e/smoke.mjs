@@ -82,7 +82,14 @@ const server = createServer(async (req, res) => {
   const path = bare === "/" ? "/index.html" : bare;
   try {
     const body = await readFile(join(DIST, path));
-    res.writeHead(200, { "content-type": MIME[extname(path)] ?? "application/octet-stream" });
+    // Cross-origin isolated, as the dev server, the shell and the
+    // service worker all make the page: the develop worker's threaded
+    // engine shares its memory, which only such a page may.
+    res.writeHead(200, {
+      "content-type": MIME[extname(path)] ?? "application/octet-stream",
+      "cross-origin-opener-policy": "same-origin",
+      "cross-origin-embedder-policy": "require-corp",
+    });
     res.end(body);
   } catch {
     res.writeHead(404).end();
@@ -15228,6 +15235,13 @@ assert(
   await settle();
   const cool = await canvasPixel(16, 16);
   assert(cool[2] > cool[0] * 1.2, `developed again, cooler (${cool})`);
+  // Developed on every core: the page is cross-origin isolated (as the
+  // harness, the dev server, the shell and the service worker make it),
+  // so the full development went through the develop worker's threaded
+  // engine — and came out as the page's own would, as above.
+  assert(await page.evaluate(() => crossOriginIsolated), "the page is cross-origin isolated");
+  const threads = Number(await page.evaluate(() => document.documentElement.dataset.developThreads ?? "0"));
+  assert(threads >= 2, `developed on the worker's threads (${threads})`);
   assert((await layerNames()).join() === "card.dng", "the same layer, not another");
   assert((await page.locator(".history").innerText()).includes("Develop"), "history says it was developed");
   await page.keyboard.press("Control+z");
