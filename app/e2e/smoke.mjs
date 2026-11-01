@@ -282,10 +282,15 @@ const menuItem = async (menu, item) => {
   if (await direct.count()) return direct;
   // Behind a row of its own — Arrange, Align, Mask — which opens on
   // hover the way a person opens it.
+  // Each row's own list is waited for — it carries the row's name —
+  // rather than a fixed pause: the menu holds a list open a moment while
+  // a hand travels to it, so the one before can still be showing too.
   for (const row of await page.locator(".menu-pop:not(.sub) .menu-item.has-sub").all()) {
+    const name = (await row.locator(".menu-item-label").textContent())?.trim() ?? "";
     await row.hover();
-    await page.waitForTimeout(120);
-    const inside = page.locator(".menu-pop.sub .menu-item", { hasText: item });
+    const pop = page.locator(`.menu-pop.sub[aria-label="${name}"]`);
+    await pop.waitFor({ timeout: 2000 }).catch(() => {});
+    const inside = pop.locator(".menu-item", { hasText: item });
     if (await inside.count()) return inside;
   }
   return page.locator(".menu-item", { hasText: item });
@@ -398,7 +403,7 @@ assert(
 await page.hover('.menu-label:text-is("View")');
 await page.waitForTimeout(120);
 assert(
-  await page.isVisible("text=Fit document to window"),
+  await page.isVisible("text=Fit on screen"),
   "hovering across the bar switches menus",
 );
 await page.keyboard.press("Escape");
@@ -1325,7 +1330,7 @@ assert(
     `and the same document pixel still reads the same (${px} vs ${pixelBeforeZoom})`,
   );
 }
-await menuClick("View", "Fit document to window");
+await menuClick("View", "Fit on screen");
 await page.waitForTimeout(150);
 
 // 8h. Live move preview: pixels move BEFORE mouseup; Escape cancels.
@@ -3370,7 +3375,7 @@ assert(
     (await page.locator(".panel ul li.selected").count()) === 0,
     "escape let the selection go",
   );
-  await menuClick("View", "Fit document to window");
+  await menuClick("View", "Fit on screen");
   await page.waitForTimeout(200);
 }
 
@@ -4097,7 +4102,7 @@ assert(
   // the document comes out the size of what was actually framed rather
   // than the size the pointer travelled. The page is back to 600x400, and
   // the view is wherever the last crop left it, so both are re-read.
-  await menuClick("View", "Fit document to window");
+  await menuClick("View", "Fit on screen");
   await page.waitForTimeout(250);
   const cropped = await page.locator("#engine-page").boundingBox();
   await pickTool("Crop");
@@ -4275,7 +4280,7 @@ assert(
   // The top row of the panel is the layer drawn last.
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(150);
-  await page.click('button[aria-label="Clip to the layer below"]');
+  await page.click('button[aria-label="Clip to layer below"]');
   await page.waitForTimeout(300);
   assert(
     (await canvasPixel(200, 200))[3] === 255,
@@ -4366,7 +4371,7 @@ assert(
       (await canvasPixel(450, 150))[2] < rightBefore[2] * 0.6,
     "unclipped, the adjustment darkens both rects",
   );
-  await page.click('button[aria-label="Clip to the layer below"]');
+  await page.click('button[aria-label="Clip to layer below"]');
   await page.waitForTimeout(400);
   assert(
     (await canvasPixel(150, 150)).join() === leftBefore.join(),
@@ -4446,7 +4451,7 @@ assert(
   await page.waitForTimeout(200);
   const [oneBoard] = await Promise.all([
     page.waitForEvent("download"),
-    (await menuItem("File", "Export this artboard")).click(),
+    (await menuItem("File", "This frame")).click(),
   ]);
   {
     const bytes = await readFile(await oneBoard.path());
@@ -4466,7 +4471,7 @@ assert(
   await page.waitForTimeout(250);
   const [twiceBoard] = await Promise.all([
     page.waitForEvent("download"),
-    (await menuItem("File", "Export this artboard")).click(),
+    (await menuItem("File", "This frame")).click(),
   ]);
   {
     const bytes = await readFile(await twiceBoard.path());
@@ -4482,7 +4487,7 @@ assert(
   // Every frame at once honours each frame's own multiple.
   const [allBoards] = await Promise.all([
     page.waitForEvent("download"),
-    (await menuItem("File", "Export every artboard")).click(),
+    (await menuItem("File", "Each frame as a picture")).click(),
   ]);
   {
     const bytes = await readFile(await allBoards.path());
@@ -4689,7 +4694,7 @@ assert(
   const original = await canvasPixel(100, 100);
   assert(original[3] === 255, `something to copy (${original})`);
 
-  await page.click('button[aria-label="Make a live copy"]');
+  await page.click('button[aria-label="Duplicate linked"]');
   await page.waitForTimeout(300);
   assert(
     (await page.locator(".panel ul li").count()) === 2,
@@ -4767,7 +4772,7 @@ assert(
   await page.waitForTimeout(250);
   await page.locator(".panel ul li").first().click();
   await page.waitForTimeout(150);
-  await page.click('button[aria-label="Make a live copy"]');
+  await page.click('button[aria-label="Duplicate linked"]');
   await page.waitForTimeout(300);
   // Move the copy clear of the original.
   await page.mouse.move(...at2(70, 70));
@@ -4868,7 +4873,7 @@ assert(
 
   await page.locator(".panel ul li").first().click(); // the card
   await page.waitForTimeout(150);
-  await page.click('button[aria-label="Make a live copy"]');
+  await page.click('button[aria-label="Duplicate linked"]');
   await page.waitForTimeout(300);
   // The copy starts on top of the original; drag it clear by 300.
   await page.mouse.move(...at3(65, 65));
@@ -5826,7 +5831,7 @@ assert(
   assert(saved.suggestedFilename() === "blue-mark.chitra", `the save carries the name (${saved.suggestedFilename()})`);
   const [png] = await Promise.all([
     page.waitForEvent("download"),
-    (await menuItem("File", "Export PNG")).first().click(),
+    (await menuItem("File", "Quick export as PNG")).first().click(),
   ]);
   assert(png.suggestedFilename() === "blue-mark.png", `and so does the export (${png.suggestedFilename()})`);
   // Opening a file takes its name; a new document starts over.
@@ -6497,7 +6502,7 @@ assert(
   assert(await inked(50, 40), "with a mark in its top left");
   assert(!(await inked(550, 40)), "and nothing in its top right");
 
-  await menuClick("Page", "Turn right");
+  await menuClick("Page", "Rotate 90° clockwise");
   await page.waitForTimeout(400);
   const [w1, h1] = await size();
   assert(h1 > w1, `turned right it stands on its end (${w1}x${h1})`);
@@ -6506,7 +6511,7 @@ assert(
   assert(await inked(260, 50), "the mark went round to the right");
   assert(!(await inked(50, 50)), "and left where it was");
 
-  await menuClick("Page", "Turn upside down");
+  await menuClick("Page", "Rotate 180°");
   await page.waitForTimeout(400);
   assert(await inked(40, 550), "upside down puts it at the bottom left");
 
@@ -6573,11 +6578,11 @@ assert(
 
   // Mirroring keeps the page's size and crosses what is on it. The mark
   // sits 100..180 across a 600-wide page, so it lands at 420..500.
-  await menuClick("Page", "Mirror left to right");
+  await menuClick("Page", "Flip page horizontal");
   await page.waitForTimeout(400);
   assert(await inked(450, 150), "the mark crossed to the other side");
   assert(!(await inked(150, 150)), "and is not where it was");
-  await menuClick("Page", "Mirror left to right");
+  await menuClick("Page", "Flip page horizontal");
   await page.waitForTimeout(400);
   assert(await inked(150, 150), "twice over is where it started");
 }
@@ -6876,7 +6881,7 @@ assert(
 {
   await newDocument(400, 300, "rgb");
   assert(
-    !(await (await menuItem("File", "Export PDF of the frames")).count()),
+    !(await (await menuItem("File", "All frames as a PDF")).count()),
     "with no frames there are no pages to offer",
   );
   await page.keyboard.press("Escape");
@@ -6896,7 +6901,7 @@ assert(
   await pickTool("Move");
   const [dl] = await Promise.all([
     page.waitForEvent("download"),
-    (await menuItem("File", "Export PDF of the frames")).click(),
+    (await menuItem("File", "All frames as a PDF")).click(),
   ]);
   const pdf = await readFile(await dl.path(), "latin1");
   assert(pdf.startsWith("%PDF-1.7"), "a PDF came out");
@@ -7722,7 +7727,7 @@ assert(
   );
 
   // The line, picked as it was drawn: the outline takes its place.
-  await menuClick("Layer", "Outline the stroke");
+  await menuClick("Layer", "Stroke to shape");
   await page.waitForTimeout(300);
   let after = await look();
   assert(
@@ -7737,7 +7742,7 @@ assert(
   // The rectangle: a group of its fill and its outlined border.
   await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
   await page.waitForTimeout(200);
-  await menuClick("Layer", "Outline the stroke");
+  await menuClick("Layer", "Stroke to shape");
   await page.waitForTimeout(300);
   after = await look();
   assert(
@@ -7901,7 +7906,7 @@ assert(
   await page.waitForTimeout(200);
   const ink = await inked();
   assert(ink > 50, `the text has ink (${ink} px)`);
-  await menuClick("Layer", "Turn the text into shapes");
+  await menuClick("Layer", "Text to shapes");
   await page.waitForTimeout(400);
   const shaped = await inked();
   assert(
@@ -8064,8 +8069,8 @@ assert(
   await page.waitForTimeout(200);
   // The window shows what the trace will be before anything is laid,
   // and Escape leaves the document as it was.
-  await menuClick("Layer", "Trace into shapes…");
-  const traceWindow = page.locator('[role="dialog"][aria-label="Trace into shapes"]');
+  await menuClick("Layer", "Picture to shapes…");
+  const traceWindow = page.locator('[role="dialog"][aria-label="Picture to shapes"]');
   await page.waitForSelector('img[alt="Trace preview"]');
   const firstPreview = await page.locator('img[alt="Trace preview"]').getAttribute("src");
   await setSlider("Trace colours", 3);
@@ -8097,7 +8102,7 @@ assert(
   // Escape let go of the layer too, as it does anywhere.
   await page.locator(".panel ul li", { hasText: "sign.png" }).click();
   await page.waitForTimeout(200);
-  await menuClick("Layer", "Trace into shapes…");
+  await menuClick("Layer", "Picture to shapes…");
   await page.waitForSelector('img[alt="Trace preview"]');
   await setSlider("Trace colours", 3);
   await page.waitForTimeout(300);
@@ -8160,7 +8165,7 @@ assert(
   await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
   await page.waitForTimeout(200);
   promptAnswer = "3";
-  await menuClick("Layer", "Blend between the two…");
+  await menuClick("Layer", "Blend shapes…");
   await page.waitForTimeout(400);
   const middle = await canvasPixel(150, 60);
   assert(
@@ -8258,7 +8263,7 @@ assert(
   await page.mouse.down();
   await page.mouse.up();
   await page.waitForTimeout(150);
-  await menuClick("Layer", "Cut the path at the anchor");
+  await menuClick("Layer", "Split at anchor");
   await page.waitForTimeout(300);
   assert(
     (await rows()) === 2 && (await onLine()) > 100 && (await canvasPixel(220, 45))[3] > 100,
@@ -8267,7 +8272,7 @@ assert(
   await page.locator(".panel ul li").first().click();
   await page.locator(".panel ul li").nth(1).click({ modifiers: [MOD] });
   await page.waitForTimeout(150);
-  await menuClick("Layer", "Join the paths");
+  await menuClick("Layer", "Join paths");
   await page.waitForTimeout(300);
   assert(
     (await rows()) === 1 && (await onLine()) > 100 && (await canvasPixel(220, 45))[3] > 100,
@@ -8967,7 +8972,7 @@ assert(
   await paint("#2255cc", 100, 80, 260, 170);
   await pickTool("Move");
   await page.keyboard.press("Escape");
-  await menuClick("Page", "Trim to the artwork");
+  await menuClick("Page", "Trim empty edges");
   await page.waitForTimeout(400);
   const after = await page.locator("#engine-page").boundingBox();
   const ratio = after.width / after.height;
@@ -9011,7 +9016,7 @@ assert(
   await page.locator(".panel ul li", { hasText: "Rect" }).first().click();
   await page.locator(".panel ul li", { hasText: "Ellipse" }).first().click({ modifiers: ["Shift"] });
   await page.waitForTimeout(200);
-  await menuClick("Layer", "Merge into a picture");
+  await menuClick("Layer", "Merge layers");
   await page.waitForTimeout(400);
   const rows = await page.locator(".panel ul li").allTextContents();
   assert(rows.length === 1 && rows[0].includes("Merged"), `one picture where the two shapes were (${rows})`);
@@ -9328,7 +9333,7 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
   assert((await blue(110, 195)) && (await blue(330, 105)), "undo takes back the pin");
-  await menuClick("Layer", "Put the picture's corners back");
+  await menuClick("Layer", "Reset corners");
   await page.waitForTimeout(300);
   assert(
     !(await blue(330, 105)) && (await page.locator(".warp-pin").count()) === 0 && Math.abs((await width()) - 200) < 1.5,
@@ -10631,7 +10636,7 @@ assert(
   // What is exported is the picture, not what this screen makes of it.
   const [pngDl] = await Promise.all([
     page.waitForEvent("download"),
-    (await menuItem("File", "Export PNG")).first().click(),
+    (await menuItem("File", "Quick export as PNG")).first().click(),
   ]);
   const png = await readFile(await pngDl.path());
   const exported = await page.evaluate(async (bytes) => {
@@ -16576,7 +16581,7 @@ assert(
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.waitForTimeout(300);
   for (const label of [
-    "New document", "Open", "Place image", "Save", "Export PNG",
+    "New document", "Open", "Place", "Save", "Quick export as PNG",
     "Zoom out", "Fit to window", "Actual size", "Zoom in",
   ]) {
     assert(
@@ -17346,20 +17351,65 @@ assert(
     "with the whole menu closing behind it",
   );
 
-  // The Layer menu's families: Arrange, Align, Combine and Mask.
+  // The Layer menu's families, each behind a row of its own, and no
+  // more than a screenful of rows on the menu itself — it had been
+  // fourteen sentences in one run.
   await page.click('.menu-label:text-is("Layer")');
   await page.waitForTimeout(120);
   const subs = await page.locator(".menu-pop:not(.sub) .menu-item.has-sub .menu-item-label").allTextContents();
   assert(
-    subs.join(",") === "Arrange,Align,Combine shapes,Mask,Styles",
-    `the Layer menu keeps five families behind a row each (${subs.join(",")})`,
+    subs.join(",") === "Arrange,Align,Transform,Mask,Styles,Combine shapes,Path,Convert",
+    `the Layer menu keeps its families behind a row each (${subs.join(",")})`,
   );
+  const layerRows = await page.locator(".menu-pop:not(.sub) > .menu-item .menu-item-label").allTextContents();
+  assert(layerRows.length <= 20, `and is short enough to read (${layerRows.length} rows: ${layerRows.join(" | ")})`);
+  assert(
+    layerRows.every((r) => r.split(" ").length <= 4),
+    `each row a few words, not a sentence (${layerRows.filter((r) => r.split(" ").length > 4).join(" | ")})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  // How the app is set up sits at the foot of Edit, as in Photoshop, and
+  // not on View, which is about the document.
+  await page.click('.menu-label:text-is("Edit")');
+  await page.waitForTimeout(120);
+  const editRows = await page.locator(".menu-pop:not(.sub) > .menu-item .menu-item-label").allTextContents();
+  assert(
+    editRows.slice(-3).join(",") === "Toolbar…,Keyboard shortcuts…,Preferences…",
+    `Edit ends with the toolbar, the keys and the preferences (${editRows.slice(-3).join(",")})`,
+  );
+  await page.hover('.menu-label:text-is("View")');
+  await page.waitForTimeout(120);
+  const viewRows = await page.locator(".menu-pop:not(.sub) > .menu-item .menu-item-label").allTextContents();
+  assert(
+    !viewRows.some((r) => r.startsWith("Preferences") || r.startsWith("Tools")),
+    `and View has none of them (${viewRows.join(" | ")})`,
+  );
+  await page.hover('.menu-label:text-is("Page")');
+  await page.waitForTimeout(120);
+  assert(
+    (await page.locator('.menu-pop:not(.sub) .menu-item.has-sub:has-text("Rotate and flip")').count()) === 1,
+    "the page's turns and flips are one family on the Page menu",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(120);
+  // Keyboard shortcuts… opens the Keys page of the preferences.
+  await menuClick("Edit", "Keyboard shortcuts…");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".prefs-tab.active").first().textContent())?.includes("Keys"),
+    "Edit › Keyboard shortcuts… opens the Keys page",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
   // A pointer on its way from the row to the popup beside it crosses
   // the rows under it, and a popup that closed the moment the pointer
   // left its row could never be reached by a hand — only by a test
   // that teleports. So the pointer is walked there, in steps, over the
   // two rows between, and the popup has to still be there when it
   // arrives, and be the one it set out for.
+  await page.click('.menu-label:text-is("Layer")');
+  await page.waitForTimeout(120);
   const arrange = page.locator('.menu-item.has-sub:has-text("Arrange")');
   await arrange.hover();
   await page.waitForTimeout(250);
@@ -17534,7 +17584,7 @@ assert(
 // with. The hand drags the view; the zoom looks closer where it is
 // pressed, and steps back with alt held.
 {
-  await menuClick("View", "Fit document to window");
+  await menuClick("View", "Fit on screen");
   const pageBox = () => page.locator("#engine-page").boundingBox();
   const was = await pageBox();
   const at = (x, y) => [was.x + (x / 600) * was.width, was.y + (y / 400) * was.height];
@@ -17945,8 +17995,8 @@ assert(
   await pickTool("Move");
   await page.keyboard.press("Escape");
 
-  await menuClick("Page", "Scale the page…");
-  const dialog = page.locator('[role=dialog][aria-label="Scale the page"]');
+  await menuClick("Page", "Resize page…");
+  const dialog = page.locator('[role=dialog][aria-label="Resize page"]');
   assert((await dialog.count()) === 1, "the Page menu opens the scale window");
   await page.locator('input[aria-label="Scale to width"]').fill("1200");
   await page.waitForTimeout(120);
@@ -18056,7 +18106,7 @@ assert(
   await page.locator('.menu-item.has-sub:has-text("Styles")').hover();
   await page.waitForTimeout(200);
   assert(
-    (await page.locator('.menu-pop.sub .menu-item:has-text("Give Style 1")').count()) === 1,
+    (await page.locator('.menu-pop.sub .menu-item:has-text("Apply Style 1")').count()) === 1,
     "the Layer menu offers the kept style by name",
   );
   await page.keyboard.press("Escape");

@@ -6471,7 +6471,7 @@ export function App() {
     if (!session || selected === null) return;
     const anchor = pickedAnchorRef.current;
     if (!anchor || anchor.id !== selected) {
-      alert("Cut the path: press the anchor to cut at first");
+      alert("Split at anchor: press the anchor to split at first");
       return;
     }
     try {
@@ -6481,7 +6481,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Cut the path: ${err}`);
+      alert(`Split at anchor: ${err}`);
     }
   };
 
@@ -6588,7 +6588,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Outline the stroke: ${err}`);
+      alert(`Stroke to shape: ${err}`);
     }
   };
 
@@ -6675,7 +6675,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Turn the text into shapes: ${err}`);
+      alert(`Text to shapes: ${err}`);
     }
   };
 
@@ -9154,8 +9154,10 @@ export function App() {
         // Bringing something in is its own kind of act — neither opening
         // a document nor saving one — so it sits between them rather
         // than in the middle of them, which is where it was.
-        item("place-image", "image", "Place image…", () => pick(placeInputRef)),
-        item("load-font", "text", "Load font…", () => pick(fontInputRef)),
+        // Place takes whatever Open can read — a photograph, a camera's
+        // raw file, a PDF, a Photoshop file — so it is not "image".
+        item("place-image", "image", "Place…", () => pick(placeInputRef)),
+        item("load-font", "text", "Add font…", () => pick(fontInputRef)),
         SEP,
         // Thirteen rows lived here: PNG, PNG at 2×, at 3×, the same
         // three for what is picked, this artboard, every artboard,
@@ -9166,21 +9168,25 @@ export function App() {
         item("export", "export", "Export…", () => setExportOpen(true), hint("export-window")),
         // Kept beside it because it is the one people press without
         // looking: the whole page, as it is, right now.
-        item("export-png", "export", "Export PNG", exportPng, hint("export")),
-        // These two stay rows because they are not one file. The window
-        // exports a picture; these write a file per artboard and a page
-        // per frame, which is a different act with a different result.
-        ...(selectedLayer?.kind === "artboard"
-          ? [item("export-artboard", "frame", "Export this artboard", exportArtboard)]
-          : []),
+        // Photoshop's Quick Export as PNG.
+        item("export-png", "export", "Quick export as PNG", exportPng, hint("export")),
+        // These stay rows because they are not one file. The window
+        // exports a picture; these write a file per frame and a page per
+        // frame, which is a different act with a different result. One
+        // row on the menu, named with the word the panel and the tool
+        // use for them — a frame — rather than three that said
+        // "artboard" and "frame" for the same thing.
         ...(layers.some((l) => l.kind === "artboard")
           ? [
-              item("export-artboards", "frame", "Export every artboard", exportArtboards,
-                "one each",
-              ),
-              item("export-pdf-frames", "frame", "Export PDF of the frames", exportPdfFrames,
-                "a page each",
-              ),
+              sub("export-frames", "frame", "Export frames", [
+                ...(selectedLayer?.kind === "artboard"
+                  ? [item("export-artboard", "frame", "This frame", exportArtboard)]
+                  : []),
+                item("export-artboards", "frame", "Each frame as a picture", exportArtboards),
+                item("export-pdf-frames", "frame", "All frames as a PDF", exportPdfFrames,
+                  "a page each",
+                ),
+              ]),
             ]
           : []),
         // The press profile used to sit here, under the exports. It is
@@ -9207,6 +9213,8 @@ export function App() {
         item("paste", "paste", "Paste", pasteClipboard, hint("paste")),
         SEP,
         item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
+        // Affinity's Duplicate Linked: a copy that follows the original.
+        item("instance", "instance", "Duplicate linked", instanceSelected),
         item("delete", "trash", "Delete", deleteSelected, "Del"),
         SEP,
         // What a selection is filled or outlined with, as Photoshop's
@@ -9218,6 +9226,14 @@ export function App() {
         item("paste-style", "paste", "Paste style", pasteStyle, hint("paste-style")),
         SEP,
         item("find-replace", "text", "Find and replace…", () => setFindOpen(true), hint("find-replace")),
+        SEP,
+        // How the application is set up for the person, at the foot of
+        // Edit as Photoshop has them (Toolbar…, Keyboard Shortcuts…,
+        // Preferences) — not on View, which is about the document. A
+        // Mac's shell also has Settings on the application's own menu.
+        item("tools", "brush", "Toolbar…", () => openPrefs("tools")),
+        item("shortcuts", "text", "Keyboard shortcuts…", () => openPrefs("keys")),
+        item("prefs", "units", "Preferences…", () => openPrefs("general"), hint("preferences")),
       ],
     },
     {
@@ -9253,11 +9269,15 @@ export function App() {
       id: "layer",
       label: "Layer",
       entries: [
-        // Four families, each behind one row, the way Photoshop's and
-        // Affinity's Layer menus hold theirs: a flat list of eight
-        // alignments and four ways to combine shapes is a wall, and a
-        // wall is not read. Every one of these was on the panel and
-        // nowhere else — an unlabelled icon, found by pressing it.
+        // The layer menu in sections, each of a kind, and a family of
+        // rows behind one row wherever there are more than two of a
+        // kind — as Photoshop's Layer, Affinity's Layer and Arrange, and
+        // Illustrator's Object menus hold theirs. It had been fourteen
+        // rows in one run, each a sentence ("Cut the path at the
+        // anchor", "Put the picture's corners back"); the ids are kept,
+        // so a key anybody gave one still reaches it.
+        item("group", "group", "Group", groupSelection, hint("group")),
+        item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),
         sub("arrange", "raise", "Arrange", [
           item("bring-front", "raise", "Bring to front", () => orderSelected(true), hint("to-front")),
           item("bring-forward", "raise", "Bring forward", () => reorderSelected(1)),
@@ -9272,6 +9292,50 @@ export function App() {
             item(`align-${mode}`, icon, label, () => alignSelection(mode)),
           ),
         ),
+        sub("transform", "flipH", "Transform", [
+          item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
+          item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
+          SEP,
+          // A picture whose corners were dragged into perspective, put
+          // square again.
+          item("square-corners", "image", "Reset corners", squareCorners),
+        ]),
+        SEP,
+        sub("mask", "mask", "Mask", [
+          item("mask-rect", "mask", "Add rectangle mask", () => addMask("rect")),
+          item("mask-ellipse", "mask", "Add ellipse mask", () => addMask("ellipse")),
+          SEP,
+          // Photoshop's Reveal and Hide Selection.
+          item("mask-from-picked", "mask", "Reveal selection", () => maskFromSelection(false)),
+          item("hide-picked", "trash", "Hide selection", () => maskFromSelection(true)),
+          ...(selectedLayer && selectedMask !== null
+            ? [
+                SEP,
+                item("mask-remove", "trash", "Delete mask", () =>
+                  run({ SetMask: { id: selectedLayer.id, mask: null } }),
+                ),
+              ]
+            : []),
+        ]),
+        item("clip", "clip", "Clip to layer below", clipSelection, hint("clip")),
+        // The looks kept by name: the panel's strip has them as chips,
+        // and this has them as names.
+        sub("styles", "copy", "Styles", [
+          item("keep-style", "copy", "New style from layer", () => keepStyle()),
+          ...(styles.length > 0
+            ? [
+                SEP,
+                ...styles.map((st) =>
+                  item(`style-${st.name}`, "paste", `Apply ${st.name}`, () =>
+                    applyStyle(st.name),
+                  ),
+                ),
+              ]
+            : []),
+        ]),
+        SEP,
+        // What is done to shapes: put together, reworked as paths, made
+        // many of, or turned into something else.
         sub(
           "combine",
           "union",
@@ -9280,70 +9344,37 @@ export function App() {
             item(`combine-${op}`, icon, label, () => combineSelection(op)),
           ),
         ),
+        sub("path", "node", "Path", [
+          item("join-paths", "node", "Join paths", joinPaths),
+          item("cut-path", "node", "Split at anchor", cutPath),
+          SEP,
+          item("offset-path", "shapes", "Offset path…", offsetPath),
+          item("simplify-path", "node", "Simplify path…", simplifyPath),
+        ]),
         item("repeat", "duplicate", "Repeat…", repeatSelection),
-        item("cut-path", "node", "Cut the path at the anchor", cutPath),
-        item("join-paths", "node", "Join the paths", joinPaths),
-        item("blend-shapes", "shapes", "Blend between the two…", blendSelection),
-        item("outline-stroke", "line", "Outline the stroke", outlineStroke),
-        item("offset-path", "shapes", "Offset path…", offsetPath),
-        item("simplify-path", "node", "Simplify path…", simplifyPath),
-        item("text-to-shapes", "text", "Turn the text into shapes", textToShapes),
-        item("merge-layers", "image", "Merge into a picture", mergeLayers),
-        item("square-corners", "image", "Put the picture's corners back", squareCorners),
+        item("blend-shapes", "shapes", "Blend shapes…", blendSelection),
+        sub("convert", "shapes", "Convert", [
+          item("text-to-shapes", "text", "Text to shapes", textToShapes),
+          item("outline-stroke", "line", "Stroke to shape", outlineStroke),
+          item("trace-picture", "image", "Picture to shapes…", tracePicture),
+        ]),
+        item("merge-layers", "image", "Merge layers", mergeLayers),
         ...(selectedLayer?.developed
-          ? [item("develop-again", "image", "Develop again…", developAgain)]
-          : []),
-        ...(selectedLayer?.developed && developedOthers.length > 0
           ? [
-              item(
-                "develop-others",
-                "image",
-                `Develop the other ${developedOthers.length} like this one`,
-                developOthersLikeThis,
-              ),
+              SEP,
+              item("develop-again", "image", "Develop again…", developAgain),
+              ...(developedOthers.length > 0
+                ? [
+                    item(
+                      "develop-others",
+                      "image",
+                      `Apply develop settings to ${developedOthers.length} other${developedOthers.length > 1 ? "s" : ""}`,
+                      developOthersLikeThis,
+                    ),
+                  ]
+                : []),
             ]
           : []),
-        item("trace-picture", "image", "Trace into shapes…", tracePicture),
-        SEP,
-        item("group", "group", "Group", groupSelection, hint("group")),
-        item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),
-        // The hint here is a shortcut that already exists and was
-        // advertised nowhere. Group and ungroup get none, because they
-        // have none: a menu that names a key the app does not answer to
-        // is worse than a menu that names no key at all.
-        item("clip", "clip", "Clip to the layer below", clipSelection, hint("clip")),
-        item("instance", "instance", "Make a live copy", instanceSelected),
-        SEP,
-        sub("mask", "mask", "Mask", [
-          item("mask-rect", "mask", "Rectangle mask", () => addMask("rect")),
-          item("mask-ellipse", "mask", "Ellipse mask", () => addMask("ellipse")),
-          // Photoshop's Reveal and Hide Selection.
-          item("mask-from-picked", "mask", "Reveal selection", () => maskFromSelection(false)),
-          item("hide-picked", "trash", "Hide selection", () => maskFromSelection(true)),
-          ...(selectedLayer && selectedMask !== null
-            ? [
-                SEP,
-                item("mask-remove", "trash", "Remove the mask", () =>
-                  run({ SetMask: { id: selectedLayer.id, mask: null } }),
-                ),
-              ]
-            : []),
-        ]),
-        // The looks kept by name: the panel's strip has them as chips,
-        // and this has them as names.
-        sub("styles", "copy", "Styles", [
-          item("keep-style", "copy", "Keep this look as a style", () => keepStyle()),
-          ...(styles.length > 0
-            ? [
-                SEP,
-                ...styles.map((st) =>
-                  item(`style-${st.name}`, "paste", `Give ${st.name}`, () =>
-                    applyStyle(st.name),
-                  ),
-                ),
-              ]
-            : []),
-        ]),
         SEP,
         // Said as what pressing it will do, since a row that says
         // "Lock" over a locked layer is a row that lies.
@@ -9362,9 +9393,6 @@ export function App() {
         item("rename", "text", "Rename…", () => {
           if (selectedLayer) setRenaming({ id: selectedLayer.id, value: selectedLayer.name });
         }),
-        SEP,
-        item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
-        item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
       ],
     },
     {
@@ -9390,11 +9418,11 @@ export function App() {
         // Canvas size is the same artwork on a page of another size;
         // this is the same design at another size — Photoshop's Image
         // Size, Canva's Resize — and the two are asked for differently.
-        item("scale-page", "fit", "Scale the page…", () => setScalePageOpen(true)),
+        item("scale-page", "fit", "Resize page…", () => setScalePageOpen(true)),
         // Cut away the edge round the artwork: clear pixels where the
         // corner is clear, the corner's colour where it is painted.
         item("crop-to-picked", "crop", "Crop to selection", cropToSelection),
-        item("trim-page", "crop", "Trim to the artwork", () => {
+        item("trim-page", "crop", "Trim empty edges", () => {
           if (!session) return;
           try {
             if (session.trim_page()) {
@@ -9406,17 +9434,21 @@ export function App() {
           }
         }),
         SEP,
-        item("turn-right", "turnRight", "Turn right", () => turnPage(1)),
-        item("turn-left", "turnLeft", "Turn left", () => turnPage(3)),
-        item("turn-over", "turnRight", "Turn upside down", () => turnPage(2)),
+        // Photoshop's Image Rotation: the whole page turned or flipped,
+        // where Layer › Transform turns what is picked.
+        sub("rotate-page", "turnRight", "Rotate and flip", [
+          item("turn-right", "turnRight", "Rotate 90° clockwise", () => turnPage(1)),
+          item("turn-left", "turnLeft", "Rotate 90° anticlockwise", () => turnPage(3)),
+          item("turn-over", "turnRight", "Rotate 180°", () => turnPage(2)),
+          SEP,
+          item("mirror-h", "flipH", "Flip page horizontal", () => mirrorPage(true)),
+          item("mirror-v", "flipV", "Flip page vertical", () => mirrorPage(false)),
+        ]),
         item("straighten", "turnLeft", "Straighten…", () => {
           setStraightenBy(0);
           setLevelling(false);
           setStraightenOpen(true);
         }),
-        SEP,
-        item("mirror-h", "flipH", "Mirror left to right", () => mirrorPage(true)),
-        item("mirror-v", "flipV", "Mirror top to bottom", () => mirrorPage(false)),
         SEP,
         // The press profile is the document's own — what it will be
         // printed through — so it belongs with the document's other
@@ -9439,39 +9471,14 @@ export function App() {
         item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), hint("zoom-in")),
         item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), hint("zoom-out")),
         item("actual-size", "actualSize", "Actual size", () => zoomTo(1), hint("zoom-actual")),
-        item("fit", "fit", "Fit document to window", fitView, hint("zoom-fit")),
+        item("fit", "fit", "Fit on screen", fitView, hint("zoom-fit")),
         item("zoom-selection", "selectAll", "Zoom to selection", zoomToSelection),
-        SEP,
-        ...(["px", "mm", "in"] as Units[]).map((u) =>
-          item(`units-${u}`, "units", UNIT_LABELS[u], () => setUnits(u), units === u ? "✓" : undefined),
-        ),
-        SEP,
-        item(
-          "guides",
-          showGuides ? "check" : "fit",
-          showGuides ? "Hide guides" : "Show guides",
-          () => setShowGuides((v) => !v),
-        ),
-        item("clear-guides", "trash", "Clear guides", () => setGuidesDoc([])),
-        SEP,
-        // A grid is a view setting and a set of lines to catch on, so it
-        // is offered by the size it should be rather than as a switch
-        // with a number hidden somewhere else.
-        item("grid-none", grid === 0 ? "check" : "fit", "No grid", () => setGrid(0)),
-        ...[8, 16, 32].map((size) =>
-          item(
-            `grid-${size}`,
-            grid === size ? "check" : "fit",
-            `Grid of ${size} px`,
-            () => setGrid(size),
-          ),
-        ),
         SEP,
         // The picture as it was before the work: the bar's eye, named.
         item(
           "before",
           untouched ? "check" : "eye",
-          "Before the adjustments and filters",
+          "Before adjustments",
           () => {
             if (!session) return;
             session.set_untouched(!untouched);
@@ -9481,17 +9488,41 @@ export function App() {
           untouched ? "✓" : undefined,
         ),
         SEP,
-        // The monitor profile rows that were here are in Preferences,
-        // under Colour, and only there: a setting in two places is a
-        // setting that can disagree with itself. The keys sheet, which
-        // was here too, is on Help — the menu it was standing in for.
-        // Last on the last menu, which is where an application's own
-        // settings sit when they are not on a Mac's application menu —
-        // and the desktop shell puts them there as well. The rail's own
-        // row beside it opens the same window on the page that decides
-        // which tools are on the rail.
-        item("tools", "brush", "Tools on the rail…", () => openPrefs("tools")),
-        item("prefs", "units", "Preferences…", () => openPrefs("general"), hint("preferences")),
+        item(
+          "guides",
+          showGuides ? "check" : "fit",
+          showGuides ? "Hide guides" : "Show guides",
+          () => setShowGuides((v) => !v),
+        ),
+        item("clear-guides", "trash", "Clear guides", () => setGuidesDoc([])),
+        // A grid is a view setting and a set of lines to catch on, so it
+        // is offered by the size it should be rather than as a switch
+        // with a number hidden somewhere else — four of them, behind one
+        // row, beside the units, which are the same kind of choice.
+        sub("grid", "fit", "Grid", [
+          item("grid-none", grid === 0 ? "check" : "fit", "No grid", () => setGrid(0),
+            grid === 0 ? "✓" : undefined),
+          ...[8, 16, 32].map((size) =>
+            item(
+              `grid-${size}`,
+              grid === size ? "check" : "fit",
+              `Grid of ${size} px`,
+              () => setGrid(size),
+              grid === size ? "✓" : undefined,
+            ),
+          ),
+        ]),
+        sub(
+          "units",
+          "units",
+          "Units",
+          (["px", "mm", "in"] as Units[]).map((u) =>
+            item(`units-${u}`, "units", UNIT_LABELS[u], () => setUnits(u), units === u ? "✓" : undefined),
+          ),
+        ),
+        // The monitor profile is in Preferences, under Colour, and only
+        // there; Preferences, the toolbar and the keys are at the foot
+        // of Edit, where Photoshop keeps them.
       ],
     },
     {
@@ -9754,8 +9785,8 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={() => pick(placeInputRef)}
-            title="Place image…"
-            aria-label="Place image"
+            title="Place…"
+            aria-label="Place"
           >
             <Icon name="image" />
           </button>
@@ -9770,8 +9801,8 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={exportPng}
-            title="Export PNG"
-            aria-label="Export PNG"
+            title="Quick export as PNG"
+            aria-label="Quick export as PNG"
           >
             <Icon name="export" />
           </button>
@@ -9847,7 +9878,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={fitView}
-            title={tip("Fit document to window", "zoom-fit")}
+            title={tip("Fit on screen", "zoom-fit")}
             aria-label="Fit to window"
           >
             <Icon name="fit" />
@@ -10151,7 +10182,7 @@ export function App() {
                 Select all
               </MenuItem>
               <MenuItem icon="fit" onClick={fitView} hint={hint("zoom-fit")}>
-                Fit document to window
+                Fit on screen
               </MenuItem>
             </>
           )}
@@ -10173,7 +10204,7 @@ export function App() {
               refresh(session);
               fitView();
             } catch (err) {
-              alert(`Scale the page: ${err}`);
+              alert(`Resize page: ${err}`);
             }
           }}
         />
@@ -12187,16 +12218,16 @@ export function App() {
                 onClick={clipSelection}
                 disabled={!clippable}
                 aria-pressed={selectedLayer?.clipped ?? false}
-                title={tip("Clip to the layer below", "clip")}
-                aria-label="Clip to the layer below"
+                title={tip("Clip to layer below", "clip")}
+                aria-label="Clip to layer below"
               >
                 <Icon name="clip" size={16} />
               </button>
               <button
                 onClick={instanceSelected}
                 disabled={selected === null}
-                title="Make a live copy: it follows this layer"
-                aria-label="Make a live copy"
+                title="Duplicate linked: a copy that follows this layer"
+                aria-label="Duplicate linked"
               >
                 <Icon name="instance" size={16} />
               </button>
@@ -13265,7 +13296,7 @@ const keyHelp = (
       [c("export-window"), "Export window — any format, any size"],
       [c("preferences"), "Preferences"],
       [cs("copy-style", "paste-style"), "Copy, paste a layer's look"],
-      [c("clip"), "Clip to the layer below"],
+      [c("clip"), "Clip to layer below"],
       [cs("to-front", "to-back"), "Bring to the front, send to the back"],
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
@@ -14381,7 +14412,7 @@ function TraceDialog({
       <div
         className="modal trace"
         role="dialog"
-        aria-label="Trace into shapes"
+        aria-label="Picture to shapes"
         onPointerDown={(e) => e.stopPropagation()}
       >
         <h2>Trace {name} into shapes</h2>
@@ -14712,10 +14743,10 @@ function ScalePageDialog({
       <div
         className="modal"
         role="dialog"
-        aria-label="Scale the page"
+        aria-label="Resize page"
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <h2>Scale the page</h2>
+        <h2>Resize page</h2>
         <p className="modal-aside">
           {shown(width)} × {shown(height)} {units} now. Everything on the
           page scales with it.

@@ -10568,6 +10568,38 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **The menus, audited against Photoshop, Affinity and Illustrator** ✅
+  (after Select, November 2026). Every row keeps its id, so a key a
+  person gave one still reaches it; names and places changed. **Layer**
+  had fourteen sentences in one run: it is sections now — Group,
+  Ungroup, Arrange ▸, Align ▸, Transform ▸ (Flip horizontal, Flip
+  vertical, Reset corners — was "Put the picture's corners back");
+  Mask ▸ (Add rectangle / ellipse mask, Reveal / Hide selection, Delete
+  mask), Clip to layer below, Styles ▸ (New style from layer, Apply …);
+  Combine shapes ▸, Path ▸ (Join paths, Split at anchor — was "Cut the
+  path at the anchor" —, Offset path…, Simplify path…), Repeat…, Blend
+  shapes…, Convert ▸ (Text to shapes, Stroke to shape — was "Outline
+  the stroke" —, Picture to shapes… — was "Trace into shapes…"), Merge
+  layers (was "Merge into a picture"); Develop again… and "Apply develop
+  settings to N others" for a developed raw; Lock, Hide, Rename….
+  **Edit** gained Duplicate linked (Affinity's name; was Layer › "Make a
+  live copy") and, at its foot as in Photoshop, Toolbar… (was View ›
+  "Tools on the rail…"), Keyboard shortcuts… (new: the Keys page) and
+  Preferences… (was on View). **File**: Place… (it takes any file Open
+  reads, not only images), Add font…, Quick export as PNG (Photoshop's
+  name; was "Export PNG"), and the three frame exports behind Export
+  frames ▸ (This frame, Each frame as a picture, All frames as a PDF —
+  they had said "artboard" and "frame" for one thing). **Page**: Resize
+  page… (was "Scale the page…"), Trim empty edges (was "Trim to the
+  artwork"), and Rotate and flip ▸ (Rotate 90° clockwise /
+  anticlockwise, Rotate 180°, Flip page horizontal / vertical — were
+  five loose rows saying turn and mirror). **View**: Fit on screen (was
+  "Fit document to window"), Before adjustments, guides, and Grid ▸ and
+  Units ▸ in place of seven loose rows. Select, Adjust, Filter and Help
+  are as they were. Smoke 9bj asks the shape: the Layer menu's families
+  in order, twenty rows at most, none longer than four words, Edit's
+  foot, View without settings, and Keyboard shortcuts… opening the Keys
+  page.
   **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
   the reports for dnglab (filter patterns, Kodak's balance, Canon
   sRAW's black taken off twice, Fuji's orientation, the S23, the

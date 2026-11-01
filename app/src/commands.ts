@@ -20,7 +20,7 @@ export const COMMANDS = [
   { id: "save", label: "Save", group: "File", chord: "mod+s" },
   // Only in the desktop shell, where a document has somewhere to be.
   { id: "save-as", label: "Save as…", group: "File", chord: "mod+shift+s" },
-  { id: "export", label: "Export PNG", group: "File", chord: "mod+e" },
+  { id: "export", label: "Quick export as PNG", group: "File", chord: "mod+e" },
   { id: "export-window", label: "Export…", group: "File", chord: "mod+shift+e" },
   { id: "preferences", label: "Preferences", group: "File", chord: "mod+," },
   { id: "undo", label: "Undo", group: "Edit", chord: "mod+z" },
@@ -39,12 +39,12 @@ export const COMMANDS = [
   { id: "pick-inverse", label: "Inverse", group: "Select", chord: "mod+shift+i" },
   { id: "group", label: "Group", group: "Layer", chord: "mod+g" },
   { id: "ungroup", label: "Ungroup", group: "Layer", chord: "mod+shift+g" },
-  { id: "clip", label: "Clip to the layer below", group: "Layer", chord: "mod+alt+g" },
+  { id: "clip", label: "Clip to layer below", group: "Layer", chord: "mod+alt+g" },
   { id: "to-front", label: "Bring to front", group: "Layer", chord: "mod+shift+]" },
   { id: "to-back", label: "Send to back", group: "Layer", chord: "mod+shift+[" },
   { id: "zoom-in", label: "Zoom in", group: "View", chord: "mod+=" },
   { id: "zoom-out", label: "Zoom out", group: "View", chord: "mod+-" },
-  { id: "zoom-fit", label: "Fit document to window", group: "View", chord: "mod+0" },
+  { id: "zoom-fit", label: "Fit on screen", group: "View", chord: "mod+0" },
   { id: "zoom-actual", label: "Actual size", group: "View", chord: "mod+1" },
   { id: "keys-sheet", label: "Keys and gestures", group: "Help", chord: "shift+/" },
 ] as const;
