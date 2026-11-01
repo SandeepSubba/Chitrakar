@@ -10534,6 +10534,23 @@ without reading anything else.*
   fetched from a pinned Hugging Face commit, checked against its
   SHA-256 and kept in Cache Storage. The colour pick stays for anyone
   who declines (smoke 9al4) and as the fallback (9al5).
+  **The subject's edge, refined against the photograph: measured, not
+  shipped.** A 320×320 matte stretched over a photograph looks like it
+  should gain from refinement against the picture (the guided filter,
+  He et al.). Measured on PPM-100's portraits with their hand-made
+  mattes (30 photographs at 1536 px; error ×1000 over the whole picture
+  / in a band round the true edge / squared): the stretched matte
+  16.9 / 130 / 10.6; a grey guide, window two matte pixels, ε 1e-2
+  19.2 / 164 / 10.5 (worse — the obvious choice, and briefly in the
+  engine); a colour guide, one matte pixel, ε 1e-3, then the
+  transition steepened ×2, 15.5 / 110 / 11.7 — better at the edge but
+  worse squared, since it makes the model's own mistakes confident.
+  Most of what is wrong is the model's, not its grid's. IS-Net
+  (the same authors' successor, Apache-2.0, 1024×1024) was also tried
+  on all 100: 22.6 mean error against U²-Net's 20.3, 2.0% of pixels on
+  the wrong side against 1.8%, and 0.9 s against 0.36. So U²-Net stays
+  and the matte goes in as the model gives it; a better answer is a
+  better model, not a filter.
   **rawler's faults, written up** ✅: `docs/upstream/rawler.md` drafts
   the reports for dnglab (filter patterns, Kodak's balance, Canon
   sRAW's black taken off twice, Fuji's orientation, the S23, the
