@@ -10568,6 +10568,20 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **Colour grading in the develop window** ✅ (Lightroom's): a tint for
+  the shadows, the midtones and the highlights, and one for everything —
+  hue, saturation and luminance each — with Blending (how far the zones
+  run into each other) and Balance (where shadows end and highlights
+  begin) (`RawDevelop::grading`, `chitrakar_doc::Grading`,
+  `develop::Grade`). On the eye's scale: the shadows and highlights trade
+  over a span about the pivot, smoothstepped, and the midtones take where
+  they meet; each tint is the hue's colour less its own grey, so it moves
+  colour and not brightness, and pure black and white take none. At full
+  saturation a fifth of the way to the hue (a quarter read heavier than
+  Lightroom at the same number on the X-T5's street). One wheel at a
+  time, the zone picked above it: red to the right, round anticlockwise,
+  grey in the middle; a drag places the point, a double-click takes it
+  back. Smoke 9cn.
   **A colour mixer in the develop window** ✅ (Lightroom's HSL):
   hue, saturation and luminance for eight bands — red, orange, yellow,
   green, aqua, blue, purple, magenta, unevenly round the circle as

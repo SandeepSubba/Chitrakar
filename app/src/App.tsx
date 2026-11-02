@@ -71,6 +71,10 @@ import {
   autoChannels,
   cleanMixer,
   MIXER_BANDS,
+  cleanGrading,
+  GRADE_ZONES,
+  NO_GRADING,
+  type GradeZone,
   type CurveKey,
   sliderToKelvin,
 } from "./develop";
@@ -14071,6 +14075,61 @@ function FindReplaceDialog({
  * what is clipped — pressed, the clipped pixels are painted over the
  * photograph, red for highlights and blue for shadows — and Before, held
  * (or the backslash key held), shows the plain development to compare. */
+/** A colour wheel for grading: the hue round the circle, how much of it
+ * by how far from the middle — a press or a drag puts the point there,
+ * a double-click takes it back to the middle. Red is to the right and
+ * the hues go round the other way from a clock, as on Lightroom's. */
+function GradeWheel({
+  label,
+  hue,
+  saturation,
+  onChange,
+}: {
+  label: string;
+  hue: number;
+  saturation: number;
+  onChange: (hue: number, saturation: number) => void;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const at = (e: React.PointerEvent) => {
+    const r = box.current!.getBoundingClientRect();
+    const [dx, dy] = [e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2))];
+    const reach = Math.min(1, Math.hypot(dx, dy) / (r.width / 2));
+    const h = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+    onChange(Math.round(h), Math.round(reach * 100));
+  };
+  const angle = (hue * Math.PI) / 180;
+  const [px, py] = [50 + Math.cos(angle) * (saturation / 2), 50 - Math.sin(angle) * (saturation / 2)];
+  return (
+    <div className="grade-wheel-row">
+      <div
+        ref={box}
+        className="grade-wheel"
+        role="slider"
+        aria-label={label}
+        aria-valuetext={`hue ${hue}°, saturation ${saturation}`}
+        aria-valuenow={saturation}
+        tabIndex={0}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          at(e);
+        }}
+        onPointerMove={(e) => {
+          if (e.buttons) at(e);
+        }}
+        onDoubleClick={() => onChange(hue, 0)}
+        title="Drag the point: round for the hue, out for how much. Double-click to take it back"
+      >
+        <span className="grade-dot" style={{ left: `${px}%`, top: `${py}%` }} />
+      </div>
+      <span className="grade-numbers">
+        <span>Hue {hue}°</span>
+        <span>Saturation {saturation}</span>
+      </span>
+    </div>
+  );
+}
+
 function RawDevelopDialog({
   session,
   name,
@@ -14108,6 +14167,8 @@ function RawDevelopDialog({
   const [big, setBig] = useState(false);
   /** Which of the colour mixer's three the sliders are showing. */
   const [mixing, setMixing] = useState<0 | 1 | 2>(0);
+  /** Which of colour grading's zones the wheel is showing. */
+  const [zone, setZone] = useState<GradeZone>("shadows");
   /** The picture's box, so a window made bigger develops a bigger
    * preview and puts the spot's mark back where it belongs. */
   const [boxSize, setBoxSize] = useState<[number, number]>([0, 0]);
@@ -14204,7 +14265,15 @@ function RawDevelopDialog({
     return () => cancelAnimationFrame(frame);
   }, [s, session, before, spot]);
   const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | CurveKey>, min: number, max: number, step: number, unit = "") => (
+  /** A change to colour grading, kept only while it asks for something. */
+  const grade = (change: (g: NonNullable<RawSettings["grading"]>) => void) =>
+    setS((o) => {
+      const g = structuredClone(o.grading ?? NO_GRADING);
+      change(g);
+      return { ...o, grading: cleanGrading(g) };
+    });
+  const grading = s.grading ?? NO_GRADING;
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
       {/* The value can be typed as well as dragged: a slider a few
           hundred pixels long for ten stops is a twentieth of a stop a
@@ -14504,6 +14573,70 @@ function RawDevelopDialog({
                 </label>
               );
             })}
+            <h3 className="props-head">Colour grading</h3>
+            {/* Lightroom's colour grading: a tint for the shadows, the
+                midtones and the highlights, and one for everything. One
+                wheel at a time, the zone chosen above it. */}
+            <div className="develop-mixing" role="group" aria-label="Colour grading zone">
+              {GRADE_ZONES.map((z) => (
+                <button
+                  key={z}
+                  type="button"
+                  className={zone === z ? "active" : undefined}
+                  aria-pressed={zone === z}
+                  onClick={() => setZone(z)}
+                >
+                  {z[0].toUpperCase() + z.slice(1)}
+                  {grading[z][1] !== 0 || grading[z][2] !== 0 ? "•" : ""}
+                </button>
+              ))}
+            </div>
+            <GradeWheel
+              label={`${zone[0].toUpperCase() + zone.slice(1)} colour`}
+              hue={grading[zone][0]}
+              saturation={grading[zone][1]}
+              onChange={(h, sat) =>
+                grade((g) => {
+                  g[zone] = [h, sat, g[zone][2]];
+                })
+              }
+            />
+            <label onDoubleClick={() => grade((g) => (g[zone] = [g[zone][0], g[zone][1], 0]))} title="Double-click to put it back">
+              <SliderHead label="Luminance" value={grading[zone][2]} />
+              <input
+                type="range"
+                min={-100}
+                max={100}
+                step={1}
+                value={grading[zone][2]}
+                onChange={(e) => grade((g) => (g[zone] = [g[zone][0], g[zone][1], Number(e.target.value)]))}
+                aria-label={`${zone} luminance`}
+              />
+            </label>
+            <label onDoubleClick={() => grade((g) => (g.blending = 50))} title="How far the zones run into each other. Double-click to put it back">
+              <SliderHead label="Blending" value={grading.blending} />
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={grading.blending}
+                onChange={(e) => grade((g) => (g.blending = Number(e.target.value)))}
+                aria-label="Grading blending"
+              />
+            </label>
+            <label onDoubleClick={() => grade((g) => (g.balance = 0))} title="Where the shadows end and the highlights begin. Double-click to put it back">
+              <SliderHead label="Balance" value={grading.balance} />
+              <input
+                type="range"
+                min={-100}
+                max={100}
+                step={1}
+                value={grading.balance}
+                onChange={(e) => grade((g) => (g.balance = Number(e.target.value)))}
+                aria-label="Grading balance"
+              />
+            </label>
             <h3 className="props-head">Tone curve</h3>
             {/* The same curves as a Curves layer, drawn over the developed
                 preview's tones: the tones as they will be seen, after

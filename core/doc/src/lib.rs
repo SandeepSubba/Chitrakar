@@ -13,10 +13,11 @@ mod node;
 pub use node::{
     bevel_light, bevel_shares, conic_turn, convex, focal_offset, focal_ramp, invert_axes,
     round_corners, spread_gain, stroke_align, Adjustment, BevelLight, BlendMode, Developed, Effect,
-    Filter, Gradient, GradientStop, Guide, Marker, Mask, MaskKind, Node, NodeKind, PaintStroke,
-    Pin, Pinning, Projective, RasterRef, RawDevelop, Rounded, Spread, Stroke, StrokeAlign,
-    StrokeCap, StrokeJoin, StyleRun, TextAlign, TextList, TextSpec, Transform, VectorShape,
-    BASELINE_MOST, BEVEL_DEPTH_MOST, LUMA, MARKER_LENGTH, MARKER_REACH, MITER_LIMIT, SPREAD_MOST,
+    Filter, Gradient, GradientStop, Grading, Guide, Marker, Mask, MaskKind, Node, NodeKind,
+    PaintStroke, Pin, Pinning, Projective, RasterRef, RawDevelop, Rounded, Spread, Stroke,
+    StrokeAlign, StrokeCap, StrokeJoin, StyleRun, TextAlign, TextList, TextSpec, Transform,
+    VectorShape, BASELINE_MOST, BEVEL_DEPTH_MOST, LUMA, MARKER_LENGTH, MARKER_REACH, MITER_LIMIT,
+    SPREAD_MOST,
 };
 
 use chitrakar_color::ColorMode;

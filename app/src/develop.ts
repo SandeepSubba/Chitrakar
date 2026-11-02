@@ -38,7 +38,46 @@ export type RawSettings = {
   /** The colour mixer: hue, saturation and luminance, -100 to 100, for
    * each of the eight bands in `MIXER_BANDS`. Absent is untouched. */
   mixer?: [number, number, number][];
+  /** Colour grading: `[hue, saturation, luminance]` for each zone (hue in
+   * degrees, saturation 0 to 100, luminance -100 to 100), how far they
+   * run into each other and where they divide. Absent is none. */
+  grading?: Grading;
 };
+
+export type GradeZone = "shadows" | "midtones" | "highlights" | "global";
+export type Grading = Record<GradeZone, [number, number, number]> & { blending: number; balance: number };
+export const GRADE_ZONES: GradeZone[] = ["shadows", "midtones", "highlights", "global"];
+export const NO_GRADING: Grading = {
+  shadows: [0, 0, 0],
+  midtones: [0, 0, 0],
+  highlights: [0, 0, 0],
+  global: [0, 0, 0],
+  blending: 50,
+  balance: 0,
+};
+
+/** Grading read from somewhere that might say anything: each zone three
+ * numbers held to their ranges, blending and balance to theirs; a grading
+ * that asks for nothing is none. */
+export function cleanGrading(x: unknown): Grading | undefined {
+  if (!x || typeof x !== "object") return undefined;
+  const o = x as Record<string, unknown>;
+  const num = (v: unknown, d: number, lo: number, hi: number) =>
+    typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
+  const zone = (v: unknown): [number, number, number] => {
+    const a = Array.isArray(v) ? v : [];
+    return [((num(a[0], 0, -1e6, 1e6) % 360) + 360) % 360, num(a[1], 0, 0, 100), num(a[2], 0, -100, 100)];
+  };
+  const g: Grading = {
+    shadows: zone(o.shadows),
+    midtones: zone(o.midtones),
+    highlights: zone(o.highlights),
+    global: zone(o.global),
+    blending: num(o.blending, 50, 0, 100),
+    balance: num(o.balance, 0, -100, 100),
+  };
+  return GRADE_ZONES.some((z) => g[z][1] !== 0 || g[z][2] !== 0) ? g : undefined;
+}
 
 /** The colour mixer's bands, as Lightroom names them, with a colour to
  * draw each slider in. */
@@ -106,7 +145,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | CurveKey>, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -143,6 +182,8 @@ export function cleanSettings(x: unknown): RawSettings {
   }
   const mixer = cleanMixer(o.mixer);
   if (mixer) out.mixer = mixer;
+  const grading = cleanGrading(o.grading);
+  if (grading) out.grading = grading;
   return out;
 }
 
@@ -215,7 +256,8 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     !!p.settings.uncorrected === !!s.uncorrected &&
     !!p.settings.curve === !!s.curve &&
     CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null)) &&
-    JSON.stringify(p.settings.mixer ?? null) === JSON.stringify(s.mixer ?? null)
+    JSON.stringify(p.settings.mixer ?? null) === JSON.stringify(s.mixer ?? null) &&
+    JSON.stringify(p.settings.grading ?? null) === JSON.stringify(s.grading ?? null)
   );
 }
 

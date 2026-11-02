@@ -111,6 +111,13 @@ check(d.cleanSettings({ mixer: Array.from({ length: 8 }, () => [0, 0, 0]) }).mix
 check(d.cleanSettings({ mixer: [[1, 2, 3]] }).mixer === undefined, "and one of the wrong shape is none");
 check(d.MIXER_BANDS.length === 8, "eight bands");
 
+// Grading read back: zones held, the hue taken round the circle, and a
+// grading that asks for nothing is none.
+const graded = d.cleanGrading({ shadows: [-170, 140, 0], blending: 200 });
+check(graded && graded.shadows[0] === 190 && graded.shadows[1] === 100 && graded.blending === 100, `grading held (${JSON.stringify(graded)})`);
+check(d.cleanGrading({ balance: 40 }) === undefined, "balance alone is no grading");
+check(d.cleanSettings({ grading: { highlights: [40, 30, 0] } }).grading.highlights[1] === 30, "grading kept in the settings");
+
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));
   process.exit(1);

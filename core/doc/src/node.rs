@@ -752,6 +752,50 @@ pub struct RawDevelop {
     /// blue, purple, magenta, as Lightroom names them. All nought is none.
     #[serde(skip_serializing_if = "untouched_mixer")]
     pub mixer: [[f32; 3]; 8],
+    /// Colour grading: a tint for the shadows, the midtones and the
+    /// highlights, and one for everything, as Lightroom has it.
+    #[serde(skip_serializing_if = "Grading::untouched")]
+    pub grading: Grading,
+}
+
+/// Colour grading in the develop window. Each zone is `[hue, saturation,
+/// luminance]`: hue in degrees round the circle, saturation nought to
+/// 100, luminance -100 to 100. `blending` (nought to 100) is how far the
+/// zones run into each other and `balance` (-100 to 100) moves where the
+/// shadows end and the highlights begin — towards the shadows when
+/// positive, so more of the picture is graded as highlights.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Grading {
+    pub shadows: [f32; 3],
+    pub midtones: [f32; 3],
+    pub highlights: [f32; 3],
+    pub global: [f32; 3],
+    pub blending: f32,
+    pub balance: f32,
+}
+
+impl Default for Grading {
+    fn default() -> Self {
+        Grading {
+            shadows: [0.0; 3],
+            midtones: [0.0; 3],
+            highlights: [0.0; 3],
+            global: [0.0; 3],
+            blending: 50.0,
+            balance: 0.0,
+        }
+    }
+}
+
+impl Grading {
+    /// No zone asks for anything: the blending and balance alone change
+    /// nothing.
+    pub fn untouched(&self) -> bool {
+        [self.shadows, self.midtones, self.highlights, self.global]
+            .iter()
+            .all(|z| z[1] == 0.0 && z[2] == 0.0)
+    }
 }
 
 fn untouched_mixer(m: &[[f32; 3]; 8]) -> bool {

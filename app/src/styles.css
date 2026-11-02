@@ -4093,6 +4093,45 @@ button.fold:hover {
   color: var(--on-accent);
 }
 
+/* Colour grading's wheel: the hues round it, grey in the middle where
+   there is no tint; red to the right, going round anticlockwise. */
+.grade-wheel-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+.grade-wheel {
+  position: relative;
+  flex: none;
+  width: 7.5rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(closest-side, rgb(128 128 128) 0%, rgb(128 128 128 / 0) 100%),
+    conic-gradient(from 90deg, #f00, #f0f, #00f, #0ff, #0f0, #ff0, #f00);
+  border: 1px solid var(--border);
+  touch-action: none;
+  cursor: crosshair;
+}
+.grade-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.6);
+  pointer-events: none;
+}
+.grade-numbers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* A setting's number, typed into where it is shown. */
 .develop-number {
   width: 3.6rem;

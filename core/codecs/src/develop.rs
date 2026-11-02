@@ -2044,6 +2044,8 @@ struct Look {
     channel_luts: [Vec<f32>; 3],
     /// The colour mixer, each setting -1 to 1; `None` when all are nought.
     mixer: Option<[[f32; 3]; 8]>,
+    /// Colour grading, made ready; `None` when it asks for nothing.
+    grading: Option<Grade>,
     encode: chitrakar_color::Srgb8,
 }
 
@@ -2101,6 +2103,7 @@ impl Look {
                 let m = s.mixer.map(|band| band.map(unit));
                 m.iter().flatten().any(|v| *v != 0.0).then_some(m)
             },
+            grading: (!s.grading.untouched()).then(|| Grade::new(&s.grading)),
             encode: chitrakar_color::Srgb8::new(),
         };
         if !look.tones_untouched() {
@@ -2176,6 +2179,9 @@ impl Look {
         }
         if let Some(mixer) = &self.mixer {
             c = mix(c, mixer);
+        }
+        if let Some(grade) = &self.grading {
+            c = grade.apply(c);
         }
         for (v, lut) in c.iter_mut().zip(&self.channel_luts) {
             if lut.is_empty() {
@@ -2354,6 +2360,87 @@ fn mix(c: [f32; 3], mixer: &[[f32; 3]; 8]) -> [f32; 3] {
     // Luminance: up to about a stop and a half darker, a stop lighter.
     let k = 1.0 + dl * if dl < 0.0 { 0.45 } else { 0.35 };
     q.map(|v| (v * k) * (v * k))
+}
+
+/// Colour grading made ready to lay on a pixel: each zone's tint as a
+/// colour with no brightness of its own (a hue's colour less its grey),
+/// scaled by the zone's saturation, and its luminance as a factor; and
+/// where the zones divide.
+struct Grade {
+    /// Shadows, midtones, highlights, everything: the push towards the
+    /// zone's hue, and the brightness factor less one.
+    zones: [([f32; 3], f32); 4],
+    pivot: f32,
+    spread: f32,
+}
+
+impl Grade {
+    fn new(g: &chitrakar_doc::Grading) -> Grade {
+        let finite = |v: f32, d: f32| if v.is_finite() { v } else { d };
+        let zone = |z: [f32; 3]| {
+            let hue = finite(z[0], 0.0).rem_euclid(360.0);
+            let sat = finite(z[1], 0.0).clamp(0.0, 100.0) / 100.0;
+            let lum = finite(z[2], 0.0).clamp(-100.0, 100.0) / 100.0;
+            // The hue at full colour, on the eye's scale, less its own
+            // grey: a push that moves colour and not brightness.
+            let h = hue / 60.0;
+            let x = 1.0 - (h % 2.0 - 1.0).abs();
+            let rgb = match h as u32 {
+                0 => [1.0, x, 0.0],
+                1 => [x, 1.0, 0.0],
+                2 => [0.0, 1.0, x],
+                3 => [0.0, x, 1.0],
+                4 => [x, 0.0, 1.0],
+                _ => [1.0, 0.0, x],
+            };
+            let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+            // At full saturation a fifth of the way to the hue's colour.
+            (rgb.map(|v| (v - y) * sat * 0.2), lum * 0.3)
+        };
+        let blending = finite(g.blending, 50.0).clamp(0.0, 100.0) / 100.0;
+        let balance = finite(g.balance, 0.0).clamp(-100.0, 100.0) / 100.0;
+        Grade {
+            zones: [
+                zone(g.shadows),
+                zone(g.midtones),
+                zone(g.highlights),
+                zone(g.global),
+            ],
+            pivot: 0.5 - balance * 0.25,
+            spread: 0.12 + blending * 0.38,
+        }
+    }
+
+    /// A linear colour graded: how much of it is shadow, midtone and
+    /// highlight is read off its brightness as the eye sees it, the
+    /// shadows and highlights trading over a span about the pivot (wider
+    /// as the blending is) and the midtones where they meet; each zone
+    /// takes its share of its push and its brightness.
+    fn apply(&self, c: [f32; 3]) -> [f32; 3] {
+        let mut q = c.map(|v| v.max(0.0).sqrt());
+        let y = (0.2126 * q[0] + 0.7152 * q[1] + 0.0722 * q[2]).min(1.0);
+        let t = ((y - (self.pivot - self.spread)) / (2.0 * self.spread)).clamp(0.0, 1.0);
+        let high = t * t * (3.0 - 2.0 * t);
+        let shadow = 1.0 - high;
+        let middle = 4.0 * shadow * high;
+        // Pure black and pure white take no colour: a tint is laid on
+        // tones, and none is left at the ends.
+        let ends = (4.0 * y * (1.0 - y)).clamp(0.0, 1.0).sqrt();
+        let shares = [
+            shadow * (1.0 - middle * 0.5),
+            middle,
+            high * (1.0 - middle * 0.5),
+            1.0,
+        ];
+        let mut factor = 1.0;
+        for ((push, lum), share) in self.zones.iter().zip(shares) {
+            for k in 0..3 {
+                q[k] += push[k] * share * ends;
+            }
+            factor *= 1.0 + lum * share;
+        }
+        q.map(|v| (v.max(0.0) * factor).powi(2))
+    }
 }
 
 /// Steps in a channel curve's table.
@@ -4230,6 +4317,61 @@ mod tests {
             photo.develop(&base).rgba8,
             photo.develop(&mixed).rgba8,
             "a grey card has nothing in the blue band"
+        );
+    }
+
+    #[test]
+    fn colour_grading_tints_each_zone_and_keeps_its_brightness() {
+        let teal_orange = chitrakar_doc::Grading {
+            shadows: [190.0, 80.0, 0.0],
+            highlights: [35.0, 80.0, 0.0],
+            ..Default::default()
+        };
+        let g = Grade::new(&teal_orange);
+        let seen = |c: [f32; 3]| 0.2126 * c[0].sqrt() + 0.7152 * c[1].sqrt() + 0.0722 * c[2].sqrt();
+        let dark = g.apply([0.03; 3]);
+        let light = g.apply([0.6; 3]);
+        // Shadows go teal (blue and green over red), highlights orange.
+        assert!(dark[2] > dark[0] && dark[1] > dark[0], "{dark:?}");
+        assert!(light[0] > light[2] * 1.1, "{light:?}");
+        // A tint is not a brightness: each grey comes out as bright as it
+        // went in, near enough.
+        assert!((seen(dark) - seen([0.03; 3])).abs() < 0.01);
+        assert!((seen(light) - seen([0.6; 3])).abs() < 0.01);
+        // Pure black and pure white are left as they are.
+        assert_eq!(g.apply([0.0; 3]), [0.0; 3]);
+        let white = g.apply([1.0; 3]);
+        assert!(white.iter().all(|v| (v - 1.0).abs() < 1e-3), "{white:?}");
+        // Balance towards the shadows grades more of the range as
+        // highlights: a middle grey turns warmer.
+        let mid = |balance| {
+            let c = Grade::new(&chitrakar_doc::Grading {
+                balance,
+                ..teal_orange
+            })
+            .apply([0.18; 3]);
+            c[0] - c[2]
+        };
+        assert!(mid(80.0) > mid(0.0) && mid(0.0) > mid(-80.0));
+        // Luminance on the shadows lifts them, not the highlights.
+        let lifted = Grade::new(&chitrakar_doc::Grading {
+            shadows: [0.0, 0.0, 100.0],
+            ..Default::default()
+        });
+        assert!(seen(lifted.apply([0.03; 3])) > seen([0.03; 3]) * 1.15);
+        assert!((seen(lifted.apply([0.8; 3])) - seen([0.8; 3])).abs() < 0.02);
+        // Untouched, the development is as it was.
+        let photo = grey_card([0.8, 1.0, 0.6]);
+        let base = RawDevelop {
+            curve: true,
+            ..Default::default()
+        };
+        let mut moved = base.clone();
+        moved.grading.balance = 60.0;
+        assert_eq!(
+            photo.develop(&base).rgba8,
+            photo.develop(&moved).rgba8,
+            "balance alone grades nothing"
         );
     }
 

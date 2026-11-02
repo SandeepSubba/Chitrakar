@@ -15406,6 +15406,29 @@ assert(
   );
   await win.locator('button:text-is("Reset")').click();
   await settle();
+  // Colour grading: the highlights given a red tint by a press near the
+  // wheel's right-hand edge — the light half of the card turns warm, the
+  // dark half stays grey.
+  const lightBefore = await previewAt(0.75, 0.5);
+  const darkBefore = await previewAt(0.25, 0.5);
+  await win.locator('[aria-label="Colour grading zone"] button', { hasText: "Highlights" }).click();
+  const wheel = win.locator('[role="slider"][aria-label="Highlights colour"]');
+  await wheel.scrollIntoViewIfNeeded();
+  const wb = await wheel.boundingBox();
+  await page.mouse.click(wb.x + wb.width * 0.95, wb.y + wb.height * 0.5);
+  await settle();
+  const lightAfter = await previewAt(0.75, 0.5);
+  const darkAfter = await previewAt(0.25, 0.5);
+  assert(
+    lightAfter[0] - lightAfter[2] > lightBefore[0] - lightBefore[2] + 10,
+    `a red tint on the highlights warms the light grey (${lightBefore} to ${lightAfter})`,
+  );
+  assert(
+    Math.abs(darkAfter[0] - darkAfter[2] - (darkBefore[0] - darkBefore[2])) < 6,
+    `and leaves the dark grey near as it was (${darkBefore} to ${darkAfter})`,
+  );
+  await win.locator('button:text-is("Reset")').click();
+  await settle();
   // Detail is judged at the photograph's own size: the square follows a
   // click on the photograph, and sharpening changes what is in it.
   const loupe = win.locator('canvas[aria-label="At its own size"]');

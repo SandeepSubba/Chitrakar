@@ -325,7 +325,8 @@ with `RawDevelop` — white balance in kelvin and tint through the
 camera's matrix, exposure, highlights, shadows, whites, blacks,
 contrast (with a shoulder into white on new developments), a tone
 curve and one a channel (`tone_curve` and kin, Curves' own `curve_lut`),
-a colour mixer of eight bands (`mixer`, `develop::mix`),
+a colour mixer of eight bands (`mixer`, `develop::mix`), colour
+grading of shadows, midtones and highlights (`grading`, `develop::Grade`),
 Presence (clarity and dehaze, `core/codecs/src/presence.rs`:
 worked out on a ~1024-pixel copy and laid on any size, so the preview,
 the whole development and the square agree), vibrance, saturation, and
