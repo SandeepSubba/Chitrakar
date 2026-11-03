@@ -1669,6 +1669,15 @@ body {
   overflow: visible;
 }
 
+/* The line between a gradient mask's ends: wide enough to take hold of,
+   drawn by the thin dashed one beneath it. */
+.grad-mask-line .grad-mask-hit {
+  stroke: transparent;
+  stroke-width: 14;
+  pointer-events: stroke;
+  cursor: move;
+}
+
 .sel-outline polygon {
   fill: none;
   stroke: var(--accent);

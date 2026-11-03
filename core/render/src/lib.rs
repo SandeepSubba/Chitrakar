@@ -9123,9 +9123,10 @@ impl<'a> MaskRef<'a> {
             Some(MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. }) => {
                 parent.compose(*transform)
             }
-            // A painted mask's strokes are written in the space the mask
-            // is authored in, so there is nothing more to compose.
-            Some(MaskKind::Painted { .. }) | None => parent,
+            // A painted mask's strokes and a gradient's ends are written
+            // in the space the mask is authored in, so there is nothing
+            // more to compose.
+            Some(MaskKind::Painted { .. } | MaskKind::Gradient { .. }) | None => parent,
         };
         MaskRef {
             mask,
@@ -9240,6 +9241,32 @@ fn softened(mut plane: MaskPlane, sigma: f32) -> MaskPlane {
     plane
 }
 
+/// A gradient mask's coverage at a point `p` in the space it is written
+/// in: all of it at `from`, none at `to`, eased (smoothstepped) between —
+/// along the line between the two, or for a radial one out from `from`
+/// to the upright ellipse whose radii are how far `to` is each way, its
+/// inner third left whole as a radial filter's is.
+pub fn gradient_coverage(radial: bool, from: [f32; 2], to: [f32; 2], p: (f32, f32)) -> f32 {
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let (px, py) = (p.0 - from[0], p.1 - from[1]);
+    let t = if radial {
+        let (rx, ry) = (dx.abs().max(1e-3), dy.abs().max(1e-3));
+        let r = ((px / rx).powi(2) + (py / ry).powi(2)).sqrt();
+        (r - 0.33) / 0.67
+    } else {
+        let len2 = dx * dx + dy * dy;
+        if len2 < 1e-6 {
+            return if px * dx + py * dy <= 0.0 { 1.0 } else { 0.0 };
+        }
+        (px * dx + py * dy) / len2
+    };
+    if !t.is_finite() {
+        return 1.0;
+    }
+    let t = t.clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
+}
+
 /// A mask's coverage without a document to read a picture out of: every
 /// kind but a raster one answers from its own geometry.
 fn bare_coverage(m: MaskRef<'_>, x: u32, y: u32) -> f32 {
@@ -9252,6 +9279,12 @@ fn bare_coverage(m: MaskRef<'_>, x: u32, y: u32) -> f32 {
             None => 0.0,
         },
         MaskKind::Painted { .. } => m.plane.map_or(1.0, |p| p.at(x, y)),
+        MaskKind::Gradient { radial, from, to } => match m.inv {
+            Some(inv) => {
+                gradient_coverage(*radial, *from, *to, inv.at(x as f32 + 0.5, y as f32 + 0.5))
+            }
+            None => 0.0,
+        },
         MaskKind::Raster { .. } => 0.0,
     };
     if mask.invert {
@@ -9282,6 +9315,10 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
         // is nothing to read, and a mask that shows everything is the
         // harmless answer.
         MaskKind::Painted { .. } => m.plane.map_or(1.0, |p| p.at(x, y)),
+        MaskKind::Gradient { radial, from, to } => match m.inv {
+            Some(inv) => gradient_coverage(*radial, *from, *to, inv.at(fx, fy)),
+            None => 0.0,
+        },
         MaskKind::Raster { resource_id, .. } => {
             match (doc.resource(resource_id), m.inv.map(|inv| inv.at(fx, fy))) {
                 (Some(res), Some((lx, ly)))

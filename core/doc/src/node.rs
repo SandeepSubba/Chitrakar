@@ -2159,7 +2159,7 @@ impl Mask {
     /// does — would leave a lie behind if it skipped them.
     pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
         match &mut self.kind {
-            MaskKind::Vector { .. } | MaskKind::Raster { .. } => {}
+            MaskKind::Vector { .. } | MaskKind::Raster { .. } | MaskKind::Gradient { .. } => {}
             MaskKind::Painted { strokes } => {
                 for stroke in strokes {
                     stroke.each_color_mut(f);
@@ -2189,6 +2189,15 @@ impl Mask {
         match &mut out.kind {
             MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
                 *transform = m.compose(*transform);
+            }
+            // Both ends are points in that space. (A radial one's ellipse
+            // stays upright: its radii are how far `to` is each way, so a
+            // turn carries the size and not the tilt.)
+            MaskKind::Gradient { from, to, .. } => {
+                let at =
+                    |p: [f32; 2]| [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+                *from = at(*from);
+                *to = at(*to);
             }
             MaskKind::Painted { strokes } => {
                 let k = m.max_scale();
@@ -2238,6 +2247,18 @@ pub enum MaskKind {
     /// again (a brush) — which is how a piece is taken out of a layer
     /// without touching the layer.
     Painted { strokes: Vec<PaintStroke> },
+    /// Coverage that fades: all of it at `from`, none at `to`, eased in
+    /// between — along the line from one to the other (`radial` false:
+    /// a graduated filter, as for a sky), or outward from `from` to the
+    /// ellipse whose radii are how far `to` is from it each way (`radial`
+    /// true: a spot, as for a face). Lightroom's graduated and radial
+    /// filters are an adjustment layer wearing one; `Mask::invert` turns
+    /// it round.
+    Gradient {
+        radial: bool,
+        from: [f32; 2],
+        to: [f32; 2],
+    },
 }
 
 /// How a layer answers when the frame around it changes size — the same
@@ -2775,7 +2796,7 @@ impl Node {
         if let Some(mask) = &self.mask {
             match &mask.kind {
                 MaskKind::Raster { resource_id, .. } => f(resource_id),
-                MaskKind::Vector { .. } | MaskKind::Painted { .. } => {}
+                MaskKind::Vector { .. } | MaskKind::Painted { .. } | MaskKind::Gradient { .. } => {}
             }
         }
     }

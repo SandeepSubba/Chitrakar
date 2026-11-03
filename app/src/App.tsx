@@ -7577,6 +7577,37 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
+  /** A gradient mask's two points, dragged on the canvas: either end on
+   * its own, or — by the line between them — both together. Previewed
+   * live, one step in the history. */
+  const gradMaskRef = useRef<{
+    end: "from" | "to" | "both";
+    mask: Mask;
+    start: [number, number];
+  } | null>(null);
+  const onGradMaskDown = (e: React.PointerEvent, end: "from" | "to" | "both") => {
+    if (!session || selected === null || !selectedMask || !("Gradient" in selectedMask.kind)) return;
+    e.stopPropagation();
+    gradMaskRef.current = { end, mask: JSON.parse(JSON.stringify(selectedMask)), start: layerPoint(e) };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onGradMaskMove = (e: React.PointerEvent) => {
+    const drag = gradMaskRef.current;
+    if (!drag || !session || selected === null || e.buttons === 0) return;
+    if (!("Gradient" in drag.mask.kind)) return;
+    const g = drag.mask.kind.Gradient;
+    const [px, py] = layerPoint(e);
+    const [dx, dy] = [px - drag.start[0], py - drag.start[1]];
+    const moved = (p: [number, number]): [number, number] => [p[0] + dx, p[1] + dy];
+    const from = drag.end === "to" ? g.from : moved(g.from);
+    const to = drag.end === "from" ? g.to : moved(g.to);
+    preview({ SetMask: { id: selected, mask: { ...drag.mask, kind: { Gradient: { ...g, from, to } } } } });
+  };
+  const onGradMaskUp = () => {
+    gradMaskRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
   const onCurveHandleUp = () => {
     handleDragRef.current = null;
     if (session?.commit_preview()) refresh(session);
@@ -7822,6 +7853,11 @@ export function App() {
       selectedKind = null;
     }
   }
+  /** The space the picked layer's mask is written in, for drawing it:
+   * wanted whether or not the layer has a box of its own, since an
+   * adjustment has none and a mask on one is a local adjustment. */
+  const maskParent: Transform | null =
+    session && selected !== null && selectedMask ? toTransform(session.parent_space_of(selected)) : null;
 
   /** The tones behind the graphs that read them. Counted only while a
    * layer that has such a graph is picked, and only once the document
@@ -8057,15 +8093,23 @@ export function App() {
   };
 
   /** Attach an ellipse mask inscribed in the layer's current bounds. */
-  const addMask = (kind: "ellipse" | "rect") => {
+  const addMask = (kind: "ellipse" | "rect" | "linear" | "radial") => {
     if (!session || !selectedLayer) return;
     // A mask is written in the layer's parent space, so inscribe it in the
     // layer's bounds *there* — mapping its own box through its own
     // transform — rather than in document bounds, which only agree while
     // the layer sits at the top level.
-    const lb = session.local_bounds_of(selectedLayer.id);
-    if (lb.length !== 4) return;
-    const t = toTransform(session.transform_of(selectedLayer.id));
+    // An adjustment or a filter has no picture of its own and so no box:
+    // it works on the whole page, which is the box its mask is laid in —
+    // the case that matters most, since an adjustment wearing a mask is a
+    // local adjustment. (It used to give up here, and a mask could not be
+    // added to one at all.)
+    const own = session.local_bounds_of(selectedLayer.id);
+    const lb = own.length === 4 ? own : [0, 0, docSize[0], docSize[1]];
+    const t =
+      own.length === 4
+        ? toTransform(session.transform_of(selectedLayer.id))
+        : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
     const xs = [
       t.a * lb[0] + t.c * lb[1] + t.e,
       t.a * lb[2] + t.c * lb[3] + t.e,
@@ -8077,6 +8121,28 @@ export function App() {
     const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
     const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
     const [w, h] = [x1 - x0, y1 - y0];
+    if (kind === "linear" || kind === "radial") {
+      // A graduated filter starts at the top and has faded by the middle,
+      // which is what a sky wants; a radial one sits in the middle, a
+      // little smaller than the layer. Both are moved by their two points
+      // on the canvas.
+      const cx = (x0 + x1) / 2;
+      run({
+        SetMask: {
+          id: selectedLayer.id,
+          mask: {
+            kind: {
+              Gradient:
+                kind === "linear"
+                  ? { radial: false, from: [cx, y0], to: [cx, (y0 + y1) / 2] }
+                  : { radial: true, from: [cx, (y0 + y1) / 2], to: [cx + w * 0.3, (y0 + y1) / 2 + h * 0.3] },
+            },
+            invert: false,
+          },
+        },
+      });
+      return;
+    }
     run({
       SetMask: {
         id: selectedLayer.id,
@@ -9583,6 +9649,10 @@ export function App() {
         sub("mask", "mask", "Mask", [
           item("mask-rect", "mask", "Add rectangle mask", () => addMask("rect")),
           item("mask-ellipse", "mask", "Add ellipse mask", () => addMask("ellipse")),
+          // Lightroom's graduated and radial filters: an adjustment layer
+          // wearing one of these is a local adjustment.
+          item("mask-linear", "gradient", "Add graduated mask", () => addMask("linear")),
+          item("mask-radial", "gradient", "Add radial mask", () => addMask("radial")),
           SEP,
           // Photoshop's Reveal and Hide Selection.
           item("mask-from-picked", "mask", "Reveal selection", () => maskFromSelection(false)),
@@ -12247,56 +12317,6 @@ export function App() {
                     </>
                   );
                 })()}
-              {/* The mask, drawn and edited where it applies. Dashed and
-                  in its own colour, because it is not the layer's outline
-                  and confusing the two makes both useless. */}
-              {(() => {
-                const box = maskBox(selectedMask);
-                if (!box || !selParent) return null;
-                const p = selParent;
-                const at = (x: number, y: number): [number, number] => [
-                  view.x + (p.a * x + p.c * y + p.e) * view.zoom,
-                  view.y + (p.b * x + p.d * y + p.f) * view.zoom,
-                ];
-                const [x0, y0, x1, y1] = box;
-                const quad: [number, number][] = [
-                  at(x0, y0),
-                  at(x1, y0),
-                  at(x1, y1),
-                  at(x0, y1),
-                ];
-                const centre = at((x0 + x1) / 2, (y0 + y1) / 2);
-                const knob = (
-                  key: string,
-                  pt: [number, number],
-                  corner: Handle | "move",
-                ) => (
-                  <div
-                    key={key}
-                    className={corner === "move" ? "mask-move" : "mask-handle"}
-                    data-mask={key}
-                    style={{ left: pt[0], top: pt[1] }}
-                    onPointerDown={(e) => onMaskHandleDown(e, corner)}
-                    onPointerMove={onMaskHandleMove}
-                    onPointerUp={onMaskHandleUp}
-                  />
-                );
-                return (
-                  <>
-                    <svg className="sel-outline" aria-hidden="true">
-                      <ellipse
-                        className="mask-outline"
-                        cx={(quad[0][0] + quad[2][0]) / 2}
-                        cy={(quad[0][1] + quad[2][1]) / 2}
-                        rx={Math.abs(quad[1][0] - quad[0][0]) / 2}
-                        ry={Math.abs(quad[3][1] - quad[0][1]) / 2}
-                      />
-                    </svg>
-                    {knob("move", centre, "move")}
-                    {HANDLES.map((c, i) => knob(c, quad[HANDLE_CORNER[i]], c))}
-                  </>
-                );
-              })()}
               {/* Gradient geometry, dragged where it is seen rather than
                   through sliders in the panel. */}
               {(() => {
@@ -12468,6 +12488,127 @@ export function App() {
                 })}
             </>
           )}
+          {/* The mask, drawn and edited where it applies. Dashed and
+              in its own colour, because it is not the layer's outline
+              and confusing the two makes both useless. */}
+          {(() => {
+            const box = maskBox(selectedMask);
+            if (!box || !maskParent) return null;
+            const p = maskParent;
+            const at = (x: number, y: number): [number, number] => [
+              view.x + (p.a * x + p.c * y + p.e) * view.zoom,
+              view.y + (p.b * x + p.d * y + p.f) * view.zoom,
+            ];
+            const [x0, y0, x1, y1] = box;
+            const quad: [number, number][] = [
+              at(x0, y0),
+              at(x1, y0),
+              at(x1, y1),
+              at(x0, y1),
+            ];
+            const centre = at((x0 + x1) / 2, (y0 + y1) / 2);
+            const knob = (
+              key: string,
+              pt: [number, number],
+              corner: Handle | "move",
+            ) => (
+              <div
+                key={key}
+                className={corner === "move" ? "mask-move" : "mask-handle"}
+                data-mask={key}
+                style={{ left: pt[0], top: pt[1] }}
+                onPointerDown={(e) => onMaskHandleDown(e, corner)}
+                onPointerMove={onMaskHandleMove}
+                onPointerUp={onMaskHandleUp}
+              />
+            );
+            return (
+              <>
+                <svg className="sel-outline" aria-hidden="true">
+                  <ellipse
+                    className="mask-outline"
+                    cx={(quad[0][0] + quad[2][0]) / 2}
+                    cy={(quad[0][1] + quad[2][1]) / 2}
+                    rx={Math.abs(quad[1][0] - quad[0][0]) / 2}
+                    ry={Math.abs(quad[3][1] - quad[0][1]) / 2}
+                  />
+                </svg>
+                {knob("move", centre, "move")}
+                {HANDLES.map((c, i) => knob(c, quad[HANDLE_CORNER[i]], c))}
+              </>
+            );
+          })()}
+          {/* A gradient mask, drawn where it fades: the line from where
+              it is whole to where it is gone (two marks across it, as
+              Lightroom draws a graduated filter), or the ellipse of a
+              radial one; each end a knob, the line itself moves both. */}
+          {(() => {
+            if (!selectedMask || !("Gradient" in selectedMask.kind) || !maskParent) return null;
+            const g = selectedMask.kind.Gradient;
+            const p = maskParent;
+            const at = (q: [number, number]): [number, number] => [
+              view.x + (p.a * q[0] + p.c * q[1] + p.e) * view.zoom,
+              view.y + (p.b * q[0] + p.d * q[1] + p.f) * view.zoom,
+            ];
+            const [a, b] = [at(g.from), at(g.to)];
+            const knob = (key: "from" | "to", pt: [number, number]) => (
+              <div
+                key={key}
+                className="grad-handle"
+                data-mask-end={key}
+                aria-label={key === "from" ? "Where the mask is whole" : "Where the mask has faded"}
+                style={{ left: pt[0], top: pt[1] }}
+                onPointerDown={(e) => onGradMaskDown(e, key)}
+                onPointerMove={onGradMaskMove}
+                onPointerUp={onGradMaskUp}
+              />
+            );
+            // Marks across the line at each end, as long as the
+            // layer is wide, so where it fades reads at a glance.
+            const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+            const len = Math.hypot(dx, dy) || 1;
+            const [nx, ny] = [(-dy / len) * 160, (dx / len) * 160];
+            const across = (q: [number, number], k: string) => (
+              <line key={k} className="mask-outline" x1={q[0] - nx} y1={q[1] - ny} x2={q[0] + nx} y2={q[1] + ny} />
+            );
+            return (
+              <>
+                <svg className="sel-outline" aria-hidden="true">
+                  {g.radial ? (
+                    <ellipse
+                      className="mask-outline"
+                      cx={a[0]}
+                      cy={a[1]}
+                      rx={Math.abs(b[0] - a[0])}
+                      ry={Math.abs(b[1] - a[1])}
+                    />
+                  ) : (
+                    <>
+                      {across(a, "a")}
+                      {across(b, "b")}
+                    </>
+                  )}
+                  <line className="mask-outline" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />
+                </svg>
+                {/* The line between, which carries both ends. */}
+                <svg className="sel-outline grad-mask-line" aria-hidden="true">
+                  <line
+                    className="grad-mask-hit"
+                    aria-label="Move the mask"
+                    x1={a[0]}
+                    y1={a[1]}
+                    x2={b[0]}
+                    y2={b[1]}
+                    onPointerDown={(e) => onGradMaskDown(e, "both")}
+                    onPointerMove={onGradMaskMove}
+                    onPointerUp={onGradMaskUp}
+                  />
+                </svg>
+                {knob("from", a)}
+                {knob("to", b)}
+              </>
+            );
+          })()}
           {coarse && <HeldKeys held={held} setHeld={setHeld} />}
         </main>
         <aside
@@ -13426,6 +13567,20 @@ export function App() {
                     onClick={() => addMask("rect")}
                   >
                     Rect mask
+                  </button>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("linear")}
+                    title="Fades from all at one end to none at the other — a graduated filter, as for a sky"
+                  >
+                    Graduated
+                  </button>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("radial")}
+                    title="Fades from all in the middle to none at its rim — a radial filter, as for a face"
+                  >
+                    Radial
                   </button>
                   {selectedKind &&
                     typeof selectedKind === "object" &&

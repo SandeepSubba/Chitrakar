@@ -19884,6 +19884,94 @@ assert(
   assert((await page.locator(".crop-frame").count()) === 0, "putting the crop tool down lets its frame go");
 }
 
+// 9cs. Gradient masks — Lightroom's graduated and radial filters, which
+// are a layer (most often an adjustment) wearing one. Graduated: all of
+// the layer at one end, none at the other; its two ends dragged on the
+// canvas, one at a time or both by the line between, each drag one step.
+// Radial: all in the middle, none past its rim.
+{
+  await newDocument(400, 300, "rgb");
+  let b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  await page.click('button.mask-button:text-is("Graduated")');
+  await page.waitForTimeout(300);
+  const a = (x, y) => canvasPixel(x, y).then((p) => p[3]);
+  assert((await a(200, 5)) > 240, `a graduated mask leaves the top whole (${await a(200, 5)})`);
+  const mid = await a(200, 75);
+  assert(mid > 60 && mid < 200, `fades through the middle of its span (${mid})`);
+  assert((await a(200, 200)) < 5, "and is gone past its end");
+  assert((await page.locator(".grad-handle[data-mask-end]").count()) === 2, "with its two ends on the canvas");
+  // The faded end dragged down: the fade reaches further.
+  const toKnob = page.locator('.grad-handle[data-mask-end="to"]');
+  const tk = await toKnob.boundingBox();
+  await page.mouse.move(tk.x + tk.width / 2, tk.y + tk.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(tk.x + tk.width / 2, tk.y + tk.height / 2 + (100 * b.height) / 300, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert((await a(200, 200)) > 10, `dragged further, it fades further (${await a(200, 200)})`);
+  // The line between moves both ends: the whole fade goes down.
+  const fromKnob = page.locator('.grad-handle[data-mask-end="from"]');
+  const fk = await fromKnob.boundingBox();
+  const tk2 = await toKnob.boundingBox();
+  const lineAt = [(fk.x + tk2.x) / 2 + fk.width / 2, (fk.y + tk2.y) / 2 + fk.height / 2];
+  await page.mouse.move(...lineAt);
+  await page.mouse.down();
+  await page.mouse.move(lineAt[0], lineAt[1] + (60 * b.height) / 300, { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert((await a(200, 40)) > 240, `the line carries both ends down (${await a(200, 40)})`);
+  // Each drag one step back.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await a(200, 40)) < 240, "one undo takes the move back");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await a(200, 200)) < 5, "and the next the drag of its end");
+  // Inverted from the panel, the other way round.
+  await page.locator('input[aria-label="Invert mask"]').check();
+  await page.waitForTimeout(250);
+  assert((await a(200, 5)) < 15 && (await a(200, 250)) > 240, "inverted, it is the other way round");
+  // A radial one from the menu, replacing it.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  await menuClick("Layer", "Add radial mask");
+  await page.waitForTimeout(300);
+  assert((await a(200, 150)) > 240, `a radial mask is whole in the middle (${await a(200, 150)})`);
+  assert((await a(5, 5)) < 5, "and gone in the corners");
+  // On an adjustment — the point of it: an exposure taken down through a
+  // graduated mask darkens the top and leaves the bottom. An adjustment
+  // has no box of its own, and a mask could not be added to one at all
+  // before; its handles are drawn all the same.
+  await page.click('button.mask-button:text-is("Remove")');
+  await page.waitForTimeout(200);
+  const plainTop = await canvasPixel(200, 5);
+  const plainBottom = await canvasPixel(200, 250);
+  await menuClick("Adjust", "Exposure");
+  await page.waitForTimeout(300);
+  await page.click('button.mask-button:text-is("Graduated")');
+  await page.waitForTimeout(300);
+  assert((await page.locator(".grad-handle[data-mask-end]").count()) === 2, "an adjustment takes a gradient mask, its ends on the canvas");
+  await setSlider("Stops", -2);
+  await page.waitForTimeout(400);
+  const darkTop = await canvasPixel(200, 5);
+  const keptBottom = await canvasPixel(200, 250);
+  assert(darkTop[0] < plainTop[0] * 0.6, `the top darkened (${plainTop} to ${darkTop})`);
+  assert(
+    plainBottom[3] > 250 && keptBottom.every((v, i) => Math.abs(v - plainBottom[i]) < 6),
+    `the bottom left as it was (${plainBottom} to ${keptBottom})`,
+  );
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

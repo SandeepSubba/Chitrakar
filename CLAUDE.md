@@ -198,6 +198,13 @@ holds for a mask brushed by hand as much as for a layer: a mask is
 brushed with the same tool and the same strokes, so it is confined the
 same way, and both paths read the clip.
 
+A mask can also be a gradient (`MaskKind::Gradient`: all at `from`,
+none at `to`, linear or radial), which is what Lightroom's graduated
+and radial filters are when an adjustment layer wears one. It is a
+formula, read by `chitrakar_render::gradient_coverage`, so every
+renderer and exporter takes it through the mask plane as they take a
+shape mask.
+
 ## Colour by name
 
 A document's palette (`Document::swatches`, `Command::SetSwatches`) is

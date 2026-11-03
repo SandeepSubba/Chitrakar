@@ -20600,6 +20600,85 @@ mod tests {
         );
     }
 
+    /// A gradient mask: a graduated filter fades a layer from all at one
+    /// end to none at the other, a radial one from all in the middle to
+    /// none at its rim; inverted, the other way round. Saved and read back
+    /// as it was.
+    #[test]
+    fn a_gradient_mask_fades_a_layer_from_one_end_to_the_other() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let id = add_rect(&mut session, "a", 200.0, 100.0);
+        let alpha = |s: &Session, x: u32, y: u32| s.render().unwrap().get(x, y).a;
+        // Graduated, from the top (all) to the middle (none).
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Gradient {
+                radial: false,
+                from: [100.0, 0.0],
+                to: [100.0, 50.0],
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.clone())),
+            })
+            .unwrap();
+        assert!(alpha(&session, 100, 1) > 0.95, "all at the start");
+        let mid = alpha(&session, 100, 25);
+        assert!(mid > 0.3 && mid < 0.7, "half way between: {mid}");
+        assert!(alpha(&session, 100, 60) < 0.01, "none past the end");
+        // The same along the whole row: it is a line, not a point.
+        assert!((alpha(&session, 5, 25) - mid).abs() < 0.02);
+        // Inverted, the other way round.
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    invert: true,
+                    ..mask.clone()
+                })),
+            })
+            .unwrap();
+        assert!(alpha(&session, 100, 1) < 0.05 && alpha(&session, 100, 90) > 0.95);
+        // Radial: whole in the middle, none past the rim.
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Gradient {
+                        radial: true,
+                        from: [100.0, 50.0],
+                        to: [160.0, 90.0],
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        assert!(
+            alpha(&session, 100, 50) > 0.99 && alpha(&session, 110, 52) > 0.99,
+            "whole in the middle"
+        );
+        assert!(
+            alpha(&session, 165, 50) < 0.01 && alpha(&session, 100, 95) < 0.01,
+            "none past the rim"
+        );
+        let between = alpha(&session, 140, 50);
+        assert!(
+            between > 0.05 && between < 0.95,
+            "fading between: {between}"
+        );
+        // Saved and opened, the same.
+        let bytes = session.save().unwrap();
+        let back = Session::load(&bytes).unwrap();
+        assert_eq!(
+            back.render().unwrap().get(140, 50),
+            session.render().unwrap().get(140, 50)
+        );
+    }
+
     /// Two steps folded into one undo as one, and redo as one.
     #[test]
     fn two_steps_folded_undo_and_redo_as_one() {

@@ -10568,6 +10568,25 @@ without reading anything else.*
   smoke 9cn). Applied before the pixel is eight bits, so a strong dehaze
   does not band. Costs on a 40 MP X-T5 natively: develop 1.7 s → 2.3–2.8 s;
   the preview 0.11 → 0.13–0.16 s.
+  **Gradient masks — Lightroom's graduated and radial filters** ✅
+  (`MaskKind::Gradient { radial, from, to }`,
+  `chitrakar_render::gradient_coverage`). All of the layer at `from`,
+  none at `to`, smoothstepped: along the line between them, or out to
+  the upright ellipse whose radii are how far `to` is each way (its
+  inner third whole). A formula like a shape mask, so the renderer, the
+  GPU (through `mask_plane_over`), SVG, PDF and PSD all take it without
+  a word of their own; `Mask::invert` turns it round, `feather` softens
+  it further. Layer › Mask › Add graduated / radial mask and the panel's
+  Graduated and Radial buttons add one (graduated: from the top to the
+  middle, for a sky; radial: in the middle, for a face), and its two
+  ends are dragged on the canvas — one at a time, or both by the line
+  between — one step each. On the way, two faults: a mask could not be
+  added to an adjustment or a filter at all (they have no box of their
+  own, and `addMask` gave up), and a mask's handles were drawn only for
+  a layer with a box — so the case that matters most, an adjustment
+  wearing a mask, which is what a local adjustment is, had neither.
+  Both take the page now. Smoke 9cs (an exposure through a graduated
+  mask darkens the top and leaves the bottom).
   **Colour grading in the develop window** ✅ (Lightroom's): a tint for
   the shadows, the midtones and the highlights, and one for everything —
   hue, saturation and luminance each — with Blending (how far the zones

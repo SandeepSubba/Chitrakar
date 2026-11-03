@@ -283,6 +283,10 @@ export type Filter =
 
 export type MaskKind =
   | { Vector: { shape: VectorShape; transform: Transform } }
+  /** All of it at `from`, none at `to`: along the line between them, or
+   * out to the upright ellipse whose radii are how far `to` is from
+   * `from` each way (radial). In the layer's parent space. */
+  | { Gradient: { radial: boolean; from: [number, number]; to: [number, number] } }
   | {
       Raster: {
         resource_id: string;
