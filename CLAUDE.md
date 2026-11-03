@@ -40,8 +40,11 @@ ICC profile (`core/codecs`).
   in one commit; the GPU audits catch drift, and skip without an adapter
   (`apt-get install mesa-vulkan-drivers` gives llvmpipe locally). The
   tone sliders (brightness, contrast, lightness, shadows/highlights) work
-  on the values a device shows and keep black and white; exposure is a
-  gain in light.
+  on the values a device shows and keep black and white; exposure and
+  the vignette are gains in light. Sharpen pushes brightness as shown,
+  eased before either end (`edged`); grain is laid on as shown,
+  weighted to the middle tones (`grained`). The same holds for
+  filters in `fs_blur_down` and the filter arm of the shader.
 - Old `.chitra` files must keep loading: new node kinds/fields are additive
   with `#[serde(default)]`.
 

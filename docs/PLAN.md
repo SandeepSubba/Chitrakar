@@ -10614,6 +10614,32 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **The photographic filters, put through theirs** ✅ (the same
+  method, on a 400×300 crop of the X-T5's street at full resolution,
+  where sharpening and grain can be judged at 1:1). **Noise** added an
+  even draw of `amount` in light, so at a tenth the dark roof was salt
+  and pepper with 12% of its pixels black: it is two specks summed now
+  (`grain_shift`, a film's grain: mostly a little, seldom a lot), laid
+  on where a device shows the tone and weighted toward the middle by
+  the pixel's brightness (`grained`), so black and white take none —
+  0.1% black at a quarter — and a saturated red is grained as a red of
+  its brightness is (weighed channel by channel it took none). **Sharpen** added each channel's difference from the blur in
+  light, so at a wide radius it dug pure-black halos (10% of the crop
+  at sigma 5, amount 1): it sharpens the *brightness* as a device shows
+  it now (`sharpened`), the same push on all three channels so colours
+  do not fringe, eased off before black and white (`edged`: s²/(s +
+  |push|) toward black, the same of the room toward white) — no pixel
+  of the crop clipped at any setting. **Vignette** was `1 - amount`, the
+  corners black at the end: it is a gain in stops (`vignette_gain`), the
+  same one stop as before at the default half, two at the end.
+  **Vibrance** judged colourfulness in light, where the muted red roof
+  read three-quarters saturated and took a quarter of the change: it is
+  judged as the eye judges it now, `1 - √(min/max)`. Surface blur was
+  fine. The shader changed in step for all four. Tests:
+  `sharpening_is_the_unsharp_mask_it_says_it_is` (now the eased push),
+  `grain_is_bounded_by_the_amount_and_reaches_it` (bounds as shown, and
+  black, white and a shadow), the vibrance strength; smoke 9z (the
+  vignette's end) and the surface-blur block (no black speck of grain).
   **The adjustment layers, put through their sliders** ✅ (after the
   develop window: "test and refine the other adjustments too"). Each
   tone slider was laid over a photograph (the X-T5's street, as a

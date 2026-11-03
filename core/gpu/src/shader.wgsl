@@ -1051,13 +1051,14 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
             return max(c * vec3f(1.0 + warm, 1.0 - mag, 1.0 - warm), vec3f(0.0));
         }
         // Vibrance: saturation weighted by how much colour there is
-        // already, measured as a fraction of the pixel's own brightness.
+        // already, measured as a fraction of the pixel's own brightness
+        // and judged as the eye judges it (square roots).
         case 6: {
             let l = dot(vec3f(0.2126, 0.7152, 0.0722), c);
             let top = max(c.r, max(c.g, c.b));
             var sat = 0.0;
             if top > 1e-6 {
-                sat = (top - min(c.r, min(c.g, c.b))) / top;
+                sat = 1.0 - sqrt(max(min(c.r, min(c.g, c.b)), 0.0) / top);
             }
             let s = 1.0 + p.y * (1.0 - clamp(sat, 0.0, 1.0));
             return max(vec3f(l) + (c - vec3f(l)) * s, vec3f(0.0));
@@ -1640,7 +1641,8 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         // Softness eases the shoulder: none of it is a straight ramp
         // from where it begins, all of it a curve with no edge anywhere.
         let fall = t + (t * t * (3.0 - 2.0 * t) - t) * ease;
-        let gain = max(1.0 - p.y * weight * fall, 0.0);
+        // A gain in stops (the CPU's `vignette_gain`): two at the end.
+        let gain = exp2(-2.0 * p.y * weight * fall);
         // Premultiplied, so scaling the three channels and leaving
         // alpha alone darkens the colour without touching what is or is
         // not covered.
@@ -1654,18 +1656,42 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
     let w = p.y * weight;
     let cell = vec2i(floor(here / max(p.z, 1e-3)));
     let seed = u32(e.z) + u32(p.w) * 65536u;
-    let one = (speck(cell, seed) - 0.5) * w;
+    let one = grain_shift(cell, seed, w);
     // Every channel moved together is film grain; each moved on its own
     // is a sensor's noise. Which of the two is the kind rather than a
     // flag on it: the four numbers a flag would have ridden are spoken
     // for by the inverse above.
     var shift = vec3f(one, one, one);
     if kind == 16 {
-        shift = vec3f(one, (speck(cell, seed + 1u) - 0.5) * w, (speck(cell, seed + 2u) - 0.5) * w);
+        shift = vec3f(one, grain_shift(cell, seed + 1u, w), grain_shift(cell, seed + 2u, w));
     }
-    // Premultiplied, so a shift is a share of the pixel's own alpha and
-    // a clear pixel stays clear.
-    return vec4f(clamp(was.rgb + shift * was.a, vec3f(0.0), vec3f(was.a)), was.a);
+    // Straight, then back: a shift is a share of the pixel's own alpha
+    // and a clear pixel stays clear.
+    if was.a <= 0.0 {
+        return was;
+    }
+    let v = was.rgb / was.a;
+    // The CPU's `grained`: weighted toward the middle tones by the
+    // pixel's brightness as a device shows it.
+    let l = to_shown(clamp(dot(vec3f(0.2126, 0.7152, 0.0722), v), 0.0, 1.0));
+    let middle = max(4.0 * l * (1.0 - l), 0.0);
+    return vec4f(
+        vec3f(grain_channel(v.r, shift.r * middle), grain_channel(v.g, shift.g * middle), grain_channel(v.b, shift.b * middle)) * was.a,
+        was.a,
+    );
+}
+
+// The CPU's `grain_shift`: two specks summed, so most move a little.
+fn grain_shift(cell: vec2i, seed: u32, amount: f32) -> f32 {
+    return (speck(cell, seed) + speck(cell, seed + 3u) - 1.0) * amount * 0.6;
+}
+
+// One channel of the CPU's `grained`: laid on where a device shows it;
+// above white carried on.
+fn grain_channel(v: f32, shift: f32) -> f32 {
+    let inside = clamp(v, 0.0, 1.0);
+    let over = max(v - inside, 0.0);
+    return to_light(clamp(to_shown(inside) + shift, 0.0, 1.0)) + over;
 }
 
 // A cheap integer hash: multiply, mix the halves, repeat. Good enough
@@ -2634,12 +2660,41 @@ fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
     if in.params.x == 0.0 {
         return mix(was, soft, weight);
     }
-    // Premultiplied, held at nothing below and let run above the alpha
-    // they are a share of: light does not stop at white here, and
-    // holding them there meant sharpening a ground two stops up brought
-    // it back to one. The layer's weight goes into the amount rather
+    // Light does not stop at white here: a ground two stops up comes
+    // back two stops up. The layer's weight goes into the amount rather
     // than into a mix, which is where the two readings differ.
     let amount = in.params.x * weight;
-    let out = max(was.rgb + (was.rgb - soft.rgb) * amount, vec3f(0.0));
-    return vec4f(out, was.a);
+    if amount == 0.0 || was.a <= 0.0 {
+        return was;
+    }
+    // The CPU's `sharpened`: the difference in brightness as a device
+    // shows it, added to each channel as a device shows it.
+    let c = was.rgb / was.a;
+    var b = vec3f(0.0);
+    if soft.a > 0.0 {
+        b = soft.rgb / soft.a;
+    }
+    let luma = vec3f(0.2126, 0.7152, 0.0722);
+    let push = amount * (to_shown(max(dot(luma, c), 0.0)) - to_shown(max(dot(luma, b), 0.0)));
+    let out = vec3f(
+        to_light(edged(to_shown(max(c.r, 0.0)), push)),
+        to_light(edged(to_shown(max(c.g, 0.0)), push)),
+        to_light(edged(to_shown(max(c.b, 0.0)), push)),
+    );
+    return vec4f(out * was.a, was.a);
+}
+
+// The CPU's `edged`: a push toward black or white eased off before the end.
+fn edged(s: f32, push: f32) -> f32 {
+    if push < 0.0 {
+        if s <= 0.0 {
+            return 0.0;
+        }
+        return s * s / (s - push);
+    }
+    if s < 1.0 {
+        let room = 1.0 - s;
+        return 1.0 - room * room / (room + push);
+    }
+    return s + push;
 }

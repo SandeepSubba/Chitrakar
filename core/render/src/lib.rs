@@ -9396,6 +9396,131 @@ fn apply_mask(doc: &Document, m: MaskRef<'_>, surface: &mut Surface, clip: ClipR
 /// runs from one pixel to the next, so the same page grains the same way
 /// however it is drawn — a region redrawn on its own has to come out the
 /// same as the whole page did, or every pan would leave a seam.
+/// An unsharp mask of one pixel by `amount`, against the blurred
+/// `soft`: the difference in *brightness* between the two, as a device
+/// shows it, added to each channel as a device shows it. The eye reads
+/// an edge by its brightness, so sharpening the brightness alone leaves
+/// the colours where they were rather than fringing them; and worked
+/// where a device shows the picture the dark side of an edge is pushed
+/// as far as the light side is, eased off before either end
+/// ([`edged`]). It was each channel's difference in light, which at a
+/// wide radius dug a halo of pure black along every edge of a dark
+/// photograph (a tenth of its pixels at amount one).
+/// Light above white carries on rather than stopping at it — a ground
+/// two stops up comes back two stops up.
+pub fn sharpened(o: LinearRgba, soft: LinearRgba, amount: f32) -> LinearRgba {
+    if amount == 0.0 || o.a <= 0.0 {
+        return o;
+    }
+    let straight = |p: LinearRgba| {
+        if p.a > 0.0 {
+            [p.r / p.a, p.g / p.a, p.b / p.a]
+        } else {
+            [0.0; 3]
+        }
+    };
+    let (c, b) = (straight(o), straight(soft));
+    let luma = |v: [f32; 3]| {
+        chitrakar_doc::LUMA[0] * v[0]
+            + chitrakar_doc::LUMA[1] * v[1]
+            + chitrakar_doc::LUMA[2] * v[2]
+    };
+    let push = amount * (shown_open(luma(c)) - shown_open(luma(b)));
+    let put = |v: f32| light_open(edged(shown_open(v), push)) * o.a;
+    LinearRgba {
+        r: put(c[0]),
+        g: put(c[1]),
+        b: put(c[2]),
+        a: o.a,
+    }
+}
+
+/// A value as a device shows it, pushed by `push` toward black or
+/// white: a little as asked, and a lot eased off so that it nears an
+/// end without reaching it — `s²/(s + |push|)` toward black, and the
+/// same of the room below white toward white. An edge's dark side was
+/// cut off at black; it keeps its shape now, and so does a light side
+/// below white (above white light carries on as it was).
+fn edged(s: f32, push: f32) -> f32 {
+    if push < 0.0 {
+        if s <= 0.0 {
+            0.0
+        } else {
+            s * s / (s - push)
+        }
+    } else if s < 1.0 {
+        let room = 1.0 - s;
+        1.0 - room * room / (room + push)
+    } else {
+        s + push
+    }
+}
+
+/// The display encoding carried on past white, where light here may go.
+fn shown_open(v: f32) -> f32 {
+    if v > 1.0 {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    } else {
+        chitrakar_color::linear_to_srgb(v.max(0.0))
+    }
+}
+
+/// And back, past white as well.
+fn light_open(s: f32) -> f32 {
+    chitrakar_color::srgb_to_linear(s.max(0.0))
+}
+
+/// What a vignette multiplies light by where it has fallen `fall` of
+/// the way to the corner, at strength `amount`: a gain in stops, as a
+/// lens's own vignette is, two stops at the slider's end either way and
+/// one at its half. It was `1 - amount`, which agreed at the half and
+/// took the corners to black at the end.
+pub fn vignette_gain(amount: f32, fall: f32) -> f32 {
+    (-VIGNETTE_STOPS * amount * fall).exp2()
+}
+
+/// The stops a vignette at full strength takes off the corners.
+pub const VIGNETTE_STOPS: f32 = 2.0;
+
+/// How far grain moves one speck, as a device shows it: the sum of two
+/// specks, so a speck is mostly a little lighter or darker and seldom a
+/// lot — a film's grain, where one even draw from the whole range was a
+/// field of salt and pepper.
+pub fn grain_shift(cell: (i32, i32), seed: u32, amount: f32) -> f32 {
+    let a = speck(cell.0, cell.1, seed);
+    let b = speck(cell.0, cell.1, seed.wrapping_add(3));
+    (a + b - 1.0) * amount * GRAIN_SPREAD
+}
+
+/// What grain's slider at one moves a speck by, at most, as a device
+/// shows it, before the middle's weight below.
+pub const GRAIN_SPREAD: f32 = 0.6;
+
+/// A straight colour with grain's `shift`s laid on it where a device
+/// shows it, weighted toward the middle tones by the pixel's brightness:
+/// a film's grain is in its greys, not its paper or its densest black,
+/// and an offset in light — which this once was — put a tenth of a dark
+/// photograph's pixels at pure black at the slider's tenth. Weighed by
+/// the brightness rather than channel by channel, so a saturated red
+/// (a channel at each end) is grained as a red of its brightness is.
+/// Above white is carried on.
+pub fn grained(c: [f32; 3], shift: [f32; 3]) -> [f32; 3] {
+    let [lr, lg, lb] = chitrakar_doc::LUMA;
+    let l = chitrakar_color::linear_to_srgb((lr * c[0] + lg * c[1] + lb * c[2]).clamp(0.0, 1.0));
+    let middle = (4.0 * l * (1.0 - l)).max(0.0);
+    let put = |v: f32, s: f32| {
+        let inside = v.clamp(0.0, 1.0);
+        let over = (v - inside).max(0.0);
+        let shown = chitrakar_color::linear_to_srgb(inside);
+        chitrakar_color::srgb_to_linear((shown + s * middle).clamp(0.0, 1.0)) + over
+    };
+    [
+        put(c[0], shift[0]),
+        put(c[1], shift[1]),
+        put(c[2], shift[2]),
+    ]
+}
+
 fn speck(x: i32, y: i32, seed: u32) -> f32 {
     // A cheap integer hash: multiply, mix the halves, repeat. Good enough
     // that neighbouring cells look unrelated, which is all grain asks.
@@ -9979,20 +10104,20 @@ fn apply_filter(
                 }
                 let (dx, dy) = inv.at(x as f32 + 0.5, y as f32 + 0.5);
                 let cell = ((dx / step).floor() as i32, (dy / step).floor() as i32);
-                let shift = |c: u32| (speck(cell.0, cell.1, seed.wrapping_add(c)) - 0.5) * w;
+                let shift = |c: u32| grain_shift(cell, seed.wrapping_add(c), w);
                 let (sr, sg, sb) = if *mono {
                     let one = shift(0);
                     (one, one, one)
                 } else {
                     (shift(0), shift(1), shift(2))
                 };
-                // Premultiplied, so a shift is a share of the pixel's own
-                // alpha and a clear pixel stays clear.
-                let put = |v: f32, s: f32| (v + s * o.a).clamp(0.0, o.a);
+                // Straight, then back: a shift is a share of the pixel's
+                // own alpha and a clear pixel stays clear.
+                let [r, g, b] = grained([o.r / o.a, o.g / o.a, o.b / o.a], [sr, sg, sb]);
                 LinearRgba {
-                    r: put(o.r, sr),
-                    g: put(o.g, sg),
-                    b: put(o.b, sb),
+                    r: r * o.a,
+                    g: g * o.a,
+                    b: b * o.a,
                     a: o.a,
                 }
             });
@@ -10026,7 +10151,7 @@ fn apply_filter(
                 // straight ramp from where it begins, all of it a curve
                 // that has no edge anywhere.
                 let fall = t + (t * t * (3.0 - 2.0 * t) - t) * ease;
-                let gain = (1.0 - w * fall).max(0.0);
+                let gain = vignette_gain(w, fall);
                 // Premultiplied, so scaling the three channels and
                 // leaving alpha alone darkens the colour without
                 // touching what is or is not covered.
@@ -10043,19 +10168,7 @@ fn apply_filter(
             blur::gaussian_blur(dst, clip, *sigma * scale, blur::Beyond::Edge);
             mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
                 let amt = amount * opacity * coverage_at(doc, mask, x, y);
-                // Unsharp mask, holding the premultiplied channels at
-                // nothing below and letting them run above. Held to the
-                // alpha they would be if light stopped at white, which
-                // here it does not: sharpening a ground two stops up used
-                // to come back at one, the filter throwing away what the
-                // exposure above it had been keeping.
-                let un = |ov: f32, bv: f32, _a: f32| (ov + amt * (ov - bv)).max(0.0);
-                LinearRgba {
-                    r: un(o.r, blurred.r, o.a),
-                    g: un(o.g, blurred.g, o.a),
-                    b: un(o.b, blurred.b, o.a),
-                    a: o.a,
-                }
+                sharpened(o, blurred, amt)
             });
         }
         Filter::Halftone { size, degrees } => {
@@ -13468,10 +13581,13 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // not as an absolute spread: the composite is unbounded
             // linear light, so a bright colour would otherwise read as
             // fully saturated and take none of the change merely for
-            // being bright.
+            // being bright. And judged as the eye judges it (square
+            // roots for the display's curve): in light, a muted red
+            // roof reads three-quarters saturated and took a quarter of
+            // the change, so the slider barely moved a photograph.
             let top = r.hi(g).hi(b);
             let sat = if top > 1e-6 {
-                (top - r.lo(g).lo(b)) / top
+                1.0 - (r.lo(g).lo(b).hi(0.0) / top).sqrt()
             } else {
                 0.0
             };
@@ -19261,9 +19377,10 @@ mod tests {
         );
         // And the strength itself. sRGB (0.6, 0.5, 0.4) is linear
         // (0.318547, 0.214041, 0.132868); its luminance is the usual
-        // weighted sum, its saturation (top - bottom) / top is 0.582892,
-        // so the stretch is 1 + 1 × (1 - that) = 1.417108, applied about
-        // the luminance.
+        // weighted sum, its saturation as the eye judges it,
+        // 1 - √(bottom / top), is 0.354162 (in light, (top - bottom) /
+        // top, it read 0.582892), so the stretch is 1 + 1 × (1 - that)
+        // = 1.645838, applied about the luminance.
         let dull_in = to_working(&AuthoredColor::Srgb {
             r: 0.6,
             g: 0.5,
@@ -19276,9 +19393,9 @@ mod tests {
             dull_in,
         );
         for (got, want, name) in [
-            (lifted.r, 0.355314f32, "red"),
-            (lifted.g, 0.207218, "green"),
-            (lifted.b, 0.092188, "blue"),
+            (lifted.r, 0.375477f32, "red"),
+            (lifted.g, 0.203477, "green"),
+            (lifted.b, 0.069879, "blue"),
         ] {
             assert!(
                 (got - want).abs() < 1e-4,
@@ -30770,11 +30887,28 @@ mod tests {
         let blurred = page(Some(Filter::GaussianBlur { sigma }));
         let sharp = page(Some(Filter::Sharpen { sigma, amount }));
 
-        // Along the row through the edge, every pixel: o + amount*(o - b).
+        // Along the row through the edge, every pixel: as a device shows
+        // it, o + amount*(o - b) — eased off before black, s²/(s - push),
+        // and before white, the same of the room below it. The bands are
+        // grey, so the brightness the difference is taken in is each
+        // channel's own.
+        let shown = chitrakar_color::linear_to_srgb;
         let mut checked = 0;
+        let mut eased = 0;
         for x in 0..40u32 {
             let (o, b, s) = (plain.get(x, 10), blurred.get(x, 10), sharp.get(x, 10));
-            let want = (o.r + amount * (o.r - b.r)).clamp(0.0, o.a.max(0.0));
+            let (so, sb) = (shown(o.r), shown(b.r));
+            let push = amount * (so - sb);
+            let plain_push = so + push;
+            let want_shown = if push < 0.0 {
+                so * so / (so - push)
+            } else {
+                1.0 - (1.0 - so) * (1.0 - so) / ((1.0 - so) + push)
+            };
+            if (want_shown - plain_push).abs() > 1e-3 {
+                eased += 1;
+            }
+            let want = chitrakar_color::srgb_to_linear(want_shown);
             assert!(
                 (s.r - want).abs() < 1e-4,
                 "at {x}: sharpened {} against {want} (plain {}, blurred {})",
@@ -30790,6 +30924,11 @@ mod tests {
             checked > 4,
             "the edge actually gave the blur something to take away ({checked} pixels)"
         );
+        assert!(eased > 0, "and something to ease off");
+        // Neither side of the edge is cut off: the dark side stays above
+        // black, the light side below white.
+        let row: Vec<f32> = (0..40u32).map(|x| sharp.get(x, 10).r).collect();
+        assert!(row.iter().all(|v| *v > 0.0 && *v < 1.0), "{row:?}");
         // Where there is nothing to sharpen there is nothing to do: a
         // flat stretch comes back exactly as it was, whatever the amount.
         assert!(
@@ -30803,9 +30942,11 @@ mod tests {
     /// Noise had the same single pin sharpen did — the GPU drawing the
     /// same page — and the same hole behind it. Being random, it has no
     /// value to assert; what it has is a *range*. Each speck shifts a
-    /// cell by `(speck - 0.5) * amount`, and speck lies in nought to one,
-    /// so no pixel may move more than half the amount and, over enough
-    /// cells, some pixel very nearly does. Both halves are needed: the
+    /// cell, as a device shows it, by `(a + b - 1) * amount *
+    /// GRAIN_SPREAD` for two specks in nought to one, weighted by how
+    /// near the middle the tone is — all of it at a middle grey — so no
+    /// pixel there may move more than the spread times the amount and,
+    /// over enough cells, some pixel nearly does. Both halves are needed: the
     /// ceiling alone passes for grain that does nothing, and the floor
     /// alone passes for grain ten times too strong.
     #[test]
@@ -30864,18 +31005,32 @@ mod tests {
                         && ((g.g - p.g) - (g.b - p.b)).abs() < 1e-5,
                     "mono grain shifts the channels alike at {x},{y}"
                 );
-                worst = worst.max((g.r - p.r).abs());
+                let shown = chitrakar_color::linear_to_srgb;
+                worst = worst.max((shown(g.r) - shown(p.r)).abs());
             }
         }
-        let half = amount / 2.0;
+        let most = amount * GRAIN_SPREAD;
         assert!(
-            worst <= half + 1e-4,
-            "no speck moves further than half the amount ({worst} against {half})"
+            worst <= most + 1e-3,
+            "no speck moves further than the spread ({worst} against {most})"
         );
         assert!(
-            worst > half * 0.8,
-            "and over nine hundred cells one very nearly does ({worst} against {half})"
+            worst > most * 0.75,
+            "and over nine hundred cells one nearly does ({worst} against {most})"
         );
+        // Black and white take no grain: a film's paper and its densest
+        // ink. Grain in light put a tenth of a dark photograph at black.
+        assert_eq!(grained([0.0; 3], [-0.3; 3]), [0.0; 3]);
+        assert!(grained([1.0; 3], [0.3; 3])
+            .iter()
+            .all(|v| (v - 1.0).abs() < 1e-6));
+        // A shadow is grained a little rather than to nothing.
+        let dark = chitrakar_color::srgb_to_linear(0.1);
+        assert!(grained([dark; 3], [-0.2 * GRAIN_SPREAD; 3])[0] > dark * 0.4);
+        // And a saturated colour, a channel at each end, is grained as
+        // its brightness is rather than not at all.
+        let red = grained([1.0, 0.0, 0.0], [-0.1, -0.1, -0.1]);
+        assert!(red[0] < 0.95, "{red:?}");
         // Asked for nothing, nothing happens.
         assert_eq!(
             page(0.0).get(30, 30).to_srgb8(),

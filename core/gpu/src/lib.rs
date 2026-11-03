@@ -15372,10 +15372,11 @@ mod tests {
         );
         // Inside it, taken down by half of what the vignette asked for.
         // The corner sits 0.668 of the way out with nothing held back
-        // and no easing, so the reading is 1 − 1.0 × 0.5 × 0.668.
+        // and no easing, and the vignette is two stops at full strength,
+        // so the reading is 2^(−2 × 1.0 × 0.5 × 0.668) = 0.629.
         let ratio = weighed.get(14, 2).r / bare.get(14, 2).r;
         assert!(
-            (ratio - 0.666).abs() < 0.01,
+            (ratio - 0.629).abs() < 0.01,
             "and the corner inside it is taken down by half: {ratio}"
         );
     }

@@ -8061,6 +8061,11 @@ assert(
   };
   const grainy = await row();
   assert(grainy > 3, `the grain is there to take out (${grainy.toFixed(2)})`);
+  // Grain is a film's: the dark grey is grained, not peppered with
+  // black (an offset in light once put a tenth of a dark photo there).
+  let darkest = 255;
+  for (let x = 40; x < 100; x += 2) darkest = Math.min(darkest, (await canvasPixel(x, 90))[0]);
+  assert(darkest > 15, `and no speck of the dark grey is black (${darkest})`);
   await page.selectOption('[aria-label="Add adjustment layer"]', "surface");
   await page.waitForTimeout(400);
   await page.locator(".panel ul li", { hasText: "Surface blur" }).click();
@@ -11119,6 +11124,16 @@ assert(
   // Asked the other way it lifts the corners instead, which is what
   // takes one a lens put there back out.
   await page.locator(".panel ul li", { hasText: "Vignette" }).click();
+  await page.waitForTimeout(200);
+  // At the slider's end it is two stops off the corners, not black.
+  await setSlider("Vignette amount", 1);
+  await page.waitForTimeout(300);
+  const strongest = (await canvasPixel(8, 8))[0];
+  assert(
+    strongest > 20 && strongest < shaded[1],
+    `at its end the corner is darker still, and not black (${strongest})`,
+  );
+  await page.keyboard.press("Control+z");
   await page.waitForTimeout(200);
   await setSlider("Vignette amount", -0.8);
   await page.waitForTimeout(300);
