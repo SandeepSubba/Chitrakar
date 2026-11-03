@@ -10614,6 +10614,23 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Every other filter, at its defaults** ✅ (one tile each on the
+  street: blur, median, motion, radial, high pass, halftone, twirl,
+  pinch, lens, oil paint, find edges, ripple, emboss, pixelate,
+  surface blur). Three worked in light where Photoshop works on what a
+  screen shows. **High pass** and **emboss** sat on linear light's half,
+  which shows as a light grey (188) rather than the middle one (128) —
+  and a high pass is what the classic sharpen lays over a photograph by
+  Overlay, which takes the middle grey as no change, so every flat
+  stretch was lifted. Both take their difference as shown and sit on
+  the middle grey now (`high_pass`, `emboss_grey`); a test lays a
+  high-passed copy over a picture by Overlay in a group and finds the
+  flat stretches as they were and only the edges moved. **Find edges**
+  measured steepness in light, where a plain step between two darks is
+  a twentieth of one, so its lines were a faint grey on white: it reads
+  the channels as shown (`seen`, `edge_white`), and the line drawing
+  is a line drawing. The shader changed in step (`straight_shown`).
+  Smoke 9o25e and 9o25h read 128.
   **The colour adjustments, put through theirs** ✅ (the street again,
   white balance, colour balance in each range, the colour bands and the
   photo filter). **Colour balance** used GIMP's formula and its scale:

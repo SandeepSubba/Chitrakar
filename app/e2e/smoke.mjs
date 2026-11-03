@@ -2925,8 +2925,14 @@ assert(
     await fresh.waitForSelector("#engine-canvas");
     await fresh.waitForTimeout(500);
     await fresh.locator('input[accept^=".chitra,"]').setInputFiles(path);
-    await fresh.waitForTimeout(600);
+    // Waited for rather than timed: the file is read, then its faces
+    // handed to the engine, and on a busy machine that is not 0.6 s.
+    await fresh.locator(".panel ul li", { hasText: "Text" }).first().waitFor({ timeout: 10000 });
     await fresh.locator(".panel ul li", { hasText: "Text" }).click();
+    await fresh
+      .locator('select[aria-label="Font"] option', { hasText: "DejaVuSerif" })
+      .waitFor({ state: "attached", timeout: 10000 })
+      .catch(() => {});
     await fresh.waitForTimeout(200);
     assert(
       (await fresh.locator('select[aria-label="Font"] option', { hasText: "DejaVuSerif" }).count()) === 1 &&
@@ -8598,9 +8604,10 @@ assert(
 }
 
 // 9o25e. High pass: the Filter menu's detail alone. A flat shape comes
-// out the grey of half (188 on screen), its edge lighter or darker
-// than that, the bare page bare; a wider radius reaches further from
-// the edge.
+// out the middle grey a screen shows (128, Photoshop's, which Overlay
+// takes as no change — it was linear light's half, 188), its edge
+// lighter or darker than that, the bare page bare; a wider radius
+// reaches further from the edge.
 {
   await newDocument(400, 200, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
@@ -8617,19 +8624,19 @@ assert(
   await page.waitForTimeout(300);
   const flat = await canvasPixel(200, 100);
   assert(
-    flat.slice(0, 3).every((c) => Math.abs(c - 188) <= 3),
-    `the flat middle of the shape is the grey of half (${flat})`,
+    flat.slice(0, 3).every((c) => Math.abs(c - 128) <= 3),
+    `the flat middle of the shape is the middle grey (${flat})`,
   );
   // The page itself is see-through: half of nothing covered is nothing.
   const outside = await canvasPixel(20, 20);
   assert(outside[3] === 0, `and the bare page stays bare (${outside})`);
   const edge = await canvasPixel(102, 100);
-  assert(Math.abs(edge[2] - 188) > 10, `the shape's edge is detail, off the grey (${edge})`);
+  assert(Math.abs(edge[2] - 128) > 10, `the shape's edge is detail, off the grey (${edge})`);
   const reach = async () => {
     let n = 0;
     for (let x = 104; x < 140; x += 2) {
       const p = await canvasPixel(x, 100);
-      if (Math.abs(p[2] - 188) > 3) n++;
+      if (Math.abs(p[2] - 128) > 3) n++;
     }
     return n;
   };
@@ -8737,8 +8744,8 @@ assert(
   };
   const flat = [await canvasPixel(30, 60), await canvasPixel(120, 60), await canvasPixel(210, 60)];
   assert(
-    flat.every((p) => Math.abs(p[0] - 188) < 6 && p[0] === p[1] && p[1] === p[2]),
-    `flat ground is the half grey (${flat.map((p) => p[0])})`,
+    flat.every((p) => Math.abs(p[0] - 128) < 6 && p[0] === p[1] && p[1] === p[2]),
+    `flat ground is the middle grey (${flat.map((p) => p[0])})`,
   );
   let [, leftHigh] = await across(77, 83);
   let [rightLow] = await across(157, 163);

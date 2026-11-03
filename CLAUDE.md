@@ -43,7 +43,9 @@ ICC profile (`core/codecs`).
   on the values a device shows and keep black and white; exposure and
   the vignette are gains in light. Sharpen pushes brightness as shown,
   eased before either end (`edged`); grain is laid on as shown,
-  weighted to the middle tones (`grained`). The same holds for
+  weighted to the middle tones (`grained`); high pass and emboss sit
+  on the middle grey a screen shows (128, what Overlay leaves alone),
+  and find edges reads the channels as shown (`seen`). The same holds for
   filters in `fs_blur_down` and the filter arm of the shader.
 - Old `.chitra` files must keep loading: new node kinds/fields are additive
   with `#[serde(default)]`.

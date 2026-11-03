@@ -10307,13 +10307,14 @@ fn apply_filter(
                     px(x, y + step),
                     px(x + step, y + step),
                 ];
-                let edge = |c: fn(&LinearRgba) -> f32| edge_white(o.a, ring.map(|p| c(&p)), k);
+                let ring = ring.map(seen);
+                let edge = |c: usize| edge_white(o.a, ring.map(|p| p[c]), k);
                 lerp(
                     o,
                     LinearRgba {
-                        r: edge(|p| p.r),
-                        g: edge(|p| p.g),
-                        b: edge(|p| p.b),
+                        r: edge(0),
+                        g: edge(1),
+                        b: edge(2),
                         a: o.a,
                     },
                     weight,
@@ -10352,11 +10353,18 @@ fn apply_filter(
             let (w, h) = ((clip.x1 - clip.x0) as i64, (clip.y1 - clip.y0) as i64);
             // How light the picture is a whole offset away, the edge
             // read again past the edge, as the smears read it.
+            // As a device shows it: a relief is read by eye.
             let lum = |x: i64, y: i64| {
                 let p = original[(y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize];
-                chitrakar_doc::LUMA[0] * p.r
-                    + chitrakar_doc::LUMA[1] * p.g
-                    + chitrakar_doc::LUMA[2] * p.b
+                if p.a <= 0.0 {
+                    return 0.0;
+                }
+                shown_value(
+                    (chitrakar_doc::LUMA[0] * p.r
+                        + chitrakar_doc::LUMA[1] * p.g
+                        + chitrakar_doc::LUMA[2] * p.b)
+                        / p.a,
+                )
             };
             mix_snapshot(dst, clip, &original, |o, _, x, y| {
                 let weight = opacity * coverage_at(doc, mask, x, y);
@@ -10378,26 +10386,15 @@ fn apply_filter(
                 )
             });
         }
-        // The difference from the blur, on a grey of half: premultiplied,
-        // so the grey is half of what is covered, and held at nothing
-        // below as a sharpen is. Weighed in by the layer's opacity and
-        // its mask as a blur is.
+        // The difference from the blur, on a middle grey, as a device
+        // shows both ([`high_pass`]). Weighed in by the layer's opacity
+        // and its mask as a blur is.
         Filter::HighPass { sigma } => {
             let original = blur::snapshot(dst, clip);
             blur::gaussian_blur(dst, clip, *sigma * scale, blur::Beyond::Edge);
             mix_snapshot(dst, clip, &original, |o, blurred, x, y| {
                 let weight = opacity * coverage_at(doc, mask, x, y);
-                let detail = |ov: f32, bv: f32| (0.5 * o.a + ov - bv).max(0.0);
-                lerp(
-                    o,
-                    LinearRgba {
-                        r: detail(o.r, blurred.r),
-                        g: detail(o.g, blurred.g),
-                        b: detail(o.b, blurred.b),
-                        a: o.a,
-                    },
-                    weight,
-                )
+                lerp(o, high_pass(o, blurred), weight)
             });
         }
     }
@@ -10615,17 +10612,50 @@ pub fn edge_amount(amount: f32) -> f32 {
     }
 }
 
-/// One channel of a find-edges over a pixel covered `alpha`: the cover
-/// less the steepness of the channel across the eight round it (`ring`,
-/// row by row from the upper left, the middle left out), a Sobel kernel
-/// over four so a step from nothing to full is one, times `amount`,
-/// held at nothing. The GPU's own.
+/// One channel of a find-edges over a pixel covered `alpha`: white less
+/// the steepness of the channel across the eight round it (`ring`, row
+/// by row from the upper left, the middle left out, each straight and as
+/// a device shows it — [`seen`]), a Sobel kernel over four so a step
+/// from nothing to full is one, times `amount`, held at black; then back
+/// into light and covered. Measured in light, a step that looks plain —
+/// a dark roof against a darker gutter — was a twentieth of one, and the
+/// edges came out a faint grey on white. The GPU's own.
 pub fn edge_white(alpha: f32, ring: [f32; 8], amount: f32) -> f32 {
     let [a, b, c, d, e, f, g, h] = ring;
     let gx = (c + 2.0 * e + h) - (a + 2.0 * d + f);
     let gy = (f + 2.0 * g + h) - (a + 2.0 * b + c);
     let steep = (gx * gx + gy * gy).sqrt() / 4.0;
-    (alpha - amount * steep).clamp(0.0, alpha)
+    chitrakar_color::srgb_to_linear((1.0 - amount * steep).clamp(0.0, 1.0)) * alpha
+}
+
+/// A high pass of one pixel against its blur: the difference as a
+/// device shows the two, on the grey a device shows as its middle —
+/// Photoshop's, which is what Overlay and Soft light take as no change,
+/// so the classic sharpen (a high pass laid over the picture) is that
+/// and not also a brightening. It was the difference in light on linear
+/// light's half, which shows as a light grey (188), and laid over a
+/// photograph by Overlay it lifted the whole of it.
+pub fn high_pass(o: LinearRgba, soft: LinearRgba) -> LinearRgba {
+    if o.a <= 0.0 {
+        return o;
+    }
+    let (a, b) = (seen(o), seen(soft));
+    let put = |c: usize| chitrakar_color::srgb_to_linear((0.5 + a[c] - b[c]).clamp(0.0, 1.0)) * o.a;
+    LinearRgba {
+        r: put(0),
+        g: put(1),
+        b: put(2),
+        a: o.a,
+    }
+}
+
+/// A premultiplied pixel's channels straight and as a device shows them,
+/// held to the display's own range: what an edge or a relief is read in.
+pub fn seen(p: LinearRgba) -> [f32; 3] {
+    if p.a <= 0.0 {
+        return [0.0; 3];
+    }
+    [p.r / p.a, p.g / p.a, p.b / p.a].map(shown_value)
 }
 
 /// A lens correction's strength: a third of the amount, held to −1..=1,
@@ -10788,7 +10818,7 @@ pub fn emboss_offset(degrees: f32, height: f32, view: Transform) -> (i64, i64) {
 /// covered, less half the `rise` toward the light times the strength,
 /// held between nothing and the cover. The GPU's own, step for step.
 pub fn emboss_grey(alpha: f32, rise: f32, amount: f32) -> f32 {
-    (0.5 * alpha - 0.5 * amount * rise).clamp(0.0, alpha)
+    chitrakar_color::srgb_to_linear((0.5 - 0.5 * amount * rise).clamp(0.0, 1.0)) * alpha
 }
 
 /// A halftone's cell, in document pixels: two at the least, and nothing
@@ -27654,10 +27684,12 @@ mod tests {
             amount,
         };
         let at = |s: &Surface, x: u32, y: u32| s.pixels[(y * 64 + x) as usize];
+        // The grey a device shows as its middle, in light.
+        let mid = chitrakar_color::srgb_to_linear(0.5);
         // The light from the left.
         let left = page(true, emboss(180.0, 1.0), 1.0);
         for (x, y) in [(4, 4), (32, 32), (60, 32)] {
-            assert!((at(&left, x, y).r - 0.5).abs() < 1e-6, "flat at {x},{y}");
+            assert!((at(&left, x, y).r - mid).abs() < 1e-5, "flat at {x},{y}");
         }
         assert!(
             at(&left, 16, 32).r > 0.99,
@@ -27672,7 +27704,7 @@ mod tests {
         );
         // Along the top and bottom edges the light is level with them.
         assert!(
-            (at(&left, 32, 16).r - 0.5).abs() < 1e-6,
+            (at(&left, 32, 16).r - mid).abs() < 1e-5,
             "level with the light"
         );
         let right = page(true, emboss(0.0, 1.0), 1.0);
@@ -27683,7 +27715,7 @@ mod tests {
         assert!(at(&right, 47, 32).r > 0.99, "and the right edge lit");
         let none = page(true, emboss(180.0, 0.0), 1.0);
         assert!(
-            none.pixels.iter().all(|p| (p.r - 0.5).abs() < 1e-6),
+            none.pixels.iter().all(|p| (p.r - mid).abs() < 1e-5),
             "no strength is the grey alone"
         );
         let faint = page(true, emboss(180.0, 1.0), 0.5);
@@ -27695,8 +27727,9 @@ mod tests {
         assert!(bare.pixels.iter().all(|p| p.a == 0.0), "nothing covered");
     }
 
-    /// A high pass leaves the detail on a grey of half: flat ground is
-    /// that grey, the inside of an edge into something lighter is
+    /// A high pass leaves the detail on the grey a device shows as its
+    /// middle (Photoshop's, and what Overlay takes as no change): flat
+    /// ground is that grey, the inside of an edge into something lighter is
     /// lighter than it and the outside darker, at half opacity it is half
     /// way from the picture, and with a blur too small to move a pixel
     /// there is no detail and only the grey.
@@ -27733,36 +27766,121 @@ mod tests {
             .unwrap();
             render(&doc).unwrap()
         };
+        let mid = chitrakar_color::srgb_to_linear(0.5);
+        let shown = chitrakar_color::linear_to_srgb;
         let hp = page(Filter::HighPass { sigma: 2.0 }, 1.0);
         let grey = hp.get(2, 2);
         assert!(
-            (grey.r - 0.5).abs() < 1e-3 && (grey.g - 0.5).abs() < 1e-3 && grey.a == 1.0,
-            "flat ground is grey: {grey:?}"
+            (grey.r - mid).abs() < 1e-3 && (grey.g - mid).abs() < 1e-3 && grey.a == 1.0,
+            "flat ground is the middle grey: {grey:?}"
         );
         assert!(
-            (hp.get(30, 20).r - 0.5).abs() < 1e-3,
+            (hp.get(30, 20).r - mid).abs() < 1e-3,
             "and so is the flat middle of the square"
         );
         assert!(
-            hp.get(21, 20).r > 0.6,
+            shown(hp.get(21, 20).r) > 0.6,
             "inside the edge, lighter: {:?}",
             hp.get(21, 20)
         );
         assert!(
-            hp.get(18, 20).r < 0.4,
+            shown(hp.get(18, 20).r) < 0.4,
             "outside it, darker: {:?}",
             hp.get(18, 20)
         );
         let half = page(Filter::HighPass { sigma: 2.0 }, 0.5);
         assert!(
-            (half.get(2, 2).r - 0.25).abs() < 1e-3,
+            (half.get(2, 2).r - mid / 2.0).abs() < 1e-3,
             "at half, half way from black to the grey"
         );
         let none = page(Filter::HighPass { sigma: 0.0 }, 1.0);
         assert!(
-            (none.get(21, 20).r - 0.5).abs() < 1e-3,
+            (none.get(21, 20).r - mid).abs() < 1e-3,
             "no blur, no detail: {:?}",
             none.get(21, 20)
+        );
+    }
+
+    /// The classic sharpen: a copy of the picture, high-passed, laid over
+    /// it by Overlay. Where the picture is flat the high pass is the
+    /// middle grey, which Overlay takes as no change — so a flat stretch
+    /// comes back as it was, and only the edges move. On linear light's
+    /// half (a light grey) every flat stretch was lifted.
+    #[test]
+    fn a_high_pass_laid_over_by_overlay_moves_only_the_edges() {
+        let page = |with_sharpen: bool| {
+            let mut doc = Document::new(60, 40, ColorMode::Rgb);
+            let root = doc.root();
+            let tan = AuthoredColor::Srgb {
+                r: 0.6,
+                g: 0.45,
+                b: 0.3,
+                a: 1.0,
+            };
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: filled_rect("ground", 60.0, 40.0, BLACK),
+            })
+            .unwrap();
+            let mut square = filled_rect("square", 20.0, 20.0, tan.clone());
+            square.transform = Transform::translation(20.0, 10.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: square.clone(),
+            })
+            .unwrap();
+            if with_sharpen {
+                let mut group = chitrakar_doc::Node::group("sharpen");
+                group.blend = BlendMode::Overlay;
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: 2,
+                    node: Box::new(group),
+                })
+                .unwrap();
+                let g = doc.children_of(root).unwrap()[2];
+                doc.apply(Command::AddNode {
+                    parent: g,
+                    index: 0,
+                    node: filled_rect("ground", 60.0, 40.0, BLACK),
+                })
+                .unwrap();
+                doc.apply(Command::AddNode {
+                    parent: g,
+                    index: 1,
+                    node: square,
+                })
+                .unwrap();
+                doc.apply(Command::AddNode {
+                    parent: g,
+                    index: 2,
+                    node: Box::new(chitrakar_doc::Node::filter(
+                        "detail",
+                        Filter::HighPass { sigma: 2.0 },
+                    )),
+                })
+                .unwrap();
+            }
+            render(&doc).unwrap()
+        };
+        let (plain, sharp) = (page(false), page(true));
+        let shown = |p: LinearRgba| [p.r, p.g, p.b].map(chitrakar_color::linear_to_srgb);
+        for (x, y) in [(30, 20), (5, 5)] {
+            let (a, b) = (shown(plain.get(x, y)), shown(sharp.get(x, y)));
+            for c in 0..3 {
+                assert!(
+                    (a[c] - b[c]).abs() < 0.01,
+                    "flat at {x},{y} is as it was: {a:?} against {b:?}"
+                );
+            }
+        }
+        // And the edge is sharper: lighter just inside the square.
+        let (a, b) = (shown(plain.get(21, 20)), shown(sharp.get(21, 20)));
+        assert!(
+            b[0] > a[0] + 0.03,
+            "the inside of the edge lifts: {a:?} -> {b:?}"
         );
     }
 

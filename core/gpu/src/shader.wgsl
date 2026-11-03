@@ -1416,6 +1416,24 @@ fn ripple_sine(at: f32, length: f32) -> f32 {
 // — the page's edge, or a frame's for a filter inside one, which is where
 // the CPU renderer's own reading stops (it is handed that rectangle to
 // work in), rather than the surface's. Within the texture either way.
+// The CPU's `seen`: a premultiplied texel straight and as a device shows
+// it, held to the display's range.
+fn straight_shown(t: vec4f) -> vec3f {
+    if t.a <= 0.0 {
+        return vec3f(0.0);
+    }
+    let s = clamp(t.rgb / t.a, vec3f(0.0), vec3f(1.0));
+    return vec3f(to_shown(s.r), to_shown(s.g), to_shown(s.b));
+}
+
+// A texel's brightness, straight and as a device shows it.
+fn straight_shown_luma(t: vec4f) -> f32 {
+    if t.a <= 0.0 {
+        return 0.0;
+    }
+    return to_shown(clamp(dot(vec3f(0.2126, 0.7152, 0.0722), t.rgb) / t.a, 0.0, 1.0));
+}
+
 fn texel_at(i: vec2i, size: vec2i) -> vec4f {
     let lo = max(vec2i(page.lo), vec2i(0));
     let hi = min(vec2i(page.hi), size) - vec2i(1);
@@ -1617,11 +1635,12 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let gg = texel_at(px + vec2i(-n, n), size);
         let h = texel_at(px + vec2i(0, n), size);
         let i = texel_at(px + vec2i(n, n), size);
-        let gx = (c.rgb + 2.0 * f.rgb + i.rgb) - (a.rgb + 2.0 * d.rgb + gg.rgb);
-        let gy = (gg.rgb + 2.0 * h.rgb + i.rgb) - (a.rgb + 2.0 * b.rgb + c.rgb);
+        // Each straight and as a device shows it.
+        let gx = (straight_shown(c) + 2.0 * straight_shown(f) + straight_shown(i)) - (straight_shown(a) + 2.0 * straight_shown(d) + straight_shown(gg));
+        let gy = (straight_shown(gg) + 2.0 * straight_shown(h) + straight_shown(i)) - (straight_shown(a) + 2.0 * straight_shown(b) + straight_shown(c));
         let steep = sqrt(gx * gx + gy * gy) / 4.0;
-        let white = clamp(vec3f(was.a) - p.z * steep, vec3f(0.0), vec3f(was.a));
-        return mix_px(was, vec4f(white, was.a), weight);
+        let white = clamp(vec3f(1.0) - p.z * steep, vec3f(0.0), vec3f(1.0));
+        return mix_px(was, vec4f(vec3f(to_light(white.r), to_light(white.g), to_light(white.b)) * was.a, was.a), weight);
     }
     if kind == 18 {
         // An emboss: the CPU renderer's own, with the offset it rounded.
@@ -1632,9 +1651,8 @@ fn filtered(kind: i32, p: vec4f, g: vec4f, e: vec3f, at: vec2f, was: vec4f, weig
         let step = vec2i(i32(p.y), i32(p.z));
         let toward = texel_at(px + step, size);
         let away = texel_at(px - step, size);
-        let luma = vec3f(0.2126, 0.7152, 0.0722);
-        let rise = dot(luma, toward.rgb) - dot(luma, away.rgb);
-        let g = clamp(0.5 * was.a - 0.5 * p.w * rise, 0.0, was.a);
+        let rise = straight_shown_luma(toward) - straight_shown_luma(away);
+        let g = to_light(clamp(0.5 - 0.5 * p.w * rise, 0.0, 1.0)) * was.a;
         return mix(was, vec4f(g, g, g, was.a), weight);
     }
     if kind == 14 {
@@ -2660,10 +2678,15 @@ fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
     if in.params.z == 0.0 {
         weight = in.alpha * mask_cover(in.page, in.mask);
     }
-    // A high pass: the difference from the blur on a grey of half of
-    // what is covered, held at nothing below, weighed in as a blur is.
+    // A high pass: the difference from the blur on a middle grey, as a
+    // device shows both, weighed in as a blur is.
     if in.params.y != 0.0 {
-        let detail = max(vec3f(0.5 * was.a) + was.rgb - soft.rgb, vec3f(0.0));
+        // The CPU's `high_pass`: as a device shows both, on its middle.
+        if was.a <= 0.0 {
+            return was;
+        }
+        let d = clamp(vec3f(0.5) + straight_shown(was) - straight_shown(soft), vec3f(0.0), vec3f(1.0));
+        let detail = vec3f(to_light(d.r), to_light(d.g), to_light(d.b)) * was.a;
         return mix(was, vec4f(detail, was.a), weight);
     }
     if in.params.x == 0.0 {
