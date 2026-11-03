@@ -1167,6 +1167,16 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
     }
 }
 
+// The CPU's `band_lightness`: half way toward white up, toward black down.
+fn band_lightness(light: f32, amount: f32) -> f32 {
+    let a = clamp(amount, -1.0, 1.0) * 0.5;
+    let l = clamp(light, 0.0, 1.0);
+    if a >= 0.0 {
+        return l + (1.0 - l) * a;
+    }
+    return l * (1.0 + a);
+}
+
 // A power of something that may be nothing, which WGSL leaves undefined.
 fn pow_or_none(x: f32, e: f32) -> f32 {
     if x <= 0.0 {
@@ -1315,7 +1325,7 @@ fn adjusted_from_table(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec
             let moved = from_hsl(vec3f(
                 hsl.x + d.r * 0.5 * take,
                 clamp(hsl.y * (1.0 + d.g * take), 0.0, 1.0),
-                clamp(hsl.z + d.b * 0.5 * take, 0.0, 1.0),
+                band_lightness(hsl.z, d.b * take),
             ));
             return vec3f(to_light(moved.r), to_light(moved.g), to_light(moved.b));
         }
@@ -1334,19 +1344,18 @@ fn adjusted_from_table(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec
             let light = (max(shown.r, max(shown.g, shown.b)) + min(shown.r, min(shown.g, shown.b))) * 0.5;
             let ramp = 0.25;
             let edge = 0.333;
-            let scale = 0.7;
+            let scale = 0.3;
             let wlo = clamp((light - edge) / -ramp + 0.5, 0.0, 1.0) * scale;
             let whi = clamp((light + edge - 1.0) / ramp + 0.5, 0.0, 1.0) * scale;
             let wmid = clamp((light - edge) / ramp + 0.5, 0.0, 1.0)
                 * clamp((light + edge - 1.0) / -ramp + 0.5, 0.0, 1.0)
                 * scale;
-            let moved = clamp(
-                shown + wlo * clamp(lo3, vec3f(-1.0), vec3f(1.0))
-                    + wmid * clamp(mid3, vec3f(-1.0), vec3f(1.0))
-                    + whi * clamp(hi3, vec3f(-1.0), vec3f(1.0)),
-                vec3f(0.0),
-                vec3f(1.0),
-            );
+            // Eased off before black and white (the CPU's `edged`)
+            // rather than cut off at them.
+            let push = wlo * clamp(lo3, vec3f(-1.0), vec3f(1.0))
+                + wmid * clamp(mid3, vec3f(-1.0), vec3f(1.0))
+                + whi * clamp(hi3, vec3f(-1.0), vec3f(1.0));
+            let moved = vec3f(edged(shown.r, push.r), edged(shown.g, push.g), edged(shown.b, push.b));
             var out = moved;
             if e.z > 0.5 {
                 // The colour that was asked for, at the lightness the

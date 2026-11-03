@@ -11380,6 +11380,12 @@ assert(
     warm[0][0] > warm[0][2] + 25,
     `the highlights warm (${before[0]} -> ${warm[0]})`,
   );
+  // A correction, not a wash: the bright band is a warm white, its blue
+  // eased rather than gone (at GIMP's strength it went near orange).
+  assert(
+    warm[0][2] > 170 && warm[0][0] - warm[0][2] < 90,
+    `and warmed as a correction is (${warm[0]})`,
+  );
   assert(
     Math.abs(warm[2][0] - before[2][0]) < 6 &&
       Math.abs(warm[2][2] - before[2][2]) < 6,

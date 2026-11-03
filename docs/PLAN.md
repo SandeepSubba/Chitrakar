@@ -10614,6 +10614,25 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **The colour adjustments, put through theirs** ✅ (the street again,
+  white balance, colour balance in each range, the colour bands and the
+  photo filter). **Colour balance** used GIMP's formula and its scale:
+  a slider moved a channel up to 0.7 as a device shows it, so half way
+  toward cyan turned the white house cyan and half way toward yellow in
+  the shadows turned the whole picture olive, with the blue channel at
+  nothing over half the frame. Its scale is 0.3 now
+  (`COLOR_BALANCE_SCALE`), and the push is eased off before black and
+  white (`edged`, as sharpen's is) rather than cut off at them — a
+  strong correction at the slider's end, not a wash. A **colour band's
+  lightness** added half the slider, so a red roof at a third went black
+  at -100: it goes half way toward black or white now (`band_lightness`,
+  Lightroom's luminance darkens a long way and never to black). White
+  balance, a band's hue and saturation and the photo filter were
+  reasonable (the photo filter at full density is the glass's colour
+  multiplied in, so an orange glass leaves no blue — Photoshop's own
+  default is a quarter). The shader changed in step. Tests: strength
+  checks in `colour_balance_reaches_one_range_of_tone_at_a_time` and
+  `a_band_of_colour_is_spoken_to_on_its_own`; smoke 9ad.
   **The photographic filters, put through theirs** ✅ (the same
   method, on a 400×300 crop of the X-T5's street at full resolution,
   where sharpening and grain can be judged at 1:1). **Noise** added an

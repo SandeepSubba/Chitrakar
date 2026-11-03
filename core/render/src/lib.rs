@@ -9470,6 +9470,25 @@ fn light_open(s: f32) -> f32 {
     chitrakar_color::srgb_to_linear(s.max(0.0))
 }
 
+/// A band's lightness moved by `amount` (-1..=1, already weighed by how
+/// much of the band the colour is): half way toward white up, half way
+/// toward black down. It was half of `amount` added, which took a red
+/// roof (lightness a third) to black at the slider's end; Lightroom's
+/// luminance darkens a colour a long way and never to black.
+pub fn band_lightness(light: f32, amount: f32) -> f32 {
+    let a = amount.clamp(-1.0, 1.0) * 0.5;
+    let l = light.clamp(0.0, 1.0);
+    if a >= 0.0 {
+        l + (1.0 - l) * a
+    } else {
+        l * (1.0 + a)
+    }
+}
+
+/// How far colour balance moves a channel, as a device shows it, at a
+/// slider's end in the middle of its range of tones.
+pub const COLOR_BALANCE_SCALE: f32 = 0.3;
+
 /// What a vignette multiplies light by where it has fallen `fall` of
 /// the way to the corner, at strength `amount`: a gain in stops, as a
 /// lens's own vignette is, two stops at the slider's end either way and
@@ -13523,7 +13542,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 let (nr, ng, nb) = from_hsl(
                     (hue + dh * 0.5 * take).rem_euclid(6.0),
                     (sat * (1.0 + ds * take)).clamp(0.0, 1.0),
-                    (light + dl * 0.5 * take).clamp(0.0, 1.0),
+                    band_lightness(light, dl * take),
                 );
                 (
                     chitrakar_color::srgb_to_linear(nr),
@@ -13697,20 +13716,26 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 // one, so a tone is only ever shared between two
                 // neighbours and nothing sits in a seam. The scale is
                 // what keeps a slider at its end a correction rather
-                // than a wash.
+                // than a wash: it was GIMP's 0.7, at which half the
+                // slider toward cyan turned a white house cyan.
                 const RAMP: f32 = 0.25;
                 const EDGE: f32 = 0.333;
-                const SCALE: f32 = 0.7;
+                const SCALE: f32 = COLOR_BALANCE_SCALE;
                 let low = ((light - EDGE) / -RAMP + 0.5).clamp(0.0, 1.0) * SCALE;
                 let high = ((light + EDGE - 1.0) / RAMP + 0.5).clamp(0.0, 1.0) * SCALE;
                 let mid = ((light - EDGE) / RAMP + 0.5).clamp(0.0, 1.0)
                     * ((light + EDGE - 1.0) / -RAMP + 0.5).clamp(0.0, 1.0)
                     * SCALE;
+                // Eased off before black and white rather than cut off
+                // at them: a shadow taken toward yellow had its blue at
+                // nothing across half a photograph.
                 let moved = |v: f32, i: usize| {
-                    (v + low * shadows[i].clamp(-1.0, 1.0)
-                        + mid * midtones[i].clamp(-1.0, 1.0)
-                        + high * highlights[i].clamp(-1.0, 1.0))
-                    .clamp(0.0, 1.0)
+                    edged(
+                        v,
+                        low * shadows[i].clamp(-1.0, 1.0)
+                            + mid * midtones[i].clamp(-1.0, 1.0)
+                            + high * highlights[i].clamp(-1.0, 1.0),
+                    )
                 };
                 let (nr, ng, nb) = (moved(sr, 0), moved(sg, 1), moved(sb, 2));
                 let (nr, ng, nb) = if *preserve_luminosity {
@@ -20002,6 +20027,12 @@ mod tests {
             hue_of(sky),
             hue_of(moved)
         );
+        // A band's lightness goes half way toward white or black at the
+        // slider's end, never to either: a red roof at a third stayed a
+        // dark red rather than going black.
+        assert!((band_lightness(0.3, -1.0) - 0.15).abs() < 1e-6);
+        assert!((band_lightness(0.3, 1.0) - 0.65).abs() < 1e-6);
+        assert_eq!(band_lightness(0.3, 0.0), 0.3);
     }
 
     /// Round-tripping a colour through hue, saturation and lightness
@@ -20262,6 +20293,25 @@ mod tests {
         assert!(
             (dr - 0.08).abs() < 0.01 && (db - 0.08).abs() < 0.01,
             "and the shadows are left alone: {dr} against {db}"
+        );
+
+        // A slider at its end is a strong correction, not a wash: a
+        // middle grey taken all the way to red is a red-tinted grey
+        // (GIMP's scale, 0.7, made it 0.85 red, 0.5 the others — the
+        // white house in a photograph went cyan at half the slider),
+        // and a deep shadow taken all the way to yellow keeps some
+        // blue rather than none.
+        let red = balance([0.0; 3], [1.0, 0.0, 0.0], [0.0; 3], false);
+        let (mr, mg, _) = shown(apply_adjustment(&red, None, grey(0.5)));
+        assert!(
+            mr > 0.62 && mr < 0.75 && (mg - 0.5).abs() < 0.01,
+            "the middle reddens by a correction's worth: {mr}"
+        );
+        let yellow = balance([0.0, 0.0, -1.0], [0.0; 3], [0.0; 3], false);
+        let (_, _, yb) = shown(apply_adjustment(&yellow, None, grey(0.08)));
+        assert!(
+            yb > 0.005 && yb < 0.05,
+            "the shadow yellows, not to nothing: {yb}"
         );
 
         // Cool shadows, the other half of a grade, reaching the other end.
