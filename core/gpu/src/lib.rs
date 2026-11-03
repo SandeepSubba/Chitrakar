@@ -13938,10 +13938,22 @@ mod tests {
                 brightness: 0.15,
                 contrast: 0.4,
             },
+            // Each slider down as well as up: down is a fade, a darker
+            // middle, a mix toward black, a share of a shadow taken away.
+            A::BrightnessContrast {
+                brightness: -0.6,
+                contrast: -0.5,
+            },
             A::HueSaturation {
                 hue_degrees: 40.0,
                 saturation: 0.3,
                 lightness: 0.05,
+                colorize: false,
+            },
+            A::HueSaturation {
+                hue_degrees: 0.0,
+                saturation: -0.2,
+                lightness: -0.4,
                 colorize: false,
             },
             // Colorized: a sepia at a quarter, and a hue past a half turn
@@ -13982,6 +13994,10 @@ mod tests {
             A::ShadowsHighlights {
                 shadows: 0.6,
                 highlights: 0.5,
+            },
+            A::ShadowsHighlights {
+                shadows: -0.7,
+                highlights: -0.5,
             },
             A::Posterize { levels: 4.0 },
             A::Threshold { level: 0.5 },

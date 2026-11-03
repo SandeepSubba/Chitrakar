@@ -986,9 +986,23 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
         case 1: {
             return c * pow(2.0, p.y);
         }
-        // Brightness and contrast, about the middle.
+        // Brightness and contrast, on the values a device shows: a power
+        // through the middle, then an S about the middle grey (or a fade
+        // toward it). Above white is carried on unchanged.
         case 2: {
-            return max((c + vec3f(p.y) - vec3f(0.5)) * (1.0 + p.z) + vec3f(0.5), vec3f(0.0));
+            if p.y == 0.0 && p.z == 0.0 {
+                return c;
+            }
+            let inside = clamp(c, vec3f(0.0), vec3f(1.0));
+            let over = max(c - inside, vec3f(0.0));
+            let b = clamp(p.y, -1.0, 1.0);
+            let k = clamp(p.z, -1.0, 1.0);
+            let s = vec3f(
+                brightness_contrast_shown(to_shown(inside.r), b, k),
+                brightness_contrast_shown(to_shown(inside.g), b, k),
+                brightness_contrast_shown(to_shown(inside.b), b, k),
+            );
+            return vec3f(to_light(s.r), to_light(s.g), to_light(s.b)) + over;
         }
         // Hue rotation (the feColorMatrix one), then saturation about
         // the pixel's own luminance, then a lightness offset.
@@ -998,7 +1012,8 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
             if q.x > 0.5 {
                 let shown = vec3f(to_shown(clamp(c.r, 0.0, 1.0)), to_shown(clamp(c.g, 0.0, 1.0)), to_shown(clamp(c.b, 0.0, 1.0)));
                 let tinted = from_hsl(vec3f(q.y, q.z, to_hsl(shown).z));
-                return max(vec3f(to_light(tinted.r), to_light(tinted.g), to_light(tinted.b)) + vec3f(p.w), vec3f(0.0));
+                let l = vec3f(lightness_shown(tinted.r, p.w), lightness_shown(tinted.g, p.w), lightness_shown(tinted.b, p.w));
+                return vec3f(to_light(l.r), to_light(l.g), to_light(l.b));
             }
             let a = radians(p.y);
             let sn = sin(a);
@@ -1008,7 +1023,18 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
             let m2 = vec3f(0.213 - cs * 0.213 - sn * 0.787, 0.715 - cs * 0.715 + sn * 0.715, 0.072 + cs * 0.928 + sn * 0.072);
             let turned = vec3f(dot(m0, c), dot(m1, c), dot(m2, c));
             let l = dot(vec3f(0.2126, 0.7152, 0.0722), turned);
-            return max(vec3f(l) + (turned - vec3f(l)) * (1.0 + p.z) + vec3f(p.w), vec3f(0.0));
+            let sat = max(vec3f(l) + (turned - vec3f(l)) * (1.0 + p.z), vec3f(0.0));
+            if p.w == 0.0 {
+                return sat;
+            }
+            let inside = clamp(sat, vec3f(0.0), vec3f(1.0));
+            let over = sat - inside;
+            let lit = vec3f(
+                to_light(lightness_shown(to_shown(inside.r), p.w)),
+                to_light(lightness_shown(to_shown(inside.g), p.w)),
+                to_light(lightness_shown(to_shown(inside.b), p.w)),
+            );
+            return lit + over * (1.0 + clamp(p.w, -1.0, 0.0));
         }
         // Levels: an input range, a gamma, an output range.
         case 4: {
@@ -1057,16 +1083,28 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
             let f = s + (vec3f(1.0) - s - s) * k;
             return vec3f(to_light(f.r), to_light(f.g), to_light(f.b)) + over * (1.0 - k);
         }
-        // Shadows and highlights: each end pulls as the cube of the
-        // distance from the other, and what moves is the brightness —
-        // the colour comes along with it.
+        // Shadows and highlights (the CPU's `shadows_highlights_shown`):
+        // what moves is the brightness — the colour comes along with it.
         case 9: {
             let l = clamp(dot(vec3f(0.2126, 0.7152, 0.0722), c), 0.0, 1.0);
             let s = to_shown(l);
             let lo = clamp(p.y, -1.0, 1.0);
             let hi = clamp(p.z, -1.0, 1.0);
-            let moved = 0.5 * (lo * (1.0 - s) * (1.0 - s) * (1.0 - s) - hi * s * s * s);
-            let want = to_light(clamp(s + moved, 0.0, 1.0));
+            // A gain on what each end holds, fading as the fourth power
+            // of the distance from that end; down divides by it.
+            let d = (1.0 - s) * (1.0 - s);
+            let gl = 1.0 + 2.0 * abs(lo) * d * d;
+            var shadow = s * gl;
+            if lo < 0.0 {
+                shadow = s / gl;
+            }
+            let b = s * s;
+            let gh = 1.0 + 2.0 * abs(hi) * b * b;
+            var room = (1.0 - s) * gh;
+            if hi < 0.0 {
+                room = (1.0 - s) / gh;
+            }
+            let want = to_light(clamp(shadow + (1.0 - room) - s, 0.0, 1.0));
             if l <= 1e-6 {
                 return vec3f(want);
             }
@@ -1126,6 +1164,37 @@ fn adjusted(kind: i32, p: vec4f, q: vec4f, e: vec3f, c: vec3f) -> vec3f {
             return c;
         }
     }
+}
+
+// A power of something that may be nothing, which WGSL leaves undefined.
+fn pow_or_none(x: f32, e: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    return pow(x, e);
+}
+
+// The CPU's `brightness_contrast_shown`, on one value a device shows.
+fn brightness_contrast_shown(v: f32, b: f32, c: f32) -> f32 {
+    let s = pow_or_none(clamp(v, 0.0, 1.0), pow(2.0, -b));
+    if c >= 0.0 {
+        let k = 1.0 + c;
+        if s < 0.5 {
+            return 0.5 * pow_or_none(2.0 * s, k);
+        }
+        return 1.0 - 0.5 * pow_or_none(2.0 * (1.0 - s), k);
+    }
+    return 0.5 + (s - 0.5) * (1.0 + 0.8 * c);
+}
+
+// The CPU's `lightness_shown`: up toward white, down toward black.
+fn lightness_shown(v: f32, lightness: f32) -> f32 {
+    let l = clamp(lightness, -1.0, 1.0);
+    let s = clamp(v, 0.0, 1.0);
+    if l >= 0.0 {
+        return s + (1.0 - s) * l;
+    }
+    return s * (1.0 + l);
 }
 
 // A table an adjustment is stated by, read the way the CPU reads its

@@ -7518,11 +7518,11 @@ assert(
   await page.waitForTimeout(300);
   const [dark1, mid1, light1] = await tones();
   assert(
-    dark1 > dark0 + 15,
+    dark1 > dark0 + 10,
     `the shadows open up (${dark0} -> ${dark1})`,
   );
   assert(
-    light1 < light0 - 15,
+    light1 < light0 - 10,
     `the highlights come back (${light0} -> ${light1})`,
   );
   assert(
@@ -7542,6 +7542,11 @@ assert(
     `and asked the other way they deepen (${dark0} -> ${dark2})`,
   );
 
+  assert(
+    dark2 > 8,
+    `but a shadow taken down is still a shadow, not black (${dark2})`,
+  );
+
   await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(400);
@@ -7549,6 +7554,43 @@ assert(
   assert(
     Math.abs(dark3 - dark0) < 3 && Math.abs(light3 - light0) < 3,
     `undo takes the slider and the layer with it (${dark3},${light3})`,
+  );
+
+  // Brightness and contrast keep black and white and the tones between:
+  // half the brightness slider down once took the dark square to black.
+  await page.selectOption(
+    '[aria-label="Add adjustment layer"]',
+    "brightness-contrast",
+  );
+  await page.waitForTimeout(300);
+  await setSlider("Brightness", -0.5);
+  await page.waitForTimeout(300);
+  const [dark4, mid4, light4] = await tones();
+  assert(
+    dark4 > 8 && dark4 < dark0 && mid4 < mid0 - 15 && light4 > 190,
+    `brightness down darkens the middle and keeps the ends (${dark4},${mid4},${light4})`,
+  );
+  await setSlider("Brightness", 0);
+  await setSlider("Contrast", 0.6);
+  await page.waitForTimeout(300);
+  const [dark5, mid5, light5] = await tones();
+  assert(
+    dark5 < dark0 && dark5 > 3 && light5 > light0 && light5 < 255 && Math.abs(mid5 - mid0) < 6,
+    `contrast spreads the tones about the middle without clipping them (${dark5},${mid5},${light5})`,
+  );
+  // And Lightness halfway down is half as light, not black.
+  await page.locator(".panel ul li", { hasText: "Brightness/Contrast" }).click();
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(200);
+  await page.selectOption('[aria-label="Add adjustment layer"]', "hue-saturation");
+  await page.waitForTimeout(300);
+  await setSlider("Lightness", -0.5);
+  await page.waitForTimeout(300);
+  const [dark6, mid6] = await tones();
+  assert(
+    dark6 > 5 && Math.abs(mid6 - mid0 / 2) < 10,
+    `lightness down is a mix toward black (${dark6},${mid6})`,
   );
 }
 

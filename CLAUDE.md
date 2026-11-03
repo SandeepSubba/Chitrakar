@@ -35,6 +35,13 @@ ICC profile (`core/codecs`).
 - Source pixels and resources are immutable; only references are edits.
 - Keep the CPU renderer the correctness reference; a future wgpu backend
   gets validated against it (llvmpipe makes that CI-able).
+- An adjustment's formula lives twice: `apply_adjustment` in
+  `core/render` and `adjusted` in `core/gpu/src/shader.wgsl`. Change both
+  in one commit; the GPU audits catch drift, and skip without an adapter
+  (`apt-get install mesa-vulkan-drivers` gives llvmpipe locally). The
+  tone sliders (brightness, contrast, lightness, shadows/highlights) work
+  on the values a device shows and keep black and white; exposure is a
+  gain in light.
 - Old `.chitra` files must keep loading: new node kinds/fields are additive
   with `#[serde(default)]`.
 

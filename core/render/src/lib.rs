@@ -12875,6 +12875,16 @@ pub fn prepare(doc: &Document, adj: &Adjustment) -> Option<Prepared> {
                 [1.0 - k; 3],
             ))
         }
+        Adjustment::BrightnessContrast {
+            brightness,
+            contrast,
+        } if *brightness != 0.0 || *contrast != 0.0 => {
+            let table = through_table(|v| brightness_contrast_channel(v, *brightness, *contrast).0);
+            Some(Prepared::Through(
+                [table.clone(), table.clone(), table],
+                [1.0; 3],
+            ))
+        }
         Adjustment::Posterize { levels } => {
             let steps = posterize_steps(*levels);
             let table = through_table(|v| posterize_channel(v, steps));
@@ -13055,6 +13065,105 @@ pub fn curve_lut(points: &[[f32; 2]]) -> Vec<f32> {
 /// returned in proportion to how much of the layer is *not* the
 /// inversion. At `k` zero that is all of it, and the layer is the
 /// identity it is asked to be rather than a highlight crusher.
+/// Brightness and contrast on one channel, worked on the values a
+/// device shows so that black and white stay where they are: brightness
+/// bends the middle (a power, as a gamma does), and contrast is an S
+/// about the middle grey that a device shows — steeper through the
+/// middle and flattening into black and white rather than clipping at
+/// them — or, taken down, a fade toward that grey. Once this was an
+/// offset and a gain in light, and half the slider's travel took a
+/// photograph to black. Above white is carried on unchanged.
+pub fn brightness_contrast_channel(v: f32, brightness: f32, contrast: f32) -> (f32, f32) {
+    let inside = v.clamp(0.0, 1.0);
+    let over = (v - inside).hi(0.0);
+    let s = chitrakar_color::linear_to_srgb(inside);
+    (
+        chitrakar_color::srgb_to_linear(brightness_contrast_shown(s, brightness, contrast)),
+        over,
+    )
+}
+
+/// [`brightness_contrast_channel`] on a value as a device shows it.
+pub fn brightness_contrast_shown(s: f32, brightness: f32, contrast: f32) -> f32 {
+    let held = |x: f32| {
+        if x.is_finite() {
+            x.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let (b, c) = (held(brightness), held(contrast));
+    let s = s.clamp(0.0, 1.0).powf(2f32.powf(-b));
+    if c >= 0.0 {
+        // Steeper through the middle by the slider — twice as steep at
+        // its end — with black and white kept.
+        let k = 1.0 + c;
+        if s < 0.5 {
+            0.5 * (2.0 * s).powf(k)
+        } else {
+            1.0 - 0.5 * (2.0 * (1.0 - s)).powf(k)
+        }
+    } else {
+        0.5 + (s - 0.5) * (1.0 + 0.8 * c)
+    }
+}
+
+/// Lightness as a device shows it, the way an editor's Hue/Saturation
+/// has it: up is a mix toward white, down a mix toward black, so the
+/// slider's end is white or black and every step short of it keeps the
+/// picture. It was an offset in light, which took a photograph's
+/// shadows to black a third of the way down.
+pub fn lightness_shown(s: f32, lightness: f32) -> f32 {
+    let l = if lightness.is_finite() {
+        lightness.clamp(-1.0, 1.0)
+    } else {
+        0.0
+    };
+    let s = s.clamp(0.0, 1.0);
+    if l >= 0.0 {
+        s + (1.0 - s) * l
+    } else {
+        s * (1.0 + l)
+    }
+}
+
+/// [`lightness_shown`] on a channel in light: above white is carried on,
+/// and darkened as the rest is when the slider is down.
+fn lightness_channel(v: f32, lightness: f32) -> f32 {
+    if lightness == 0.0 {
+        return v;
+    }
+    let inside = v.clamp(0.0, 1.0);
+    let over = (v - inside).hi(0.0);
+    chitrakar_color::srgb_to_linear(lightness_shown(
+        chitrakar_color::linear_to_srgb(inside),
+        lightness,
+    )) + over * (1.0 + lightness.clamp(-1.0, 0.0))
+}
+
+/// Where shadows and highlights take a brightness `s` as a device shows
+/// it. Each end is opened up by a gain on what it holds — a shadow by a
+/// share of itself, a highlight by a share of the room it has left
+/// below white — that fades as the fourth power of the distance from
+/// that end, so black stays black, white stays white, and the middle
+/// barely moves. Closed down is the same gain divided rather than
+/// multiplied. It was once an offset, which
+/// lifted black to a middle grey and laid a haze over the whole picture.
+pub fn shadows_highlights_shown(s: f32, shadows: f32, highlights: f32) -> f32 {
+    let (lo, hi) = (shadows.clamp(-1.0, 1.0), highlights.clamp(-1.0, 1.0));
+    let s = s.clamp(0.0, 1.0);
+    let gain = |amount: f32, near: f32| 1.0 + 2.0 * amount.abs() * near.powi(4);
+    let g = gain(lo, 1.0 - s);
+    let shadow = if lo >= 0.0 { s * g } else { s / g };
+    let g = gain(hi, s);
+    let room = if hi >= 0.0 {
+        (1.0 - s) * g
+    } else {
+        (1.0 - s) / g
+    };
+    (shadow + (1.0 - room) - s).clamp(0.0, 1.0)
+}
+
 fn invert_channel(v: f32, k: f32) -> (f32, f32) {
     let inside = v.clamp(0.0, 1.0);
     let over = (v - inside).hi(0.0);
@@ -13195,8 +13304,21 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             brightness,
             contrast,
         } => {
-            let f = |v: f32| ((v + brightness - 0.5) * (1.0 + contrast) + 0.5).hi(0.0);
-            (f(r), f(g), f(b))
+            if *brightness == 0.0 && *contrast == 0.0 {
+                (r, g, b)
+            } else {
+                match ready {
+                    Some(Prepared::Through(tables, over)) => through(tables, over, r, g, b),
+                    _ => {
+                        let f = |v: f32| {
+                            let (inside, over) =
+                                brightness_contrast_channel(v, *brightness, *contrast);
+                            inside + over
+                        };
+                        (f(r), f(g), f(b))
+                    }
+                }
+            }
         }
         Adjustment::Exposure { stops } => {
             let m = match ready {
@@ -13218,7 +13340,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             let (hue, sat) = colorize_tint(*hue_degrees, *saturation);
             let (_, _, light) = to_hsl(shown_value(r), shown_value(g), shown_value(b));
             let (nr, ng, nb) = from_hsl(hue, sat, light);
-            let f = |v: f32| (chitrakar_color::srgb_to_linear(v) + lightness).hi(0.0);
+            let f = |v: f32| chitrakar_color::srgb_to_linear(lightness_shown(v, *lightness));
             (f(nr), f(ng), f(nb))
         }
         Adjustment::HueSaturation {
@@ -13254,7 +13376,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
             // Saturation: scale distance from luminance; then lightness add.
             let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
             let s = 1.0 + saturation;
-            let f = |v: f32| (lum + (v - lum) * s + lightness).hi(0.0);
+            let f = |v: f32| lightness_channel((lum + (v - lum) * s).hi(0.0), *lightness);
             (f(r), f(g), f(b))
         }
         Adjustment::SelectiveHsl { bands } => {
@@ -13422,13 +13544,7 @@ fn apply_adjustment(adj: &Adjustment, ready: Option<&Prepared>, px: LinearRgba) 
                 + chitrakar_doc::LUMA[2] * b)
                 .clamp(0.0, 1.0);
             let s = chitrakar_color::linear_to_srgb(lum);
-            let (lo, hi) = (shadows.clamp(-1.0, 1.0), highlights.clamp(-1.0, 1.0));
-            // Each end pulls as the square of the distance from the other,
-            // so the middle of the range is left where it is, and each
-            // pull is scaled by how much room there is left in that
-            // direction — a tone already white cannot be opened up.
-            let moved = 0.5 * (lo * (1.0 - s) * (1.0 - s) * (1.0 - s) - hi * s * s * s);
-            let want = (s + moved).clamp(0.0, 1.0);
+            let want = shadows_highlights_shown(s, *shadows, *highlights);
             let target = chitrakar_color::srgb_to_linear(want);
             if lum <= 1e-6 {
                 // Nothing to scale: a black pixel has no colour to keep,
@@ -19316,10 +19432,123 @@ mod tests {
             green[1] > 0.95 && green[0] < 0.05 && green[2] < 0.05,
             "{green:?}"
         );
-        // And lightness lifts what the tint gave, in light.
-        let lifted = apply_adjustment(&tint(0.0, -0.5, 0.1), None, srgb(0.5, 0.5, 0.5));
-        let plain = apply_adjustment(&red, None, srgb(0.5, 0.5, 0.5));
-        assert!((lifted.g - plain.g - 0.1).abs() < 1e-4);
+        // And lightness takes what the tint gave a tenth of the way to
+        // white, as a device shows it.
+        let lifted = shown(apply_adjustment(
+            &tint(0.0, -0.5, 0.1),
+            None,
+            srgb(0.5, 0.5, 0.5),
+        ));
+        assert!((lifted[1] - (grey[1] + (1.0 - grey[1]) * 0.1)).abs() < 1e-3);
+    }
+
+    /// Brightness, contrast, lightness and the shadows taken down are
+    /// worked where a device shows a picture, so no step of a slider
+    /// short of its end takes a photograph to black or to white. Each of
+    /// them was once an offset or a gain in light, and half the travel
+    /// was enough to lose most of a picture.
+    #[test]
+    fn the_tone_sliders_keep_black_and_white_and_the_picture_between() {
+        let grey = |v: f32| {
+            to_working(&AuthoredColor::Srgb {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            })
+        };
+        let shown = |adj: &Adjustment, v: f32| {
+            chitrakar_color::linear_to_srgb(apply_adjustment(adj, None, grey(v)).r)
+        };
+        let bc = |brightness: f32, contrast: f32| Adjustment::BrightnessContrast {
+            brightness,
+            contrast,
+        };
+        let light = |lightness: f32| Adjustment::HueSaturation {
+            hue_degrees: 0.0,
+            saturation: 0.0,
+            lightness,
+            colorize: false,
+        };
+        let shade = |shadows: f32| Adjustment::ShadowsHighlights {
+            shadows,
+            highlights: 0.0,
+        };
+        for adj in [
+            bc(1.0, 0.0),
+            bc(-1.0, 0.0),
+            bc(0.0, 1.0),
+            bc(0.5, 0.5),
+            light(0.5),
+            light(-0.5),
+            shade(-1.0),
+        ] {
+            // Black and white stay, when the slider is not a fade.
+            let fades = matches!(adj, Adjustment::BrightnessContrast { contrast, .. } if contrast < 0.0)
+                || matches!(adj, Adjustment::HueSaturation { lightness, .. } if lightness != 0.0);
+            if !fades {
+                assert!(shown(&adj, 0.0) < 0.01, "{adj:?} keeps black");
+                assert!(shown(&adj, 1.0) > 0.99, "{adj:?} keeps white");
+            }
+            // And the tones between stay tones: a dark one is not black,
+            // a light one not white, and their order holds.
+            let tones: Vec<f32> = [0.1, 0.3, 0.5, 0.7, 0.9]
+                .iter()
+                .map(|v| shown(&adj, *v))
+                .collect();
+            assert!(
+                tones.windows(2).all(|w| w[1] > w[0] + 0.02),
+                "{adj:?} keeps the tones apart: {tones:?}"
+            );
+            assert!(
+                tones[0] > 0.005 && tones[4] < 0.995,
+                "{adj:?} crushes nothing: {tones:?}"
+            );
+        }
+        // Brightness moves the middle the way it says.
+        assert!(shown(&bc(0.5, 0.0), 0.5) > 0.58 && shown(&bc(-0.5, 0.0), 0.5) < 0.42);
+        // Contrast turns about the middle grey a device shows: it spreads
+        // the tones either side and leaves the middle.
+        let c = bc(0.0, 0.5);
+        assert!((shown(&c, 0.5) - 0.5).abs() < 0.01);
+        assert!(shown(&c, 0.3) < 0.27 && shown(&c, 0.7) > 0.73);
+        // Taken down, it fades toward that grey.
+        let fade = bc(0.0, -1.0);
+        assert!(shown(&fade, 0.0) > 0.35 && shown(&fade, 1.0) < 0.65);
+        // Lightness at its end is white or black, half way is half way.
+        assert!(shown(&light(1.0), 0.2) > 0.99 && shown(&light(-1.0), 0.8) < 0.01);
+        assert!((shown(&light(0.5), 0.2) - 0.6).abs() < 0.01);
+        assert!((shown(&light(-0.5), 0.8) - 0.4).abs() < 0.01);
+        // What is above white is carried on, not clipped at it.
+        let bright = LinearRgba {
+            r: 2.0,
+            g: 2.0,
+            b: 2.0,
+            a: 1.0,
+        };
+        assert!(apply_adjustment(&bc(0.3, 0.3), None, bright).r > 1.9);
+        // The table a pass prepares agrees with the pixel-by-pixel answer.
+        let doc = Document::new(10, 10, ColorMode::Rgb);
+        let adj = bc(0.4, -0.3);
+        let ready = prepare(&doc, &adj);
+        for v in [0.0, 0.003, 0.05, 0.2, 0.5, 0.8, 1.0, 1.5] {
+            let px = LinearRgba {
+                r: v,
+                g: v,
+                b: v,
+                a: 1.0,
+            };
+            let (a, b) = (
+                apply_adjustment(&adj, ready.as_ref(), px).r,
+                apply_adjustment(&adj, None, px).r,
+            );
+            assert!((a - b).abs() < 1e-3, "{v}: {a} against {b}");
+        }
+        // And asked for nothing, nothing moves at all.
+        for v in [0.0, 0.2, 0.7, 1.0] {
+            assert_eq!(apply_adjustment(&bc(0.0, 0.0), None, grey(v)).r, grey(v).r);
+            assert!((apply_adjustment(&light(0.0), None, grey(v)).r - grey(v).r).abs() < 1e-6);
+        }
     }
 
     /// Black and white is a recipe, not a switch: the same colours taken
@@ -19805,7 +20034,7 @@ mod tests {
         let dark = shown(apply_adjustment(&lift, None, grey(0.1)));
         let mid = shown(apply_adjustment(&lift, None, grey(0.5)));
         let bright = shown(apply_adjustment(&lift, None, grey(0.95)));
-        assert!(dark > 0.1 + 0.15, "the shadows open up: {dark}");
+        assert!(dark > 0.1 + 0.1, "the shadows open up: {dark}");
         assert!((mid - 0.5).abs() < 0.08, "the middle barely moves: {mid}");
         assert!(
             (bright - 0.95).abs() < 0.01,
@@ -19818,7 +20047,15 @@ mod tests {
         };
         let top = shown(apply_adjustment(&tame, None, grey(0.95)));
         let floor = shown(apply_adjustment(&tame, None, grey(0.1)));
-        assert!(top < 0.95 - 0.15, "the highlights come back: {top}");
+        assert!(top < 0.95 - 0.06, "the highlights come back: {top}");
+        // And neither end moves: a lift is not a haze laid over black,
+        // nor is taming the highlights a grey laid over white.
+        assert!(shown(apply_adjustment(&lift, None, grey(0.0))) < 0.005);
+        assert!(shown(apply_adjustment(&tame, None, grey(1.0))) > 0.995);
+        // Down darkens a shadow by a share of itself, never to black.
+        let down = shadows_highlights_shown(0.3, -1.0, 0.0);
+        assert!(down < 0.27 && down > 0.15, "{down}");
+        assert!(shadows_highlights_shown(0.05, -1.0, 0.0) > 0.015);
         assert!(
             (floor - 0.1).abs() < 0.01,
             "and the shadows are left alone: {floor}"
@@ -19853,11 +20090,6 @@ mod tests {
             (was - now).abs() < 1e-4 && up.b > blue.b,
             "the colour comes along: {was} against {now}"
         );
-
-        // A pixel with no light in it has no colour to keep, and still
-        // lifts rather than staying black.
-        let black = apply_adjustment(&lift, None, grey(0.0));
-        assert!(black.r > 0.0 && (black.r - black.b).abs() < 1e-6);
     }
 
     /// Colour balance speaks to one range of tone at a time: warming

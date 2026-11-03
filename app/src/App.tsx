@@ -5816,7 +5816,7 @@ export function App() {
     "shadows-highlights": {
       name: "Shadows & highlights",
       kind: {
-        Adjustment: { ShadowsHighlights: { shadows: 0.35, highlights: 0.35 } },
+        Adjustment: { ShadowsHighlights: { shadows: 0.5, highlights: 0.5 } },
       },
     },
     "colour-balance": {

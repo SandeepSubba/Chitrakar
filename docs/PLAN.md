@@ -10614,6 +10614,35 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **The adjustment layers, put through their sliders** ✅ (after the
+  develop window: "test and refine the other adjustments too"). Each
+  tone slider was laid over a photograph (the X-T5's street, as a
+  JPEG) at -100, -50, +50 and +100 and looked at, with what went to
+  white and black counted. Four were offsets or gains in linear light
+  and lost the picture well short of their ends. **Brightness** -50 put
+  71% of the frame at pure black: it is a power on the values a device
+  shows now (`brightness_contrast_shown`), so it bends the middle and
+  keeps black and white. **Contrast** +50 put 54% at black: it is an S
+  about the middle grey a device shows (twice as steep through the
+  middle at +100, flattening into the ends rather than clipping), and
+  taken down a fade toward that grey. **Lightness** (Hue/Saturation and
+  Colorize) was an offset in light, so -33 took the shadows to black: it
+  is a mix toward white or black as a device shows it, Photoshop's own
+  (`lightness_shown`). **Shadows** -100 put 41% at black, and +100 and
+  Highlights +100 laid a grey haze over the whole picture, because they
+  moved black and white themselves: each end is now opened up or held
+  back by a gain on what it holds that fades as the fourth power of the
+  distance from it (`shadows_highlights_shown`), so the ends stay and
+  the middle barely moves; a new layer starts at 50 rather than 35,
+  since the same number does less. Exposure stays a gain in light, as
+  Photoshop's is. Above white is carried on unchanged by all of them.
+  Brightness/Contrast is read off a table a pass prepares
+  (`Prepared::Through`). The graphics card's shader changed in step, and
+  the GPU audits now ask each slider down as well as up (run here on
+  llvmpipe: 109 GPU tests). A document saved before reads its old
+  numbers through the new formulas. Tests:
+  `the_tone_sliders_keep_black_and_white_and_the_picture_between`,
+  `shadows_and_highlights_move_their_own_ends`; smoke 9o.
   **The develop window, put through its sliders** ✅ (reported: no
   curve; exposure blows out quickly; make the window resizable). Each
   slider was developed at -100, -50, 0, +50 and +100 on an X-T5 RAF and
