@@ -222,11 +222,13 @@ impl Lens {
             };
             table.push([0, 1, 2].map(|c| a.1[c] + (b.1[c] - a.1[c]) * t));
         }
+        let half_diagonal = (w * w + h * h).sqrt() * 0.5;
+        let per_rr = LENS_STEPS as f32 / most;
         let mut warp = Warp {
             table,
-            per_rr: LENS_STEPS as f32 / most,
-            half_diagonal: (w * w + h * h).sqrt() * 0.5,
+            step_of_rr: per_rr / (half_diagonal * half_diagonal),
             zoom: 1.0,
+            inv_zoom: 1.0,
         };
         // The least zoom that keeps every edge's source inside the
         // picture, found by halving.
@@ -251,19 +253,19 @@ impl Lens {
         };
         if !fits(&warp) {
             let (mut lo, mut hi) = (1.0f32, 2.0f32);
-            warp.zoom = hi;
+            warp.set_zoom(hi);
             if !fits(&warp) {
                 return None;
             }
             for _ in 0..30 {
-                warp.zoom = 0.5 * (lo + hi);
+                warp.set_zoom(0.5 * (lo + hi));
                 if fits(&warp) {
                     hi = warp.zoom;
                 } else {
                     lo = warp.zoom;
                 }
             }
-            warp.zoom = hi;
+            warp.set_zoom(hi);
         }
         Some(warp)
     }
@@ -286,7 +288,7 @@ fn brighten(
         for (px, x) in row.iter_mut().zip(x0..x1) {
             let dx = x as f32 + 0.5 - hw;
             let f = ((dx * dx + dy * dy) * per_rr).min(LENS_STEPS as f32);
-            let i = (f as usize).min(LENS_STEPS - 1);
+            let i = (f as i32).clamp(0, LENS_STEPS as i32 - 1) as usize;
             let gain = light[i] + (light[i + 1] - light[i]) * (f - i as f32);
             for v in px.iter_mut() {
                 *v *= gain;
@@ -299,28 +301,35 @@ fn brighten(
 /// in the photograph each channel of it comes from.
 struct Warp {
     /// Per channel, how many times as far out the source is, over the
-    /// landing radius squared (in half-diagonals) times `per_rr`.
+    /// landing radius squared (in half-diagonals), `LENS_STEPS` steps to
+    /// the table's end.
     table: Vec<[f32; 3]>,
-    per_rr: f32,
-    half_diagonal: f32,
+    /// From a radius squared in pixels to a step of the table: worked
+    /// out once, since a division a pixel was a quarter of the warp.
+    step_of_rr: f32,
     zoom: f32,
+    inv_zoom: f32,
 }
 
 impl Warp {
+    fn set_zoom(&mut self, zoom: f32) {
+        self.zoom = zoom;
+        self.inv_zoom = 1.0 / zoom;
+    }
+
     /// The source of channel `c` at (`x`, `y`) from the middle, in pixels
     /// from the middle.
     #[inline]
     fn source(&self, x: f32, y: f32, c: usize) -> (f32, f32) {
         let s = self.scales(x, y)[c];
-        (x / self.zoom * s, y / self.zoom * s)
+        (x * self.inv_zoom * s, y * self.inv_zoom * s)
     }
 
     #[inline]
     fn scales(&self, x: f32, y: f32) -> [f32; 3] {
-        let (qx, qy) = (x / self.zoom, y / self.zoom);
-        let rr = (qx * qx + qy * qy) / (self.half_diagonal * self.half_diagonal);
-        let f = (rr * self.per_rr).min(LENS_STEPS as f32);
-        let i = (f as usize).min(LENS_STEPS - 1);
+        let (qx, qy) = (x * self.inv_zoom, y * self.inv_zoom);
+        let f = ((qx * qx + qy * qy) * self.step_of_rr).min(LENS_STEPS as f32);
+        let i = (f as i32).clamp(0, LENS_STEPS as i32 - 1) as usize;
         let t = f - i as f32;
         let (a, b) = (self.table[i], self.table[i + 1]);
         [0, 1, 2].map(|c| a[c] + (b[c] - a[c]) * t)
@@ -338,7 +347,7 @@ impl Geometry for Warp {
     #[inline]
     fn sources(&self, x: f32, y: f32) -> [[f32; 2]; 3] {
         let k = self.scales(x, y);
-        let (qx, qy) = (x / self.zoom, y / self.zoom);
+        let (qx, qy) = (x * self.inv_zoom, y * self.inv_zoom);
         [0, 1, 2].map(|c| [qx * k[c], qy * k[c]])
     }
 }
@@ -431,7 +440,7 @@ fn orient_through(
     let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
     // Source positions in 256ths of a pixel, kept short of the far edges
     // by a 256th so that the four neighbours are always there.
-    let (most_x, most_y) = (((w - 1) * 256 - 1) as f32, ((h - 1) * 256 - 1) as f32);
+    let (most_x, most_y) = (((w - 1) * 256 - 1) as i32, ((h - 1) * 256 - 1) as i32);
     let (hw256, hh256) = ((hw - 0.5) * 256.0, (hh - 0.5) * 256.0);
     let (right, down) = (4, w * 4);
     // Straightened in the photograph's own rows, so that what each point
@@ -446,18 +455,25 @@ fn orient_through(
             for (x, out) in row.chunks_exact_mut(4).enumerate() {
                 let qx = x as f32 + 0.5 - hw;
                 let from = geometry.sources(qx, qy);
-                let pixel: [u8; 3] = std::array::from_fn(|c| {
-                    // Pixel centres are at the halves.
-                    let fx = (from[c][0] * 256.0 + hw256).clamp(0.0, most_x) as u32;
-                    let fy = (from[c][1] * 256.0 + hh256).clamp(0.0, most_y) as u32;
-                    let (tx, ty) = (fx & 255, fy & 255);
-                    let at = ((fy >> 8) as usize * w + (fx >> 8) as usize) * 4 + c;
-                    let top = px[at] as u32 * (256 - tx) + px[at + right] as u32 * tx;
-                    let bottom =
-                        px[at + down] as u32 * (256 - tx) + px[at + down + right] as u32 * tx;
-                    ((top * (256 - ty) + bottom * ty + 32768) >> 16) as u8
-                });
-                out.copy_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+                let mut pixel = [0u8, 0, 0, 255];
+                for (c, (o, f)) in pixel.iter_mut().zip(from).enumerate() {
+                    // Pixel centres are at the halves. Into whole numbers
+                    // first and held there: a float held and then made
+                    // unsigned costs a saturating conversion each, and the
+                    // two did most of a warp's time — the same answer, as
+                    // both round toward nothing above nought.
+                    let fx = ((f[0] * 256.0 + hw256) as i32).clamp(0, most_x) as usize;
+                    let fy = ((f[1] * 256.0 + hh256) as i32).clamp(0, most_y) as usize;
+                    let (tx, ty) = ((fx & 255) as u32, (fy & 255) as u32);
+                    let at = ((fy >> 8) * w + (fx >> 8)) * 4 + c;
+                    // The pixel, the one right of it, and the two below:
+                    // one slice reaching all four, so one check.
+                    let p = &px[at..at + down + right + 1];
+                    let t = p[0] as u32 * (256 - tx) + p[right] as u32 * tx;
+                    let b = p[down] as u32 * (256 - tx) + p[down + right] as u32 * tx;
+                    *o = ((t * (256 - ty) + b * ty + 32768) >> 16) as u8;
+                }
+                out.copy_from_slice(&pixel);
             }
         });
     drop(px);
@@ -2159,7 +2175,9 @@ impl Look {
         if at >= CURVE_STEPS as f32 {
             return self.tone(y);
         }
-        let i = at as usize;
+        // Through a signed whole number: `at` is in the table here, and a
+        // float made unsigned costs a saturating conversion a channel.
+        let i = (at as i32).max(0) as usize;
         let t = at - i as f32;
         self.curve[i] + (self.curve[i + 1] - self.curve[i]) * t
     }
@@ -2228,7 +2246,7 @@ impl Look {
                 *v - 1.0 + lut[CHANNEL_STEPS]
             } else {
                 let at = v.max(0.0).sqrt() * CHANNEL_STEPS as f32;
-                let i = (at as usize).min(CHANNEL_STEPS - 1);
+                let i = (at as i32).clamp(0, CHANNEL_STEPS as i32 - 1) as usize;
                 lut[i] + (lut[i + 1] - lut[i]) * (at - i as f32)
             };
         }
@@ -2496,7 +2514,7 @@ fn drawn_curve(points: &[[f32; 2]]) -> Vec<f32> {
 fn read_lut(lut: &[f32], x: f32) -> f32 {
     let last = lut.len() - 1;
     let at = x.clamp(0.0, 1.0) * last as f32;
-    let i = (at as usize).min(last - 1);
+    let i = (at as i32).clamp(0, last as i32 - 1) as usize;
     lut[i] + (lut[i + 1] - lut[i]) * (at - i as f32)
 }
 

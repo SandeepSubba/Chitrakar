@@ -10614,6 +10614,24 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **A raw's development a tenth quicker, its lens corrections a
+  quarter** ✅. `--io` showed a 24-megapixel develop at 2.2 s in the
+  page and 5.2 s with a lens's corrections, which every Fuji RAF
+  carries. Timed natively on the X-T5's 40-megapixel RAF on one thread,
+  the warp (`orient_through`) was 2.3 s of 6.2. Callgrind and a
+  standalone loop found it was not memory but conversions: a float
+  clamped and then made unsigned is a saturating conversion, two a
+  channel and three channels a pixel, and a division a pixel in the
+  lens's table lookup. Into a signed whole number first and held there
+  (the same answer, as both round toward nothing above nought), one
+  slice check where there were four, and the reciprocals worked out
+  once: the warp is 1.7 s, and the same change to the tone curve's and
+  the channel curves' lookups takes the whole of a development from
+  6.2 s to 5.5 s corrected and 4.0 s to 3.5 s without (best of three;
+  the browser develops on every core, so the wait is a fraction of
+  this). The conversions give the same answers; the reciprocals can
+  move a lens-corrected pixel by a rounding. Every develop test, the
+  square against the whole included, holds as it was.
   **Masking, in the develop window's Detail** ✅ (Lightroom's). Detail
   was judged at 1:1 on the X-T5's RAF with its shadows pushed two and a
   half stops, where the noise of a high ISO shows: radius-one sharpening
