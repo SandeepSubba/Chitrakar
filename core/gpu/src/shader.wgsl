@@ -2685,7 +2685,13 @@ fn fs_blur_down(in: ImageOut) -> @location(0) vec4f {
         if was.a <= 0.0 {
             return was;
         }
-        let d = clamp(vec3f(0.5) + straight_shown(was) - straight_shown(soft), vec3f(0.0), vec3f(1.0));
+        // Each side weighed by its cover, so a shape's edge against
+        // nothing is an edge.
+        let d = clamp(
+            vec3f(0.5) + straight_shown(was) * min(was.a, 1.0) - straight_shown(soft) * clamp(soft.a, 0.0, 1.0),
+            vec3f(0.0),
+            vec3f(1.0),
+        );
         let detail = vec3f(to_light(d.r), to_light(d.g), to_light(d.b)) * was.a;
         return mix(was, vec4f(detail, was.a), weight);
     }

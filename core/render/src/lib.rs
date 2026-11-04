@@ -10639,7 +10639,13 @@ pub fn high_pass(o: LinearRgba, soft: LinearRgba) -> LinearRgba {
     if o.a <= 0.0 {
         return o;
     }
-    let (a, b) = (seen(o), seen(soft));
+    // Each side weighed by how much of it is there, so the edge of a
+    // shape against nothing is an edge (its colour against black) rather
+    // than no difference at all, as it would be with the cover divided out.
+    let (a, b) = (
+        seen(o).map(|v| v * o.a.min(1.0)),
+        seen(soft).map(|v| v * soft.a.clamp(0.0, 1.0)),
+    );
     let put = |c: usize| chitrakar_color::srgb_to_linear((0.5 + a[c] - b[c]).clamp(0.0, 1.0)) * o.a;
     LinearRgba {
         r: put(0),
@@ -27793,6 +27799,22 @@ mod tests {
             (half.get(2, 2).r - mid / 2.0).abs() < 1e-3,
             "at half, half way from black to the grey"
         );
+        // A shape's edge against nothing is an edge: the blur there is
+        // the same colour less covered, which is less of it, so the inside
+        // of the edge is lighter than the grey.
+        let solid = LinearRgba {
+            r: 0.2,
+            g: 0.3,
+            b: 0.6,
+            a: 1.0,
+        };
+        let half_there = LinearRgba {
+            r: 0.1,
+            g: 0.15,
+            b: 0.3,
+            a: 0.5,
+        };
+        assert!(shown(high_pass(solid, half_there).b) > 0.6);
         let none = page(Filter::HighPass { sigma: 0.0 }, 1.0);
         assert!(
             (none.get(21, 20).r - mid).abs() < 1e-3,

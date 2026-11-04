@@ -14841,6 +14841,7 @@ function RawDevelopDialog({
               title="The photograph at its own size, where it was last clicked: sharpening and noise show here"
             />
             {row("Sharpening", "sharpen", 0, 150, 1)}
+            {row("Masking", "masking", 0, 100, 1)}
             {row("Noise reduction", "noise", 0, 100, 1)}
             {info.lens && (
               <>

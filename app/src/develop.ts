@@ -23,6 +23,10 @@ export type RawSettings = {
   sharpen: number;
   /** Detail: edge-aware smoothing, 0 to 100. */
   noise: number;
+  /** Detail: how much of the sharpening is kept to edges, 0 (everywhere)
+   * to 100 (only the steepest), so a smooth sky's grain is left as it is.
+   * Lightroom's Masking. */
+  masking: number;
   /** Leave off the lens corrections the file carries (a Fuji's RAF). */
   uncorrected?: boolean;
   /** The tones a camera's own pictures have, under the rest: on for a new
@@ -136,6 +140,7 @@ export const RAW_DEFAULTS: RawSettings = {
   dehaze: 0,
   sharpen: 0,
   noise: 0,
+  masking: 0,
   curve: true,
 };
 
@@ -158,6 +163,7 @@ const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve
   dehaze: [-100, 100],
   sharpen: [0, 150],
   noise: [0, 100],
+  masking: [0, 100],
 };
 
 /** Settings read from somewhere that might say anything (a kept preset,

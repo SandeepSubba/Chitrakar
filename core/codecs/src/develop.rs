@@ -1485,7 +1485,7 @@ impl RawPhoto {
                     }
                 },
             );
-        let upright = detail(&upright, w, h, s.sharpen, s.noise).unwrap_or(upright);
+        let upright = detail(&upright, w, h, s.sharpen, s.noise, s.masking).unwrap_or(upright);
         let geometry = self.straighten(s, w, h);
         let (width, height, rgba8) =
             orient_through(upright, w, h, self.orientation, geometry.as_ref());
@@ -1563,7 +1563,7 @@ impl RawPhoto {
             let c = look.encode(c);
             out.copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
-        let px = detail(&px, mw, mh, s.sharpen, s.noise).unwrap_or(px);
+        let px = detail(&px, mw, mh, s.sharpen, s.noise, s.masking).unwrap_or(px);
         let mut square = Vec::with_capacity(size * size * 4);
         for y in (y0 - my0)..(y0 - my0 + size) {
             let from = (y * mw + (x0 - mx0)) * 4;
@@ -1725,11 +1725,33 @@ impl RawPhoto {
 ///   grain is averaged away.
 /// - Sharpening (0 to 150) is an unsharp mask of radius one on the
 ///   brightness, after the smoothing.
+/// - Masking (0 to 100) keeps the sharpening to edges, as Lightroom's
+///   does: a pixel is sharpened by how steep the brightness is across it
+///   (the step from the pixel before to the one after, each way) against
+///   a threshold that rises with the slider — up to forty levels at a
+///   hundred — so the grain of a smooth sky or skin, a few levels from
+///   pixel to pixel, is left as it is while an edge is sharpened in full.
+///   Sharpening a whole picture at radius one makes its noise as crisp
+///   as its edges; that is what masking is for.
 ///
 /// Done in bands of rows, each read with the rows either side its filters
 /// reach, so a 24-megapixel photograph costs a band's worth of working
 /// space rather than three more copies of itself.
-pub fn detail(rgba: &[u8], w: usize, h: usize, sharpen: f32, noise: f32) -> Option<Vec<u8>> {
+pub fn detail(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    sharpen: f32,
+    noise: f32,
+    masking: f32,
+) -> Option<Vec<u8>> {
+    // The steepness, in levels, below which nothing is sharpened, and
+    // above twice of which everything is.
+    let edge_at = if masking.is_finite() {
+        masking.clamp(0.0, 100.0) / 100.0 * MASKING_LEVELS
+    } else {
+        0.0
+    };
     let sharpen = if sharpen.is_finite() {
         sharpen.clamp(0.0, 150.0) / 100.0
     } else {
@@ -1819,7 +1841,15 @@ pub fn detail(rgba: &[u8], w: usize, h: usize, sharpen: f32, noise: f32) -> Opti
                             let row = &y[yy * w..yy * w + w];
                             blur += ky * (0.25 * row[left] + 0.5 * row[px] + 0.25 * row[right]);
                         }
-                        l += (l - blur) * sharpen * 2.0;
+                        let mut amount = sharpen * 2.0;
+                        if edge_at > 0.0 {
+                            let row = &y[ly * w..ly * w + w];
+                            let steep = (row[right] - row[left]).abs()
+                                + (y[down * w + px] - y[up * w + px]).abs();
+                            let t = ((steep - edge_at * 0.5) / (edge_at * 0.5)).clamp(0.0, 1.0);
+                            amount *= t * t * (3.0 - 2.0 * t);
+                        }
+                        l += (l - blur) * amount;
                     }
                     let (b, r) = (cb[c] + l, cr[c] + l);
                     let g = (l - 0.299 * r - 0.114 * b) / 0.587;
@@ -1833,6 +1863,11 @@ pub fn detail(rgba: &[u8], w: usize, h: usize, sharpen: f32, noise: f32) -> Opti
         });
     Some(out)
 }
+
+/// How steep, in levels, an edge has to be to be sharpened in full with
+/// masking at a hundred: twice the threshold below which it is not
+/// sharpened at all.
+pub const MASKING_LEVELS: f32 = 40.0;
 
 /// A box blur of `radius` run twice each way over a `w` by `h` channel —
 /// a tent, near enough a gaussian — with the edges held. A running sum,
@@ -4007,7 +4042,7 @@ mod tests {
     #[test]
     fn noise_reduction_smooths_grain_and_keeps_the_edge() {
         let px = noisy(80, 12);
-        let smooth = detail(&px, 40, 40, 0.0, 80.0).unwrap();
+        let smooth = detail(&px, 40, 40, 0.0, 80.0, 0.0).unwrap();
         assert!(
             spread_of(&smooth, 3, 16) < spread_of(&px, 3, 16) * 0.6,
             "grain smoothed"
@@ -4021,7 +4056,7 @@ mod tests {
             "the edge kept"
         );
         assert!(
-            detail(&px, 40, 40, 0.0, 0.0).is_none(),
+            detail(&px, 40, 40, 0.0, 0.0, 0.0).is_none(),
             "nothing asked, nothing done"
         );
     }
@@ -4035,7 +4070,7 @@ mod tests {
                 px.extend_from_slice(&[v, v, v, 255]);
             }
         }
-        let sharp = detail(&px, 40, 40, 100.0, 0.0).unwrap();
+        let sharp = detail(&px, 40, 40, 100.0, 0.0, 0.0).unwrap();
         let at = |x: usize| sharp[(20 * 40 + x) * 4 + 1];
         assert!(
             at(19) < 80 && at(20) > 160,
@@ -4050,6 +4085,51 @@ mod tests {
             p[0].abs_diff(p[1]) <= 1 && p[1].abs_diff(p[2]) <= 1,
             "{p:?}"
         );
+    }
+
+    /// Masking keeps sharpening to edges: grain on a flat ground — a few
+    /// levels from pixel to pixel — is sharpened with none, and an edge
+    /// across it is sharpened as it was.
+    #[test]
+    fn masking_sharpens_the_edge_and_not_the_grain() {
+        let (w, h) = (60usize, 40usize);
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                // A ground of 100 with a speck of grain, a step to 200.
+                let grain = if (x * 7 + y * 13) % 5 == 0 { 4 } else { 0 };
+                let v = if x < 30 { 100 + grain } else { 200 };
+                let o = (y * w + x) * 4;
+                px[o..o + 4].copy_from_slice(&[v as u8, v as u8, v as u8, 255]);
+            }
+        }
+        let rough = |p: &[u8]| {
+            let mut sum = 0i32;
+            for y in 2..h - 2 {
+                for x in 2..26 {
+                    let (a, b) = (p[(y * w + x) * 4] as i32, p[(y * w + x + 1) * 4] as i32);
+                    sum += (a - b).abs();
+                }
+            }
+            sum
+        };
+        let plain = rough(&px);
+        let sharp = detail(&px, w, h, 150.0, 0.0, 0.0).unwrap();
+        let masked = detail(&px, w, h, 150.0, 0.0, 60.0).unwrap();
+        assert!(
+            rough(&sharp) > plain * 2,
+            "unmasked, the grain is sharpened"
+        );
+        assert!(
+            rough(&masked) < plain + plain / 4,
+            "masked, it is left near as it was ({plain} -> {})",
+            rough(&masked)
+        );
+        // The edge, at the step, is sharpened the same either way.
+        let at = |p: &[u8], x: usize| p[(20 * w + x) * 4];
+        assert_eq!(at(&masked, 29), at(&sharp, 29));
+        assert_eq!(at(&masked, 30), at(&sharp, 30));
+        assert!(at(&sharp, 30) > 200, "and the edge is sharpened");
     }
 
     #[test]
@@ -4067,10 +4147,10 @@ mod tests {
                 }
             })
             .collect();
-        let whole = detail(&px, w, h, 80.0, 60.0).unwrap();
+        let whole = detail(&px, w, h, 80.0, 60.0, 0.0).unwrap();
         // Rows either side of the first seam, worked out on their own.
         let piece = &px[(100 * w * 4)..(160 * w * 4)];
-        let part = detail(piece, w, 60, 80.0, 60.0).unwrap();
+        let part = detail(piece, w, 60, 80.0, 60.0, 0.0).unwrap();
         for y in 10..50 {
             for x in 0..w * 4 {
                 assert_eq!(

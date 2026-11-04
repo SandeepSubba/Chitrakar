@@ -15510,6 +15510,18 @@ assert(
   await settle();
   const sharp = await loupePixels();
   assert(sharp.some((v, i) => v !== unsharp[i]), "sharpening shows in the square");
+  // Masking keeps the sharpening to edges: at a hundred, what is not a
+  // steep edge goes back toward the unsharpened square.
+  await win.locator('input[aria-label="Masking"]').fill("100");
+  await settle();
+  const masked = await loupePixels();
+  const away = (a) => a.reduce((n, v, i) => n + Math.abs(v - unsharp[i]), 0);
+  assert(
+    away(masked) < away(sharp),
+    `masking takes the sharpening off what is not an edge (${away(sharp)} to ${away(masked)} from unsharpened)`,
+  );
+  await win.locator('input[aria-label="Masking"]').fill("0");
+  await settle();
   const spot = win.locator(".develop-spot");
   const before9 = await spot.boundingBox();
   const pic = await win.locator('canvas[aria-label="Developed picture"]').boundingBox();

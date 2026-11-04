@@ -723,6 +723,10 @@ pub struct RawDevelop {
     pub sharpen: f32,
     /// Detail: edge-aware smoothing, colour hardest, 0 to 100.
     pub noise: f32,
+    /// Detail: how much of the sharpening is kept to edges, 0 (all of
+    /// the picture) to 100 (only its steepest edges), so the grain of a
+    /// smooth sky is not sharpened with it. Lightroom's Masking.
+    pub masking: f32,
     /// Leave off the lens corrections the camera wrote into the file
     /// (distortion, colour fringes, dark corners — a Fuji's RAF carries
     /// them), which are otherwise applied.

@@ -10614,6 +10614,21 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Masking, in the develop window's Detail** ✅ (Lightroom's). Detail
+  was judged at 1:1 on the X-T5's RAF with its shadows pushed two and a
+  half stops, where the noise of a high ISO shows: radius-one sharpening
+  sharpened the grain of a smooth blue surface as crisply as its edges
+  (the roughness of the square went from 3.3 to 11.1 at 150). Masking
+  (`RawDevelop::masking`, 0 to 100, additive) keeps it to edges: a pixel
+  is sharpened by how steep the brightness is across it against a
+  threshold that rises with the slider (`MASKING_LEVELS`, forty at a
+  hundred, smoothstepped from half that). At 50 the surface is as clean
+  as unsharpened (4.4) and its edge and the hose beside it are as crisp
+  as at 0. Noise reduction was reasonable for this; it is a three by
+  three edge-aware average and a colour blur, enough at moderate ISO.
+  Tests: `masking_sharpens_the_edge_and_not_the_grain`; develop.test
+  (held to its range); smoke 9cn (masking at 100 takes the square back
+  toward unsharpened).
   **Every other filter, at its defaults** ✅ (one tile each on the
   street: blur, median, motion, radial, high pass, halftone, twirl,
   pinch, lens, oil paint, find edges, ripple, emboss, pixelate,
