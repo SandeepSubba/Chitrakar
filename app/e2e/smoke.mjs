@@ -17199,6 +17199,36 @@ assert(
   await weight();
   await previewShown();
 
+  // A photograph is sized for somewhere else by its long edge: 320
+  // across a 640 by 480 page is half, and what is made is that size to
+  // the pixel; a scale pressed lets the long edge go.
+  await page.locator('input[aria-label="Long edge"]').fill("320");
+  assert(
+    (await page.textContent('[aria-label="Scale"] .hint')).includes("320 \u00d7 240"),
+    `a long edge of 320 is said as the size it comes to (${await page.textContent('[aria-label="Scale"] .hint')})`,
+  );
+  await weight();
+  const longShown = await previewShown();
+  assert(
+    longShown.w === 320 && longShown.h === 240,
+    `and what is made is that size (${longShown.w}x${longShown.h})`,
+  );
+  assert(
+    (await page.locator('.export-scales .preset[aria-pressed="true"]').count()) === 0,
+    "no scale is marked while a long edge is asked for",
+  );
+  assert(
+    /-320\.png/.test(await page.textContent('[role=dialog][aria-label="Export"]')),
+    "and the file is named for its size, not for a fraction of a scale",
+  );
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  assert(
+    (await page.locator('input[aria-label="Long edge"]').inputValue()) === "",
+    "and pressing a scale lets the long edge go",
+  );
+  await weight();
+  await previewShown();
+
   // The number is the real encode, not a guess from the pixel count:
   // move the quality and it moves with it. This is the whole reason the
   // window is worth having over a menu row.

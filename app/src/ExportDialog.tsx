@@ -202,12 +202,8 @@ export function ExportDialog({
   const slices: (string | null)[] = many.length > 0 ? many : [null];
   /** Whether the set is asked for rather than one size. */
   const set = spec.scales && prefs.exportScale === 0;
-  /** The one scale everything shown is worked out at; the set's other
-   * two are multiples of it. */
-  const scale = spec.scales && !set ? prefs.exportScale : 1;
-  /** Every scale that will be written. */
-  const scales = set ? SET : [scale];
-
+  /** A long edge asked for in pixels, which stands in for the scale. */
+  const longEdge = spec.scales && !set ? prefs.exportLongEdge : 0;
   /** The page's own size, which everything shown is worked out from. */
   const [pageW, pageH] = [session.width, session.height];
 
@@ -226,37 +222,40 @@ export function ExportDialog({
     }
   };
 
-  /** What will actually be written, in pixels. A region that is picked
-   * is exported in the shape it was picked in, so the box it sits in is
-   * what decides the size. */
-  const outSize = (): [number, number] => {
+  /** What is exported at its own size: the page, or the box a picked
+   * region sits in, since a region is exported in the shape it was
+   * picked in. */
+  const baseSize = (): [number, number] => {
     if (area === "regions") {
       // The first slice stands for the set here, as the first of the
       // `@1x` set does: they are different sizes and the window has one
       // line to say it in.
       const box = regionBox(0);
-      if (box) {
-        return [
-          Math.max(1, Math.round((box[2] - box[0]) * scale)),
-          Math.max(1, Math.round((box[3] - box[1]) * scale)),
-        ];
-      }
+      if (box) return [box[2] - box[0], box[3] - box[1]];
     }
     if (area === "selection") {
       const box = selectionBounds();
-      if (box) {
-        return [
-          Math.max(1, Math.round((box[2] - box[0]) * scale)),
-          Math.max(1, Math.round((box[3] - box[1]) * scale)),
-        ];
-      }
+      if (box) return [box[2] - box[0], box[3] - box[1]];
     }
-    return [
-      Math.max(1, Math.round(pageW * scale)),
-      Math.max(1, Math.round(pageH * scale)),
-    ];
+    return [pageW, pageH];
   };
-  const [outW, outH] = outSize();
+  const [baseW, baseH] = baseSize();
+  /** The one scale everything shown is worked out at; the set's other
+   * two are multiples of it. A long edge is a scale worked out from
+   * the size, so 2048 is 2048 whatever the photograph was. */
+  const scale =
+    spec.scales && !set
+      ? longEdge > 0
+        ? longEdge / Math.max(1, baseW, baseH)
+        : prefs.exportScale
+      : 1;
+  /** Every scale that will be written. */
+  const scales = set ? SET : [scale];
+  /** What will actually be written, in pixels. */
+  const [outW, outH] = [
+    Math.max(1, Math.round(baseW * scale)),
+    Math.max(1, Math.round(baseH * scale)),
+  ];
 
   /** Whether this combination can be exported at all, and why not. */
   const refuses = (): string | null => {
@@ -451,9 +450,11 @@ export function ExportDialog({
     [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks],
   );
 
+  // Named for its size where a size was asked for — `-2048` — rather
+  // than for the scale that came to, which is a fraction nobody chose.
   const nameAt = (s: number, slice: string | null = null) =>
     `${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
-      s !== 1 || set ? `@${s}x` : ""
+      longEdge > 0 && !set ? `-${longEdge}` : s !== 1 || set ? `@${s}x` : ""
     }.${spec.ext}`;
   const name = set
     ? `${nameAt(1)}, @2x, @3x`
@@ -536,7 +537,8 @@ export function ExportDialog({
             const inHand =
               st.format === format &&
               st.area === area &&
-              st.scale === (set ? 0 : scale) &&
+              (st.longEdge ?? 0) === longEdge &&
+              (longEdge > 0 || st.scale === (set ? 0 : scale)) &&
               (format !== "jpeg" || st.jpegQuality === prefs.jpegQuality) &&
               (format !== "pdf" ||
                 (st.pdfBleed === prefs.pdfBleed && st.pdfCropMarks === prefs.pdfCropMarks));
@@ -558,6 +560,7 @@ export function ExportDialog({
                     exportFormat: st.format,
                     exportArea: st.area,
                     exportScale: st.scale,
+                    exportLongEdge: st.longEdge ?? 0,
                     jpegQuality: st.jpegQuality,
                     // A PDF kept for a press brings that press back; any
                     // other setup leaves what the PDF was last asked alone.
@@ -581,7 +584,13 @@ export function ExportDialog({
               // it is not the page — and a number when that name is taken.
               const base = [
                 spec.label,
-                set ? "set" : scale !== 1 && spec.scales ? `${scale}×` : "",
+                set
+                  ? "set"
+                  : longEdge > 0
+                    ? `${longEdge}px`
+                    : scale !== 1 && spec.scales
+                      ? `${scale}×`
+                      : "",
                 format === "jpeg" ? `q${prefs.jpegQuality}` : "",
                 format === "pdf" && prefs.pdfBleed > 0 ? `${prefs.pdfBleed} mm` : "",
                 format === "pdf" && prefs.pdfCropMarks ? "marks" : "",
@@ -596,7 +605,8 @@ export function ExportDialog({
                 name,
                 format,
                 area,
-                scale: set ? 0 : scale,
+                scale: set ? 0 : longEdge > 0 ? 1 : scale,
+                ...(longEdge > 0 ? { longEdge } : {}),
                 jpegQuality: prefs.jpegQuality,
                 pdfBleed: prefs.pdfBleed,
                 pdfCropMarks: prefs.pdfCropMarks,
@@ -664,10 +674,10 @@ export function ExportDialog({
             {SCALES.map((s) => (
               <button
                 key={s}
-                className={!set && s === scale ? "preset active" : "preset"}
+                className={!set && !longEdge && s === scale ? "preset active" : "preset"}
                 disabled={!spec.scales}
-                aria-pressed={!set && s === scale}
-                onClick={() => setPrefs({ exportScale: s })}
+                aria-pressed={!set && !longEdge && s === scale}
+                onClick={() => setPrefs({ exportScale: s, exportLongEdge: 0 })}
               >
                 {s === 1 ? "1×" : `${s}×`}
               </button>
@@ -677,10 +687,37 @@ export function ExportDialog({
               disabled={!spec.scales}
               aria-pressed={set}
               title="1×, 2× and 3×: three files in one press, named @1x, @2x and @3x"
-              onClick={() => setPrefs({ exportScale: 0 })}
+              onClick={() => setPrefs({ exportScale: 0, exportLongEdge: 0 })}
             >
               Set
             </button>
+            {/* The way a photograph is sized for somewhere else: its long
+                edge in pixels, whatever the camera gave it. */}
+            <label
+              className={longEdge ? "export-long active" : "export-long"}
+              title="The long edge in pixels — 2048 for the web — whatever the picture's own size; empty for the scale"
+            >
+              <input
+                type="number"
+                min={16}
+                max={16384}
+                step={1}
+                placeholder="Long edge"
+                disabled={!spec.scales}
+                value={longEdge || ""}
+                onChange={(e) => {
+                  const v = Math.round(Number(e.target.value));
+                  setPrefs({
+                    exportLongEdge: Number.isFinite(v) && v >= 16 ? Math.min(16384, v) : 0,
+                    // Asked for one size, the set is let go of.
+                    ...(set ? { exportScale: 1 } : {}),
+                  });
+                }}
+                onKeyDown={(e) => e.stopPropagation()}
+                aria-label="Long edge"
+              />
+              px
+            </label>
           </div>
           <span className="hint">
             {!spec.scales

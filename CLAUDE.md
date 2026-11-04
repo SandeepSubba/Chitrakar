@@ -301,7 +301,8 @@ gets written, and is decoded again for the picture beside the settings
 goes everywhere a PNG does (`Raster` in `core/codecs`), though only its
 encoder is in the engine — placing a WebP, GIF or BMP goes through the
 browser's decoder (`app/src/picture.ts`); `Set` writes @1x, @2x and
-@3x in one press; `prefs.exportSetups` keeps a window's answers by name
+@3x in one press, and a Long edge in pixels (`prefs.exportLongEdge`)
+sizes a photograph for elsewhere; `prefs.exportSetups` keeps a window's answers by name
 as chips above the formats; the area "Each kept region" writes a file per
 region the document keeps by name (`Session::kept_region_png` reads one
 where it is kept, so exporting moves neither the selection nor history). Above four megapixels it waits to be asked. Two exports

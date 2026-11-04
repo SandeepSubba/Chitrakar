@@ -61,6 +61,9 @@ export type ExportSetup = {
   format: ExportFormat;
   area: ExportArea;
   scale: number;
+  /** The long edge in pixels it was kept for, where it was kept for one
+   * rather than a scale; absent or 0 for a scale. */
+  longEdge?: number;
   jpegQuality: number;
   /** For a PDF, the press it was kept for: the bleed in mm and whether
    * it is marked. A setup kept before these were asked reads as none. */
@@ -115,6 +118,10 @@ export type Prefs = {
   exportFormat: ExportFormat;
   exportArea: ExportArea;
   exportScale: number;
+  /** A size asked for as its long edge in pixels — 2048 for the web,
+   * whatever the photograph's own — which then stands in for the scale;
+   * 0 for none. */
+  exportLongEdge: number;
   /** JPEG quality, 1–100. */
   jpegQuality: number;
   /** How far a PDF runs past its trim for the press, in millimetres —
@@ -205,6 +212,7 @@ export const DEFAULTS: Prefs = {
   exportFormat: "png",
   exportArea: "page",
   exportScale: 1,
+  exportLongEdge: 0,
   jpegQuality: 92,
   pdfBleed: 0,
   pdfCropMarks: false,
@@ -320,6 +328,11 @@ export function clamp(p: Prefs): Prefs {
     // Zero is not a scale but the set — 1×, 2× and 3× in one press —
     // and the window never hands it to the engine as one.
     exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
+    // None, or a whole number of pixels a long edge can be.
+    exportLongEdge:
+      typeof p.exportLongEdge === "number" && p.exportLongEdge > 0
+        ? n(Math.round(p.exportLongEdge), 16, 16384, 0)
+        : 0,
     jpegQuality: n(Math.round(p.jpegQuality), 1, 100, 92),
     // The engine keeps a bleed to 25 mm as well; held here so the field
     // does not show what will not be written.
@@ -411,6 +424,9 @@ export function clamp(p: Prefs): Prefs {
                 ? e.area
                 : "page",
             scale: e.scale === 0 ? 0 : n(e.scale, 0.05, 16, 1),
+            ...(typeof e.longEdge === "number" && e.longEdge >= 16
+              ? { longEdge: n(Math.round(e.longEdge), 16, 16384, 2048) }
+              : {}),
             jpegQuality: n(Math.round(e.jpegQuality), 1, 100, 92),
             pdfBleed: typeof e.pdfBleed === "number" ? n(e.pdfBleed, 0, 25, 0) : 0,
             pdfCropMarks: e.pdfCropMarks === true,

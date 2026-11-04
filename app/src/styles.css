@@ -3482,6 +3482,7 @@ button.fold:hover {
 
 .export-scales {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.25rem;
   margin-left: auto;
 }
@@ -3509,6 +3510,23 @@ button.fold:hover {
   .export-preview figcaption {
     text-align: center;
   }
+}
+
+/* The long edge beside the scales: a number of pixels, marked as the
+   scale buttons are when it is what is asked for. */
+.export-long {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.85em;
+}
+
+.export-long input {
+  width: 6.5em;
+}
+
+.export-long.active input {
+  border-color: var(--accent);
 }
 
 .export-scales .preset:disabled,

@@ -10614,6 +10614,19 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Export by long edge** ✅ (Lightroom's "resize to fit: long edge").
+  The Export window's sizes were ½×, 1×, 2× and 3×, which is how a
+  screen asset is sized and not how a photograph is: a 40-megapixel
+  frame for the web is 2048 on its long side, whatever it began as.
+  A Long edge field beside the scales (`prefs.exportLongEdge`, 16 to
+  16384, 0 for none) works the scale out from the area's own size —
+  the page, the picked box or the region — so the file is that size to
+  the pixel, and names it for it (`photo-2048.jpg`, not `@0.265x`).
+  Pressing a scale or Set lets it go; a setup kept with it brings it
+  back (`ExportSetup::longEdge`, additive). Shrinking was already an
+  area average in light — a one-pixel checkerboard comes out flat grey
+  at a tenth, so a photograph does not alias. Smoke 9bh (320 across a
+  640 page is 320 × 240, named `-320`).
   **The demosaics' inner loops** ✅ (after the warp, the profiles of a
   whole development: the X-T5's RAF and the 6D's CR2 under callgrind).
   X-Trans walked its sites with a remainder at every site to find its
