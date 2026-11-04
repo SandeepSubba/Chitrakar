@@ -691,10 +691,12 @@ fn each_site(
     (ry0..ry1).flat_map(move |y| {
         let tile_row = (y % TILE) * TILE;
         let row = base + (y - ry0) * stride;
-        let first = rx0 % TILE;
-        (0..rx1.saturating_sub(rx0)).map(move |k| {
-            let p = tile_row + (first + k) % TILE;
-            (row + k, p, tile[p] as usize)
+        // The column in the tile stepped along rather than worked out
+        // by a remainder at every site, which is a division each.
+        (0..rx1.saturating_sub(rx0)).scan(rx0 % TILE, move |col, k| {
+            let p = tile_row + *col;
+            *col = if *col + 1 == TILE { 0 } else { *col + 1 };
+            Some((row + k, p, tile[p] as usize))
         })
     })
 }
@@ -1407,6 +1409,15 @@ impl RawPhoto {
         // asked thirteen times a site. Two sites in from every edge the
         // neighbours need no folding either.
         let colour = |yy: usize, xx: usize| self.tile[(yy & 1) * TILE + (xx & 1)] as usize;
+        // The balance of each of the pattern's four places, read once a
+        // site rather than through the tile and the balance at each of
+        // the thirteen neighbours.
+        let balance = [
+            wb[self.tile[0] as usize],
+            wb[self.tile[1] as usize],
+            wb[self.tile[TILE] as usize],
+            wb[self.tile[TILE + 1] as usize],
+        ];
         let inside = y >= 2 && x >= 2 && y + 2 < self.height && x + 2 < self.width;
         let at = |dy: isize, dx: isize| -> f32 {
             let (yy, xx) = if inside {
@@ -1417,7 +1428,9 @@ impl RawPhoto {
                     fold(x as isize + dx, w) as usize,
                 )
             };
-            self.data[yy * self.width + xx] as f32 * (1.0 / WHITE) * wb[colour(yy, xx)]
+            self.data[yy * self.width + xx] as f32
+                * (1.0 / WHITE)
+                * balance[(yy & 1) * 2 + (xx & 1)]
         };
         // Each of the thirteen sites read once, and summed in the same
         // order as the weights below were first written.

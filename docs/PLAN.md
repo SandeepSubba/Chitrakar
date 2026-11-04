@@ -10614,6 +10614,17 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **The demosaics' inner loops** ✅ (after the warp, the profiles of a
+  whole development: the X-T5's RAF and the 6D's CR2 under callgrind).
+  X-Trans walked its sites with a remainder at every site to find its
+  place in the six-by-six tile, a division each; the column is stepped
+  along now (`each_site`): 3.68 s to 3.39 s on one thread. Bayer's
+  Malvar read thirteen neighbours a site, each finding its colour
+  through the tile and then its balance; the four places' balances are
+  read once a site (`malvar_at`): the 6D 1.45 s to 1.25 s. Both give
+  the same bytes (checksummed). In the page (`--io`, one thread, 24
+  megapixels): develop and place 2204 to 1871 ms, X-Trans 2944 to 2695,
+  lens corrected 5235 to 4279, with the warp's change before it.
   **A raw's development a tenth quicker, its lens corrections a
   quarter** ✅. `--io` showed a 24-megapixel develop at 2.2 s in the
   page and 5.2 s with a lens's corrections, which every Fuji RAF
