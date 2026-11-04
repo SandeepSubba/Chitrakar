@@ -10614,6 +10614,17 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **The develop window, folded and legible** ✅ (looked at with the
+  X-T5's RAF open in the built app). Its eight sections — white
+  balance, tone, presence, colour mixer, colour grading, tone curve,
+  detail, lens — were one long scroll; each now folds away by its
+  heading, as Lightroom's panels do (a chevron turns), and stays folded
+  from one photograph to the next (`prefs.developFolded`). Folded is
+  hidden, not taken out, so the 1:1 square and the histogram keep
+  drawing. And the histogram behind the tone curve was all but
+  invisible on the light theme: it was laid on with `screen`, which on
+  a near-white graph lightens to nothing; there it multiplies now.
+  Smoke 9cn (Tone folds, is remembered, opens).
   **A photograph's camera data goes out with it** ✅. A JPEG exported
   from a photograph said nothing of it: no camera, lens, shutter,
   aperture, ISO or date, which every photograph's file carries and

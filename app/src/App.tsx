@@ -10715,6 +10715,8 @@ export function App() {
           action={developing.layer === null ? "Place" : "Develop"}
           presets={prefs.developPresets}
           onPresets={(developPresets) => setPrefs({ developPresets })}
+          folded={prefs.developFolded}
+          onFolded={(developFolded) => setPrefs({ developFolded })}
           count={
             developing.layer === null && rawDone.current + 1 + rawWaiting > 1
               ? [rawDone.current + 1, rawDone.current + 1 + rawWaiting]
@@ -14294,6 +14296,8 @@ function RawDevelopDialog({
   count,
   presets,
   onPresets,
+  folded,
+  onFolded,
   onCancel,
   onDone,
 }: {
@@ -14307,10 +14311,37 @@ function RawDevelopDialog({
   /** Settings kept by name, and keeping or forgetting one. */
   presets: DevelopPreset[];
   onPresets: (p: DevelopPreset[]) => void;
+  /** The sections folded away, by name, and folding or opening one. */
+  folded: string[];
+  onFolded: (f: string[]) => void;
   onCancel: () => void;
   onDone: (s: RawSettings, all?: boolean) => void;
 }) {
   const [s, setS] = useState<RawSettings>(initial);
+  /** A section of the settings, folded away by its heading as
+   * Lightroom's panels are, and kept folded from one photograph to the
+   * next. Hidden rather than taken out, so what draws inside it (the
+   * square at its own size) is there when it is opened again. */
+  const fold = (title: string, body: React.ReactNode, extra?: React.ReactNode) => {
+    const shut = folded.includes(title);
+    return (
+      <section className={shut ? "develop-section folded" : "develop-section"} aria-label={title}>
+        <div className="develop-head-row">
+          <button
+            type="button"
+            className="props-head fold-head"
+            aria-expanded={!shut}
+            title={shut ? `Show ${title.toLowerCase()}` : `Fold ${title.toLowerCase()} away`}
+            onClick={() => onFolded(shut ? folded.filter((f) => f !== title) : [...folded, title])}
+          >
+            {title}
+          </button>
+          {!shut && extra}
+        </div>
+        <div hidden={shut}>{body}</div>
+      </section>
+    );
+  };
   const [picking, setPicking] = useState(false);
   const [before, setBefore] = useState(false);
   const [showClip, setShowClip] = useState<{ high: boolean; low: boolean }>({ high: false, low: false });
@@ -14603,7 +14634,9 @@ function RawDevelopDialog({
                 onClick={() => setShowClip((o) => ({ ...o, high: !o.high }))}
               />
             </div>
-            <h3 className="props-head">White balance</h3>
+            {fold(
+              "White balance",
+              <>
             <div className="develop-light">
               <select
                 value={light}
@@ -14652,12 +14685,11 @@ function RawDevelopDialog({
                 aria-label="Tint"
               />
             </label>
-            <div className="develop-head-row">
-              <h3 className="props-head">Tone</h3>
-              <button type="button" onClick={auto} title="Exposure, highlights and shadows worked out from the picture">
-                Auto
-              </button>
-            </div>
+              </>,
+            )}
+            {fold(
+              "Tone",
+              <>
             {row("Exposure", "exposure", -5, 5, 0.05, " EV")}
             {row("Contrast", "contrast", -100, 100, 1)}
             {row("Highlights", "highlights", -100, 100, 1)}
@@ -14676,12 +14708,23 @@ function RawDevelopDialog({
               />
               Tone curve like the camera's
             </label>
-            <h3 className="props-head">Presence</h3>
+              </>,
+              <button type="button" onClick={auto} title="Exposure, highlights and shadows worked out from the picture">
+                Auto
+              </button>,
+            )}
+            {fold(
+              "Presence",
+              <>
             {row("Clarity", "clarity", -100, 100, 1)}
             {row("Dehaze", "dehaze", -100, 100, 1)}
             {row("Vibrance", "vibrance", -100, 100, 1)}
             {row("Saturation", "saturation", -100, 100, 1)}
-            <h3 className="props-head">Colour mixer</h3>
+              </>,
+            )}
+            {fold(
+              "Colour mixer",
+              <>
             {/* Lightroom's HSL: a band of colour at a time — a sky deepened
                 without the grass, a face warmed without the wall. Hue,
                 saturation or luminance, one at a time across all eight. */}
@@ -14728,7 +14771,11 @@ function RawDevelopDialog({
                 </label>
               );
             })}
-            <h3 className="props-head">Colour grading</h3>
+              </>,
+            )}
+            {fold(
+              "Colour grading",
+              <>
             {/* Lightroom's colour grading: a tint for the shadows, the
                 midtones and the highlights, and one for everything. One
                 wheel at a time, the zone chosen above it. */}
@@ -14792,7 +14839,11 @@ function RawDevelopDialog({
                 aria-label="Grading balance"
               />
             </label>
-            <h3 className="props-head">Tone curve</h3>
+              </>,
+            )}
+            {fold(
+              "Tone curve",
+              <>
             {/* The same curves as a Curves layer, drawn over the developed
                 preview's tones: the tones as they will be seen, after
                 everything above. */}
@@ -14832,7 +14883,11 @@ function RawDevelopDialog({
                 }
               }}
             />
-            <h3 className="props-head">Detail</h3>
+              </>,
+            )}
+            {fold(
+              "Detail",
+              <>
             <canvas
               ref={loupe}
               className="develop-loupe"
@@ -14843,9 +14898,12 @@ function RawDevelopDialog({
             {row("Sharpening", "sharpen", 0, 150, 1)}
             {row("Masking", "masking", 0, 100, 1)}
             {row("Noise reduction", "noise", 0, 100, 1)}
-            {info.lens && (
-              <>
-                <h3 className="props-head">Lens</h3>
+              </>,
+            )}
+            {info.lens &&
+              fold(
+                "Lens",
+                <>
                 <label
                   className="row check"
                   title={
@@ -14870,8 +14928,8 @@ function RawDevelopDialog({
                     {info.lensProfile}
                   </p>
                 )}
-              </>
-            )}
+                </>,
+              )}
           </div>
         </div>
         <div className="modal-actions">

@@ -125,6 +125,8 @@ export type Prefs = {
   /** Whether a JPEG goes out with how its photograph was taken (camera,
    * lens, exposure, date — never place) as its EXIF. */
   exportCameraData: boolean;
+  /** The develop window's sections folded away, by their headings. */
+  developFolded: string[];
   /** JPEG quality, 1–100. */
   jpegQuality: number;
   /** How far a PDF runs past its trim for the press, in millimetres —
@@ -217,6 +219,7 @@ export const DEFAULTS: Prefs = {
   exportScale: 1,
   exportLongEdge: 0,
   exportCameraData: true,
+  developFolded: [],
   jpegQuality: 92,
   pdfBleed: 0,
   pdfCropMarks: false,
@@ -333,6 +336,9 @@ export function clamp(p: Prefs): Prefs {
     // and the window never hands it to the engine as one.
     exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
     exportCameraData: p.exportCameraData !== false,
+    developFolded: Array.isArray(p.developFolded)
+      ? p.developFolded.filter((t): t is string => typeof t === "string").slice(0, 32)
+      : [],
     // None, or a whole number of pixels a long edge can be.
     exportLongEdge:
       typeof p.exportLongEdge === "number" && p.exportLongEdge > 0

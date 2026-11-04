@@ -2957,6 +2957,12 @@ button.fold:hover {
   opacity: 0.4;
   mix-blend-mode: screen;
 }
+/* Screen lightens, which on the light theme's near-white graph left the
+   tones all but invisible; there they darken instead. */
+:root[data-theme="light"] .histogram path {
+  opacity: 0.3;
+  mix-blend-mode: multiply;
+}
 
 /* The Auto button sits under the histogram it reads, at the width of
    the fields it fills in. */
@@ -4299,6 +4305,33 @@ button.fold:hover {
 .develop-head-row button {
   font-size: 0.75rem;
   padding: 0.1rem 0.6rem;
+}
+/* A section's heading is what folds it: the heading's own look, a
+   chevron before it that turns when the section is folded away. */
+.develop-head-row button.fold-head {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  flex: 1;
+}
+.develop-head-row button.fold-head::before {
+  content: "";
+  display: inline-block;
+  width: 0.4em;
+  height: 0.4em;
+  margin: 0 0.45em 0.12em 0.1em;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  transition: transform 0.12s;
+}
+.develop-section.folded .fold-head::before {
+  transform: rotate(-45deg);
+}
+.develop-head-row button.fold-head:hover {
+  color: var(--text, inherit);
 }
 .modal.develop .modal-actions button.on {
   background: var(--accent);

@@ -15522,6 +15522,24 @@ assert(
   );
   await win.locator('input[aria-label="Masking"]').fill("0");
   await settle();
+  // A section folds away by its heading, as Lightroom's panels do, and
+  // is remembered folded; opened again its sliders are as they were.
+  const toneHead = win.locator('section[aria-label="Tone"] button.fold-head');
+  await toneHead.click();
+  assert(
+    (await toneHead.getAttribute("aria-expanded")) === "false" &&
+      !(await win.locator('input[aria-label="Exposure"]').isVisible()),
+    "the Tone section folds away by its heading",
+  );
+  assert(
+    (await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs") || "{}").developFolded || [])).includes("Tone"),
+    "and is remembered folded",
+  );
+  await toneHead.click();
+  assert(
+    await win.locator('input[aria-label="Exposure"]').isVisible(),
+    "and opens again",
+  );
   const spot = win.locator(".develop-spot");
   const before9 = await spot.boundingBox();
   const pic = await win.locator('canvas[aria-label="Developed picture"]').boundingBox();
