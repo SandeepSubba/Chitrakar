@@ -28,7 +28,7 @@
  * is unavailable is more useful than its absence.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
 import type { ExportArea, ExportFormat, ExportSetup, Prefs } from "./prefs";
 import type { Outgoing } from "./files";
@@ -275,7 +275,7 @@ export function ExportDialog({
   /** The bytes, made once and used for both the size shown and the file
    * written — so what the window says and what lands are the same
    * encode, not two that might differ. */
-  const encodeAt = useCallback(
+  const encodePlain = useCallback(
     (scale: number, slice: number | null = null): Uint8Array => {
       if (slice !== null && area === "comps") {
         return format === "webp"
@@ -299,6 +299,19 @@ export function ExportDialog({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session, format, area, hasRegion, prefs.jpegQuality, selectionBounds],
   );
+  /** A JPEG goes out saying how its photograph was taken — the camera,
+   * the lens, the exposure, when; never where — unless asked not to. In
+   * the encode, so the size shown is the size written. */
+  const encodeAt = useCallback(
+    (scale: number, slice: number | null = null): Uint8Array => {
+      const bytes = encodePlain(scale, slice);
+      return format === "jpeg" && prefs.exportCameraData ? session.jpeg_with_capture(bytes) : bytes;
+    },
+    [encodePlain, format, prefs.exportCameraData, session],
+  );
+  /** The photograph's camera and lens, for the window to say what a JPEG
+   * will carry; empty where the page holds no photograph that said. */
+  const cameraSummary = useMemo(() => session.capture_summary(), [session]);
 
   const encodeOne = useCallback((scale: number): Uint8Array => {
     switch (format) {
@@ -447,7 +460,7 @@ export function ExportDialog({
   // any of it puts the question back.
   useEffect(
     () => setMeasure(0),
-    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks],
+    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks, prefs.exportCameraData],
   );
 
   // Named for its size where a size was asked for — `-2048` — rather
@@ -744,6 +757,22 @@ export function ExportDialog({
               aria-label="Quality"
             />
             <span className="hint">{prefs.jpegQuality}</span>
+          </label>
+        )}
+
+        {format === "jpeg" && cameraSummary && (
+          <label
+            className="row check"
+            title="The camera, lens, exposure and date the photograph was taken with, as its EXIF — never where it was taken"
+          >
+            <input
+              type="checkbox"
+              checked={prefs.exportCameraData}
+              onChange={(e) => setPrefs({ exportCameraData: e.target.checked })}
+              aria-label="Camera data"
+            />
+            Camera data
+            <span className="hint">{cameraSummary}</span>
           </label>
         )}
 

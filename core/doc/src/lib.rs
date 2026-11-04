@@ -435,6 +435,42 @@ pub struct Resource {
     pub height: u32,
     #[serde(skip)]
     pub rgba8: Vec<u8>,
+    /// How the photograph these pixels are was taken, where the file
+    /// they came from said: what a JPEG exported from it carries again
+    /// as its EXIF. Written when the picture is added, like its pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<Capture>,
+}
+
+/// How a photograph was taken, as a camera's EXIF says it: the camera,
+/// the lens, the exposure and when. Kept as EXIF keeps its numbers —
+/// ratios of whole numbers — so they go out exactly as they came in.
+/// Anything the file did not say is empty or nought. No place: where a
+/// photograph was taken is the person's to give away, not the editor's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Capture {
+    pub make: String,
+    pub model: String,
+    pub lens_make: String,
+    pub lens_model: String,
+    /// When it was taken, as EXIF writes it: `YYYY:MM:DD HH:MM:SS`.
+    pub taken: String,
+    /// The shutter, in seconds, as a fraction.
+    pub exposure: Option<[u32; 2]>,
+    /// The f-number and the focal length (mm), each as a fraction.
+    pub aperture: Option<[u32; 2]>,
+    pub focal: Option<[u32; 2]>,
+    pub iso: u32,
+    /// Exposure compensation in stops, as a fraction.
+    pub bias: Option<[i32; 2]>,
+}
+
+impl Capture {
+    /// Whether it says anything at all.
+    pub fn is_empty(&self) -> bool {
+        *self == Capture::default()
+    }
 }
 
 impl Resource {
@@ -531,8 +567,22 @@ impl Document {
             width,
             height,
             rgba8,
+            capture: None,
         });
         id
+    }
+
+    /// Say how the photograph a resource is was taken. Part of adding the
+    /// picture, not an edit: the store is immutable, and what a camera
+    /// said about a photograph is as fixed as its pixels. The first word
+    /// on a picture stands; one saying nothing is not kept.
+    pub fn set_capture(&mut self, id: &str, capture: Capture) {
+        if capture.is_empty() {
+            return;
+        }
+        if let Some(r) = self.resources.get_mut(id) {
+            r.capture.get_or_insert(capture);
+        }
     }
 
     /// Keep a file as it came, returning its content id. Like

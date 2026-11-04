@@ -122,6 +122,9 @@ export type Prefs = {
    * whatever the photograph's own — which then stands in for the scale;
    * 0 for none. */
   exportLongEdge: number;
+  /** Whether a JPEG goes out with how its photograph was taken (camera,
+   * lens, exposure, date — never place) as its EXIF. */
+  exportCameraData: boolean;
   /** JPEG quality, 1–100. */
   jpegQuality: number;
   /** How far a PDF runs past its trim for the press, in millimetres —
@@ -213,6 +216,7 @@ export const DEFAULTS: Prefs = {
   exportArea: "page",
   exportScale: 1,
   exportLongEdge: 0,
+  exportCameraData: true,
   jpegQuality: 92,
   pdfBleed: 0,
   pdfCropMarks: false,
@@ -328,6 +332,7 @@ export function clamp(p: Prefs): Prefs {
     // Zero is not a scale but the set — 1×, 2× and 3× in one press —
     // and the window never hands it to the engine as one.
     exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
+    exportCameraData: p.exportCameraData !== false,
     // None, or a whole number of pixels a long edge can be.
     exportLongEdge:
       typeof p.exportLongEdge === "number" && p.exportLongEdge > 0

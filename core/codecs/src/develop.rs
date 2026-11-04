@@ -2748,9 +2748,19 @@ pub mod sample {
         entries.push((279, 4, 1, long(w * h * 2)));
         entries.push((33421, 3, 2, [short(2), short(2)].concat()));
         entries.push((33422, 1, 4, vec![0, 1, 1, 2]));
-        // How it was taken: f/4 at 35 mm through a lens named for a test.
+        // How it was taken: f/4 at 35 mm through a lens named for a test,
+        // a 250th at ISO 400 two thirds of a stop down, one afternoon.
         let rational = |n: u32, d: u32| [n.to_le_bytes(), d.to_le_bytes()].concat();
+        entries.push((33434, 5, 1, rational(1, 250)));
         entries.push((33437, 5, 1, rational(4, 1)));
+        entries.push((34855, 3, 1, short(400)));
+        entries.push((36867, 2, 20, b"2026:10:31 16:42:07\0".to_vec()));
+        entries.push((
+            37380,
+            10,
+            1,
+            [(-2i32).to_le_bytes(), 3i32.to_le_bytes()].concat(),
+        ));
         entries.push((37386, 5, 1, rational(35, 1)));
         entries.push((42035, 2, 10, b"Chitrakar\0".to_vec()));
         entries.push((42036, 2, 14, b"Test 35mm f/2\0".to_vec()));

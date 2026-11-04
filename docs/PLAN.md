@@ -10614,6 +10614,30 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **A photograph's camera data goes out with it** ✅. A JPEG exported
+  from a photograph said nothing of it: no camera, lens, shutter,
+  aperture, ISO or date, which every photograph's file carries and
+  every place a photograph is shown reads. `chitrakar_doc::Capture`
+  (on `Resource`, additive: what a camera said about a picture is as
+  fixed as its pixels, so it is set when the picture is added,
+  `Document::set_capture`, and travels in the manifest) holds those
+  fields as EXIF's own fractions. A camera's JPEG gives it from its
+  EXIF (`core/codecs/src/exif.rs`, either byte order); a raw file from
+  rawler's reading of it, through version 5 of the packed mosaic
+  (shutter, ISO, compensation, date after version 4's camera and lens;
+  `Shot::capture`), on placing and on developing again. The Export
+  window's JPEG carries it as EXIF (`Session::jpeg_with_capture`, from
+  the first visible photograph in paint order; `exif::with_capture`
+  puts the segment after the JFIF header and replaces any it had),
+  with a Camera data box that names the camera (`capture_summary`,
+  `prefs.exportCameraData`, on). Never where it was taken: no GPS is
+  read or written, a place being the person's to give away. Tests:
+  `what_is_written_is_what_is_read`, `a_jpeg_carries_it_and_still_
+  decodes`, `a_big_endian_tiff_is_read`, `nonsense_is_nothing_rather_
+  than_a_panic`, the raw reader's packed shot,
+  `a_photographs_camera_data_goes_out_with_it` (through a save);
+  smoke 9bh2 (an X-T5's JPEG made byte by byte, exported with and
+  without).
   **Export by long edge** ✅ (Lightroom's "resize to fit: long edge").
   The Export window's sizes were ½×, 1×, 2× and 3×, which is how a
   screen asset is sized and not how a photograph is: a 40-megapixel

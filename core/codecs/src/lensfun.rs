@@ -46,6 +46,32 @@ pub struct Shot {
     pub aperture: f32,
     /// Metres to what was focused on; nought where the file does not say.
     pub distance: f32,
+    /// The rest of how it was taken, for a JPEG made from it to carry
+    /// (`chitrakar_doc::Capture`): the shutter in seconds and the
+    /// compensation in stops as fractions, the ISO, and when.
+    pub exposure: [u32; 2],
+    pub iso: u32,
+    pub bias: [i32; 2],
+    pub taken: String,
+}
+
+impl Shot {
+    /// What a JPEG made from the photograph says of how it was taken.
+    pub fn capture(&self) -> chitrakar_doc::Capture {
+        let tenths = |v: f32| (v > 0.0 && v.is_finite()).then(|| [(v * 10.0).round() as u32, 10]);
+        chitrakar_doc::Capture {
+            make: self.camera_make.clone(),
+            model: self.camera_model.clone(),
+            lens_make: self.lens_make.clone(),
+            lens_model: self.lens_model.clone(),
+            taken: self.taken.clone(),
+            exposure: (self.exposure[0] > 0 && self.exposure[1] > 0).then_some(self.exposure),
+            aperture: tenths(self.aperture),
+            focal: tenths(self.focal),
+            iso: self.iso,
+            bias: (self.bias[1] != 0).then_some(self.bias),
+        }
+    }
 }
 
 /// One calibrated focal length of a distortion or fringe model.
@@ -587,6 +613,7 @@ mod tests {
             focal,
             aperture,
             distance: 0.0,
+            ..Default::default()
         }
     }
 

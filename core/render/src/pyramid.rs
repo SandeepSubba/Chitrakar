@@ -370,6 +370,7 @@ mod tests {
             width: w,
             height: h,
             rgba8,
+            capture: None,
         }
     }
 

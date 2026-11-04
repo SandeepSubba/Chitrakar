@@ -8790,6 +8790,45 @@ impl Session {
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// How the photograph on the page was taken, as its camera said: the
+    /// first picture in the order the page is painted (the bottom one,
+    /// where a photograph being edited sits) whose file said. `None` for
+    /// a page with no such picture.
+    pub fn capture(&self) -> Option<chitrakar_doc::Capture> {
+        fn find(doc: &Document, id: NodeId) -> Option<chitrakar_doc::Capture> {
+            for &child in doc.children_of(id).ok()? {
+                let Ok(node) = doc.node(child) else {
+                    continue;
+                };
+                if !node.visible {
+                    continue;
+                }
+                if let NodeKind::Raster(r) = &node.kind {
+                    if let Some(c) = doc
+                        .resource(&r.resource_id)
+                        .and_then(|res| res.capture.clone())
+                    {
+                        return Some(c);
+                    }
+                }
+                if let Some(c) = find(doc, child) {
+                    return Some(c);
+                }
+            }
+            None
+        }
+        find(&self.doc, self.doc.root())
+    }
+
+    /// A JPEG made from the page, carrying how its photograph was taken
+    /// (`capture`) as its EXIF; as it was where there is none to carry.
+    pub fn jpeg_with_capture(&self, jpeg: &[u8]) -> Vec<u8> {
+        match self.capture() {
+            Some(c) => chitrakar_codecs::exif::with_capture(jpeg, &c),
+            None => jpeg.to_vec(),
+        }
+    }
+
     /// Render and encode as JPEG. Transparency flattens onto white, since
     /// JPEG carries no alpha.
     pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, EngineError> {
@@ -9035,7 +9074,10 @@ impl Session {
     pub fn place_image(&mut self, bytes: &[u8], name: &str) -> Result<NodeId, EngineError> {
         let img = chitrakar_codecs::decode_named(bytes, name)
             .map_err(|e| EngineError::BadCommand(e.to_string()))?;
-        self.place_picture(img, name)
+        // A camera's JPEG says how it was taken; a JPEG made from the
+        // page says it again.
+        let capture = chitrakar_codecs::exif::capture_of(bytes);
+        self.place_developed(img, name, None, capture)
     }
 
     /// Pixels drawn elsewhere — a PDF's page, drawn by the module the
@@ -9073,7 +9115,7 @@ impl Session {
         img: chitrakar_codecs::SourceImage,
         name: &str,
     ) -> Result<NodeId, EngineError> {
-        self.place_developed(img, name, None)
+        self.place_developed(img, name, None, None)
     }
 
     // ---- Camera raw, developed ----
@@ -9247,6 +9289,7 @@ impl Session {
         self.developed_elsewhere(&img)?;
         let raw = self.raw.as_ref().expect("checked above");
         let name = raw.name.clone();
+        let capture = raw.photo.shot().map(|s| s.capture());
         let original = match &raw.bytes {
             Some(bytes) => self.doc.add_original(&name, bytes.clone()),
             None => raw.original.clone(),
@@ -9258,6 +9301,7 @@ impl Session {
                 original,
                 settings: settings.clone(),
             }),
+            capture,
         )
     }
 
@@ -9353,6 +9397,14 @@ impl Session {
         };
         let mut new = old.clone();
         new.resource_id = self.doc.add_resource(img.width, img.height, img.rgba8);
+        let capture = self
+            .raw
+            .as_ref()
+            .and_then(|r| r.photo.shot())
+            .map(|s| s.capture());
+        if let Some(capture) = capture {
+            self.doc.set_capture(&new.resource_id, capture);
+        }
         (new.width, new.height) = (img.width, img.height);
         new.develop = Some(Developed {
             original: developed.original,
@@ -9411,10 +9463,14 @@ impl Session {
         img: chitrakar_codecs::SourceImage,
         name: &str,
         develop: Option<Developed>,
+        capture: Option<chitrakar_doc::Capture>,
     ) -> Result<NodeId, EngineError> {
         self.import_notes.clear();
         let (width, height) = (img.width, img.height);
         let resource_id = self.doc.add_resource(width, height, img.rgba8);
+        if let Some(capture) = capture {
+            self.doc.set_capture(&resource_id, capture);
+        }
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
         let id = self.doc.peek_next_id();
@@ -20604,6 +20660,63 @@ mod tests {
     /// end to none at the other, a radial one from all in the middle to
     /// none at its rim; inverted, the other way round. Saved and read back
     /// as it was.
+    /// A camera's JPEG placed says how it was taken, the page keeps it
+    /// (through a save as well), and a JPEG exported from the page says
+    /// it again — the camera, the lens, the exposure and when.
+    #[test]
+    fn a_photographs_camera_data_goes_out_with_it() {
+        let taken = chitrakar_doc::Capture {
+            make: "Canon".into(),
+            model: "Canon EOS 6D".into(),
+            lens_model: "EF24-105mm f/4L IS USM".into(),
+            taken: "2026:11:01 09:12:44".into(),
+            exposure: Some([1, 125]),
+            aperture: Some([80, 10]),
+            focal: Some([500, 10]),
+            iso: 800,
+            ..Default::default()
+        };
+        let px: Vec<chitrakar_color::LinearRgba> = (0..48 * 32)
+            .map(|i| chitrakar_color::LinearRgba {
+                r: (i % 48) as f32 / 48.0,
+                g: 0.4,
+                b: 0.2,
+                a: 1.0,
+            })
+            .collect();
+        let camera = chitrakar_codecs::exif::with_capture(
+            &chitrakar_codecs::encode_jpeg(48, 32, &px, 90).unwrap(),
+            &taken,
+        );
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        assert_eq!(session.capture(), None, "an empty page says nothing");
+        session.place_image(&camera, "IMG_0001.JPG").unwrap();
+        assert_eq!(session.capture(), Some(taken.clone()));
+        let out = session.jpeg_with_capture(&session.export_jpeg(85).unwrap());
+        assert_eq!(
+            chitrakar_codecs::exif::capture_of(&out),
+            Some(taken.clone())
+        );
+        // Kept by the file, as the picture is.
+        let opened = Session::load(&session.save().unwrap()).unwrap();
+        assert_eq!(opened.capture(), Some(taken.clone()));
+        // A picture with nothing to say leaves a JPEG as it was.
+        let mut plain = Session::new(100, 100, ColorMode::Rgb);
+        let png = chitrakar_codecs::encode_png(2, 2, &[200; 16]).unwrap();
+        plain.place_image(&png, "flat.png").unwrap();
+        let jpeg = plain.export_jpeg(85).unwrap();
+        assert_eq!(plain.jpeg_with_capture(&jpeg), jpeg);
+        // Hidden, a photograph is not what the page is; the next one is.
+        let id = session
+            .document()
+            .children_of(session.document().root())
+            .unwrap()[0];
+        session
+            .apply(Command::SetVisible { id, visible: false })
+            .unwrap();
+        assert_eq!(session.capture(), None);
+    }
+
     #[test]
     fn a_gradient_mask_fades_a_layer_from_one_end_to_the_other() {
         let mut session = Session::new(200, 100, ColorMode::Rgb);

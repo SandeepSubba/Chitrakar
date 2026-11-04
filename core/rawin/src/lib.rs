@@ -32,6 +32,11 @@
 //! profiles: the camera's make and model and the lens's make and model,
 //! each a length (u32) and UTF-8, then the focal length (mm), f-number
 //! and distance focused at (m) as f32, each nought where not said.
+//! Version 5 goes on with the rest of how it was taken, for a JPEG made
+//! from it to carry: the shutter in seconds as a fraction (two u32), the
+//! ISO (u32), the exposure compensation in stops as a fraction (two
+//! i32), each nought where not said, and when it was taken as EXIF
+//! writes it (a length, u32, and its bytes).
 
 use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
 
@@ -449,7 +454,7 @@ fn pack(
     };
     let mut out = Vec::with_capacity(4 + 4 * 5 + 4 * 24 + 16 + PATTERN * PATTERN + 1 + bytes);
     out.extend_from_slice(b"CKRW");
-    for v in std::iter::once(4u32).chain(size) {
+    for v in std::iter::once(5u32).chain(size) {
         out.extend_from_slice(&v.to_le_bytes());
     }
     for v in levels.iter().flatten().chain(xyz_to_cam) {
@@ -516,6 +521,17 @@ fn pack(
     for v in [shot.focal, shot.aperture, shot.distance] {
         out.extend_from_slice(&v.to_le_bytes());
     }
+    let [en, ed] = shot.exposure;
+    let [bn, bd] = shot.bias;
+    for v in [en, ed, shot.iso] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [bn, bd] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    let taken = &shot.taken.as_bytes()[..shot.taken.len().min(64)];
+    out.extend_from_slice(&(taken.len() as u32).to_le_bytes());
+    out.extend_from_slice(taken);
     out
 }
 
@@ -532,6 +548,13 @@ pub struct Shot {
     pub focal: f32,
     pub aperture: f32,
     pub distance: f32,
+    /// The shutter in seconds and the compensation in stops, as EXIF's
+    /// fractions; the ISO; and when, as EXIF writes it. Nought or empty
+    /// where the file does not say.
+    pub exposure: [u32; 2],
+    pub iso: u32,
+    pub bias: [i32; 2],
+    pub taken: String,
 }
 
 /// The camera, from rawler's own names for it (its make without "Co.,
@@ -568,6 +591,21 @@ fn shot_of(raw: &rawler::RawImage, meta: Option<&rawler::decoders::RawMetadata>)
         focal: number(exif.and_then(|e| e.focal_length)),
         aperture: number(exif.and_then(|e| e.fnumber)),
         distance: number(exif.and_then(|e| e.subject_distance)),
+        exposure: exif
+            .and_then(|e| e.exposure_time)
+            .filter(|r| r.n > 0 && r.d > 0)
+            .map_or([0, 0], |r| [r.n, r.d]),
+        iso: exif
+            .and_then(|e| e.iso_speed_ratings.map(u32::from).or(e.iso_speed))
+            .unwrap_or(0),
+        bias: exif
+            .and_then(|e| e.exposure_bias)
+            .filter(|r| r.d != 0)
+            .map_or([0, 0], |r| [r.n, r.d]),
+        taken: exif
+            .and_then(|e| e.date_time_original.as_deref().or(e.create_date.as_deref()))
+            .map(clean)
+            .unwrap_or_default(),
     }
 }
 
@@ -1325,6 +1363,16 @@ mod tests {
         assert_eq!(shot.lens_make, "Chitrakar");
         assert_eq!((shot.focal, shot.aperture, shot.distance), (35.0, 4.0, 0.0));
         assert!(!shot.camera_model.is_empty());
+        // And version 5 the rest, for a JPEG made from it to carry.
+        assert_eq!(shot.exposure, [1, 250]);
+        assert_eq!(shot.iso, 400);
+        assert_eq!(shot.bias, [-2, 3]);
+        assert_eq!(shot.taken, "2026:10:31 16:42:07");
+        let c = shot.capture();
+        assert_eq!(
+            (c.exposure, c.aperture, c.focal, c.iso),
+            (Some([1, 250]), Some([40, 10]), Some([350, 10]), 400)
+        );
     }
 
     #[test]

@@ -138,7 +138,7 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
     }
     let head = cur.u32s(5)?;
     let version = head[0];
-    if !(1..=4).contains(&version) {
+    if !(1..=5).contains(&version) {
         return Err(bad(format!("a packed mosaic of version {version}")));
     }
     let (width, height, cpp, orientation) = (
@@ -271,7 +271,7 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .map(|v| if v.is_finite() && v > 0.0 { v } else { 0.0 })
             .collect();
-        photo.shot = Some(crate::lensfun::Shot {
+        let mut shot = crate::lensfun::Shot {
             camera_make,
             camera_model,
             lens_make,
@@ -279,7 +279,20 @@ pub fn unpack(packed: &[u8]) -> Result<RawPhoto, CodecError> {
             focal: f[0],
             aperture: f[1],
             distance: f[2],
-        });
+            ..Default::default()
+        };
+        if version >= 5 {
+            let w = cur.u32s(5)?;
+            shot.exposure = [w[0], w[1]];
+            shot.iso = w[2];
+            shot.bias = [w[3] as i32, w[4] as i32];
+            let n = cur.u32s(1)?[0] as usize;
+            if n > 64 {
+                return Err(bad("a date longer than a date"));
+            }
+            shot.taken = String::from_utf8_lossy(cur.take(n)?).into_owned();
+        }
+        photo.shot = Some(shot);
     }
     Ok(photo)
 }

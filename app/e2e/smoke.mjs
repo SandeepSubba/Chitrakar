@@ -17435,6 +17435,104 @@ assert(
   await page.waitForTimeout(150);
 }
 
+// 9bh2. A photograph's camera data goes out with it. A camera's JPEG —
+// made here from a canvas, its EXIF written by hand: a FUJIFILM X-T5 at
+// a 250th and ISO 400 — is placed, and a JPEG exported from the page
+// says the same; the window says what it will carry, and unticked it
+// carries none.
+{
+  await newDocument(400, 300, "rgb");
+  const base = Buffer.from(
+    await page.evaluate(() => {
+      const c = document.createElement("canvas");
+      c.width = 64;
+      c.height = 48;
+      const g = c.getContext("2d");
+      g.fillStyle = "#4070a0";
+      g.fillRect(0, 0, 64, 48);
+      return c.toDataURL("image/jpeg", 0.9).split(",")[1];
+    }),
+    "base64",
+  );
+  // A little-endian TIFF: the make and model, and an EXIF directory with
+  // the shutter and the ISO.
+  const le16 = (v) => Buffer.from([v & 255, v >> 8]);
+  const le32 = (v) => Buffer.from([v & 255, (v >> 8) & 255, (v >> 16) & 255, v >>> 24]);
+  const entry = (tag, type, count, value) => Buffer.concat([le16(tag), le16(type), le32(count), value]);
+  const make = Buffer.from("FUJIFILM\0");
+  const model = Buffer.from("X-T5\0\0");
+  // IFD0 at 8: three entries (38 bytes); the make and model after it;
+  // the EXIF directory after them.
+  const ifd0At = 8;
+  const makeAt = ifd0At + 2 + 3 * 12 + 4;
+  const modelAt = makeAt + make.length;
+  const exifAt = modelAt + model.length;
+  const shutterAt = exifAt + 2 + 2 * 12 + 4;
+  const tiff = Buffer.concat([
+    Buffer.from("II*\0"),
+    le32(ifd0At),
+    le16(3),
+    entry(0x010f, 2, make.length, le32(makeAt)),
+    entry(0x0110, 2, 5, le32(modelAt)),
+    entry(0x8769, 4, 1, le32(exifAt)),
+    le32(0),
+    make,
+    model,
+    le16(2),
+    entry(0x829a, 5, 1, le32(shutterAt)),
+    entry(0x8827, 3, 1, Buffer.concat([le16(400), le16(0)])),
+    le32(0),
+    le32(1),
+    le32(250),
+  ]);
+  const body = Buffer.concat([Buffer.from("Exif\0\0"), tiff]);
+  const app1 = Buffer.concat([Buffer.from([0xff, 0xe1, (body.length + 2) >> 8, (body.length + 2) & 255]), body]);
+  const camera = Buffer.concat([base.subarray(0, 2), app1, base.subarray(2)]);
+  await page.setInputFiles('input[accept^="image/*,"]', {
+    name: "DSCF0001.JPG",
+    mimeType: "image/jpeg",
+    buffer: camera,
+  });
+  await page.waitForTimeout(400);
+
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("JPEG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  const box = page.locator('input[aria-label="Camera data"]');
+  assert(await box.isChecked(), "a JPEG carries the camera's data unless asked not to");
+  const said = await page.locator('label:has(input[aria-label="Camera data"]) .hint').textContent();
+  assert(said.includes("FUJIFILM") && said.includes("X-T5"), `and the window says whose (${said})`);
+  const exportNow = async () => {
+    const [dl] = await Promise.all([page.waitForEvent("download"), page.click(".modal-actions .primary")]);
+    return readFile(await dl.path());
+  };
+  const carried = await exportNow();
+  assert(
+    carried.includes(Buffer.from("Exif\0\0")) && carried.includes(Buffer.from("X-T5")),
+    "the JPEG written says it was an X-T5's",
+  );
+  // The shutter goes out as it came: a 250th.
+  const at = carried.indexOf(Buffer.from([0x9a, 0x82, 5, 0]));
+  assert(at > 0, "with a shutter speed");
+
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await box.uncheck();
+  await page.waitForTimeout(150);
+  const bare = await exportNow();
+  assert(
+    !bare.includes(Buffer.from("X-T5")) && !bare.includes(Buffer.from("Exif\0\0")),
+    "and unticked, it says nothing of the camera",
+  );
+  // Put it back for whoever opens the window next.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await box.check();
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 // 9bi. How you like to work, in one window. These settings existed
 // before it did — they were scattered across whichever menu happened to
 // use them, and two of them (how far an arrow key moves a layer, how

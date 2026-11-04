@@ -1074,6 +1074,32 @@ impl WasmSession {
     }
 
     /// The same as a JPEG, on white.
+    /// A JPEG made from the page, carrying how its photograph was taken
+    /// as its EXIF (the camera, lens, exposure and when; never where), as
+    /// it came where the page holds no photograph that said.
+    pub fn jpeg_with_capture(&self, jpeg: &[u8]) -> Vec<u8> {
+        self.inner.jpeg_with_capture(jpeg)
+    }
+
+    /// The camera and lens the page's photograph was taken with, for the
+    /// export window to say what it will carry; empty where none.
+    pub fn capture_summary(&self) -> String {
+        self.inner.capture().map_or(String::new(), |c| {
+            // "Canon · Canon EOS 6D" says the make twice.
+            let make = if c.model.starts_with(&c.make) {
+                ""
+            } else {
+                c.make.as_str()
+            };
+            [make, c.model.as_str(), c.lens_model.as_str()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" · ")
+        })
+    }
+
     pub fn comp_jpeg(&mut self, index: usize, scale: f32, quality: u8) -> Result<Vec<u8>, JsError> {
         self.inner.comp_jpeg(index, scale, quality).map_err(to_js)
     }
