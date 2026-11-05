@@ -10614,6 +10614,21 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Undo in the develop window** ✅. The window had no history: a
+  slider pushed too far came back by Reset or by remembering the
+  number. Worse, the editor's own Ctrl+Z listens on the whole window
+  and so, pressed in the develop window, undid the *document* behind
+  it. The window keeps its own now (`RawDevelopDialog`: `past`,
+  `future`): every change of the settings a step, changes less than
+  0.4 s apart one step, so a slider's whole drag is undone at once, a
+  hundred kept. The person's own undo and redo chords (passed in as
+  `historyKey`, read off `boundChords`) are taken in the capture phase
+  before the editor's handler sees them, and Undo and Redo buttons sit
+  beside Reset, greyed when there is nothing to step to. A preset's
+  name being typed keeps the field's own undo. Placing the development
+  is still one step in the document's history. Smoke 9cn (exposure
+  then contrast, undone, undone, redone by key and by button, the
+  document's layers as they were).
   **Noise reduction in two: Luminance and Colour** ✅ (Lightroom's
   Luminance and Color). One slider smoothed the brightness's grain and
   the colour's blotches together, and they want different amounts —

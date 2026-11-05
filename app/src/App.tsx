@@ -10778,6 +10778,10 @@ export function App() {
           info={developing.info}
           initial={developing.initial}
           action={developing.layer === null ? "Place" : "Develop"}
+          historyKey={(e) => {
+            const fired = chords.byChord[chordFromEvent(e)];
+            return fired === "undo" || fired === "redo" ? fired : undefined;
+          }}
           presets={prefs.developPresets}
           onPresets={(developPresets) => setPrefs({ developPresets })}
           folded={prefs.developFolded}
@@ -14370,6 +14374,7 @@ function RawDevelopDialog({
   info,
   initial,
   action,
+  historyKey,
   count,
   presets,
   onPresets,
@@ -14383,6 +14388,8 @@ function RawDevelopDialog({
   info: RawInfo;
   initial: RawSettings;
   action: string;
+  /** Which of undo and redo a key press is, by the person's own chords. */
+  historyKey: (e: KeyboardEvent) => "undo" | "redo" | undefined;
   /** Which of how many raw files waiting this is, when more than one. */
   count?: [number, number];
   /** Settings kept by name, and keeping or forgetting one. */
@@ -14395,6 +14402,63 @@ function RawDevelopDialog({
   onDone: (s: RawSettings, all?: boolean) => void;
 }) {
   const [s, setS] = useState<RawSettings>(initial);
+  /** The window's own history, as Lightroom's: every change of the
+   * settings a step, those less than a breath apart one step (so a
+   * slider's whole drag is undone at once), a hundred kept. The
+   * document's own history is not touched until the development is
+   * placed, which is one step there. */
+  const past = useRef<RawSettings[]>([]);
+  const future = useRef<RawSettings[]>([]);
+  const recorded = useRef<RawSettings>(initial);
+  const lastChange = useRef(0);
+  const stepping = useRef(false);
+  const [, setSteps] = useState(0);
+  useEffect(() => {
+    if (s === recorded.current) return;
+    if (stepping.current) {
+      stepping.current = false;
+    } else {
+      const now = performance.now();
+      if (now - lastChange.current > 400) {
+        past.current.push(recorded.current);
+        if (past.current.length > 100) past.current.shift();
+      }
+      future.current = [];
+      lastChange.current = now;
+    }
+    recorded.current = s;
+    setSteps((n) => n + 1);
+  }, [s]);
+  const step = (from: React.MutableRefObject<RawSettings[]>, to: React.MutableRefObject<RawSettings[]>) => {
+    const back = from.current.pop();
+    if (!back) return;
+    to.current.push(recorded.current);
+    stepping.current = true;
+    lastChange.current = 0;
+    setS(back);
+  };
+  const undoRef = useRef(() => step(past, future));
+  undoRef.current = () => step(past, future);
+  const redoRef = useRef(() => step(future, past));
+  redoRef.current = () => step(future, past);
+  const historyKeyRef = useRef(historyKey);
+  historyKeyRef.current = historyKey;
+  useEffect(() => {
+    // Before the editor's own handler, which would otherwise undo the
+    // document behind the window.
+    const key = (e: KeyboardEvent) => {
+      const which = historyKeyRef.current(e);
+      if (!which) return;
+      e.stopImmediatePropagation();
+      // A name being typed keeps its own undo.
+      if (e.target instanceof HTMLInputElement && e.target.type === "text") return;
+      e.preventDefault();
+      if (which === "undo") undoRef.current();
+      else redoRef.current();
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, []);
   /** A section of the settings, folded away by its heading as
    * Lightroom's panels are, and kept folded from one photograph to the
    * next. Hidden rather than taken out, so what draws inside it (the
@@ -15080,6 +15144,12 @@ function RawDevelopDialog({
         </div>
         <div className="modal-actions">
           <button onClick={() => setS(RAW_DEFAULTS)}>Reset</button>
+          <button type="button" disabled={past.current.length === 0} onClick={() => undoRef.current()} title="Undo the last change here">
+            Undo
+          </button>
+          <button type="button" disabled={future.current.length === 0} onClick={() => redoRef.current()} title="Redo">
+            Redo
+          </button>
           <button
             type="button"
             className={before ? "on" : undefined}

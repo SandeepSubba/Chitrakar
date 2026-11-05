@@ -15907,6 +15907,40 @@ assert(
   await win.locator('button:text-is("Cancel")').click();
   await settle();
 
+  // The window has its own history: a change a step, undone and redone
+  // by the editor's own keys, and the document behind it untouched.
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "blotched.dng", mimeType: "", buffer: blotched });
+  await win.waitFor();
+  await settle();
+  const layersBehind = await layerNames();
+  const valueOf = (label) => win.locator(`input[aria-label="${label} value"]`).inputValue();
+  await win.locator('input[aria-label="Exposure value"]').fill("1");
+  await page.waitForTimeout(600);
+  await win.locator('input[aria-label="Contrast value"]').fill("20");
+  await page.waitForTimeout(600);
+  await page.keyboard.press("Control+z");
+  await settle();
+  assert(
+    (await valueOf("Contrast")) === "0" && (await valueOf("Exposure")) === "1",
+    "undo in the develop window takes back the last change",
+  );
+  await page.keyboard.press("Control+z");
+  await settle();
+  assert((await valueOf("Exposure")) === "0", "and the one before it");
+  assert(await win.locator('button:text-is("Undo")').isDisabled(), "with nothing left, Undo is greyed");
+  await page.keyboard.press("Control+Shift+z");
+  await settle();
+  assert((await valueOf("Exposure")) === "1" && (await valueOf("Contrast")) === "0", "redo puts it back");
+  await win.locator('button:text-is("Redo")').click();
+  await settle();
+  assert((await valueOf("Contrast")) === "20", "and so does the Redo button");
+  assert(
+    JSON.stringify(await layerNames()) === JSON.stringify(layersBehind),
+    "the document behind the window is not undone",
+  );
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+
   // A Canon's raw file carries no corrections but names its lens, and
   // lensfun's profile for it — added in Preferences › Camera raw, since
   // the database cannot be shipped — puts them right. The DNG here names
