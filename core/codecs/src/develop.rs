@@ -1711,7 +1711,16 @@ impl RawPhoto {
                     }
                 },
             );
-        let upright = detail(&upright, w, h, s.sharpen, s.noise, s.masking).unwrap_or(upright);
+        let upright = detail(
+            &upright,
+            w,
+            h,
+            s.sharpen,
+            s.noise,
+            s.colour_noise(),
+            s.masking,
+        )
+        .unwrap_or(upright);
         let geometry = self.straighten(s, w, h);
         let (width, height, rgba8) =
             orient_through(upright, w, h, self.orientation, geometry.as_ref());
@@ -1840,7 +1849,7 @@ impl RawPhoto {
             let c = look.encode(c);
             out.copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
-        let px = detail(&px, mw, mh, s.sharpen, s.noise, s.masking).unwrap_or(px);
+        let px = detail(&px, mw, mh, s.sharpen, s.noise, s.colour_noise(), s.masking).unwrap_or(px);
         let px = defringe(&px, mw, mh, s.defringe[0], s.defringe[1], 2).unwrap_or(px);
         let mut square = Vec::with_capacity(size * size * 4);
         for y in (y0 - my0)..(y0 - my0 + size) {
@@ -2161,15 +2170,20 @@ pub fn defringe(
 /// going soft, and sharpening wants the brightness alone — sharpen the
 /// colour too and every edge gets a coloured halo.
 ///
-/// - Noise reduction (0 to 100) does the two kinds differently. Colour
+/// - Noise reduction comes in two, as Lightroom's Luminance and Color
+///   (0 to 100 each), since the two kinds want different amounts. Colour
 ///   noise is blotches several pixels across, and the eye reads colour at
 ///   a fraction of the resolution it reads brightness, so the colour is
-///   blurred outright — a box blur run twice (a tent), wider as the slider
-///   goes up, costing the same however wide. Brightness noise is grain,
-///   and blurring it would blur the picture, so it is an edge-aware
-///   average of the three by three round each pixel: neighbours count by
-///   how alike in brightness they are, so an edge stays where it is and
-///   grain is averaged away.
+///   blurred — a box blur run twice (a tent), wider as the slider goes
+///   up, costing the same however wide — except across an edge: where a
+///   pixel's brightness, or its colour, stands well apart from the same
+///   blur of what is round it, it is beside an edge and keeps its own
+///   colour by as much, so a red flower does not bleed into the leaf
+///   beside it. Brightness
+///   noise is grain, and blurring it would blur the picture, so it is an
+///   edge-aware average of the three by three round each pixel:
+///   neighbours count by how alike in brightness they are, so an edge
+///   stays where it is and grain is averaged away.
 /// - Sharpening (0 to 150) is an unsharp mask of radius one on the
 ///   brightness, after the smoothing.
 /// - Masking (0 to 100) keeps the sharpening to edges, as Lightroom's
@@ -2190,6 +2204,7 @@ pub fn detail(
     h: usize,
     sharpen: f32,
     noise: f32,
+    colour: f32,
     masking: f32,
 ) -> Option<Vec<u8>> {
     // The steepness, in levels, below which nothing is sharpened, and
@@ -2204,21 +2219,35 @@ pub fn detail(
     } else {
         0.0
     };
-    let noise = if noise.is_finite() {
-        noise.clamp(0.0, 100.0) / 100.0
-    } else {
-        0.0
+    let amount = |v: f32| {
+        if v.is_finite() {
+            v.clamp(0.0, 100.0) / 100.0
+        } else {
+            0.0
+        }
     };
-    if (sharpen == 0.0 && noise == 0.0) || w == 0 || h == 0 || rgba.len() < w * h * 4 {
+    let (noise, colour) = (amount(noise), amount(colour));
+    if (sharpen == 0.0 && noise == 0.0 && colour == 0.0)
+        || w == 0
+        || h == 0
+        || rgba.len() < w * h * 4
+    {
         return None;
     }
     const BAND: usize = 128;
     // How far the colour blur reaches: a tent of two boxes of this radius.
-    let radius = if noise > 0.0 {
-        1 + (noise * 3.0).round() as usize
+    let radius = if colour > 0.0 {
+        1 + (colour * 3.0).round() as usize
     } else {
         0
     };
+    // How far, in levels, a pixel's brightness stands from the blur of
+    // the brightness round it before its colour is kept as its own: past
+    // grain, short of an edge.
+    const BESIDE_EDGE: f32 = 12.0;
+    // The same for colour, in levels of a colour difference, at the
+    // slider's foot (twice this at its top).
+    const BESIDE_COLOUR_EDGE: f32 = 24.0;
     let reach = 2 * radius + 2;
     let mut out = rgba[..w * h * 4].to_vec();
     // The likeness weights for brightness, tabled at a quarter of a level.
@@ -2248,13 +2277,23 @@ pub fn detail(
                 cb[i] = b - l;
                 cr[i] = r - l;
             }
-            if noise > 0.0 {
-                for ch in [&mut cb, &mut cr] {
-                    let blurred = tent(ch, w, rows, radius);
-                    for (v, b) in ch.iter_mut().zip(blurred) {
-                        *v += (b - *v) * noise.sqrt();
-                    }
+            if colour > 0.0 {
+                let around = tent(&y, w, rows, radius);
+                let (bb, rb) = (tent(&cb, w, rows, radius), tent(&cr, w, rows, radius));
+                // Blotches stand further from their surroundings as the
+                // slider goes up (it is asked to take bigger ones), so
+                // the colour an edge is told by grows with it.
+                let colour_edge = BESIDE_COLOUR_EDGE * (1.0 + colour);
+                for i in 0..n {
+                    let dl = (y[i] - around[i]) / BESIDE_EDGE;
+                    let (db, dr) = (bb[i] - cb[i], rb[i] - cr[i]);
+                    let dc2 = (db * db + dr * dr) / (colour_edge * colour_edge);
+                    let k = colour.sqrt() * (-(dl * dl) - dc2).exp();
+                    cb[i] += db * k;
+                    cr[i] += dr * k;
                 }
+            }
+            if noise > 0.0 {
                 let src = y.clone();
                 for ly in 0..rows {
                     let (up, down) = (ly.saturating_sub(1), (ly + 1).min(rows - 1));
@@ -4746,7 +4785,7 @@ mod tests {
     #[test]
     fn noise_reduction_smooths_grain_and_keeps_the_edge() {
         let px = noisy(80, 12);
-        let smooth = detail(&px, 40, 40, 0.0, 80.0, 0.0).unwrap();
+        let smooth = detail(&px, 40, 40, 0.0, 80.0, 80.0, 0.0).unwrap();
         assert!(
             spread_of(&smooth, 3, 16) < spread_of(&px, 3, 16) * 0.6,
             "grain smoothed"
@@ -4760,9 +4799,81 @@ mod tests {
             "the edge kept"
         );
         assert!(
-            detail(&px, 40, 40, 0.0, 0.0, 0.0).is_none(),
+            detail(&px, 40, 40, 0.0, 0.0, 0.0, 0.0).is_none(),
             "nothing asked, nothing done"
         );
+    }
+
+    #[test]
+    fn colour_noise_is_smoothed_on_its_own_and_not_across_an_edge() {
+        // A flat grey with blotches of colour, as a raw file's shadows
+        // have, beside a red and green meeting at an edge.
+        let (w, h) = (60usize, 40usize);
+        let mut seed = 7u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let mut px = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let p = if x < 30 {
+                    let (a, b) = (next() * 40.0, next() * 40.0);
+                    [120.0 + a, 120.0 - 0.5 * (a + b), 120.0 + b]
+                } else if x < 45 {
+                    [200.0, 40.0, 40.0]
+                } else {
+                    [40.0, 160.0, 40.0]
+                };
+                px[(y * w + x) * 4..][..4].copy_from_slice(&[
+                    p[0].round() as u8,
+                    p[1].round() as u8,
+                    p[2].round() as u8,
+                    255,
+                ]);
+            }
+        }
+        // How much the grey's colour wanders, and its brightness.
+        let wander = |p: &[u8]| {
+            let (mut c, mut l, mut n) = (0f32, Vec::new(), 0f32);
+            for y in 8..h - 8 {
+                for x in 8..22 {
+                    let q = &p[(y * w + x) * 4..];
+                    let (r, g, b) = (q[0] as f32, q[1] as f32, q[2] as f32);
+                    c += (r - g).abs() + (b - g).abs();
+                    l.push(0.299 * r + 0.587 * g + 0.114 * b);
+                    n += 1.0;
+                }
+            }
+            let m = l.iter().sum::<f32>() / n;
+            (
+                c / n,
+                (l.iter().map(|v| (v - m) * (v - m)).sum::<f32>() / n).sqrt(),
+            )
+        };
+        let (colour0, _) = wander(&px);
+        let coloured = detail(&px, w, h, 0.0, 0.0, 60.0, 0.0).unwrap();
+        let (colour1, _) = wander(&coloured);
+        assert!(
+            colour1 < colour0 * 0.5,
+            "Color smooths the blotches: {colour0} to {colour1}"
+        );
+        let lumed = detail(&px, w, h, 0.0, 60.0, 0.0, 0.0).unwrap();
+        let (colour2, _) = wander(&lumed);
+        assert!(
+            colour2 > colour0 * 0.8,
+            "Luminance leaves the colour: {colour0} to {colour2}"
+        );
+        // At the full slider the red stays red two pixels from the green.
+        let full = detail(&px, w, h, 0.0, 0.0, 100.0, 0.0).unwrap();
+        for y in [10, 20, 30] {
+            let q = &full[(y * w + 43) * 4..];
+            assert!(
+                q[0] as i32 - q[1] as i32 > 130,
+                "the red keeps its colour beside the green: {:?}",
+                &q[..3]
+            );
+        }
     }
 
     #[test]
@@ -4774,7 +4885,7 @@ mod tests {
                 px.extend_from_slice(&[v, v, v, 255]);
             }
         }
-        let sharp = detail(&px, 40, 40, 100.0, 0.0, 0.0).unwrap();
+        let sharp = detail(&px, 40, 40, 100.0, 0.0, 0.0, 0.0).unwrap();
         let at = |x: usize| sharp[(20 * 40 + x) * 4 + 1];
         assert!(
             at(19) < 80 && at(20) > 160,
@@ -4818,8 +4929,8 @@ mod tests {
             sum
         };
         let plain = rough(&px);
-        let sharp = detail(&px, w, h, 150.0, 0.0, 0.0).unwrap();
-        let masked = detail(&px, w, h, 150.0, 0.0, 60.0).unwrap();
+        let sharp = detail(&px, w, h, 150.0, 0.0, 0.0, 0.0).unwrap();
+        let masked = detail(&px, w, h, 150.0, 0.0, 0.0, 60.0).unwrap();
         assert!(
             rough(&sharp) > plain * 2,
             "unmasked, the grain is sharpened"
@@ -4851,10 +4962,10 @@ mod tests {
                 }
             })
             .collect();
-        let whole = detail(&px, w, h, 80.0, 60.0, 0.0).unwrap();
+        let whole = detail(&px, w, h, 80.0, 60.0, 60.0, 0.0).unwrap();
         // Rows either side of the first seam, worked out on their own.
         let piece = &px[(100 * w * 4)..(160 * w * 4)];
-        let part = detail(piece, w, 60, 80.0, 60.0, 0.0).unwrap();
+        let part = detail(piece, w, 60, 80.0, 60.0, 60.0, 0.0).unwrap();
         for y in 10..50 {
             for x in 0..w * 4 {
                 assert_eq!(

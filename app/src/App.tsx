@@ -14579,7 +14579,7 @@ function RawDevelopDialog({
       />
     </label>
   );
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") =>
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") =>
     slider(label, s[k], (v) => set(k, v), min, max, step, unit);
   /** Defringe's purple (0) or green (1), kept only while it asks for something. */
   const fringeRow = (label: string, i: 0 | 1) =>
@@ -15013,7 +15013,19 @@ function RawDevelopDialog({
             />
             {row("Sharpening", "sharpen", 0, 150, 1)}
             {row("Masking", "masking", 0, 100, 1)}
-            {row("Noise reduction", "noise", 0, 100, 1)}
+            {/* Two, as Lightroom's Luminance and Color: brightness grain
+                and colour blotches want different amounts. Settings from
+                before there were two have one, which the colour follows
+                until either is moved. */}
+            {slider(
+              "Luminance noise",
+              s.noise,
+              (v) => setS((o) => ({ ...o, noise: v, color_noise: o.color_noise ?? o.noise })),
+              0,
+              100,
+              1,
+            )}
+            {slider("Colour noise", s.color_noise ?? s.noise, (v) => setS((o) => ({ ...o, color_noise: v })), 0, 100, 1)}
               </>,
             )}
             {fold(

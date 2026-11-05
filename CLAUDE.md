@@ -354,7 +354,9 @@ grading of shadows, midtones and highlights (`grading`, `develop::Grade`),
 Presence (clarity and dehaze, `core/codecs/src/presence.rs`:
 worked out on a ~1024-pixel copy and laid on any size, so the preview,
 the whole development and the square agree), vibrance, saturation, and
-Detail (sharpening with Lightroom's masking, noise reduction, judged in a 1:1 square from
+Detail (sharpening with Lightroom's masking, noise reduction of the
+brightness and, on its own slider, the colour — `color_noise`, which
+follows `noise` where a picture predates it — judged in a 1:1 square from
 `develop_square`) — with a
 block-averaged `RawPreview` for the sliders; settings kept by name
 (`prefs.developPresets`) and given to other picked raw layers as one

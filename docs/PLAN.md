@@ -10614,6 +10614,27 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Noise reduction in two: Luminance and Colour** ✅ (Lightroom's
+  Luminance and Color). One slider smoothed the brightness's grain and
+  the colour's blotches together, and they want different amounts —
+  a raw's shadows want their colour mottle gone long before their
+  grain. Two sliders in Detail now (`RawDevelop::noise`, and
+  `color_noise` with `colour_noise()`): a picture developed with one
+  has no `color_noise`, and its colour follows `noise` as it did, so it
+  develops again as it was; the window pins the colour to what it shows
+  the first time either is moved. The colour's smoothing was a plain
+  blur, and turned up a red flower bled into the leaf beside it; now a
+  pixel whose brightness, or colour, stands well apart from the blur of
+  what is round it (12 levels of brightness, 24 to 48 of a colour
+  difference as the slider rises) is beside an edge and keeps its own
+  colour by as much. Blotches stronger than a camera makes stand out
+  like edges and are partly kept too. On the 70-300's cat the grey
+  wall's purple and green mottle smoothed at 50 and the whiskers kept
+  their edges. Tests:
+  `colour_noise_is_smoothed_on_its_own_and_not_across_an_edge` (Colour
+  halves the blotches, Luminance leaves them, the red stays red two
+  pixels from the green at 100); smoke 9cn (a blotched grey, 24 from
+  grey to 9 with Colour, unmoved by Luminance); `develop.test.mjs`.
   **Auto white balance** ✅ (Lightroom's Auto in the White Balance
   menu). The Light menu had As shot, the named lights and a picker, but
   nothing that read the light from the picture. Auto does, by grey

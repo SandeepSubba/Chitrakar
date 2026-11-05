@@ -74,6 +74,13 @@ check(
     d.cleanSettings({ defringe: "purple" }).defringe === undefined,
   "defringe held to 0..100 a colour, and none when it asks for nothing",
 );
+check(
+  d.cleanSettings({ noise: 30 }).color_noise === 30 &&
+    d.cleanSettings({ noise: 30, color_noise: 200 }).color_noise === 100 &&
+    d.cleanSettings({ noise: 30, color_noise: 5 }).color_noise === 5 &&
+    d.cleanSettings(null).color_noise === 0,
+  "colour noise its own, held to 0..100, and following the one slider in settings from before there were two",
+);
 check(d.cleanSettings(null).curve === true, "a new development has the camera's tone curve");
 check(d.cleanSettings({ curve: false }).curve === false, "a curve left off stays off");
 check(d.cleanSettings({ curve: "yes" }).curve === true, "a curve that is not a yes or a no is the default");

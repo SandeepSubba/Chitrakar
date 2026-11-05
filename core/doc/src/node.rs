@@ -721,8 +721,15 @@ pub struct RawDevelop {
     pub dehaze: f32,
     /// Detail: an unsharp mask on the brightness, 0 to 150.
     pub sharpen: f32,
-    /// Detail: edge-aware smoothing, colour hardest, 0 to 100.
+    /// Detail: noise reduction of the brightness (Lightroom's Luminance),
+    /// edge-aware, 0 to 100; and of the colour, where `color_noise` says
+    /// nothing.
     pub noise: f32,
+    /// Detail: noise reduction of the colour (Lightroom's Color), 0 to
+    /// 100. `None` follows `noise`, as one slider did both before there
+    /// were two, so a picture developed then develops again as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_noise: Option<f32>,
     /// Detail: how much of the sharpening is kept to edges, 0 (all of
     /// the picture) to 100 (only its steepest edges), so the grain of a
     /// smooth sky is not sharpened with it. Lightroom's Masking.
@@ -773,6 +780,14 @@ pub struct RawDevelop {
     /// highlights, and one for everything, as Lightroom has it.
     #[serde(skip_serializing_if = "Grading::untouched")]
     pub grading: Grading,
+}
+
+impl RawDevelop {
+    /// How hard the colour's noise is smoothed: its own slider, or the
+    /// brightness's where there is none.
+    pub fn colour_noise(&self) -> f32 {
+        self.color_noise.unwrap_or(self.noise)
+    }
 }
 
 fn untouched_defringe(d: &[f32; 2]) -> bool {

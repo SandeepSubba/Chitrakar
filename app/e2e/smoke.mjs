@@ -15880,6 +15880,33 @@ assert(
   await win.locator('button:text-is("Cancel")').click();
   await settle();
 
+  // Noise reduction in two: a grey wall with blotches of colour, as a
+  // raw file's shadows have. Colour noise takes them out; Luminance
+  // noise, the grain's own, leaves them.
+  let seed = 3;
+  const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32) - 0.5;
+  const blotches = Array.from({ length: (128 / 4) * (256 / 4) }, () => [rand() * 0.12, rand() * 0.12]);
+  const blotched = dng(256, 128, [0.8, 1.0, 0.6], (x, y) => {
+    const [a, b] = blotches[Math.floor(y / 4) * 64 + Math.floor(x / 4)];
+    return [0.3 + a, 0.3 - 0.5 * (a + b), 0.3 + b];
+  });
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "blotched.dng", mimeType: "", buffer: blotched });
+  await win.waitFor();
+  await settle();
+  const blotchy = await offGrey("At its own size");
+  await win.locator('input[aria-label="Luminance noise"]').fill("100");
+  await page.waitForTimeout(800);
+  const lumOnly = await offGrey("At its own size");
+  await win.locator('input[aria-label="Colour noise"]').fill("100");
+  await page.waitForTimeout(800);
+  const unblotched = await offGrey("At its own size");
+  assert(
+    lumOnly > blotchy * 0.8 && unblotched < blotchy * 0.6,
+    `Colour noise takes the blotches out and Luminance noise does not (${blotchy.toFixed(1)}, ${lumOnly.toFixed(1)} with Luminance, ${unblotched.toFixed(1)} with Colour)`,
+  );
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+
   // A Canon's raw file carries no corrections but names its lens, and
   // lensfun's profile for it — added in Preferences › Camera raw, since
   // the database cannot be shipped — puts them right. The DNG here names

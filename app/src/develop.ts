@@ -23,6 +23,10 @@ export type RawSettings = {
   sharpen: number;
   /** Detail: edge-aware smoothing, 0 to 100. */
   noise: number;
+  /** Detail: noise reduction of the colour, 0 to 100 (Lightroom's Color;
+   * `noise` is its Luminance). Absent follows `noise`, as one slider did
+   * both before there were two. */
+  color_noise?: number;
   /** Detail: how much of the sharpening is kept to edges, 0 (everywhere)
    * to 100 (only the steepest), so a smooth sky's grain is left as it is.
    * Lightroom's Masking. */
@@ -147,6 +151,7 @@ export const RAW_DEFAULTS: RawSettings = {
   dehaze: 0,
   sharpen: 0,
   noise: 0,
+  color_noise: 0,
   masking: 0,
   curve: true,
 };
@@ -157,7 +162,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -189,6 +194,12 @@ export function cleanSettings(x: unknown): RawSettings {
   }
   if (o.uncorrected === true) out.uncorrected = true;
   if (o.fringe === true) out.fringe = true;
+  // A preset kept before there were two follows its one slider.
+  if (typeof o.color_noise === "number" && Number.isFinite(o.color_noise)) {
+    out.color_noise = Math.min(100, Math.max(0, o.color_noise));
+  } else {
+    out.color_noise = out.noise;
+  }
   const d = o.defringe;
   if (Array.isArray(d) && d.length === 2 && d.every((v) => typeof v === "number" && Number.isFinite(v))) {
     const kept = d.map((v) => Math.min(100, Math.max(0, v))) as [number, number];
@@ -274,6 +285,7 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     white(p.settings.white, s.white) &&
     !!p.settings.uncorrected === !!s.uncorrected &&
     !!p.settings.fringe === !!s.fringe &&
+    (p.settings.color_noise ?? p.settings.noise) === (s.color_noise ?? s.noise) &&
     JSON.stringify(p.settings.defringe ?? [0, 0]) === JSON.stringify(s.defringe ?? [0, 0]) &&
     !!p.settings.curve === !!s.curve &&
     CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null)) &&
