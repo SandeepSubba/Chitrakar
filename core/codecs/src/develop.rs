@@ -1983,6 +1983,72 @@ impl RawPhoto {
         }
         Some(self.white_of([sum[1] / sum[0], 1.0, sum[1] / sum[2]]))
     }
+
+    /// The light's colour worked out from the picture, as Lightroom's
+    /// Auto white balance: kelvin and tint, `None` where too little of
+    /// it can be read.
+    ///
+    /// By grey pixels (Yang, Gao and Li, 2015): light multiplies every
+    /// colour, so in the logarithms of red, green and blue a grey surface
+    /// changes by the same amount in all three from one place to the next
+    /// whatever the light — a coloured one does not. The pixels whose
+    /// three logarithms change most alike (each one's step to its four
+    /// neighbours, against the mean of the three) are the picture's
+    /// greys; the hundredth of them that are greyest, their colours each
+    /// made the same brightness and summed, are the light. Clipped and
+    /// near-black pixels say nothing and are left out, and so are flat
+    /// ones, which change too little to be read.
+    pub fn auto_white(&self, preview: &RawPreview) -> Option<[f32; 2]> {
+        let (w, h) = (preview.width, preview.height);
+        if w < 8 || h < 8 {
+            return None;
+        }
+        let usable = |c: &[f32; 3]| c.iter().all(|&v| v > 0.003 && v < 0.95);
+        let logs: Vec<[f32; 3]> = preview
+            .cam
+            .iter()
+            .map(|c| c.map(|v| v.max(1e-6).ln()))
+            .collect();
+        let mut found: Vec<(f32, usize)> = Vec::new();
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let i = y * w + x;
+                let near = [i - 1, i + 1, i - w, i + w];
+                if !usable(&preview.cam[i]) || near.iter().any(|&j| !usable(&preview.cam[j])) {
+                    continue;
+                }
+                let step = [0, 1, 2].map(|c| {
+                    (4.0 * logs[i][c] - near.iter().map(|&j| logs[j][c]).sum::<f32>()).abs()
+                });
+                let mean = (step[0] + step[1] + step[2]) / 3.0;
+                // Too flat to read, or an edge too hard to be anything
+                // but a boundary between things.
+                if !(0.03..=3.0).contains(&mean) {
+                    continue;
+                }
+                let spread =
+                    (step.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / 3.0).sqrt();
+                found.push((spread / mean, i));
+            }
+        }
+        if found.len() < 200 {
+            return None;
+        }
+        let keep = (found.len() / 100).max(50);
+        found.select_nth_unstable_by(keep, |a, b| a.0.total_cmp(&b.0));
+        let mut light = [0f32; 3];
+        for &(_, i) in &found[..keep] {
+            let c = preview.cam[i];
+            let sum = c[0] + c[1] + c[2];
+            for k in 0..3 {
+                light[k] += c[k] / sum;
+            }
+        }
+        if light.iter().any(|v| *v <= 0.0) {
+            return None;
+        }
+        Some(self.white_of([light[1] / light[0], 1.0, light[1] / light[2]]))
+    }
 }
 
 /// Where a fringe's colours are, on the hue circle in degrees, and how
@@ -4178,6 +4244,50 @@ mod tests {
     fn px(img: &SourceImage, x: u32, y: u32) -> [u8; 3] {
         let i = ((y * img.width + x) * 4) as usize;
         [img.rgba8[i], img.rgba8[i + 1], img.rgba8[i + 2]]
+    }
+
+    #[test]
+    fn auto_white_finds_the_light_from_the_greys() {
+        // Cells of colour and of grey, each with a texture of its own,
+        // taken under a warm light (and a camera whose own balance says
+        // nothing about it).
+        let mut seed = 12345u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let cells: Vec<[f32; 3]> = (0..400)
+            .map(|_| {
+                let grey = next() < 0.35;
+                let l = 0.1 + 0.5 * next();
+                if grey {
+                    [l; 3]
+                } else {
+                    [l * (0.3 + next()), l * (0.3 + next()), l * (0.3 + next())]
+                }
+            })
+            .collect();
+        for light in [[1.0f32, 0.8, 0.45], [0.6, 0.8, 1.0], [0.9, 1.0, 0.8]] {
+            let scene = |y: usize, x: usize| {
+                let c = cells[(y / 24) * 20 + x / 24];
+                let t = 1.0 + 0.25 * ((x as f32 * 0.7).sin() * (y as f32 * 0.9).cos());
+                [0, 1, 2].map(|k| c[k] * t * light[k])
+            };
+            let photo = clipped_photo(480, 480, [1.0; 3], scene);
+            let preview = photo.preview(480);
+            let got = photo.auto_white(&preview).expect("a light found");
+            let gains = photo.gains_for(got[0], got[1]);
+            let want = [light[1] / light[0], 1.0, light[1] / light[2]];
+            for k in [0, 2] {
+                assert!(
+                    (gains[k] / want[k] - 1.0).abs() < 0.04,
+                    "under {light:?}: gains {gains:?} for {want:?} ({got:?})"
+                );
+            }
+        }
+        // A picture with nothing in it to read says nothing.
+        let flat = clipped_photo(64, 64, [1.0; 3], |_, _| [0.3, 0.2, 0.1]);
+        assert_eq!(flat.auto_white(&flat.preview(64)), None);
     }
 
     #[test]

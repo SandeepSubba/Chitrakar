@@ -14455,7 +14455,12 @@ function RawDevelopDialog({
    * the photograph. */
   const square = Math.min(Math.round(LOUPE * devicePixelRatio), info.width, info.height);
   const white = s.white ?? info.asShot;
-  const light = lightOf(s);
+  /** The light Auto found for this photograph, once asked for: worked
+   * out from the picture's greys (`auto_white`), so it is this
+   * photograph's own and not a preset's. Null where none could be read. */
+  const [autoWhite, setAutoWhite] = useState<[number, number] | null | undefined>(undefined);
+  const light =
+    autoWhite && s.white && s.white[0] === autoWhite[0] && s.white[1] === autoWhite[1] ? "Auto" : lightOf(s);
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
@@ -14737,12 +14742,27 @@ function RawDevelopDialog({
               <select
                 value={light}
                 onChange={(e) => {
+                  if (e.target.value === "Auto") {
+                    let found = autoWhite;
+                    if (found === undefined) {
+                      const json = session.raw_auto_white();
+                      found = json ? (JSON.parse(json) as [number, number]) : null;
+                      setAutoWhite(found);
+                    }
+                    if (found) setS((o) => ({ ...o, white: found }));
+                    return;
+                  }
                   const w = LIGHTS.find(([n]) => n === e.target.value)?.[1];
                   setS((o) => ({ ...o, white: w ?? (e.target.value === "Custom" ? white : undefined) }));
                 }}
                 aria-label="Light"
+                title={autoWhite === null ? "Auto found too little in this photograph to go by" : undefined}
               >
-                {LIGHTS.map(([n]) => (
+                {LIGHTS.slice(0, 1).map(([n]) => (
+                  <option key={n}>{n}</option>
+                ))}
+                <option disabled={autoWhite === null}>Auto</option>
+                {LIGHTS.slice(1).map(([n]) => (
                   <option key={n}>{n}</option>
                 ))}
                 {light === "Custom" && <option>Custom</option>}

@@ -15842,6 +15842,20 @@ assert(
     cleanPreview < fringedPreview,
     `and in the preview (${fringedPreview.toFixed(1)} to ${cleanPreview.toFixed(1)} from grey)`,
   );
+  // Auto white balance reads the light from the picture's greys: under
+  // Tungsten's balance the grey cells go blue, and Auto puts them back.
+  const lightMenu = win.locator('select[aria-label="Light"]');
+  await lightMenu.selectOption("Tungsten");
+  await page.waitForTimeout(500);
+  const tungsten = await offGrey("Developed picture");
+  await lightMenu.selectOption("Auto");
+  await page.waitForTimeout(500);
+  const auto = await offGrey("Developed picture");
+  assert(
+    tungsten > cleanPreview + 20 && auto < cleanPreview + 4,
+    `Auto finds the light (${tungsten.toFixed(1)} from grey under Tungsten, ${auto.toFixed(1)} on Auto, ${cleanPreview.toFixed(1)} as shot)`,
+  );
+  assert((await lightMenu.inputValue()) === "Auto", "and says it is Auto");
   await win.locator('button:text-is("Cancel")').click();
   await settle();
 

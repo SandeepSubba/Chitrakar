@@ -361,7 +361,8 @@ block-averaged `RawPreview` for the sliders; settings kept by name
 step (`stage_redevelop` + `commit_staged_develop`). "Remove chromatic aberration" (`RawDevelop::fringe`) measures the
 lens's colour fringes from the photograph (`core/codecs/src/fringe.rs`)
 and lays them on as a lens's own, in place of any the file gives. Defringe (`RawDevelop::defringe`, `develop::defringe`) greys
-purple and green along strong edges, after the lens's straightening. X-Trans has a
+purple and green along strong edges, after the lens's straightening. The Light menu's Auto reads the light from the picture's grey pixels
+(`RawPhoto::auto_white`, `raw_auto_white`). X-Trans has a
 demosaic of its own (`x_trans_region`, judged by the ignored
 `demosaic_against_truth`); a Fuji's RAF carries its lens's corrections,
 which `core/rawin` reads (`fuji_lens`), and a DNG its opcodes

@@ -10614,6 +10614,27 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Auto white balance** ✅ (Lightroom's Auto in the White Balance
+  menu). The Light menu had As shot, the named lights and a picker, but
+  nothing that read the light from the picture. Auto does, by grey
+  pixels (Yang, Gao and Li 2015; `RawPhoto::auto_white`): light
+  multiplies every colour, so in the logarithms of red, green and blue
+  a grey surface steps by the same amount in all three from a pixel to
+  its neighbours whatever the light; the hundredth of the preview's
+  pixels whose three steps are most alike, clipped, near-black, flat
+  and hard-edged ones left out, are its greys, and their colours (each
+  made the same brightness) summed are the light, turned into kelvin
+  and tint by the picker's own `white_of`. Measured from the camera's
+  own colours on the preview, 10–40 ms. On the 6D's still life with a
+  grey cube it found 5750 K where the camera said 4830 and the cube
+  came out grey; on a 6D shot under a strongly green light the camera's
+  balance was pink and Auto took most of it out before running out of
+  tint (−150); on the X-T5's overcast street it was within 500 K of the
+  camera. It reads "Auto" while the balance is still the one it found,
+  and is greyed out (with a reason) for a picture with too few greys to
+  go by. Tests: `auto_white_finds_the_light_from_the_greys` (warm, cool
+  and green lights over cells of colour and grey, within 4%; a flat
+  picture says nothing); smoke 9cn (Tungsten's blue taken back to grey).
   **Defringe** ✅ (Lightroom's Purple and Green amounts). Moving red
   and blue back into line takes out the fringes a lens draws by size;
   the purple it leaves along a bright edge because blue is out of focus

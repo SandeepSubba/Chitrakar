@@ -1594,6 +1594,14 @@ impl WasmSession {
         self.inner.redevelop(NodeId(id as u64), &s).map_err(to_js)
     }
 
+    /// The open raw file's light worked out from the picture, as JSON
+    /// `[kelvin, tint]`; nothing where it cannot be read.
+    pub fn raw_auto_white(&mut self) -> Option<String> {
+        self.inner
+            .raw_auto_white()
+            .and_then(|w| serde_json::to_string(&w).ok())
+    }
+
     /// Auto: the open raw file's tone worked out from it, from
     /// `settings` (JSON, whose white balance and colour are kept).
     pub fn raw_auto(&mut self, settings: &str) -> Result<String, JsError> {

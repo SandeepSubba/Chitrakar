@@ -9526,6 +9526,21 @@ impl Session {
 
     /// Settings worked out from the open raw file, as a raw developer's
     /// Auto, from `settings` (whose white balance and colour are kept).
+    /// The open raw file's light worked out from the picture (Auto
+    /// white balance): kelvin and tint, `None` where it cannot be read.
+    pub fn raw_auto_white(&mut self) -> Option<[f32; 2]> {
+        let raw = self.raw.as_mut()?;
+        if raw
+            .preview
+            .as_ref()
+            .is_none_or(|(longest, _)| *longest < 512)
+        {
+            raw.preview = Some((512, raw.photo.preview(512)));
+        }
+        let (_, preview) = raw.preview.as_ref()?;
+        raw.photo.auto_white(preview)
+    }
+
     pub fn raw_auto(&mut self, settings: &RawDevelop) -> Result<RawDevelop, EngineError> {
         let raw = self
             .raw
