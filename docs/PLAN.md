@@ -9697,6 +9697,26 @@ without reading anything else.*
        perspective distortion of pixels, and content-aware fill — the
        first three are destructive by nature and the last is a model
        this editor does not ship.
+  5. **The raw developer, against Lightroom (November 2026).** For a
+     photographer shooting an X-T5 and a 6D, the develop window and the
+     way out of it were brought up to what Lightroom's Develop module
+     and Export do day to day, each item above in this section with its
+     tests: a tone curve and one a channel, a colour mixer, colour
+     grading, Presence, Detail with masking, folding sections, batch
+     develop and export, sharpen for screen, camera data in a JPEG, a
+     long edge, dodge and burn, Remove chromatic aberration (measured
+     from the photograph), Defringe, Auto white balance, noise reduction
+     as Luminance and Colour, the window's own undo, and a watermark.
+     What is left wants material rather than work: noise reduction has
+     only been judged on low-ISO files and synthetic noise, and wants a
+     high-ISO raw from either camera to be tuned on; and the export
+     preview's report of pictures above shapes not showing could not be
+     reproduced and wants a screenshot.
+     **Where the plan stands, then.** Items 2 and 4 are done; item 1
+     waits on hardware this container has not got (a real card in the
+     shell, a browser with WebGPU), item 2's remainder on the owner's
+     accounts (a kept Android key, an Apple team), and item 3 is a
+     method, not a list — it is what to reach for next, and never done.
 - **What the view shows of the document** is one setting
   (`chitrakar_render::Showing`) rather than a growing pile of flags: the
   page, one layer on its own, or the picture before the work. Both of
@@ -11720,7 +11740,7 @@ chitrakar/
   with a mouse's speed standing in for it); the view's own gestures ✅
   (two fingers pinch to zoom and carry the page, and take the gesture
   over from the one that began it).
-- Platform file integration (Files app, Android SAF, share sheets).
+- ✅ Platform file integration (Files app, Android SAF, share sheets).
   Share sheets ✅: where the device has one, the export window has a
   Share… beside Export — the same bytes, handed to the system, which on a
   phone is where a picture goes next and Save to Files is one of its
