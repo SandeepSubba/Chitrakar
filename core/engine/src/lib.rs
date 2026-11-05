@@ -334,6 +334,10 @@ pub enum AlignTo {
     Key(NodeId),
 }
 
+/// How wide the sharpening for the screen reaches, in pixels of the
+/// picture going out.
+const OUTPUT_SHARPEN_SIGMA: f32 = 0.7;
+
 pub struct Session {
     doc: Document,
     undo: Vec<HistoryEntry>,
@@ -407,6 +411,10 @@ pub struct Session {
     lens_profiles: chitrakar_codecs::lensfun::Profiles,
     /// Developments waiting to go into the history as one step.
     staged_develop: Vec<Command>,
+    /// Sharpening laid on a picture going out (`render_scaled`), for the
+    /// screen it is shown on: what a photograph made smaller loses. Set
+    /// by the export window for its own encodes; nought otherwise.
+    output_sharpen: f32,
     /// The PNG each picture was last saved as, for the next save (and the
     /// draft kept after every edit) to write again rather than encode.
     written: std::sync::Mutex<chitrakar_codecs::WrittenPictures>,
@@ -501,6 +509,7 @@ impl Session {
             raw: None,
             lens_profiles: Default::default(),
             staged_develop: Vec::new(),
+            output_sharpen: 0.0,
             written: Default::default(),
             proof_cms: None,
             soft_proof: false,
@@ -8807,7 +8816,33 @@ impl Session {
                 ..Default::default()
             },
         )?;
+        if self.output_sharpen > 0.0 {
+            // At the size it goes out at, a pixel's width: the edges a
+            // smaller copy softened, and no halo a screen would show.
+            let original = chitrakar_render::blur::snapshot(&surface, full);
+            chitrakar_render::blur::gaussian_blur(
+                &mut surface,
+                full,
+                OUTPUT_SHARPEN_SIGMA,
+                chitrakar_render::blur::Beyond::Edge,
+            );
+            for (px, o) in surface.pixels.iter_mut().zip(original) {
+                *px = chitrakar_render::sharpened(o, *px, self.output_sharpen);
+            }
+        }
         Ok(surface)
+    }
+
+    /// Sharpen what goes out by `amount` (0 for none, about 0.3 a light
+    /// touch and 1 a strong one), as a raw developer's "sharpen for
+    /// screen" does: for the export window, which sets it for its own
+    /// encodes and puts it back to nought after.
+    pub fn set_output_sharpen(&mut self, amount: f32) {
+        self.output_sharpen = if amount.is_finite() {
+            amount.clamp(0.0, 2.0)
+        } else {
+            0.0
+        };
     }
 
     /// PNG of a region at a scale; see [`render_scaled`](Self::render_scaled).
@@ -20714,6 +20749,47 @@ mod tests {
     /// end to none at the other, a radial one from all in the middle to
     /// none at its rim; inverted, the other way round. Saved and read back
     /// as it was.
+    /// Sharpening for the screen steepens what a smaller copy softened —
+    /// an edge — leaves a flat stretch as it was, and is nothing at all
+    /// at nought, which is what every export but the window's asks.
+    #[test]
+    fn sharpening_for_the_screen_steepens_an_edge_and_nothing_else() {
+        let mut session = Session::new(80, 40, ColorMode::Rgb);
+        add_rect(&mut session, "ground", 80.0, 40.0);
+        // The left half a mid grey over the red ground.
+        let left = add_rect(&mut session, "left", 40.0, 40.0);
+        let mut kind = session.document().node(left).unwrap().kind.clone();
+        if let NodeKind::Vector { fill, .. } = &mut kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.4,
+                g: 0.4,
+                b: 0.4,
+                a: 1.0,
+            });
+        }
+        session
+            .apply(Command::SetKind {
+                id: left,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        let plain = session.render_scaled(0.5, None).unwrap();
+        session.set_output_sharpen(0.6);
+        let sharp = session.render_scaled(0.5, None).unwrap();
+        let shown = |s: &Surface, x: u32| chitrakar_color::linear_to_srgb(s.get(x, 10).r);
+        // At the edge at 20 (half of 40), the grey's last pixel goes
+        // darker against the red beside it; far from it, nothing moves.
+        let (a, b) = (shown(&plain, 19), shown(&sharp, 19));
+        assert!(b < a - 0.01, "the edge steepens: {a} -> {b}");
+        assert!(
+            (shown(&plain, 5) - shown(&sharp, 5)).abs() < 1e-4,
+            "flat stays flat"
+        );
+        session.set_output_sharpen(0.0);
+        let again = session.render_scaled(0.5, None).unwrap();
+        assert_eq!(again.pixels, plain.pixels, "and nought is nothing");
+    }
+
     /// A dodge layer changes nothing until it is painted: then it
     /// lightens where the brush went, half a stop, and nowhere else; it
     /// came as one step of history, and a burn darkens the same way.

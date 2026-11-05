@@ -125,6 +125,9 @@ export type Prefs = {
   /** Whether a JPEG goes out with how its photograph was taken (camera,
    * lens, exposure, date — never place) as its EXIF. */
   exportCameraData: boolean;
+  /** How much a picture going out is sharpened for a screen: 0 (off),
+   * 0.3, 0.6 or 1. */
+  exportSharpen: number;
   /** The develop window's sections folded away, by their headings. */
   developFolded: string[];
   /** JPEG quality, 1–100. */
@@ -219,6 +222,7 @@ export const DEFAULTS: Prefs = {
   exportScale: 1,
   exportLongEdge: 0,
   exportCameraData: true,
+  exportSharpen: 0,
   developFolded: [],
   jpegQuality: 92,
   pdfBleed: 0,
@@ -336,6 +340,7 @@ export function clamp(p: Prefs): Prefs {
     // and the window never hands it to the engine as one.
     exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
     exportCameraData: p.exportCameraData !== false,
+    exportSharpen: [0, 0.3, 0.6, 1].includes(p.exportSharpen) ? p.exportSharpen : 0,
     developFolded: Array.isArray(p.developFolded)
       ? p.developFolded.filter((t): t is string => typeof t === "string").slice(0, 32)
       : [],

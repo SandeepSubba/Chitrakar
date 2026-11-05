@@ -1004,6 +1004,12 @@ impl WasmSession {
     /// Add a layer from its JSON, held to what is picked out when
     /// something is — one entry in the history, since a region picked
     /// and a layer put over it are one wish. Returns the new id.
+    /// Sharpen what goes out for the screen (0 none, 0.3, 0.6, 1); the
+    /// export window sets it around its own encodes.
+    pub fn set_output_sharpen(&mut self, amount: f32) {
+        self.inner.set_output_sharpen(amount);
+    }
+
     /// A dodge (`lighten`) or burn layer: an exposure layer whose mask
     /// shows none of it until the brush paints it in. Its id.
     pub fn add_dodge_burn(

@@ -17526,6 +17526,9 @@ assert(
       const g = c.getContext("2d");
       g.fillStyle = "#4070a0";
       g.fillRect(0, 0, 64, 48);
+      // Mid-grey stripes: edges a sharpening has room to steepen.
+      g.fillStyle = "#909090";
+      for (let x = 0; x < 64; x += 8) g.fillRect(x, 24, 4, 24);
       return c.toDataURL("image/jpeg", 0.9).split(",")[1];
     }),
     "base64",
@@ -17591,6 +17594,21 @@ assert(
   // The shutter goes out as it came: a 250th.
   const at = carried.indexOf(Buffer.from([0x9a, 0x82, 5, 0]));
   assert(at > 0, "with a shutter speed");
+
+  // Sharpened for a screen the file is another file; off, the very file
+  // it was.
+  const writtenWith = async (sharpen) => {
+    await page.keyboard.press("Control+Shift+E");
+    await page.waitForSelector('[role=dialog][aria-label="Export"]');
+    await page.selectOption('select[aria-label="Sharpen for screen"]', sharpen);
+    await page.waitForTimeout(400);
+    return exportNow();
+  };
+  const plainFile = await writtenWith("0");
+  const sharpFile = await writtenWith("1");
+  const plainAgain = await writtenWith("0");
+  assert(!sharpFile.equals(plainFile), "sharpening for a screen makes another file");
+  assert(plainAgain.equals(plainFile), "and off, the very file it was");
 
   await page.keyboard.press("Control+Shift+E");
   await page.waitForSelector('[role=dialog][aria-label="Export"]');

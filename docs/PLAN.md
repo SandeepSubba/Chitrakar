@@ -10614,6 +10614,21 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Sharpen for screen** ✅ (Lightroom's output sharpening). A
+  photograph made smaller — 2048 across from 7728 — loses its edges'
+  crispness in the averaging, which is why raw developers sharpen what
+  goes out for the screen it goes to. The Export window offers Off,
+  Low, Standard and High for PNG, JPEG and WebP (`prefs.exportSharpen`:
+  0, 0.3, 0.6, 1); `Session::set_output_sharpen` lays the same
+  brightness-only, eased sharpening the filter uses (`sharpened`) on
+  what `render_scaled` makes, a pixel wide at the size it goes out at.
+  The window sets it around its own encodes and puts it back to nought
+  after, so no other export is touched. Saturated colours with crisp
+  edges have nothing for it to steepen — it never pushes past black or
+  white — which is why the smoke reads a striped photograph. Tests:
+  `sharpening_for_the_screen_steepens_an_edge_and_nothing_else` (and
+  nought is the identical surface); smoke 9bh2 (High another file, Off
+  the very file it was).
   **Dodge and burn** ✅. There was no way to lighten or darken a part
   of a photograph by hand short of building it: an exposure layer, a
   mask, the mask filled black, the brush. Adjust › Dodge (paint to

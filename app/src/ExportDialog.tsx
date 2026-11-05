@@ -122,6 +122,13 @@ const FORMATS: Record<
 };
 
 const SCALES = [0.5, 1, 2, 3];
+/** How much a picture going out is sharpened for a screen, by name. */
+const SHARPEN_FOR_SCREEN: [string, number][] = [
+  ["Off", 0],
+  ["Low", 0.3],
+  ["Standard", 0.6],
+  ["High", 1],
+];
 /** The set an asset pipeline wants: one press, three files, named
  * `@1x`, `@2x` and `@3x`. Kept in the preference as a scale of zero,
  * which is not a scale, and never reaches the engine as one. */
@@ -302,12 +309,22 @@ export function ExportDialog({
   /** A JPEG goes out saying how its photograph was taken — the camera,
    * the lens, the exposure, when; never where — unless asked not to. In
    * the encode, so the size shown is the size written. */
+  /** Whether the format is pixels, which sharpening for the screen is for. */
+  const pixels = format === "png" || format === "jpeg" || format === "webp";
   const encodeAt = useCallback(
     (scale: number, slice: number | null = null): Uint8Array => {
-      const bytes = encodePlain(scale, slice);
+      // Sharpened for the screen around this encode alone, and put back
+      // after, so no other export is sharpened by what this window asked.
+      session.set_output_sharpen(pixels ? prefs.exportSharpen : 0);
+      let bytes: Uint8Array;
+      try {
+        bytes = encodePlain(scale, slice);
+      } finally {
+        session.set_output_sharpen(0);
+      }
       return format === "jpeg" && prefs.exportCameraData ? session.jpeg_with_capture(bytes) : bytes;
     },
-    [encodePlain, format, prefs.exportCameraData, session],
+    [encodePlain, format, pixels, prefs.exportCameraData, prefs.exportSharpen, session],
   );
   /** The photograph's camera and lens, for the window to say what a JPEG
    * will carry; empty where the page holds no photograph that said. */
@@ -460,7 +477,7 @@ export function ExportDialog({
   // any of it puts the question back.
   useEffect(
     () => setMeasure(0),
-    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks, prefs.exportCameraData],
+    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks, prefs.exportCameraData, prefs.exportSharpen],
   );
 
   // Named for its size where a size was asked for — `-2048` — rather
@@ -757,6 +774,27 @@ export function ExportDialog({
               aria-label="Quality"
             />
             <span className="hint">{prefs.jpegQuality}</span>
+          </label>
+        )}
+
+        {/* Lightroom's "sharpen for screen": what a photograph made
+            smaller loses at its edges, given back at the size it goes
+            out at. */}
+        {pixels && (
+          <label className="row">
+            Sharpen for screen
+            <select
+              value={String(prefs.exportSharpen)}
+              onChange={(e) => setPrefs({ exportSharpen: Number(e.target.value) })}
+              aria-label="Sharpen for screen"
+              title="Sharpening for a screen, at the size the picture goes out at — what making it smaller softened"
+            >
+              {SHARPEN_FOR_SCREEN.map(([name, v]) => (
+                <option key={name} value={String(v)}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </label>
         )}
 
