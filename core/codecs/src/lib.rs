@@ -9,6 +9,7 @@ pub mod container;
 pub mod cube;
 pub mod develop;
 pub mod exif;
+pub mod fringe;
 pub mod lensfun;
 pub mod opcodes;
 pub mod pdf;

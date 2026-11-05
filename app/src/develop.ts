@@ -29,6 +29,10 @@ export type RawSettings = {
   masking: number;
   /** Leave off the lens corrections the file carries (a Fuji's RAF). */
   uncorrected?: boolean;
+  /** Take out the colour fringes of a lens nothing else corrects them
+   * for, measured from the photograph itself (Lightroom's "Remove
+   * chromatic aberration"). */
+  fringe?: boolean;
   /** The tones a camera's own pictures have, under the rest: on for a new
    * development, off for one made before there was such a curve. */
   curve?: boolean;
@@ -150,7 +154,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -181,6 +185,7 @@ export function cleanSettings(x: unknown): RawSettings {
     out.white = [Math.min(25000, Math.max(2000, w[0])), Math.min(150, Math.max(-150, w[1]))];
   }
   if (o.uncorrected === true) out.uncorrected = true;
+  if (o.fringe === true) out.fringe = true;
   if (typeof o.curve === "boolean") out.curve = o.curve;
   for (const k of CURVE_KEYS) {
     const points = cleanCurve(o[k]);
@@ -260,6 +265,7 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     keys.every((k) => p.settings[k] === s[k]) &&
     white(p.settings.white, s.white) &&
     !!p.settings.uncorrected === !!s.uncorrected &&
+    !!p.settings.fringe === !!s.fringe &&
     !!p.settings.curve === !!s.curve &&
     CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null)) &&
     JSON.stringify(p.settings.mixer ?? null) === JSON.stringify(s.mixer ?? null) &&

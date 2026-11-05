@@ -14536,7 +14536,7 @@ function RawDevelopDialog({
       return { ...o, grading: cleanGrading(g) };
     });
   const grading = s.grading ?? NO_GRADING;
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") => (
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") => (
     <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
       {/* The value can be typed as well as dragged: a slider a few
           hundred pixels long for ten stops is a twentieth of a stop a
@@ -14977,10 +14977,10 @@ function RawDevelopDialog({
             {row("Noise reduction", "noise", 0, 100, 1)}
               </>,
             )}
-            {info.lens &&
-              fold(
+            {fold(
                 "Lens",
                 <>
+                {info.lens && (
                 <label
                   className="row check"
                   title={
@@ -14999,6 +14999,22 @@ function RawDevelopDialog({
                     }}
                   />
                   {info.lensProfile ? "Corrections from lensfun" : "Corrections from the camera"}
+                </label>
+                )}
+                <label
+                  className="row check"
+                  title="The red and blue edges a lens leaves towards the corners, measured from this photograph and taken out (in place of any the corrections above give)"
+                >
+                  <input
+                    type="checkbox"
+                    aria-label="Remove chromatic aberration"
+                    checked={!!s.fringe}
+                    onChange={(e) => {
+                      const { fringe: _, ...rest } = s;
+                      setS(e.target.checked ? { ...rest, fringe: true } : rest);
+                    }}
+                  />
+                  Remove chromatic aberration
                 </label>
                 {info.lensProfile && (
                   <p className="modal-aside" aria-label="Lens profile">

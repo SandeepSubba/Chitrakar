@@ -29,11 +29,13 @@
 //! demosaic and makes a slider's drag a matter of milliseconds. Both go
 //! through [`Look::finish`], so the preview is the develop, smaller.
 
+use crate::fringe::Fringes;
 use crate::opcodes::{Frame, GainMap, Op};
 use crate::raw::{camera_to_srgb, orient, Mosaic, Sample};
 use crate::{CodecError, SourceImage};
 use chitrakar_doc::RawDevelop;
 use rayon::prelude::*;
+use std::borrow::Cow;
 
 /// The tile a colour filter's pattern is read into: twelve each way is a
 /// whole number of every pattern there is (2×2 Bayer, 6×6 X-Trans, and
@@ -103,6 +105,10 @@ pub struct RawPhoto {
     /// How it was taken, where the file said: what a lens profile is
     /// looked up by.
     pub(crate) shot: Option<crate::lensfun::Shot>,
+    /// The lens's colour fringes as the photograph shows them, measured
+    /// the first time a development asks (`RawDevelop::fringe`) and kept:
+    /// the sensor's values do not change.
+    fringes: std::sync::OnceLock<Option<Fringes>>,
 }
 
 /// A lens's corrections as the camera wrote them for one photograph (a
@@ -146,6 +152,37 @@ impl Lens {
             ]
             .iter()
             .all(|v| v.iter().all(|x| x.is_finite()))
+    }
+
+    /// Whether these corrections say how the lens fringes.
+    fn fringes(&self) -> bool {
+        self.red.iter().chain(&self.blue).any(|v| v.abs() > 1e-6)
+    }
+
+    /// `base`'s distortion and light, if there is one, with red and blue
+    /// scaled as `f` measured (whatever `base` said of them): tabled
+    /// every twentieth of the half-diagonal, a little past the corner.
+    fn with_fringes(base: Option<&Lens>, f: Fringes) -> Lens {
+        let radii: Vec<f32> = (0..=26).map(|i| i as f32 * 0.05).collect();
+        let of = |pick: fn(&Lens) -> &Vec<f32>, nought: f32, r: f32| {
+            base.map_or(nought, |b| b.at(pick(b), nought, r))
+        };
+        Lens {
+            distortion: radii
+                .iter()
+                .map(|&r| of(|l| &l.distortion, 0.0, r))
+                .collect(),
+            light: radii.iter().map(|&r| of(|l| &l.light, 100.0, r)).collect(),
+            red: radii.iter().map(|&r| Fringes::at(f.red, r)).collect(),
+            blue: radii.iter().map(|&r| Fringes::at(f.blue, r)).collect(),
+            radii,
+        }
+    }
+
+    /// Whether the light is made even anywhere (a lens measured for its
+    /// fringes alone darkens nothing).
+    fn shades(&self) -> bool {
+        self.light.iter().any(|&v| (v - 100.0).abs() > 1e-4)
     }
 
     /// One of the curves at radius `r`, straight between the radii, held
@@ -269,6 +306,27 @@ impl Lens {
         }
         Some(warp)
     }
+}
+
+/// A plane `w` by `h` softened 1-2-1 across and then down, its edges
+/// repeated.
+fn soften(v: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let mut across = vec![0f32; w * h];
+    for (row, out) in v.chunks_exact(w).zip(across.chunks_exact_mut(w)) {
+        for x in 0..w {
+            let (l, r) = (row[x.saturating_sub(1)], row[(x + 1).min(w - 1)]);
+            out[x] = 0.25 * (l + r) + 0.5 * row[x];
+        }
+    }
+    let mut out = vec![0f32; w * h];
+    for y in 0..h {
+        let (up, down) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        for x in 0..w {
+            out[y * w + x] =
+                0.25 * (across[up * w + x] + across[down * w + x]) + 0.5 * across[y * w + x];
+        }
+    }
+    out
 }
 
 /// Brighten the sites of a region (rows `y0..y1`, columns `x0..x1`, as
@@ -813,16 +871,152 @@ impl RawPhoto {
             lens: None,
             dng: None,
             shot: None,
+            fringes: std::sync::OnceLock::new(),
         };
         photo.rebuild_highlights();
         (photo.auto_gain, photo.middle) = photo.measure();
         Ok(photo)
     }
 
-    /// The lens corrections to develop with: the file's, unless the
-    /// settings leave them off or they are not worth applying.
-    fn lens_for(&self, s: &RawDevelop) -> Option<&Lens> {
-        self.lens.as_ref().filter(|l| !s.uncorrected && l.usable())
+    /// The lens corrections to develop with: the file's (or a lens
+    /// profile's), unless the settings leave them off or they are not
+    /// worth applying; and where the settings ask for the fringes to be
+    /// taken out, the fringes measured from the photograph in place of
+    /// any the file gives, with the file's other corrections. Measured
+    /// beside a Fuji's own figures on an X-T5's photographs, the measure
+    /// left the crisper edges where they differed, so it is the one the
+    /// box asks for.
+    fn lens_for(&self, s: &RawDevelop) -> Option<Cow<'_, Lens>> {
+        let file = self.lens.as_ref().filter(|l| !s.uncorrected && l.usable());
+        if s.fringe && !self.dng_warps(s) {
+            if let Some(f) = self.fringes() {
+                let lens = Lens::with_fringes(file, f);
+                if lens.warp(self.width as f32, self.height as f32).is_some() {
+                    return Some(Cow::Owned(lens));
+                }
+            }
+        }
+        file.map(Cow::Borrowed)
+    }
+
+    /// Whether the DNG's warp is to be laid on, which is a lens's
+    /// straightening of its own and may take the fringes out with it.
+    fn dng_warps(&self, s: &RawDevelop) -> bool {
+        self.dng_for(s)
+            .is_some_and(|(_, ops)| ops.iter().any(|op| matches!(op, Op::Warp { .. })))
+    }
+
+    /// The fringes the photograph shows (measured once); `None` where it
+    /// has too few edges to say, or they are too small to be worth
+    /// moving the colours for.
+    pub fn fringes(&self) -> Option<Fringes> {
+        *self.fringes.get_or_init(|| {
+            let planes = self.fringe_planes()?;
+            let f = crate::fringe::measure(&planes)?;
+            (f.most(planes.half_diagonal) >= 0.15).then_some(f)
+        })
+    }
+
+    /// The sensor read for [`crate::fringe::measure`]: each colour from
+    /// its own sites alone (so none is guessed from another, as a
+    /// demosaic does), weighted by nearness, at points every two sites
+    /// for Bayer and a raw already RGB and every three for X-Trans — all
+    /// three colours at the same points.
+    fn fringe_planes(&self) -> Option<crate::fringe::Planes> {
+        let step = if self.cpp == 3 || self.bayer { 2 } else { 3 };
+        let (w, h) = (self.width, self.height);
+        let (pw, ph) = (w / step, h / step);
+        if pw < 8 || ph < 8 {
+            return None;
+        }
+        // Weights over the sites within `reach` of a point, which falls
+        // at a block's middle (between sites for an even step).
+        let reach = step as isize + 1;
+        let sigma = 0.6 * step as f32;
+        let centre = step as f32 * 0.5;
+        let weights: Vec<(isize, isize, f32)> = (-reach..step as isize + reach)
+            .flat_map(|dy| (-reach..step as isize + reach).map(move |dx| (dy, dx)))
+            .filter_map(|(dy, dx)| {
+                let (ex, ey) = (dx as f32 + 0.5 - centre, dy as f32 + 0.5 - centre);
+                let d2 = ex * ex + ey * ey;
+                let r = reach as f32 + 0.5 * step as f32;
+                (d2 <= r * r).then(|| (dy, dx, (-d2 / (2.0 * sigma * sigma)).exp()))
+            })
+            .collect();
+        let middle = [centre - w as f32 * 0.5, centre - h as f32 * 0.5];
+        let origin = [middle; 3];
+        let rows: Vec<([Vec<f32>; 3], Vec<bool>)> = (0..ph)
+            .into_par_iter()
+            .map(|by| {
+                let mut colours = [vec![0f32; pw], vec![0f32; pw], vec![0f32; pw]];
+                let mut clipped = vec![false; pw];
+                for bx in 0..pw {
+                    let (mut sum, mut n) = ([0f32; 3], [0f32; 3]);
+                    let (y0, x0) = ((by * step) as isize, (bx * step) as isize);
+                    for &(dy, dx, wt) in &weights {
+                        let (y, x) = (y0 + dy, x0 + dx);
+                        if y < 0 || x < 0 || y >= h as isize || x >= w as isize {
+                            continue;
+                        }
+                        let (y, x) = (y as usize, x as usize);
+                        for k in 0..self.cpp {
+                            let c = if self.cpp == 3 { k } else { self.color(y, x) };
+                            let v = self.sample(y, x, k);
+                            clipped[bx] |= v >= 0.97;
+                            sum[c] += v * wt;
+                            n[c] += wt;
+                        }
+                    }
+                    for c in 0..3 {
+                        colours[c][bx] = if n[c] > 0.0 {
+                            (sum[c] / n[c]).max(0.0).sqrt()
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+                (colours, clipped)
+            })
+            .collect();
+        let mut colours = [
+            Vec::with_capacity(pw * ph),
+            Vec::with_capacity(pw * ph),
+            Vec::with_capacity(pw * ph),
+        ];
+        let mut clipped = Vec::with_capacity(pw * ph);
+        for (row, bad) in rows {
+            for (all, part) in colours.iter_mut().zip(row) {
+                all.extend(part);
+            }
+            clipped.extend(bad);
+        }
+        // Softened a little (1-2-1 each way), which steadies the slopes
+        // the measure reads and lets it see a shift of a block or more.
+        for plane in &mut colours {
+            *plane = soften(plane, pw, ph);
+        }
+        // A clipped block's neighbours are let go of with it.
+        let mut bad = clipped.clone();
+        for by in 0..ph {
+            for bx in 0..pw {
+                if clipped[by * pw + bx] {
+                    for yy in by.saturating_sub(1)..(by + 2).min(ph) {
+                        for xx in bx.saturating_sub(1)..(bx + 2).min(pw) {
+                            bad[yy * pw + xx] = true;
+                        }
+                    }
+                }
+            }
+        }
+        Some(crate::fringe::Planes {
+            width: pw,
+            height: ph,
+            block: step as f32,
+            colours,
+            bad,
+            origin,
+            half_diagonal: ((w * w + h * h) as f32).sqrt() * 0.5,
+        })
     }
 
     /// What the DNG says to do to the developed picture, unless the
@@ -1481,7 +1675,10 @@ impl RawPhoto {
         // develops it, so the picture is too.
         const BAND: usize = 128;
         let lens = self.lens_for(s);
-        let light = lens.map(Lens::light_table);
+        let light = lens
+            .as_deref()
+            .filter(|l| l.shades())
+            .map(Lens::light_table);
         let dng = self.dng_for(s);
         let presence = self.presence_for(s);
         upright
@@ -1557,17 +1754,64 @@ impl RawPhoto {
         );
         let (mw, mh) = (mx1 - mx0, my1 - my0);
         let mut px = vec![0u8; mw * mh * 4];
-        let mut sites = Vec::new();
+        let lens = self.lens_for(s);
+        // The square is not moved by the lens's distortion, which at one
+        // site a pixel is a shift of where it is taken from, not of what
+        // it shows; but its fringes are taken out — they are what a
+        // square at its own size shows — by moving red and blue as far
+        // against green as the lens has them moved at the square's middle.
+        let shifts = lens.as_deref().filter(|l| l.fringes()).map(|l| {
+            let (hw, hh) = (self.width as f32 * 0.5, self.height as f32 * 0.5);
+            let (dx, dy) = (
+                (x0 + size / 2) as f32 + 0.5 - hw,
+                (y0 + size / 2) as f32 + 0.5 - hh,
+            );
+            let r = (dx * dx + dy * dy).sqrt() / (hw * hw + hh * hh).sqrt();
+            [&l.red, &l.blue].map(|k| {
+                let k = l.at(k, 0.0, r);
+                [(dx * k).clamp(-16.0, 16.0), (dy * k).clamp(-16.0, 16.0)]
+            })
+        });
+        // Room round the region for the colours to be read from.
+        let extra = shifts.map_or(0, |sh| {
+            sh.iter().flatten().fold(0f32, |m, v| m.max(v.abs())).ceil() as usize + 1
+        });
+        let (ex0, ey0) = (mx0.saturating_sub(extra), my0.saturating_sub(extra));
+        let (ex1, ey1) = (
+            (mx1 + extra).min(self.width),
+            (my1 + extra).min(self.height),
+        );
+        let mut wide = Vec::new();
         self.region(
-            (my0, my1, mx0, mx1),
+            (ey0, ey1, ex0, ex1),
             &look.wb,
             &mut Planes::default(),
-            &mut sites,
+            &mut wide,
         );
-        // The light made even, as in the develop; the square is not moved
-        // by the lens's distortion, which at one site a pixel is a shift
-        // of where it is taken from, not of what it shows.
-        if let Some(lens) = self.lens_for(s) {
+        let ew = ex1 - ex0;
+        let mut sites = Vec::with_capacity(mw * mh);
+        for y in my0..my1 {
+            for x in mx0..mx1 {
+                let mut site = wide[(y - ey0) * ew + x - ex0];
+                if let Some(sh) = &shifts {
+                    for (c, d) in [(0, sh[0]), (2, sh[1])] {
+                        let at = |v: f32, lo: usize, hi: usize| v.clamp(lo as f32, (hi - 1) as f32);
+                        let fx = at(x as f32 + d[0], ex0, ex1) - ex0 as f32;
+                        let fy = at(y as f32 + d[1], ey0, ey1) - ey0 as f32;
+                        let (ix, iy) = (fx as usize, fy as usize);
+                        let (jx, jy) = ((ix + 1).min(ew - 1), (iy + 1).min(ey1 - ey0 - 1));
+                        let (tx, ty) = (fx - ix as f32, fy - iy as f32);
+                        let v = |yy: usize, xx: usize| wide[yy * ew + xx][c];
+                        let top = v(iy, ix) + (v(iy, jx) - v(iy, ix)) * tx;
+                        let bottom = v(jy, ix) + (v(jy, jx) - v(jy, ix)) * tx;
+                        site[c] = top + (bottom - top) * ty;
+                    }
+                }
+                sites.push(site);
+            }
+        }
+        // The light made even, as in the develop.
+        if let Some(lens) = lens.as_deref().filter(|l| l.shades()) {
             brighten(
                 &lens.light_table(),
                 &mut sites,
@@ -2041,7 +2285,7 @@ impl RawPreview {
             .collect();
         // The lens's corrections as the develop makes them, at the
         // preview's size: they are in fractions of the picture.
-        if let Some(lens) = photo.lens_for(s) {
+        if let Some(lens) = photo.lens_for(s).filter(|l| l.shades()) {
             brighten(&lens.light_table(), &mut sites, (pw, ph), (0, ph, 0, pw));
         }
         if let Some((frame, ops)) = photo.dng_for(s) {
@@ -3824,6 +4068,157 @@ mod tests {
     fn px(img: &SourceImage, x: u32, y: u32) -> [u8; 3] {
         let i = ((y * img.width + x) * 4) as usize;
         [img.rgba8[i], img.rgba8[i + 1], img.rgba8[i + 2]]
+    }
+
+    /// A Bayer photograph of soft-edged grey cells, red drawn `1 +
+    /// red` times as big as green about the middle and blue `1 + blue`:
+    /// a lens's lateral fringes.
+    fn fringed_photo(w: usize, h: usize, red: f32, blue: f32) -> RawPhoto {
+        let bayer = |y: usize, x: usize| [[0usize, 1], [1, 2]][y % 2][x % 2];
+        let scene = |x: f32, y: f32| {
+            let v = (x * 0.19).sin() * (y * 0.23 + 0.4 * (x * 0.031).sin()).sin();
+            0.08 + 0.3 * (1.0 + (3.0 * v).tanh())
+        };
+        let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
+        let data: Vec<u16> = (0..w * h)
+            .map(|i| {
+                let (y, x) = (i / w, i % w);
+                let c = bayer(y, x);
+                let grow = [1.0 + red, 1.0, 1.0 + blue][c];
+                let (dx, dy) = (x as f32 + 0.5 - hw, y as f32 + 0.5 - hh);
+                (scene(hw + dx / grow, hh + dy / grow) * 65535.0).round() as u16
+            })
+            .collect();
+        RawPhoto::from_mosaic(&Mosaic {
+            width: w,
+            height: h,
+            cpp: 1,
+            data: &data,
+            color_at: &bayer,
+            black: [0.0; 4],
+            white: [65535.0; 4],
+            wb: [1.0, 1.0, 1.0, f32::NAN],
+            xyz_to_cam: [[0.0; 3]; 4],
+            crops: [0; 4],
+            orientation: 1,
+        })
+        .unwrap()
+    }
+
+    /// How far red and blue stand from green, on average, over the
+    /// picture's outer half (where fringes are).
+    fn colour_off_grey(img: &SourceImage) -> f32 {
+        let (w, h) = (img.width as f32, img.height as f32);
+        let (mut sum, mut n) = (0f32, 0f32);
+        for y in 4..img.height - 4 {
+            for x in 4..img.width - 4 {
+                let (dx, dy) = (x as f32 - w / 2.0, y as f32 - h / 2.0);
+                if (dx * dx + dy * dy).sqrt() < 0.5 * (w * w + h * h).sqrt() / 2.0 {
+                    continue;
+                }
+                let p = px(img, x, y);
+                sum += (p[0] as f32 - p[1] as f32).abs() + (p[2] as f32 - p[1] as f32).abs();
+                n += 1.0;
+            }
+        }
+        sum / n
+    }
+
+    #[test]
+    fn a_lens_s_fringes_are_measured_from_the_photograph_and_taken_out() {
+        let photo = fringed_photo(1024, 680, 0.0015, -0.001);
+        let f = photo.fringes().expect("fringes found");
+        for (got, want, name) in [(f.red, 0.0015, "red"), (f.blue, -0.001, "blue")] {
+            for rho in [0.3f32, 0.6, 0.9] {
+                let k = Fringes::at(got, rho);
+                assert!(
+                    (k - want).abs() < 0.00025,
+                    "{name} at {rho}: {k} for {want} ({got:?})"
+                );
+            }
+        }
+        let off = photo.develop(&RawDevelop::default());
+        let on = photo.develop(&RawDevelop {
+            fringe: true,
+            ..Default::default()
+        });
+        let (before, after) = (colour_off_grey(&off), colour_off_grey(&on));
+        assert!(
+            after < before * 0.5,
+            "fringes taken out: {after} off grey from {before}"
+        );
+        // A file's own figures, here wrong, give way to the measure.
+        let mut told = photo.clone();
+        told.give_lens(Lens::with_fringes(
+            None,
+            Fringes {
+                red: [-0.002, 0.0],
+                blue: [0.002, 0.0],
+            },
+        ));
+        let wrong = colour_off_grey(&told.develop(&RawDevelop::default()));
+        let measured = colour_off_grey(&told.develop(&RawDevelop {
+            fringe: true,
+            ..Default::default()
+        }));
+        assert!(
+            measured < after * 1.1 && measured < wrong * 0.5,
+            "the measure in place of the file's: {measured} against {wrong}"
+        );
+        // The square at its own size, out near a corner, too.
+        let sq = |s: &RawDevelop| colour_off_grey(&photo.develop_square(s, 0.9, 0.85, 96));
+        let (before, after) = (
+            sq(&RawDevelop::default()),
+            sq(&RawDevelop {
+                fringe: true,
+                ..Default::default()
+            }),
+        );
+        assert!(
+            after < before * 0.5,
+            "the square's fringes taken out: {after} from {before}"
+        );
+    }
+
+    #[test]
+    fn an_x_trans_lens_s_fringes_are_measured_too() {
+        let (w, h) = (1536usize, 1020usize);
+        let (hw, hh) = (w as f32 * 0.5, h as f32 * 0.5);
+        let scene = |x: f32, y: f32| {
+            let v = (x * 0.19).sin() * (y * 0.23 + 0.4 * (x * 0.031).sin()).sin();
+            0.08 + 0.3 * (1.0 + (3.0 * v).tanh())
+        };
+        let photo = x_trans_photo(w, h, |y, x| {
+            let (dx, dy) = (x as f32 + 0.5 - hw, y as f32 + 0.5 - hh);
+            [1.0012f32, 1.0, 0.9993].map(|g| scene(hw + dx / g, hh + dy / g))
+        });
+        let f = photo.fringes().expect("fringes found");
+        for (got, want, name) in [(f.red, 0.0012, "red"), (f.blue, -0.0007, "blue")] {
+            for rho in [0.3f32, 0.6, 0.9] {
+                let k = Fringes::at(got, rho);
+                assert!(
+                    (k - want).abs() < 0.0002,
+                    "{name} at {rho}: {k} for {want} ({got:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_lens_without_fringes_is_left_alone() {
+        let photo = fringed_photo(1024, 680, 0.0, 0.0);
+        assert_eq!(photo.fringes(), None);
+        let s = RawDevelop {
+            fringe: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            photo.develop(&s).rgba8,
+            photo.develop(&RawDevelop::default()).rgba8
+        );
+        // Nor anything measured from a picture with no edges.
+        let flat = fringed_photo(64, 48, 0.002, 0.002);
+        assert_eq!(flat.fringes(), None);
     }
 
     #[test]

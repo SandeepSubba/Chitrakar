@@ -10614,6 +10614,45 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Remove chromatic aberration** ✅ (Lightroom's box of the same
+  name). A Canon's CR2 carries no lens corrections, and without
+  lensfun's database added nothing took its colour fringes out; the
+  develop window's Lens section was not even shown. It is shown for
+  every raw file now, with a box that measures the fringes from the
+  photograph itself (`core/codecs/src/fringe.rs`,
+  `RawPhoto::fringes`, `RawDevelop::fringe`): each colour read from
+  its own sites only, every two sites (three for X-Trans), so no
+  demosaic has borrowed one colour's edges for another; in tiles where
+  red (or blue) has the same edges as green, the shift that lays it on
+  green by least squares over the slopes, kept along the line from the
+  middle; and those shifts against how far out each tile is fitted as a
+  scale `k₀ + k₁ρ²`, the tiles that disagree left out, measured again
+  from the colour moved until it stops moving. Clipped blocks and their
+  neighbours are not read (a fringe there is bloom, not the lens). It
+  is laid on as a lens's own fringes are, so the develop's warp, the
+  preview and the 1:1 square all take it; the square now takes any
+  lens's fringes, Fuji's included, by moving red and blue as far as the
+  lens has them at its middle (it showed them uncorrected before).
+  Measured once a photograph (0.4–0.8 s natively over 24 to 40
+  megapixels), nothing where it has too few edges or the fringes are
+  under a sixth of a pixel. Where the file or a profile gives fringes
+  of its own, the measure takes their place and their distortion and
+  vignette stay: on the X-T5's crane and solar panels Fuji's figures
+  left purple and green edges our development does not lose and the
+  measure did not; on the 70-300's whiskers the two were alike. Off by
+  default, so a Fuji develops as before. Tried and taken back: moving
+  red and blue on the sensor before the demosaic, on the idea that the
+  X-Trans demosaic hides part of a fringe — a synthetic X-Trans
+  photograph with no fringe at all has as much colour at its edges as
+  the corrected one, so there was nothing to win, and it came out a
+  little worse. Tests: `a_lens_s_fringes_are_measured_from_the_photograph_and_taken_out`
+  (within 0.00025 of what was drawn, the colour at edges halved in the
+  develop and the square, a file's wrong figures replaced),
+  `an_x_trans_lens_s_fringes_are_measured_too`,
+  `a_lens_without_fringes_is_left_alone`; smoke 9cn (a DNG drawn with
+  fringes: offered off for a file without a lens, the square 13 to 5
+  from grey). `core/rawin/examples/fringes.rs` puts the three
+  corrections side by side on real files.
   **Develop and export raws, a shoot at a time** ✅ (a raw developer's
   batch export). File › Develop and export raws… takes many raw files
   at once and asks five things — develop with the plain development or

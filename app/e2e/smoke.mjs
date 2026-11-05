@@ -15794,6 +15794,57 @@ assert(
   await win.locator('button:text-is("Cancel")').click();
   await settle();
 
+  // A lens's colour fringes are measured from the photograph and taken
+  // out, whatever the file carries: here red is drawn 0.4% bigger than
+  // green and blue 0.4% smaller, so each soft edge towards the corners
+  // wears red on one side and blue on the other.
+  const fringed = dng(512, 340, [0.8, 1.0, 0.6], (x, y) => {
+    const cell = (cx, cy) => {
+      const v = Math.sin(cx * 0.19) * Math.sin(cy * 0.23 + 0.4 * Math.sin(cx * 0.031));
+      return 0.08 + 0.3 * (1 + Math.tanh(3 * v));
+    };
+    const [dx, dy] = [x + 0.5 - 256, y + 0.5 - 170];
+    return [1.004, 1, 0.996].map((g) => cell(256 + dx / g, 170 + dy / g));
+  });
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "fringed.dng", mimeType: "", buffer: fringed });
+  await win.waitFor();
+  await settle();
+  const fringeBox = win.locator('input[aria-label="Remove chromatic aberration"]');
+  assert((await fringeBox.count()) === 1 && !(await fringeBox.isChecked()), "a file without a lens still offers the fringes' removal, off");
+  // How far from grey the outer half of a canvas is, on average.
+  const offGrey = (label) =>
+    win.locator(`canvas[aria-label="${label}"]`).evaluate((c, outer) => {
+      const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+      const half = Math.hypot(c.width, c.height) / 2;
+      let [sum, n] = [0, 0];
+      for (let y = 2; y < c.height - 2; y++)
+        for (let x = 2; x < c.width - 2; x++) {
+          if (outer && Math.hypot(x - c.width / 2, y - c.height / 2) < half / 2) continue;
+          const i = (y * c.width + x) * 4;
+          sum += Math.abs(d[i] - d[i + 1]) + Math.abs(d[i + 2] - d[i + 1]);
+          n++;
+        }
+      return sum / n;
+    }, label === "Developed picture");
+  // The square at its own size is taken near a corner.
+  const picture = await win.locator('canvas[aria-label="Developed picture"]').boundingBox();
+  await page.mouse.click(picture.x + picture.width * 0.92, picture.y + picture.height * 0.12);
+  await settle();
+  const [fringedPreview, fringedSquare] = [await offGrey("Developed picture"), await offGrey("At its own size")];
+  await fringeBox.check();
+  await page.waitForTimeout(800);
+  const [cleanPreview, cleanSquare] = [await offGrey("Developed picture"), await offGrey("At its own size")];
+  assert(
+    cleanSquare < fringedSquare * 0.6,
+    `the fringes taken out at the photograph's own size (${fringedSquare.toFixed(1)} to ${cleanSquare.toFixed(1)} from grey)`,
+  );
+  assert(
+    cleanPreview < fringedPreview,
+    `and in the preview (${fringedPreview.toFixed(1)} to ${cleanPreview.toFixed(1)} from grey)`,
+  );
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+
   // A Canon's raw file carries no corrections but names its lens, and
   // lensfun's profile for it — added in Preferences › Camera raw, since
   // the database cannot be shipped — puts them right. The DNG here names

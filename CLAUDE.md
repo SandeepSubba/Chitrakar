@@ -358,7 +358,9 @@ Detail (sharpening with Lightroom's masking, noise reduction, judged in a 1:1 sq
 `develop_square`) — with a
 block-averaged `RawPreview` for the sliders; settings kept by name
 (`prefs.developPresets`) and given to other picked raw layers as one
-step (`stage_redevelop` + `commit_staged_develop`). X-Trans has a
+step (`stage_redevelop` + `commit_staged_develop`). "Remove chromatic aberration" (`RawDevelop::fringe`) measures the
+lens's colour fringes from the photograph (`core/codecs/src/fringe.rs`)
+and lays them on as a lens's own, in place of any the file gives. X-Trans has a
 demosaic of its own (`x_trans_region`, judged by the ignored
 `demosaic_against_truth`); a Fuji's RAF carries its lens's corrections,
 which `core/rawin` reads (`fuji_lens`), and a DNG its opcodes

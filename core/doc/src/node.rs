@@ -732,6 +732,14 @@ pub struct RawDevelop {
     /// them), which are otherwise applied.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub uncorrected: bool,
+    /// Take a lens's colour fringes out as the photograph shows them:
+    /// red's and blue's size against green measured from its own edges
+    /// (`core/codecs/src/fringe.rs`), as Lightroom's "Remove chromatic
+    /// aberration" does — in place of any fringes the file or a lens
+    /// profile gives, with their distortion and vignette kept. Nothing
+    /// for a DNG whose own warp is laid on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub fringe: bool,
     /// The tones a camera's own pictures have, laid under the settings
     /// above: deeper shadows and a soft roll into white about the
     /// photograph's own middle (`develop::base_curve`). Off for a picture
