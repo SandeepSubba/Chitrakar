@@ -304,7 +304,9 @@ browser's decoder (`app/src/picture.ts`); `Set` writes @1x, @2x and
 @3x in one press, and a Long edge in pixels (`prefs.exportLongEdge`)
 sizes a photograph for elsewhere; a JPEG carries the photograph's
 camera data as EXIF (`Resource::capture`, read from a camera's JPEG
-or a raw file, `core/codecs/src/exif.rs`; never GPS); `prefs.exportSetups` keeps a window's answers by name
+or a raw file, `core/codecs/src/exif.rs`; never GPS); File › Develop and export raws… (`BatchDialog.tsx`) does a
+shoot at a time, each raw on an engine of its own;
+`prefs.exportSetups` keeps a window's answers by name
 as chips above the formats; the area "Each kept region" writes a file per
 region the document keeps by name (`Session::kept_region_png` reads one
 where it is kept, so exporting moves neither the selection nor history). Above four megapixels it waits to be asked. Two exports

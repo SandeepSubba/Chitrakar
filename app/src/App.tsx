@@ -51,10 +51,18 @@ import {
   type CommandId,
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
+import { BatchDialog, type BatchFile } from "./BatchDialog";
 import { enginePicture } from "./picture";
 import { pdfReader, unpackPage } from "./pdf";
 import { readRaw } from "./raw";
-import { importKind, OPEN_ACCEPT, PLACE_ACCEPT, PLACE_EXTENSIONS, unreadable } from "./imports";
+import {
+  importKind,
+  OPEN_ACCEPT,
+  PLACE_ACCEPT,
+  PLACE_EXTENSIONS,
+  RAW_EXTENSIONS,
+  unreadable,
+} from "./imports";
 import {
   drawHistogram,
   histogram,
@@ -1661,6 +1669,9 @@ export function App() {
   );
   const openInputRef = useRef<HTMLInputElement>(null);
   const placeInputRef = useRef<HTMLInputElement>(null);
+  /** Raw files chosen to be developed and exported together. */
+  const batchInputRef = useRef<HTMLInputElement>(null);
+  const [batch, setBatch] = useState<BatchFile[] | null>(null);
   const iccInputRef = useRef<HTMLInputElement>(null);
   /** The `.cube` picker, and where what it reads goes: a new layer over
    * everything, one only on the picked layer, or the picked lookup's own
@@ -9543,6 +9554,9 @@ export function App() {
         // — and still no way to ask for JPEG at 80, or a PNG at half
         // size. That is a dialog's job, and it is one now.
         item("export", "export", "Export…", () => setExportOpen(true), hint("export-window")),
+        // A shoot out in one go: raw files developed with one setting
+        // and written as JPEGs, none of them opened on the page.
+        item("batch-export", "export", "Develop and export raws…", () => pick(batchInputRef)),
         // Kept beside it because it is the one people press without
         // looking: the whole page, as it is, right now.
         // Photoshop's Quick Export as PNG.
@@ -10411,6 +10425,25 @@ export function App() {
           hidden
         />
         <input
+          ref={batchInputRef}
+          type="file"
+          multiple
+          accept={RAW_EXTENSIONS.map((e) => `.${e}`).join(",")}
+          onChange={async (e) => {
+            const chosen = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            const raws = chosen.filter((f) => importKind(f.name) === "raw");
+            if (raws.length === 0) return;
+            setBatch(
+              await Promise.all(
+                raws.map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) })),
+              ),
+            );
+          }}
+          aria-label="Raw files to develop and export"
+          hidden
+        />
+        <input
           ref={iccInputRef}
           type="file"
           accept=".icc,.icm"
@@ -10756,6 +10789,16 @@ export function App() {
           }
           onCancel={cancelDevelop}
           onDone={finishDevelop}
+        />
+      )}
+      {batch && (
+        <BatchDialog
+          files={batch}
+          presets={prefs.developPresets}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          write={(files) => writeFiles("Export", files, docPath)}
+          onClose={() => setBatch(null)}
         />
       )}
       {pdfAsk && (

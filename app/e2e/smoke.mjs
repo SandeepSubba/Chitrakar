@@ -15866,6 +15866,48 @@ assert(
   assert((await win.locator('input[aria-label="Lens corrections"]').count()) === 0, "forgotten, nothing offered");
   await win.locator('button:text-is("Cancel")').click();
   await settle();
+
+  // A shoot out in one go: two raw files developed with one setting and
+  // written as JPEGs at a long edge, neither opened on the page.
+  const layersBefore = (await layerNames()).length;
+  await page.setInputFiles('input[aria-label="Raw files to develop and export"]', [
+    { name: "card-1.dng", mimeType: "image/x-adobe-dng", buffer: card },
+    { name: "card-2.dng", mimeType: "image/x-adobe-dng", buffer: card },
+  ]);
+  const batchWin = page.locator('[role="dialog"][aria-label="Batch export"]');
+  await batchWin.waitFor();
+  assert((await batchWin.textContent()).includes("2 photographs"), "the window says how many");
+  await batchWin.locator('input[aria-label="Batch long edge"]').fill("32");
+  const downloads = [];
+  const onDownload = (d) => downloads.push(d);
+  page.on("download", onDownload);
+  await batchWin.locator('button:text-is("Export 2")').click();
+  await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Batch export"]'), null, { timeout: 60000 });
+  await page.waitForTimeout(500);
+  page.off("download", onDownload);
+  const names = downloads.map((d) => d.suggestedFilename()).sort();
+  assert(names.join() === "card-1-32.jpg,card-2-32.jpg", `a JPEG each, named for its long edge (${names})`);
+  // The size a JPEG says it is, in its frame header.
+  const jpegSize = (b) => {
+    for (let i = 2; i + 9 < b.length; ) {
+      if (b[i] !== 0xff) return null;
+      const m = b[i + 1];
+      if (m >= 0xc0 && m <= 0xc3) return [b.readUInt16BE(i + 7), b.readUInt16BE(i + 5)];
+      i += 2 + b.readUInt16BE(i + 2);
+    }
+    return null;
+  };
+  const first = await readFile(await downloads[0].path());
+  assert(jpegSize(first)?.join("x") === "32x16", `at the long edge asked (${jpegSize(first)})`);
+  assert((await layerNames()).length === layersBefore, "and the page's document is as it was");
+  // Back to full size for whoever exports next: the long edge is the
+  // export window's too.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.locator('input[aria-label="Long edge"]').fill("");
+  // The field keeps its keys to itself, Escape included.
+  await page.click('[role=dialog][aria-label="Export"] .modal-actions button:text-is("Cancel")');
+  await page.waitForTimeout(150);
 }
 
 // 9co. A Photoshop file with layers goes out of the Export window: each

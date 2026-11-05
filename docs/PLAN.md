@@ -10614,6 +10614,23 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Develop and export raws, a shoot at a time** ✅ (a raw developer's
+  batch export). File › Develop and export raws… takes many raw files
+  at once and asks five things — develop with the plain development or
+  a kept setting, a long edge, the JPEG's quality, sharpening for a
+  screen, camera data — then develops each and writes it as a JPEG
+  without opening any of them on the page (`app/src/BatchDialog.tsx`,
+  `developToJpeg`). Each is developed on an engine of its own (a
+  `WasmSession` made and freed per file; the threaded develop worker
+  where the page is isolated), so the document is untouched and a
+  forty-megapixel photograph's pixels are let go of before the next is
+  read; the JPEGs are written together — downloads in a browser, one
+  folder in the shell. Never made bigger than it is; named for its
+  long edge (`DSCF0021-2048.jpg`); a file that will not develop is said
+  by name and the rest still go; "Stop after this one". The long edge,
+  quality, sharpening and camera data are the Export window's own
+  preferences. Smoke 9cn (two DNGs out as `-32.jpg`, 32 × 16, the
+  document as it was).
   **Sharpen for screen** ✅ (Lightroom's output sharpening). A
   photograph made smaller — 2048 across from 7728 — loses its edges'
   crispness in the averaging, which is why raw developers sharpen what

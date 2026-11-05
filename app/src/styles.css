@@ -4414,3 +4414,11 @@ button.fold:hover {
   font-size: 0.9em;
   white-space: nowrap;
 }
+
+/* Develop and export raws: a short column of the export's own answers. */
+.modal.batch {
+  width: min(30rem, 92vw);
+}
+.modal.batch .row input[type="number"] {
+  width: 7em;
+}
