@@ -10614,6 +10614,19 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Dodge and burn** ✅. There was no way to lighten or darken a part
+  of a photograph by hand short of building it: an exposure layer, a
+  mask, the mask filled black, the brush. Adjust › Dodge (paint to
+  lighten) and Burn (paint to darken), and the panel's + Adjust list,
+  add it in one step (`Session::add_dodge_burn`): an exposure layer
+  half a stop up or down wearing a painted mask that starts showing
+  none of it — one eraser stroke past every corner — picked, with the
+  brush in hand. The brush paints the light (or the shade) in where it
+  goes, the eraser takes it back, the stops and the layer's opacity
+  say how much; non-destructive, as everything here is. Tests:
+  `a_dodge_layer_lightens_only_where_it_is_painted` (nothing until
+  painted, half a stop where painted, nothing elsewhere, the layer one
+  step, a burn darker); smoke 9o1.
   **The develop window, folded and legible** ✅ (looked at with the
   X-T5's RAF open in the built app). Its eight sections — white
   balance, tone, presence, colour mixer, colour grading, tone curve,

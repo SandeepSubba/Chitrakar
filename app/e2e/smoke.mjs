@@ -7600,6 +7600,64 @@ assert(
   );
 }
 
+// 9o1. Dodge and burn: a layer to paint the light into. Added, it
+// changes nothing and puts the brush in hand; a stroke lightens where it
+// went and nowhere else; undo takes the stroke, then the layer.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.keyboard.press("Escape");
+  await setColor("Fill colour", "#606060");
+  await pickTool("Rect");
+  await page.mouse.move(...at(0, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 300), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const left0 = (await canvasPixel(100, 150))[0];
+  const right0 = (await canvasPixel(320, 150))[0];
+
+  await page.selectOption('[aria-label="Add adjustment layer"]', "dodge");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Dodge" }).count()) === 1,
+    "a Dodge layer is added",
+  );
+  assert(
+    await page.locator('input[aria-label="Paint width"]').isVisible(),
+    "with the brush in hand",
+  );
+  assert(
+    Math.abs((await canvasPixel(100, 150))[0] - left0) < 2,
+    "and unpainted it changes nothing",
+  );
+  await page.mouse.move(...at(60, 150));
+  await page.mouse.down();
+  await page.mouse.move(...at(140, 150), { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(350);
+  const left1 = (await canvasPixel(100, 150))[0];
+  assert(left1 > left0 + 10, `the stroke lightens where it went (${left0} -> ${left1})`);
+  assert(
+    Math.abs((await canvasPixel(320, 150))[0] - right0) < 2,
+    "and nowhere else",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    Math.abs((await canvasPixel(100, 150))[0] - left0) < 2,
+    "one undo takes the stroke",
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert(
+    (await page.locator(".panel ul li", { hasText: "Dodge" }).count()) === 0,
+    "and the next the layer",
+  );
+  await pickTool("Move");
+}
+
 // 9o2. Posterize and threshold: a picture held to a few flat steps, or
 // to two. The steps are even as the screen shows them, and a threshold
 // is read from brightness as the eye has it — pure blue, bright to a

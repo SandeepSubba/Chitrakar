@@ -1227,6 +1227,7 @@ const PRESET_FAMILIES: Record<"Adjustment" | "Filter", string[][]> = {
     ["exposure", "brightness-contrast", "levels", "curves", "shadows-highlights"],
     ["hue-saturation", "vibrance", "white-balance", "colour-balance", "photo-filter", "channel-mixer", "black-and-white", "lookup"],
     ["gradient-map", "colour-bands", "invert", "posterize", "threshold"],
+    ["dodge", "burn"],
   ],
   Filter: [
     ["blur", "surface", "motion", "radial"],
@@ -6013,6 +6014,23 @@ export function App() {
       lookupInputRef.current?.click();
       return;
     }
+    // Dodge and burn are a layer and a brush: an exposure layer whose
+    // mask shows nothing yet, picked, with the brush in hand to paint
+    // the light (or the shade) in where it goes. Over everything below,
+    // which is where a photograph is dodged.
+    if (key === "dodge" || key === "burn") {
+      if (!session) return;
+      try {
+        const id = session.add_dodge_burn(session.root_id, topLevelCount(layers), key === "dodge") as NodeId;
+        setSelected(id);
+        setMultiSel([]);
+        setTool("Paint");
+        refresh(session);
+      } catch (err) {
+        alert(`Adjust: ${err}`);
+      }
+      return;
+    }
     const preset = ADJUSTMENT_PRESETS[key];
     if (preset) putAdjustment(only, preset.name, preset.kind);
   };
@@ -9392,8 +9410,15 @@ export function App() {
         Object.entries(ADJUSTMENT_PRESETS).filter(([, p]) => presetIs(p.kind, what)),
       ),
       // A colour lookup is a file to choose rather than numbers to start
-      // from, so it is a row of its own among the colour adjustments.
-      ...(what === "Adjustment" ? { lookup: { name: "Colour lookup…" } } : {}),
+      // from, so it is a row of its own among the colour adjustments;
+      // dodge and burn are layers to paint, rows of their own too.
+      ...(what === "Adjustment"
+        ? {
+            lookup: { name: "Colour lookup…" },
+            dodge: { name: "Dodge (paint to lighten)" },
+            burn: { name: "Burn (paint to darken)" },
+          }
+        : {}),
     };
     // In families, a line between each, as Photoshop's and Affinity's
     // menus have them: eighteen rows in one run, every one with the
@@ -9406,11 +9431,14 @@ export function App() {
       ...families.map((f) => f.filter((key) => key in presets)),
       Object.keys(presets).filter((key) => !named.has(key)),
     ].filter((g) => g.length > 0);
-    const rows = (make: (key: string, name: string) => MenuEntry) =>
-      groups.flatMap((g, i) => [
-        ...(i > 0 ? [SEP] : []),
-        ...g.map((key) => make(key, presets[key].name)),
-      ]);
+    const rows = (make: (key: string, name: string) => MenuEntry, skip: string[] = []) =>
+      groups
+        .map((g) => g.filter((key) => !skip.includes(key)))
+        .filter((g) => g.length > 0)
+        .flatMap((g, i) => [
+          ...(i > 0 ? [SEP] : []),
+          ...g.map((key) => make(key, presets[key].name)),
+        ]);
     const over = rows((key, name) => item(`${what}-${key}`, icon, name, () => addAdjustment(key)));
     // The same list again, scoped to the picked layer — which the
     // engine does by grouping the two, a group being what isolates.
@@ -9426,8 +9454,12 @@ export function App() {
               `${what}-only`,
               icon,
               `Only on ${selectedLayer.name}`,
-              rows((key, name) =>
-                item(`${what}-only-${key}`, icon, name, () => addAdjustment(`only:${key}`)),
+              // Dodge and burn paint over everything below; a layer of
+              // its own has nothing for them to do.
+              rows(
+                (key, name) =>
+                  item(`${what}-only-${key}`, icon, name, () => addAdjustment(`only:${key}`)),
+                ["dodge", "burn"],
               ),
             ),
           ]
@@ -12668,6 +12700,8 @@ export function App() {
                   </option>
                 ))}
                 <option value="lookup">Colour lookup…</option>
+                <option value="dodge">Dodge (paint to lighten)</option>
+                <option value="burn">Burn (paint to darken)</option>
               </optgroup>
               {selectedLayer &&
                 selectedLayer.kind !== "adjustment" &&

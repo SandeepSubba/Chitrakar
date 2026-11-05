@@ -3472,6 +3472,60 @@ impl Session {
         }
     }
 
+    /// Dodge or burn, as a photographer does it without touching the
+    /// photograph: an exposure layer half a stop up (`lighten`) or down,
+    /// wearing a painted mask that starts showing none of it — one
+    /// eraser stroke over the whole page — so the brush paints the light
+    /// in (or the shade) exactly where it goes, the eraser takes it back,
+    /// and the stops and the layer's opacity say how much. One step of
+    /// history; its id.
+    pub fn add_dodge_burn(
+        &mut self,
+        parent: NodeId,
+        index: usize,
+        lighten: bool,
+    ) -> Result<NodeId, EngineError> {
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        let mut node = Node::adjustment(
+            if lighten { "Dodge" } else { "Burn" },
+            chitrakar_doc::Adjustment::Exposure {
+                stops: if lighten { 0.5 } else { -0.5 },
+            },
+        );
+        node.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Painted {
+                strokes: vec![chitrakar_doc::PaintStroke {
+                    points: vec![[w * 0.5, h * 0.5]],
+                    // Past every corner, with room for the page to grow.
+                    radii: vec![(w * w + h * h).sqrt() * 2.0],
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    softness: 0.0,
+                    erase: true,
+                    source: [0.0, 0.0],
+                    heal: false,
+                    clip: None,
+                }],
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        let id = self.doc.peek_next_id();
+        self.apply_labeled(
+            Command::AddNode {
+                parent,
+                index,
+                node: Box::new(node),
+            },
+            Some(if lighten { "Dodge layer" } else { "Burn layer" }.into()),
+        )?;
+        Ok(id)
+    }
+
     /// A small square picture of one layer on its own, for a panel that
     /// shows what a layer holds rather than only what it is called.
     /// RGBA8, `size * size * 4` bytes — empty when the layer has no
@@ -20660,6 +20714,59 @@ mod tests {
     /// end to none at the other, a radial one from all in the middle to
     /// none at its rim; inverted, the other way round. Saved and read back
     /// as it was.
+    /// A dodge layer changes nothing until it is painted: then it
+    /// lightens where the brush went, half a stop, and nowhere else; it
+    /// came as one step of history, and a burn darkens the same way.
+    #[test]
+    fn a_dodge_layer_lightens_only_where_it_is_painted() {
+        let mut session = Session::new(80, 60, ColorMode::Rgb);
+        add_rect(&mut session, "ground", 80.0, 60.0);
+        let before = chitrakar_render::render(session.document()).unwrap();
+        let root = session.document().root();
+        let id = session.add_dodge_burn(root, 1, true).unwrap();
+        let unpainted = chitrakar_render::render(session.document()).unwrap();
+        for (a, b) in before.pixels.iter().zip(&unpainted.pixels) {
+            assert!((a.r - b.r).abs() < 1e-6, "unpainted, nothing moves");
+        }
+        // A stroke on its mask, at the left.
+        let white = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        };
+        session
+            .paint_begin(id, 15.0, 30.0, 8.0, white.clone(), 0.0, false, true)
+            .unwrap();
+        session.commit_preview();
+        let painted = chitrakar_render::render(session.document()).unwrap();
+        let (was, now) = (before.get(15, 30), painted.get(15, 30));
+        assert!(
+            (now.r / was.r - 2f32.powf(0.5)).abs() < 0.02,
+            "half a stop where the brush went: {} -> {}",
+            was.r,
+            now.r
+        );
+        assert!(
+            (painted.get(60, 30).r - before.get(60, 30).r).abs() < 1e-6,
+            "and nowhere else"
+        );
+        // Two steps: the layer, then the stroke.
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(
+            session.document().node(id).is_err(),
+            "the layer was one step"
+        );
+        let burn = session.add_dodge_burn(root, 1, false).unwrap();
+        session
+            .paint_begin(burn, 15.0, 30.0, 8.0, white, 0.0, false, true)
+            .unwrap();
+        session.commit_preview();
+        let darker = chitrakar_render::render(session.document()).unwrap();
+        assert!(darker.get(15, 30).r < before.get(15, 30).r * 0.75);
+    }
+
     /// A camera's JPEG placed says how it was taken, the page keeps it
     /// (through a save as well), and a JPEG exported from the page says
     /// it again — the camera, the lens, the exposure and when.

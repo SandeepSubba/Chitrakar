@@ -1004,6 +1004,20 @@ impl WasmSession {
     /// Add a layer from its JSON, held to what is picked out when
     /// something is — one entry in the history, since a region picked
     /// and a layer put over it are one wish. Returns the new id.
+    /// A dodge (`lighten`) or burn layer: an exposure layer whose mask
+    /// shows none of it until the brush paints it in. Its id.
+    pub fn add_dodge_burn(
+        &mut self,
+        parent: f64,
+        index: usize,
+        lighten: bool,
+    ) -> Result<f64, JsError> {
+        self.inner
+            .add_dodge_burn(NodeId(parent as u64), index, lighten)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     pub fn add_over_selection(
         &mut self,
         parent: f64,
