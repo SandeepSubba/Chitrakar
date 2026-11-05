@@ -4422,3 +4422,14 @@ button.fold:hover {
 .modal.batch .row input[type="number"] {
   width: 7em;
 }
+
+/* The watermark's row: its words take what room there is. */
+.row.watermark {
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+.row.watermark input[type="text"] {
+  flex: 1;
+  min-width: 8em;
+}

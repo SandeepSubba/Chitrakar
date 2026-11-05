@@ -17799,6 +17799,47 @@ assert(
   assert(!sharpFile.equals(plainFile), "sharpening for a screen makes another file");
   assert(plainAgain.equals(plainFile), "and off, the very file it was");
 
+  // A watermark: typed, it is on, and goes out in its corner and nowhere
+  // else; off again, the file is the very file it was.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.fill('input[aria-label="Watermark text"]', "© A. Photographer");
+  assert(await page.locator('input[aria-label="Watermark"]').isChecked(), "a watermark typed is a watermark on");
+  await page.waitForTimeout(400);
+  const markedFile = await exportNow();
+  const quarters = await page.evaluate(
+    async ([a, b]) => {
+      const read = async (b64) => {
+        const bmp = await createImageBitmap(new Blob([Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))]));
+        const c = new OffscreenCanvas(bmp.width, bmp.height);
+        const g = c.getContext("2d");
+        g.drawImage(bmp, 0, 0);
+        return g.getImageData(0, 0, bmp.width, bmp.height);
+      };
+      const [p, q] = [await read(a), await read(b)];
+      const moved = (x0, y0, x1, y1) => {
+        let n = 0;
+        for (let y = Math.floor(y0 * p.height); y < y1 * p.height; y++)
+          for (let x = Math.floor(x0 * p.width); x < x1 * p.width; x++) {
+            const i = (y * p.width + x) * 4;
+            if (Math.abs(p.data[i] - q.data[i]) + Math.abs(p.data[i + 1] - q.data[i + 1]) > 40) n++;
+          }
+        return n;
+      };
+      return { corner: moved(0.5, 0.75, 1, 1), away: moved(0, 0, 0.5, 0.5) };
+    },
+    [plainFile.toString("base64"), markedFile.toString("base64")],
+  );
+  assert(
+    quarters.corner > 40 && quarters.away === 0,
+    `the watermark is in the bottom right and nowhere else (${quarters.corner} pixels there, ${quarters.away} elsewhere)`,
+  );
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.locator('input[aria-label="Watermark"]').uncheck();
+  await page.waitForTimeout(400);
+  assert((await exportNow()).equals(plainFile), "and off, the very file it was");
+
   await page.keyboard.press("Control+Shift+E");
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
   await box.uncheck();

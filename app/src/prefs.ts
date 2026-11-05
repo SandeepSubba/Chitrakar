@@ -128,6 +128,9 @@ export type Prefs = {
   /** How much a picture going out is sharpened for a screen: 0 (off),
    * 0.3, 0.6 or 1. */
   exportSharpen: number;
+  /** A line laid on pictures going out (the Export window's PNG, JPEG
+   * and WebP, and batch export): a photographer's name in a corner. */
+  exportWatermark: Watermark;
   /** The develop window's sections folded away, by their headings. */
   developFolded: string[];
   /** JPEG quality, 1–100. */
@@ -223,6 +226,7 @@ export const DEFAULTS: Prefs = {
   exportLongEdge: 0,
   exportCameraData: true,
   exportSharpen: 0,
+  exportWatermark: { on: false, text: "", size: 0.03, corner: "bottom-right", dark: false, opacity: 0.7 },
   developFolded: [],
   jpegQuality: 92,
   pdfBleed: 0,
@@ -341,6 +345,7 @@ export function clamp(p: Prefs): Prefs {
     exportScale: p.exportScale === 0 ? 0 : n(p.exportScale, 0.05, 16, 1),
     exportCameraData: p.exportCameraData !== false,
     exportSharpen: [0, 0.3, 0.6, 1].includes(p.exportSharpen) ? p.exportSharpen : 0,
+    exportWatermark: cleanWatermark(p.exportWatermark),
     developFolded: Array.isArray(p.developFolded)
       ? p.developFolded.filter((t): t is string => typeof t === "string").slice(0, 32)
       : [],
@@ -512,4 +517,40 @@ export function usePrefs() {
   );
   const reset = useCallback(() => setAll({ ...DEFAULTS }), []);
   return { prefs, set, reset };
+}
+
+/** Where a watermark can stand. */
+export const WATERMARK_CORNERS = ["bottom-right", "bottom-left", "top-right", "top-left", "middle"] as const;
+
+/** A line laid on pictures going out. `size` is its height against the
+ * picture's shorter side, so it reads the same at any size. */
+export type Watermark = {
+  on: boolean;
+  text: string;
+  size: number;
+  corner: (typeof WATERMARK_CORNERS)[number];
+  dark: boolean;
+  opacity: number;
+};
+
+/** A watermark read from somewhere that might say anything. */
+export function cleanWatermark(x: unknown): Watermark {
+  const o = (x && typeof x === "object" ? x : {}) as Record<string, unknown>;
+  const num = (v: unknown, lo: number, hi: number, d: number) =>
+    typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : d;
+  return {
+    on: o.on === true,
+    text: typeof o.text === "string" ? o.text.slice(0, 200) : "",
+    size: num(o.size, 0.01, 0.2, 0.03),
+    corner: WATERMARK_CORNERS.includes(o.corner as Watermark["corner"]) ? (o.corner as Watermark["corner"]) : "bottom-right",
+    dark: o.dark === true,
+    opacity: num(o.opacity, 0.05, 1, 0.7),
+  };
+}
+
+/** What the engine is handed for `set_output_watermark`: the line, or
+ * nothing when it is off or says nothing. */
+export function watermarkJson(w: Watermark): string {
+  if (!w.on || !w.text.trim()) return "";
+  return JSON.stringify({ text: w.text, size: w.size, corner: w.corner, dark: w.dark, opacity: w.opacity });
 }

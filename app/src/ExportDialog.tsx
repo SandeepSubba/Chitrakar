@@ -30,7 +30,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
-import type { ExportArea, ExportFormat, ExportSetup, Prefs } from "./prefs";
+import { watermarkJson, type ExportArea, type ExportFormat, type ExportSetup, type Prefs } from "./prefs";
+import { WatermarkRow } from "./WatermarkRow";
 import type { Outgoing } from "./files";
 
 /** What each format is called, what it writes, and what it can do.
@@ -316,15 +317,17 @@ export function ExportDialog({
       // Sharpened for the screen around this encode alone, and put back
       // after, so no other export is sharpened by what this window asked.
       session.set_output_sharpen(pixels ? prefs.exportSharpen : 0);
+      session.set_output_watermark(pixels ? watermarkJson(prefs.exportWatermark) : "");
       let bytes: Uint8Array;
       try {
         bytes = encodePlain(scale, slice);
       } finally {
         session.set_output_sharpen(0);
+        session.set_output_watermark("");
       }
       return format === "jpeg" && prefs.exportCameraData ? session.jpeg_with_capture(bytes) : bytes;
     },
-    [encodePlain, format, pixels, prefs.exportCameraData, prefs.exportSharpen, session],
+    [encodePlain, format, pixels, prefs.exportCameraData, prefs.exportSharpen, prefs.exportWatermark, session],
   );
   /** The photograph's camera and lens, for the window to say what a JPEG
    * will carry; empty where the page holds no photograph that said. */
@@ -477,7 +480,7 @@ export function ExportDialog({
   // any of it puts the question back.
   useEffect(
     () => setMeasure(0),
-    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks, prefs.exportCameraData, prefs.exportSharpen],
+    [format, area, scale, prefs.jpegQuality, prefs.pdfBleed, prefs.pdfCropMarks, prefs.exportCameraData, prefs.exportSharpen, prefs.exportWatermark],
   );
 
   // Named for its size where a size was asked for — `-2048` — rather
@@ -796,6 +799,10 @@ export function ExportDialog({
               ))}
             </select>
           </label>
+        )}
+
+        {pixels && (
+          <WatermarkRow mark={prefs.exportWatermark} onChange={(exportWatermark) => setPrefs({ exportWatermark })} />
         )}
 
         {format === "jpeg" && cameraSummary && (

@@ -1010,6 +1010,14 @@ impl WasmSession {
         self.inner.set_output_sharpen(amount);
     }
 
+    /// A line laid on what goes out, as JSON (`{text, size, corner,
+    /// opacity, dark}`); empty, or anything unreadable, for none. The
+    /// export windows set it around their own encodes.
+    pub fn set_output_watermark(&mut self, json: &str) {
+        self.inner
+            .set_output_watermark(serde_json::from_str::<crate::Watermark>(json).ok());
+    }
+
     /// A dodge (`lighten`) or burn layer: an exposure layer whose mask
     /// shows none of it until the brush paints it in. Its id.
     pub fn add_dodge_burn(

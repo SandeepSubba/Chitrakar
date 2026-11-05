@@ -10614,6 +10614,26 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **A watermark on what goes out** ✅. Nothing put a photographer's
+  name on an export short of a text layer added by hand to every
+  picture, and batch export could not at all. The Export window (PNG,
+  JPEG, WebP) and Develop and export raws… both have a Watermark row
+  now (`WatermarkRow.tsx`, `prefs.exportWatermark`): the words (typing
+  them turns it on), where it stands — a corner or the middle — Small,
+  Medium or Large (its height 2, 3 or 5% of the picture's shorter side,
+  so it is the same share at any size it goes out at), and white or
+  black. The engine lays it on as the picture goes out
+  (`Session::set_output_watermark`, `Watermark::lay_on` in
+  `render_scaled`, after the sharpening): the line set in the bundled
+  face as a one-layer document of its own, at 70%, with a soft shadow
+  of the other colour so white reads over a white wall and black over
+  a sky, laid over the export. The windows set it around their own
+  encodes and take it off after, as with the sharpening, so nothing
+  else is marked and the document never holds it. Tests:
+  `a_watermark_goes_out_in_its_corner_and_not_into_the_document` (in
+  its corner and nowhere else, half as wide at half the size, no layer
+  added, none with no words); smoke 9bh2 (typed is on, the bottom right
+  and only it changed, off the very file it was).
   **Undo in the develop window** ✅. The window had no history: a
   slider pushed too far came back by Reset or by remembering the
   number. Worse, the editor's own Ctrl+Z listens on the whole window

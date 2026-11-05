@@ -334,6 +334,108 @@ pub enum AlignTo {
     Key(NodeId),
 }
 
+/// A photographer's line laid on a picture as it goes out: the text, in
+/// the bundled face, its height a fraction of the picture's shorter side
+/// (so it reads the same at any size it is exported at), in a corner or
+/// the middle, white or black, at an opacity, with a soft shadow of the
+/// other colour so it reads over anything.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct Watermark {
+    pub text: String,
+    /// The line's height against the shorter side, 0.01 to 0.2.
+    pub size: f32,
+    /// "top-left", "top-right", "bottom-left", "bottom-right" or "middle".
+    pub corner: String,
+    pub opacity: f32,
+    /// Black text with a light shadow, rather than white with a dark one.
+    pub dark: bool,
+}
+
+impl Default for Watermark {
+    fn default() -> Self {
+        Watermark {
+            text: String::new(),
+            size: 0.03,
+            corner: "bottom-right".into(),
+            opacity: 0.7,
+            dark: false,
+        }
+    }
+}
+
+impl Watermark {
+    /// Draw the line over `surface`, at the size the surface is.
+    fn lay_on(&self, surface: &mut Surface) -> Result<(), EngineError> {
+        let (w, h) = (surface.width, surface.height);
+        let short = w.min(h) as f32;
+        let size = (short * self.size.clamp(0.01, 0.2)).max(6.0);
+        let ink = if self.dark { 0.0 } else { 1.0 };
+        let mut spec = chitrakar_doc::TextSpec::new(
+            self.text.trim(),
+            size,
+            chitrakar_color::AuthoredColor::Srgb {
+                r: ink,
+                g: ink,
+                b: ink,
+                a: 1.0,
+            },
+        );
+        spec.width = 0.0;
+        let [x0, y0, x1, y1] = chitrakar_render::text::bounds(&spec);
+        let margin = size * 0.8;
+        let (tw, th) = (x1 - x0, y1 - y0);
+        let (left, top) = match self.corner.as_str() {
+            "top-left" => (margin, margin),
+            "top-right" => (w as f32 - margin - tw, margin),
+            "bottom-left" => (margin, h as f32 - margin - th),
+            "middle" => ((w as f32 - tw) * 0.5, (h as f32 - th) * 0.5),
+            _ => (w as f32 - margin - tw, h as f32 - margin - th),
+        };
+        let mut node = chitrakar_doc::Node::text("watermark", spec);
+        node.transform.e = left - x0;
+        node.transform.f = top - y0;
+        node.opacity = self.opacity.clamp(0.0, 1.0);
+        let shade = 1.0 - ink;
+        node.effects.push(chitrakar_doc::Effect::DropShadow {
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: shade,
+                g: shade,
+                b: shade,
+                a: 1.0,
+            },
+            opacity: 0.6,
+            dx: 0.0,
+            dy: size * 0.04,
+            blur: size * 0.12,
+            spread: 0.0,
+        });
+        let mut doc = Document::new(w, h, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })?;
+        let mut mark = Surface::new(w, h);
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        chitrakar_render::render_region_at(&doc, &mut mark, full, Transform::default())?;
+        for (px, m) in surface.pixels.iter_mut().zip(&mark.pixels) {
+            let keep = 1.0 - m.a;
+            px.r = m.r + px.r * keep;
+            px.g = m.g + px.g * keep;
+            px.b = m.b + px.b * keep;
+            px.a = m.a + px.a * keep;
+        }
+        Ok(())
+    }
+}
+
 /// How wide the sharpening for the screen reaches, in pixels of the
 /// picture going out.
 const OUTPUT_SHARPEN_SIGMA: f32 = 0.7;
@@ -415,6 +517,10 @@ pub struct Session {
     /// screen it is shown on: what a photograph made smaller loses. Set
     /// by the export window for its own encodes; nought otherwise.
     output_sharpen: f32,
+    /// A line of text laid on a picture going out (`render_scaled`): a
+    /// photographer's name in a corner. Set by the export windows for
+    /// their own encodes, as the sharpening is; never in the document.
+    output_watermark: Option<Watermark>,
     /// The PNG each picture was last saved as, for the next save (and the
     /// draft kept after every edit) to write again rather than encode.
     written: std::sync::Mutex<chitrakar_codecs::WrittenPictures>,
@@ -510,6 +616,7 @@ impl Session {
             lens_profiles: Default::default(),
             staged_develop: Vec::new(),
             output_sharpen: 0.0,
+            output_watermark: None,
             written: Default::default(),
             proof_cms: None,
             soft_proof: false,
@@ -8830,7 +8937,17 @@ impl Session {
                 *px = chitrakar_render::sharpened(o, *px, self.output_sharpen);
             }
         }
+        if let Some(mark) = &self.output_watermark {
+            mark.lay_on(&mut surface)?;
+        }
         Ok(surface)
+    }
+
+    /// Lay `mark` on what goes out, or nothing (`None`, or no text): for
+    /// the export windows, which set it for their own encodes and take
+    /// it off after, as with the sharpening.
+    pub fn set_output_watermark(&mut self, mark: Option<Watermark>) {
+        self.output_watermark = mark.filter(|m| !m.text.trim().is_empty());
     }
 
     /// Sharpen what goes out by `amount` (0 for none, about 0.3 a light
@@ -20803,6 +20920,86 @@ mod tests {
         session.set_output_sharpen(0.0);
         let again = session.render_scaled(0.5, None).unwrap();
         assert_eq!(again.pixels, plain.pixels, "and nought is nothing");
+    }
+
+    /// A watermark is drawn in its corner of what goes out and nowhere
+    /// else, the same share of the picture at any size it goes out at,
+    /// and not into the document; taken off, the export is as it was.
+    #[test]
+    fn a_watermark_goes_out_in_its_corner_and_not_into_the_document() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        add_rect(&mut session, "ground", 400.0, 300.0);
+        let layers = session
+            .document()
+            .children_of(session.document().root())
+            .unwrap()
+            .len();
+        let plain = session.render_scaled(1.0, None).unwrap();
+        session.set_output_watermark(Some(Watermark {
+            text: "© A. Photographer".into(),
+            size: 0.05,
+            ..Default::default()
+        }));
+        let marked = session.render_scaled(1.0, None).unwrap();
+        let changed = |a: &Surface, b: &Surface, x0: u32, y0: u32, x1: u32, y1: u32| {
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let (p, q) = (a.get(x, y), b.get(x, y));
+                    (p.r - q.r).abs() + (p.g - q.g).abs() + (p.b - q.b).abs() > 0.02
+                })
+                .count()
+        };
+        let (w, h) = (plain.width, plain.height);
+        assert!(
+            changed(&plain, &marked, w / 2, h * 3 / 4, w, h) > 100,
+            "the line is in the bottom right"
+        );
+        assert_eq!(
+            changed(&plain, &marked, 0, 0, w / 2, h / 2),
+            0,
+            "and nothing else is touched"
+        );
+        // Out at half the size, the line is the same share of it: its
+        // box half as wide.
+        let half = session.render_scaled(0.5, None).unwrap();
+        session.set_output_watermark(None);
+        let half_plain = session.render_scaled(0.5, None).unwrap();
+        let span = |a: &Surface, b: &Surface| {
+            let xs: Vec<u32> = (0..a.height)
+                .flat_map(|y| (0..a.width).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let (p, q) = (a.get(x, y), b.get(x, y));
+                    (p.r - q.r).abs() + (p.g - q.g).abs() + (p.b - q.b).abs() > 0.1
+                })
+                .map(|(x, _)| x)
+                .collect();
+            (xs.iter().max().unwrap() - xs.iter().min().unwrap()) as f32
+        };
+        let (big, small) = (span(&plain, &marked), span(&half_plain, &half));
+        assert!(
+            (small / big - 0.5).abs() < 0.05,
+            "half as wide at half the size: {small} of {big}"
+        );
+        assert_eq!(
+            session
+                .document()
+                .children_of(session.document().root())
+                .unwrap()
+                .len(),
+            layers,
+            "nothing in the document"
+        );
+        assert_eq!(
+            session.render_scaled(1.0, None).unwrap().pixels,
+            plain.pixels
+        );
+        // No text is no watermark.
+        session.set_output_watermark(Some(Watermark::default()));
+        assert_eq!(
+            session.render_scaled(1.0, None).unwrap().pixels,
+            plain.pixels
+        );
     }
 
     /// A dodge layer changes nothing until it is painted: then it

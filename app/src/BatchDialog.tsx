@@ -18,7 +18,8 @@ import { WasmSession } from "./engine";
 import type { Outgoing } from "./files";
 import { developElsewhere } from "./developer";
 import { giveLensProfiles, lensProfileTexts } from "./lensProfiles";
-import type { Prefs } from "./prefs";
+import { watermarkJson, type Prefs } from "./prefs";
+import { WatermarkRow } from "./WatermarkRow";
 import { readRaw } from "./raw";
 
 /** A file chosen, as read. */
@@ -37,7 +38,7 @@ const SHARPEN: [string, number][] = [
 export async function developToJpeg(
   file: BatchFile,
   settings: string,
-  opts: { longEdge: number; quality: number; sharpen: number; cameraData: boolean },
+  opts: { longEdge: number; quality: number; sharpen: number; cameraData: boolean; watermark: string },
 ): Promise<Outgoing> {
   const packed = await readRaw(file.bytes);
   const temp = new WasmSession(1, 1, false);
@@ -53,6 +54,7 @@ export async function developToJpeg(
     const long = Math.max(temp.width, temp.height, 1);
     const scale = opts.longEdge > 0 ? Math.min(1, opts.longEdge / long) : 1;
     temp.set_output_sharpen(opts.sharpen);
+    temp.set_output_watermark(opts.watermark);
     let bytes = temp.export_jpeg_at(scale, 0, 0, 0, 0, opts.quality);
     if (opts.cameraData) bytes = temp.jpeg_with_capture(bytes);
     const base = file.name.replace(/\.[^.]+$/, "");
@@ -92,6 +94,7 @@ export function BatchDialog({
       quality: prefs.jpegQuality,
       sharpen: prefs.exportSharpen,
       cameraData: prefs.exportCameraData,
+      watermark: watermarkJson(prefs.exportWatermark),
     };
     stop.current = false;
     const done: Outgoing[] = [];
@@ -182,6 +185,11 @@ export function BatchDialog({
             ))}
           </select>
         </label>
+        <WatermarkRow
+          mark={prefs.exportWatermark}
+          onChange={(exportWatermark) => setPrefs({ exportWatermark })}
+          disabled={!!running}
+        />
         <label className="row check">
           <input
             type="checkbox"

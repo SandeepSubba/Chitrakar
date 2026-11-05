@@ -305,7 +305,10 @@ browser's decoder (`app/src/picture.ts`); `Set` writes @1x, @2x and
 sizes a photograph for elsewhere; a JPEG carries the photograph's
 camera data as EXIF (`Resource::capture`, read from a camera's JPEG
 or a raw file, `core/codecs/src/exif.rs`; never GPS); File › Develop and export raws… (`BatchDialog.tsx`) does a
-shoot at a time, each raw on an engine of its own;
+shoot at a time, each raw on an engine of its own; both lay on a
+watermark when asked (`prefs.exportWatermark`, `WatermarkRow.tsx`,
+`Session::set_output_watermark`, laid on in `render_scaled` and never
+put in the document);
 `prefs.exportSetups` keeps a window's answers by name
 as chips above the formats; the area "Each kept region" writes a file per
 region the document keeps by name (`Session::kept_region_png` reads one
