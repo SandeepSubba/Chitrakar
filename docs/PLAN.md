@@ -10614,6 +10614,25 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Defringe** ✅ (Lightroom's Purple and Green amounts). Moving red
+  and blue back into line takes out the fringes a lens draws by size;
+  the purple it leaves along a bright edge because blue is out of focus
+  (and the green on the other side of focus) is in the right place and
+  only the wrong colour, which no moving lines up — the X-T5's crane
+  kept its purple struts after the measure. Two sliders under the Lens
+  section (`RawDevelop::defringe`, `develop::defringe`): where a pixel
+  sits within two pixels of a steep step in brightness (the brightest
+  less the darkest there, counted from fifteen levels and fully from
+  sixty) and its hue is near a fringe's (purple 285° and green 115°,
+  whole over the middle half of their ranges, eased out over the rest),
+  its colour goes towards a grey as bright as it was, so the edge keeps
+  its shape. A purple thing away from an edge keeps its colour, and so
+  does a blue sky. Laid on after the lens's straightening (what that
+  lines up is no fringe), in the develop, the preview (a pixel's reach)
+  and the 1:1 square. On the crane the struts came out their own dark
+  brown. Tests: `defringe_greys_a_purple_edge_and_leaves_a_purple_thing_alone`;
+  smoke 9cn (grey stripes edged with purple, 23 to 9 from grey);
+  `develop.test.mjs` (held to 0–100, none kept when nought).
   **Remove chromatic aberration** ✅ (Lightroom's box of the same
   name). A Canon's CR2 carries no lens corrections, and without
   lensfun's database added nothing took its colour fringes out; the

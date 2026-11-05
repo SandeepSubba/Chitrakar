@@ -1715,6 +1715,10 @@ impl RawPhoto {
         let geometry = self.straighten(s, w, h);
         let (width, height, rgba8) =
             orient_through(upright, w, h, self.orientation, geometry.as_ref());
+        // After the lens's straightening: what it moves back into line
+        // is not a fringe to take the colour out of.
+        let rgba8 =
+            defringe(&rgba8, width, height, s.defringe[0], s.defringe[1], 2).unwrap_or(rgba8);
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -1837,6 +1841,7 @@ impl RawPhoto {
             out.copy_from_slice(&[c[0], c[1], c[2], 255]);
         }
         let px = detail(&px, mw, mh, s.sharpen, s.noise, s.masking).unwrap_or(px);
+        let px = defringe(&px, mw, mh, s.defringe[0], s.defringe[1], 2).unwrap_or(px);
         let mut square = Vec::with_capacity(size * size * 4);
         for y in (y0 - my0)..(y0 - my0 + size) {
             let from = (y * mw + (x0 - mx0)) * 4;
@@ -1978,6 +1983,109 @@ impl RawPhoto {
         }
         Some(self.white_of([sum[1] / sum[0], 1.0, sum[1] / sum[2]]))
     }
+}
+
+/// Where a fringe's colours are, on the hue circle in degrees, and how
+/// far either side of that they still count: purple — the blue-violet
+/// to magenta a lens leaves along a bright edge, out of focus in blue —
+/// and green, its partner on the near side of focus.
+const PURPLE_FRINGE: (f32, f32) = (285.0, 50.0);
+const GREEN_FRINGE: (f32, f32) = (115.0, 40.0);
+
+/// Defringe, as Lightroom's: the colour taken out of what is purple (or
+/// green) where it sits on a strong edge, so the purple a lens draws
+/// along a branch against the sky goes grey while a purple flower's
+/// middle keeps its colour. `purple` and `green` run nought to 100.
+///
+/// An edge is a steep step in brightness within `reach` pixels (the
+/// brightest less the darkest there, counting fully from sixty levels
+/// and not at all below fifteen); a pixel's part in a fringe is how near
+/// its hue is to the fringe's, eased to nothing at the range's ends; and
+/// the colour goes by the slider times both, towards a grey as bright
+/// as the pixel was, so the edge keeps its shape. `None` when both are
+/// nought.
+pub fn defringe(
+    rgba: &[u8],
+    w: usize,
+    h: usize,
+    purple: f32,
+    green: f32,
+    reach: usize,
+) -> Option<Vec<u8>> {
+    let amount = |v: f32| {
+        if v.is_finite() {
+            v.clamp(0.0, 100.0) / 100.0
+        } else {
+            0.0
+        }
+    };
+    let (purple, green) = (amount(purple), amount(green));
+    if (purple == 0.0 && green == 0.0) || w == 0 || h == 0 || rgba.len() < w * h * 4 {
+        return None;
+    }
+    let luma = |p: &[u8]| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+    let y: Vec<f32> = rgba[..w * h * 4].chunks_exact(4).map(luma).collect();
+    // The brightest less the darkest within `reach`, across then down.
+    let span = |pick: fn(f32, f32) -> f32| {
+        let mut across = vec![0f32; w * h];
+        across
+            .par_chunks_mut(w)
+            .zip(y.par_chunks(w))
+            .for_each(|(out, row)| {
+                for x in 0..w {
+                    let (a, b) = (x.saturating_sub(reach), (x + reach + 1).min(w));
+                    out[x] = row[a..b].iter().copied().reduce(pick).unwrap_or(row[x]);
+                }
+            });
+        let mut out = vec![0f32; w * h];
+        out.par_chunks_mut(w).enumerate().for_each(|(yy, o)| {
+            let (a, b) = (yy.saturating_sub(reach), (yy + reach + 1).min(h));
+            for x in 0..w {
+                o[x] = (a..b)
+                    .map(|r| across[r * w + x])
+                    .reduce(pick)
+                    .unwrap_or(0.0);
+            }
+        });
+        out
+    };
+    let (high, low) = (span(f32::max), span(f32::min));
+    let near = |hue: f32, (centre, half): (f32, f32)| {
+        let d = ((hue - centre + 540.0) % 360.0 - 180.0).abs();
+        // Whole over the middle half of the range, eased out over the rest.
+        let t = ((half - d) / (half * 0.5)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let mut out = rgba[..w * h * 4].to_vec();
+    out.par_chunks_mut(4).enumerate().for_each(|(i, p)| {
+        let edge = ((high[i] - low[i] - 15.0) / 45.0).clamp(0.0, 1.0);
+        if edge == 0.0 {
+            return;
+        }
+        let [r, g, b] = [p[0] as f32, p[1] as f32, p[2] as f32];
+        let (most, least) = (r.max(g).max(b), r.min(g).min(b));
+        let chroma = most - least;
+        if chroma < 1.0 {
+            return;
+        }
+        let hue = if most == r {
+            60.0 * ((g - b) / chroma).rem_euclid(6.0)
+        } else if most == g {
+            60.0 * ((b - r) / chroma + 2.0)
+        } else {
+            60.0 * ((r - g) / chroma + 4.0)
+        };
+        let k = edge * (purple * near(hue, PURPLE_FRINGE) + green * near(hue, GREEN_FRINGE));
+        if k <= 0.0 {
+            return;
+        }
+        let grey = y[i];
+        for c in p.iter_mut().take(3) {
+            let v = *c as f32;
+            *c = (v + (grey - v) * k.min(1.0)).round().clamp(0.0, 255.0) as u8;
+        }
+    });
+    Some(out)
 }
 
 /// Sharpening and noise reduction on a developed picture: what a raw
@@ -2263,6 +2371,8 @@ impl RawPreview {
         let geometry = photo.straighten(s, pw, ph);
         let (width, height, rgba8) =
             orient_through(upright, pw, ph, photo.orientation, geometry.as_ref());
+        let rgba8 =
+            defringe(&rgba8, width, height, s.defringe[0], s.defringe[1], 1).unwrap_or(rgba8);
         SourceImage {
             width: width as u32,
             height: height as u32,
@@ -4068,6 +4178,54 @@ mod tests {
     fn px(img: &SourceImage, x: u32, y: u32) -> [u8; 3] {
         let i = ((y * img.width + x) * 4) as usize;
         [img.rgba8[i], img.rgba8[i + 1], img.rgba8[i + 2]]
+    }
+
+    #[test]
+    fn defringe_greys_a_purple_edge_and_leaves_a_purple_thing_alone() {
+        // Pale sky, a dark strut down the middle wearing a purple line
+        // along each side, a green line along one, and a purple patch in
+        // the sky's corner with no edge near it.
+        let (w, h) = (40usize, 30usize);
+        let mut img = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let p = match x {
+                    18..=21 => [30, 30, 34],
+                    17 | 22 => [120, 60, 170],
+                    16 => [90, 170, 80],
+                    _ if x < 8 && y < 8 => [140, 100, 175],
+                    _ => [190, 200, 215],
+                };
+                img[(y * w + x) * 4..][..4].copy_from_slice(&[p[0], p[1], p[2], 255]);
+            }
+        }
+        let at = |v: &[u8], x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            [v[i], v[i + 1], v[i + 2]]
+        };
+        let colour = |p: [u8; 3]| p.iter().max().unwrap() - p.iter().min().unwrap();
+        assert_eq!(defringe(&img, w, h, 0.0, 0.0, 2), None);
+        let out = defringe(&img, w, h, 100.0, 0.0, 2).unwrap();
+        for x in [17, 22] {
+            assert!(
+                colour(at(&out, x, 15)) <= 4,
+                "the purple at {x} goes grey: {:?}",
+                at(&out, x, 15)
+            );
+        }
+        assert_eq!(at(&out, 16, 15), at(&img, 16, 15), "green is not purple");
+        assert_eq!(
+            at(&out, 3, 3),
+            at(&img, 3, 3),
+            "a purple thing away from an edge keeps its colour"
+        );
+        assert_eq!(at(&out, 30, 15), at(&img, 30, 15), "the sky is the sky");
+        // Green's own slider takes the green line.
+        let both = defringe(&img, w, h, 100.0, 100.0, 2).unwrap();
+        assert!(colour(at(&both, 16, 15)) <= 4, "{:?}", at(&both, 16, 15));
+        // Brightness stays: the edge keeps its shape.
+        let l = |p: [u8; 3]| 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+        assert!((l(at(&out, 17, 15)) - l(at(&img, 17, 15))).abs() < 2.0);
     }
 
     /// A Bayer photograph of soft-edged grey cells, red drawn `1 +

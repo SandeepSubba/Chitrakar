@@ -14536,8 +14536,9 @@ function RawDevelopDialog({
       return { ...o, grading: cleanGrading(g) };
     });
   const grading = s.grading ?? NO_GRADING;
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") => (
-    <label key={k} onDoubleClick={() => set(k, 0)} title="Double-click to put it back">
+  /** A slider with its number beside it, for any value of the settings. */
+  const slider = (label: string, value: number, put: (v: number) => void, min: number, max: number, step: number, unit = "") => (
+    <label key={label} onDoubleClick={() => put(0)} title="Double-click to put it back">
       {/* The value can be typed as well as dragged: a slider a few
           hundred pixels long for ten stops is a twentieth of a stop a
           pixel, and a hand wants an exact number sometimes. */}
@@ -14550,10 +14551,10 @@ function RawDevelopDialog({
             min={min}
             max={max}
             step={step}
-            value={Math.round(s[k] * 100) / 100}
+            value={Math.round(value * 100) / 100}
             onChange={(e) => {
               const v = Number(e.target.value);
-              if (Number.isFinite(v)) set(k, Math.min(max, Math.max(min, v)));
+              if (Number.isFinite(v)) put(Math.min(max, Math.max(min, v)));
             }}
             onKeyDown={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
@@ -14567,12 +14568,30 @@ function RawDevelopDialog({
         min={min}
         max={max}
         step={step}
-        value={s[k]}
-        onChange={(e) => set(k, Number(e.target.value))}
+        value={value}
+        onChange={(e) => put(Number(e.target.value))}
         aria-label={label}
       />
     </label>
   );
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") =>
+    slider(label, s[k], (v) => set(k, v), min, max, step, unit);
+  /** Defringe's purple (0) or green (1), kept only while it asks for something. */
+  const fringeRow = (label: string, i: 0 | 1) =>
+    slider(
+      label,
+      s.defringe?.[i] ?? 0,
+      (v) =>
+        setS((o) => {
+          const d: [number, number] = [...(o.defringe ?? [0, 0])] as [number, number];
+          d[i] = v;
+          const { defringe: _, ...rest } = o;
+          return d[0] === 0 && d[1] === 0 ? rest : { ...rest, defringe: d };
+        }),
+      0,
+      100,
+      1,
+    );
   const pick = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const c = e.currentTarget;
     const r = c.getBoundingClientRect();
@@ -15016,6 +15035,8 @@ function RawDevelopDialog({
                   />
                   Remove chromatic aberration
                 </label>
+                {fringeRow("Purple fringe", 0)}
+                {fringeRow("Green fringe", 1)}
                 {info.lensProfile && (
                   <p className="modal-aside" aria-label="Lens profile">
                     {info.lensProfile}

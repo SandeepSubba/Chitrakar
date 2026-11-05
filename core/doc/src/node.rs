@@ -740,6 +740,11 @@ pub struct RawDevelop {
     /// for a DNG whose own warp is laid on.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub fringe: bool,
+    /// Defringe: how much of the colour is taken out of purple, and of
+    /// green, where it sits on a strong edge (nought to 100 each) — the
+    /// fringes a lens leaves that no moving of the colours lines up.
+    #[serde(skip_serializing_if = "untouched_defringe")]
+    pub defringe: [f32; 2],
     /// The tones a camera's own pictures have, laid under the settings
     /// above: deeper shadows and a soft roll into white about the
     /// photograph's own middle (`develop::base_curve`). Off for a picture
@@ -768,6 +773,10 @@ pub struct RawDevelop {
     /// highlights, and one for everything, as Lightroom has it.
     #[serde(skip_serializing_if = "Grading::untouched")]
     pub grading: Grading,
+}
+
+fn untouched_defringe(d: &[f32; 2]) -> bool {
+    *d == [0.0, 0.0]
 }
 
 /// Colour grading in the develop window. Each zone is `[hue, saturation,

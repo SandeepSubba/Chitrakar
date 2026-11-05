@@ -1,7 +1,8 @@
 //! Measure each raw file's colour fringes (`RawPhoto::fringes`) and,
 //! at the spots `SPOTS` names (fractions across and down, `x,y;x,y`),
-//! write the photograph at its own size three ways side by side and
-//! enlarged: no corrections, the file's own, and the fringes measured.
+//! write the photograph at its own size four ways side by side and
+//! enlarged: no corrections, the file's own, the fringes measured, and
+//! those with Defringe (purple 70, green 30) on top.
 //! `ONLY=1` measures and writes nothing. A thumbnail goes beside them,
 //! to find the edges by.
 //! `cargo run --release -p chitrakar-raw-in --example fringes -- FILE... OUTDIR`
@@ -60,6 +61,13 @@ fn main() {
                 uncorrected: true,
                 fringe: true,
                 curve: true,
+                ..Default::default()
+            },
+            RawDevelop {
+                uncorrected: true,
+                fringe: true,
+                curve: true,
+                defringe: [70.0, 30.0],
                 ..Default::default()
             },
         ];

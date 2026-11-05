@@ -33,6 +33,9 @@ export type RawSettings = {
    * for, measured from the photograph itself (Lightroom's "Remove
    * chromatic aberration"). */
   fringe?: boolean;
+  /** Defringe: the colour taken out of purple, and of green, along strong
+   * edges, nought to 100 each. Absent is none. */
+  defringe?: [number, number];
   /** The tones a camera's own pictures have, under the rest: on for a new
    * development, off for one made before there was such a curve. */
   curve?: boolean;
@@ -154,7 +157,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],
@@ -186,6 +189,11 @@ export function cleanSettings(x: unknown): RawSettings {
   }
   if (o.uncorrected === true) out.uncorrected = true;
   if (o.fringe === true) out.fringe = true;
+  const d = o.defringe;
+  if (Array.isArray(d) && d.length === 2 && d.every((v) => typeof v === "number" && Number.isFinite(v))) {
+    const kept = d.map((v) => Math.min(100, Math.max(0, v))) as [number, number];
+    if (kept[0] > 0 || kept[1] > 0) out.defringe = kept;
+  }
   if (typeof o.curve === "boolean") out.curve = o.curve;
   for (const k of CURVE_KEYS) {
     const points = cleanCurve(o[k]);
@@ -266,6 +274,7 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     white(p.settings.white, s.white) &&
     !!p.settings.uncorrected === !!s.uncorrected &&
     !!p.settings.fringe === !!s.fringe &&
+    JSON.stringify(p.settings.defringe ?? [0, 0]) === JSON.stringify(s.defringe ?? [0, 0]) &&
     !!p.settings.curve === !!s.curve &&
     CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null)) &&
     JSON.stringify(p.settings.mixer ?? null) === JSON.stringify(s.mixer ?? null) &&

@@ -15845,6 +15845,27 @@ assert(
   await win.locator('button:text-is("Cancel")').click();
   await settle();
 
+  // Defringe: grey stripes, dark and light, with a line of purple along
+  // every edge, as a lens leaves along a branch against the sky. Taken
+  // out, the edges go grey; the stripes themselves were grey already.
+  const purpled = dng(256, 128, [0.8, 1.0, 0.6], (x) => {
+    const at = x % 16;
+    return at < 6 ? [0.04, 0.04, 0.04] : at === 6 || at === 15 ? [0.35, 0.12, 0.6] : [0.6, 0.6, 0.6];
+  });
+  await page.setInputFiles('input[accept^="image/*,"]', { name: "purpled.dng", mimeType: "", buffer: purpled });
+  await win.waitFor();
+  await settle();
+  const purple = await offGrey("At its own size");
+  await win.locator('input[aria-label="Purple fringe"]').fill("100");
+  await page.waitForTimeout(800);
+  const unpurpled = await offGrey("At its own size");
+  assert(
+    unpurpled < purple * 0.5,
+    `Defringe greys a purple edge (${purple.toFixed(1)} to ${unpurpled.toFixed(1)} from grey)`,
+  );
+  await win.locator('button:text-is("Cancel")').click();
+  await settle();
+
   // A Canon's raw file carries no corrections but names its lens, and
   // lensfun's profile for it — added in Preferences › Camera raw, since
   // the database cannot be shipped — puts them right. The DNG here names

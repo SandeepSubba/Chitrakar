@@ -68,6 +68,12 @@ check(
   d.cleanSettings({ masking: 250 }).masking === 100 && d.cleanSettings({}).masking === 0,
   "masking held to 0..100, and none in a preset kept before it",
 );
+check(
+  JSON.stringify(d.cleanSettings({ defringe: [250, -3] }).defringe) === "[100,0]" &&
+    d.cleanSettings({ defringe: [0, 0] }).defringe === undefined &&
+    d.cleanSettings({ defringe: "purple" }).defringe === undefined,
+  "defringe held to 0..100 a colour, and none when it asks for nothing",
+);
 check(d.cleanSettings(null).curve === true, "a new development has the camera's tone curve");
 check(d.cleanSettings({ curve: false }).curve === false, "a curve left off stays off");
 check(d.cleanSettings({ curve: "yes" }).curve === true, "a curve that is not a yes or a no is the default");
