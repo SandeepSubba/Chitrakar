@@ -10655,6 +10655,22 @@ without reading anything else.*
   written before Remove chromatic aberration, Defringe and Colour noise
   existed are read the way they developed then
   (`develop_settings_from_before_keep_their_meaning`).
+  **The fringe measure, given nothing to measure** (item 3: what a new
+  measure says of pictures with no answer in them). Grain alone, a
+  picture clipped all over, black, one too small to tile, spokes (every
+  edge pointing at the middle, which no scale moves) and cells of
+  colours unrelated channel to channel: none is given fringes, and each
+  develops with the box ticked as without it
+  (`the_fringe_measure_finds_nothing_where_there_is_nothing`). Then the
+  measure's two guards were taken out in turn to see who would notice.
+  Without the one that keeps to tiles where red has green's edges, the
+  coloured cells read as fringes of 2.75 pixels out of none — caught by
+  that picture, which is why it is in the test. Without the one that
+  keeps to edges across the line from the middle, nothing changed: a
+  picture half spokes and half real fringes was measured the same,
+  since the fit's trim of what disagrees throws the spokes' tiles out
+  anyway. It is kept, against dividing by next to nothing, and the code
+  says it is not pinned rather than pretending otherwise.
   **A watermark on what goes out** ✅. Nothing put a photographer's
   name on an export short of a text layer added by hand to every
   picture, and batch export could not at all. The Export window (PNG,

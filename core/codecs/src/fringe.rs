@@ -191,7 +191,9 @@ impl Planes {
                     }
                     let corr = (scg / nf - mc * mg) / (vc * vg).sqrt();
                     // The same edges in both: an edge of colour, red against
-                    // green, says nothing about where the lens put red.
+                    // green, says nothing about where the lens put red
+                    // (taken out, cells of unrelated colours read as
+                    // fringes of nearly three pixels out of none).
                     if corr < 0.85 {
                         continue;
                     }
@@ -226,7 +228,11 @@ impl Planes {
                     let along = ux * ux * mxx + 2.0 * ux * uy * mxy + uy * uy * myy;
                     let far = ux * ux + uy * uy;
                     // Edges across the line from the middle, not along it: an
-                    // edge pointing at the middle cannot show a scale.
+                    // edge pointing at the middle cannot show a scale. The
+                    // fit's trimming of what disagrees catches such tiles
+                    // too (taken out, a picture half spokes is measured the
+                    // same), so this is kept against dividing by next to
+                    // nothing rather than pinned by a test of its own.
                     if far < 1.0 || along < 0.15 * far * (mxx + myy) || along <= 0.0 {
                         continue;
                     }

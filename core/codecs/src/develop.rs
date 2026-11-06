@@ -4511,6 +4511,78 @@ mod tests {
         }
     }
 
+    /// Pictures with nothing in them to measure a lens by: grain alone,
+    /// a picture clipped all over, black, one too small to tile, and one
+    /// whose every edge points at the middle (which no scale can move).
+    /// None of them is to be given fringes, nor to stop a development.
+    #[test]
+    fn the_fringe_measure_finds_nothing_where_there_is_nothing() {
+        let mut seed = 99u32;
+        let mut grain = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let noise: Vec<[f32; 3]> = (0..512 * 384)
+            .map(|_| [grain(), grain(), grain()])
+            .collect();
+        let photos = [
+            (
+                "grain",
+                clipped_photo(512, 384, [1.0; 3], |y, x| noise[y * 512 + x]),
+            ),
+            (
+                "clipped",
+                clipped_photo(512, 384, [1.0; 3], |_, _| [3.0; 3]),
+            ),
+            ("black", clipped_photo(512, 384, [1.0; 3], |_, _| [0.0; 3])),
+            // Cells whose colours are unrelated channel to channel: red's
+            // edges are not green's, and read as if they were, they make
+            // fringes of nearly three pixels out of none.
+            ("colours", {
+                let mut seed = 5u32;
+                let mut next = move || {
+                    seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                    (seed >> 8) as f32 / (1u32 << 24) as f32
+                };
+                let cells: Vec<[f32; 3]> = (0..2000)
+                    .map(|_| {
+                        [
+                            0.05 + 0.6 * next(),
+                            0.05 + 0.6 * next(),
+                            0.05 + 0.6 * next(),
+                        ]
+                    })
+                    .collect();
+                clipped_photo(1024, 680, [1.0; 3], move |y, x| {
+                    cells[(y / 20) * 52 + x / 20]
+                })
+            }),
+            ("tiny", fringed_photo(40, 30, 0.003, -0.003)),
+            ("spokes", {
+                // Light and dark wedges round the middle: every edge runs
+                // along a line from it, the one way a scale shows nothing.
+                let (w, h) = (512usize, 384usize);
+                clipped_photo(w, h, [1.0; 3], move |y, x| {
+                    let a = (y as f32 - h as f32 / 2.0).atan2(x as f32 - w as f32 / 2.0);
+                    [if (a * 12.0).sin() > 0.0 { 0.6 } else { 0.1 }; 3]
+                })
+            }),
+        ];
+        for (name, photo) in &photos {
+            assert_eq!(photo.fringes(), None, "{name}: nothing to measure");
+            let s = RawDevelop {
+                fringe: true,
+                ..Default::default()
+            };
+            assert_eq!(
+                photo.develop(&s).rgba8,
+                photo.develop(&RawDevelop::default()).rgba8,
+                "{name}: develops as without"
+            );
+            let _ = photo.develop_square(&s, 0.95, 0.95, 32);
+        }
+    }
+
     #[test]
     fn a_lens_without_fringes_is_left_alone() {
         let photo = fringed_photo(1024, 680, 0.0, 0.0);
