@@ -10634,6 +10634,27 @@ without reading anything else.*
   light does not darken when the sky's blue is taken down (seen on the
   X-T5's overcast street before that easing was added). On the eye's
   scale (square roots), applied before the channel curves. Smoke 9cn.
+  **Every develop setting in the shared fixture** (item 3's first
+  method, after this round's develop work). The fixture's developed
+  picture had carried four settings — white balance, exposure,
+  highlights, vibrance — since it was put in, so the file, clipboard,
+  wire and undo audits had never been handed a tone curve, the mixer,
+  grading, Detail, or any of the lens's settings, the new ones
+  included; a setting at its default is not even written, so one a
+  file dropped would have gone unseen. It holds every setting away
+  from its default now. Every audit held. Then the code was broken to
+  see who would notice: Defringe never written to a file. Two audits
+  did — the file's (`every_command_survives_the_file`) and the wire's
+  (`every_command_survives_the_boundary_the_ui_talks_over`) — where
+  before neither could. The page's half of the same question had no
+  test at all: settings go from the engine to the develop window and
+  back through `cleanSettings`, which keeps only what it knows, so a
+  field it forgot would be reset on every Develop again. A full set
+  now goes through unchanged (`develop.test.mjs`), and with `fringe`
+  forgotten on purpose it names the field it lost. And settings
+  written before Remove chromatic aberration, Defringe and Colour noise
+  existed are read the way they developed then
+  (`develop_settings_from_before_keep_their_meaning`).
   **A watermark on what goes out** ✅. Nothing put a photographer's
   name on an export short of a text layer added by hand to every
   picture, and batch export could not at all. The Export window (PNG,

@@ -81,6 +81,49 @@ check(
     d.cleanSettings(null).color_noise === 0,
   "colour noise its own, held to 0..100, and following the one slider in settings from before there were two",
 );
+{
+  // Every setting away from its default goes through as it came: a field
+  // this forgot would be reset whenever a picture is developed again.
+  const full = {
+    white: [4800, 12],
+    exposure: 0.5,
+    contrast: 15,
+    highlights: -40,
+    shadows: 25,
+    whites: -5,
+    blacks: 8,
+    vibrance: 20,
+    saturation: -10,
+    clarity: 12,
+    dehaze: 6,
+    sharpen: 40,
+    noise: 20,
+    color_noise: 35,
+    masking: 30,
+    uncorrected: true,
+    fringe: true,
+    defringe: [40, 10],
+    curve: true,
+    tone_curve: [[0, 0.05], [0.5, 0.55], [1, 0.97]],
+    red_curve: [[0, 0], [0.4, 0.45], [1, 1]],
+    green_curve: [[0, 0.02], [1, 1]],
+    blue_curve: [[0, 0], [0.6, 0.55], [1, 1]],
+    mixer: [[5, -20, 10], [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0], [-8, 15, -12], [0, 0, 0], [0, 0, 0]],
+    grading: {
+      shadows: [210, 20, -5],
+      midtones: [0, 0, 0],
+      highlights: [40, 15, 3],
+      global: [0, 0, 0],
+      blending: 60,
+      balance: -10,
+    },
+  };
+  const sorted = (o) =>
+    JSON.stringify(o, (_, v) => (v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort()) : v));
+  const back = d.cleanSettings(full);
+  const lost = Object.keys(full).filter((k) => sorted(full[k]) !== sorted(back[k]));
+  check(lost.length === 0, `every setting comes through as it went (lost: ${lost.join(", ") || "none"})`);
+}
 check(d.cleanSettings(null).curve === true, "a new development has the camera's tone curve");
 check(d.cleanSettings({ curve: false }).curve === false, "a curve left off stays off");
 check(d.cleanSettings({ curve: "yes" }).curve === true, "a curve that is not a yes or a no is the default");

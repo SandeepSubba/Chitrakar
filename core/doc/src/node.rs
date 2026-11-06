@@ -2937,6 +2937,32 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    /// Settings written before the lens's fringes, Defringe and a slider
+    /// of its own for the colour's noise load as they developed then: no
+    /// fringes measured, nothing greyed, and the colour smoothed by the
+    /// one slider there was. One written since keeps its own.
+    #[test]
+    fn develop_settings_from_before_keep_their_meaning() {
+        let old: super::RawDevelop =
+            serde_json::from_str(r#"{"exposure":0.5,"noise":30.0}"#).unwrap();
+        assert!(!old.fringe);
+        assert_eq!(old.defringe, [0.0, 0.0]);
+        assert_eq!(old.color_noise, None);
+        assert_eq!(old.colour_noise(), 30.0);
+        let new: super::RawDevelop = serde_json::from_str(
+            r#"{"noise":30.0,"color_noise":5.0,"fringe":true,"defringe":[40.0,10.0]}"#,
+        )
+        .unwrap();
+        assert_eq!(new.colour_noise(), 5.0);
+        assert!(new.fringe);
+        assert_eq!(new.defringe, [40.0, 10.0]);
+        // And what was nought is not written, so a file stays as it was.
+        let written = serde_json::to_string(&old).unwrap();
+        for absent in ["fringe", "defringe", "color_noise"] {
+            assert!(!written.contains(absent), "{absent} in {written}");
+        }
+    }
+
     /// A run written before runs had a size has none.
     #[test]
     fn a_run_from_before_run_sizes_has_none() {

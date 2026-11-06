@@ -1980,12 +1980,50 @@ pub fn everything() -> Fixture {
                 corners: Some([[0.0, 0.0], [11.0, 1.0], [7.0, 11.0], [-3.0, 7.0]]),
                 develop: Some(crate::Developed {
                     original,
+                    // Every setting away from its default, so that a
+                    // setting a file, the clipboard or the wire dropped
+                    // would be a setting some audit here saw go: four of
+                    // them were all this ever held, and the curves, the
+                    // mixer, grading, Detail and the lens's had never
+                    // been carried by anything that asks.
                     settings: crate::RawDevelop {
                         white: Some([4800.0, 12.0]),
                         exposure: 0.5,
+                        contrast: 15.0,
                         highlights: -40.0,
+                        shadows: 25.0,
+                        whites: -5.0,
+                        blacks: 8.0,
                         vibrance: 20.0,
-                        ..Default::default()
+                        saturation: -10.0,
+                        clarity: 12.0,
+                        dehaze: 6.0,
+                        sharpen: 40.0,
+                        noise: 20.0,
+                        color_noise: Some(35.0),
+                        masking: 30.0,
+                        uncorrected: true,
+                        fringe: true,
+                        defringe: [40.0, 10.0],
+                        curve: true,
+                        tone_curve: vec![[0.0, 0.05], [0.5, 0.55], [1.0, 0.97]],
+                        red_curve: vec![[0.0, 0.0], [0.4, 0.45], [1.0, 1.0]],
+                        green_curve: vec![[0.0, 0.02], [1.0, 1.0]],
+                        blue_curve: vec![[0.0, 0.0], [0.6, 0.55], [1.0, 1.0]],
+                        mixer: {
+                            let mut m = [[0.0; 3]; 8];
+                            m[0] = [5.0, -20.0, 10.0];
+                            m[5] = [-8.0, 15.0, -12.0];
+                            m
+                        },
+                        grading: crate::Grading {
+                            shadows: [210.0, 20.0, -5.0],
+                            midtones: [0.0, 0.0, 0.0],
+                            highlights: [40.0, 15.0, 3.0],
+                            global: [0.0, 0.0, 0.0],
+                            blending: 60.0,
+                            balance: -10.0,
+                        },
                     },
                 }),
             },
