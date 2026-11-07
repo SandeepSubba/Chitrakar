@@ -21002,6 +21002,69 @@ mod tests {
         );
     }
 
+    /// A watermark at its edges: an export a few pixels across, words far
+    /// wider than the picture, two lines, every place it can stand. Each
+    /// goes out without a fault, the picture its own size, and a line
+    /// that fits is wholly inside it.
+    #[test]
+    fn a_watermark_at_its_edges_goes_out_whole() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        add_rect(&mut session, "ground", 400.0, 300.0);
+        for corner in [
+            "top-left",
+            "top-right",
+            "bottom-left",
+            "bottom-right",
+            "middle",
+            "nowhere",
+        ] {
+            for text in [
+                "©",
+                "© A. Photographer",
+                "a line\nand another",
+                &"wide ".repeat(80),
+            ] {
+                for scale in [0.05, 0.25, 1.0] {
+                    session.set_output_watermark(Some(Watermark {
+                        text: text.into(),
+                        corner: corner.into(),
+                        size: 0.2,
+                        ..Default::default()
+                    }));
+                    let out = session.render_scaled(scale, None).unwrap();
+                    let (w, h) = (
+                        (400.0 * scale).round().max(1.0) as u32,
+                        (300.0 * scale).round().max(1.0) as u32,
+                    );
+                    assert_eq!((out.width, out.height), (w, h), "{corner} {scale}");
+                    assert!(
+                        out.pixels.iter().all(|p| p.r.is_finite() && p.a <= 1.0001),
+                        "{corner} {scale}: every pixel a pixel"
+                    );
+                }
+            }
+        }
+        // A short line at full size stands wholly inside, in each corner:
+        // a margin of nothing changed round the edge.
+        session.set_output_watermark(None);
+        let plain = session.render_scaled(1.0, None).unwrap();
+        for corner in ["top-left", "top-right", "bottom-left", "bottom-right"] {
+            session.set_output_watermark(Some(Watermark {
+                text: "© A. P.".into(),
+                corner: corner.into(),
+                ..Default::default()
+            }));
+            let marked = session.render_scaled(1.0, None).unwrap();
+            let edge = |x: u32, y: u32| {
+                let (p, q) = (plain.get(x, y), marked.get(x, y));
+                (p.r - q.r).abs() + (p.g - q.g).abs() + (p.b - q.b).abs() > 0.01
+            };
+            let touched = (0..400).any(|x| edge(x, 0) || edge(x, 299))
+                || (0..300).any(|y| edge(0, y) || edge(399, y));
+            assert!(!touched, "{corner}: the line stays off the picture's edge");
+        }
+    }
+
     /// A dodge layer changes nothing until it is painted: then it
     /// lightens where the brush went, half a stop, and nowhere else; it
     /// came as one step of history, and a burn darkens the same way.

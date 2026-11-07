@@ -10671,6 +10671,20 @@ without reading anything else.*
   since the fit's trim of what disagrees throws the spokes' tiles out
   anyway. It is kept, against dividing by next to nothing, and the code
   says it is not pinned rather than pretending otherwise.
+  **The watermark at its edges** (item 3). An export at the smallest
+  scale (5%: twenty pixels across), words eighty times wider than the
+  picture, two lines, every place it can stand and a place it cannot
+  (read as the bottom right): each goes out without a fault, its own
+  size, every pixel a pixel; and a short line at full size stays off
+  the picture's edge in every corner
+  (`a_watermark_at_its_edges_goes_out_whole`). Broken on purpose — the
+  margin round the line taken to nothing — the test names the corner
+  it touched. Also worth writing down from the same day: CI's engine
+  job once died with a segmentation fault inside the GPU crate's tests
+  after one had passed, on a commit that touched nothing it reads; the
+  same 109 passed three times here and on the job run again, so it was
+  the runner's software Vulkan (llvmpipe), not the code. If it comes
+  back it is worth pinning the runner's mesa rather than retrying.
   **A watermark on what goes out** ✅. Nothing put a photographer's
   name on an export short of a text layer added by hand to every
   picture, and batch export could not at all. The Export window (PNG,
