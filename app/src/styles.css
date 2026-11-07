@@ -1912,6 +1912,14 @@ body {
   padding: 0.45rem 0.4rem;
   background: var(--panel);
   border-right: 1px solid var(--border);
+  /* On a window too short for the whole rail — a laptop's screen with a
+     browser's bars on it — what does not fit scrolls into view rather
+     than being cut off below the window's edge, out of reach. The tools'
+     flyouts are pinned to the window when they open (`pinFlyout`), so
+     the scrolling does not clip them. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
 }
 
 /* Carried off its edge: the same rail, floating over the canvas, with a

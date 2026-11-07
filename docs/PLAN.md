@@ -10671,6 +10671,61 @@ without reading anything else.*
   since the fit's trim of what disagrees throws the spokes' tiles out
   anyway. It is kept, against dividing by next to nothing, and the code
   says it is not pinned rather than pretending otherwise.
+  **An audit of the whole app, driven as a person would, and what it
+  found (November 2026).** Four helpers each took a part — every menu
+  row and window, every tool on the canvas, the photograph side, and
+  getting work out and back in — and drove the built app in Chromium,
+  noting every error, alert and wrong picture. None crashed the page;
+  these were found and put right:
+  - *Number boxes* (about twenty-five of them) took each keystroke as
+    a number and clamped it at once: `Number("")` is 0, so an emptied
+    box became 0 or its least, "-" on the way to "-5" became 0 (Straighten
+    turned the wrong way, Repeat moved the wrong way), "1" on the way to
+    "12" sides became 3 then 24, and a long edge could not be typed at
+    all. One `NumberField` now keeps what is typed until it is a number
+    in range, clamps when the caret leaves, shows a value changed from
+    outside (an Undo), and lets Escape reach the window; the boxes that
+    commit when left (position, angle, skew, zoom) put the old value
+    back for an emptied box rather than reading it as 0.
+  - *Export's long edge* promised 4000 and wrote 3200: the engine scales
+    a page sixteen times at most, which the window did not know. It
+    works the size out the same way now, names the file by it, says
+    when it is as large as it goes, and refuses past the engine's own
+    limits before Export is pressed.
+  - *Keys in windows*: Escape that closed a window also let go of the
+    picked layer (the editor heard it after React had already taken the
+    window off the page, in a microtask between the two listeners — so
+    whether a window was up is now noted at the start of the key's way,
+    `aWindowIsUp`), a letter typed at a window took up a tool, Enter on a
+    focused Cancel exported or made a new document (`enterMeansGo`), and
+    the subject offer and batch export would not close on Escape.
+  - *The ellipse marquee* picked out a region half its size below and
+    right of the one dragged (`pick_region` moved an ellipse, which is
+    laid out from its corner, on by its radii).
+  - *Tools*: text finished by a press elsewhere stayed an open preview
+    and no other block would open; the Text tool's click now opens the
+    block for typing with its word picked (letters typed after it took
+    up tools); the pen's Ctrl+Z took back the step before the path and
+    a change of tool threw the path away (it takes back an anchor, and
+    keeps the path); a frame took shapes and nothing else drawn in it
+    (text, pen paths and brush strokes now too — paint layers still go
+    on the page, the engine's `add_paint_layer` having no parent); a
+    first paint, clone or rub stroke was two steps, so one Undo left an
+    empty layer (folded with `merge_last`, and taken back on cancel),
+    and the eraser with nothing to rub at made a layer to rub; Delete
+    with an anchor held took the whole shape; a lasso drawn as a line
+    said so in an alert; Escape did not stop a zoom box.
+  - *Smaller*: the tool rail ran off the bottom of a laptop-height
+    window with no way to reach what was below (it scrolls now, its
+    flyouts pinned to the window so the scrolling does not cut them);
+    Clear guides on a page without any was a step every time; Canvas
+    size took nought or less and made a one-pixel page; Offset path took
+    a billion; Preferences said the press profile was on the File menu;
+    "1 photographs".
+  Smoke 9ct drives the tool fixes; 9bh the long edge typed and capped
+  and the window's keys; 9al the ellipse; 9cn the develop window's
+  boxes. Left as found: Paste style onto the layer it was copied from,
+  and Merge on a lone picture, still each make a step.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

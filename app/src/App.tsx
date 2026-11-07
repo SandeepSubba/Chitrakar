@@ -51,6 +51,8 @@ import {
   type CommandId,
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
+import { NumberField } from "./NumberField";
+import { enterMeansGo } from "./dialogKeys";
 import { BatchDialog, type BatchFile } from "./BatchDialog";
 import { enginePicture } from "./picture";
 import { pdfReader, unpackPage } from "./pdf";
@@ -559,6 +561,43 @@ async function clearDraft(): Promise<void> {
   if (!db) return;
   const parts = [...(await draftPartsKept(db))].map((n) => PART + n);
   await draftWrite(db, [], ["current", "parts", "name", "path", "saved", ...parts]).catch(() => {});
+}
+
+/** A tool's flyout, pinned to the window beside the button it opened
+ * from: the rail scrolls when the window is too short for it, and a
+ * flyout placed inside a scrolling rail would be cut off at its edge.
+ * Only while the rail runs down the side; along the bottom, on a phone,
+ * the stylesheet places it above. */
+function pinFlyout(el: HTMLDivElement | null) {
+  const from = el?.parentElement;
+  const rail = el?.closest(".toolbar");
+  if (!el || !from || !rail || getComputedStyle(rail).flexDirection !== "column") return;
+  const at = from.getBoundingClientRect();
+  el.style.position = "fixed";
+  el.style.left = `${Math.round(at.right + 6)}px`;
+  el.style.top = `${Math.round(at.top)}px`;
+}
+
+/** Whether a window (a dialog, the develop window) was up over the editor
+ * when the key now being handled was pressed. Its keys are its own:
+ * Escape that closes it must not also let go of the picked layer, Enter
+ * is its own, and a letter typed at it is not a tool. Asked at the very
+ * start of the key's way through the page (the window's capture phase),
+ * because by the time the editor's own handlers hear it the window may
+ * already be gone: it closes on the same Escape, and React puts that on
+ * the page in a microtask, which runs between one listener and the next. */
+let windowUpForKey = false;
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "keydown",
+    () => {
+      windowUpForKey = document.querySelector(".modal-scrim") !== null;
+    },
+    true,
+  );
+}
+function aWindowIsUp(): boolean {
+  return windowUpForKey || document.querySelector(".modal-scrim") !== null;
 }
 
 function isTextEntry(target: EventTarget | null): boolean {
@@ -1358,6 +1397,20 @@ export function App() {
   const [subjectOffer, setSubjectOffer] = useState<number | null>(null);
   const [subjectFetched, setSubjectFetched] = useState<number | null>(null);
   const [subjectAskNoMore, setSubjectAskNoMore] = useState(false);
+  const subjectFetchedRef = useRef(subjectFetched);
+  subjectFetchedRef.current = subjectFetched;
+  // Escape puts the offer away, as it does every other window — but not
+  // the model while it is coming down.
+  useEffect(() => {
+    if (subjectOffer === null) return;
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || subjectFetchedRef.current !== null) return;
+      setSubjectOffer(null);
+      setSubjectAskNoMore(false);
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [subjectOffer]);
   /** The angle the straighten panel is showing, and whether it is
    * waiting for a line to be drawn along something level. */
   const [straightenBy, setStraightenBy] = useState(0);
@@ -2773,24 +2826,61 @@ export function App() {
     gradToolRef.current = null;
     knifeRef.current = null;
     setKnifeLine(null);
+    // A zoom box let go of with Escape zooms nowhere when the button is.
+    zoomBoxRef.current = null;
+    setZoomBox(null);
     setPenPoints([]);
     setCropFrame(null);
     cropEditRef.current = null;
-    if (session.cancel_preview()) refresh(session);
+    const cancelled = session.cancel_preview();
+    // A stroke let go of takes what it made for itself with it.
+    if (paintingRef.current) {
+      paintingRef.current = null;
+      if (strokeMade.current) session.undo();
+      strokeMade.current = false;
+      refresh(session);
+    } else if (cancelled) refresh(session);
   }, [session, refresh]);
 
   /** Commit the pen path being drawn: closed shapes get the current fill,
    * open polylines get a stroke. Anchors normalize to a (0,0) origin with
    * the offset carried by the node transform. */
+  /** Where a layer made from these page points goes: into the frame the
+   * first of them is in, with the points in the frame's own coordinates,
+   * as the shape tools put what is drawn inside a frame — or on the page.
+   * Text, pen paths and brush strokes stayed on the page wherever they
+   * were drawn, and were left behind when the frame was moved. */
+  const placeAmong = (pts: [number, number][]) => {
+    const onPage = { parent: session?.root_id ?? 0, index: topLevelCount(layers), points: pts };
+    if (!session || pts.length === 0) return onPage;
+    const board = session.frame_at(pts[0][0], pts[0][1]);
+    if (board < 0) return onPage;
+    const mapped = pts.map((p) => Array.from(session.point_inside(board, p[0], p[1])));
+    if (mapped.some((m) => m.length !== 2)) return onPage;
+    return {
+      parent: board,
+      index: session.child_count(board),
+      points: mapped.map((m) => [m[0], m[1]] as [number, number]),
+    };
+  };
+
   const finishPath = useCallback(
-    (closed: boolean, upTo?: number) => {
+    (
+      closed: boolean,
+      upTo?: number,
+      given?: { pts: [number, number][]; hs: [number, number, number, number][] },
+    ) => {
       if (!session) return;
       // Read from what is drawn rather than inside a state updater: an
       // updater may be run twice, and this one adds a layer.
-      const pts = penPoints.slice(0, upTo ?? penPoints.length);
-      const hs = pts.map((_, i) => penHandles[i] ?? ([0, 0, 0, 0] as [number, number, number, number]));
+      const from = given?.pts ?? penPoints;
+      const fromHandles = given?.hs ?? penHandles;
+      const drawn = from.slice(0, upTo ?? from.length);
+      const hs = drawn.map((_, i) => fromHandles[i] ?? ([0, 0, 0, 0] as [number, number, number, number]));
       {
-        if (pts.length < (closed ? 3 : 2)) return;
+        if (drawn.length < (closed ? 3 : 2)) return;
+        const place = placeAmong(drawn);
+        const pts = place.points;
         const minX = Math.min(...pts.map((p) => p[0]));
         const minY = Math.min(...pts.map((p) => p[1]));
         const points = pts.map(
@@ -2799,8 +2889,8 @@ export function App() {
         shapeCount.current += 1;
         run({
           AddNode: {
-            parent: session.root_id,
-            index: topLevelCount(layers),
+            parent: place.parent,
+            index: place.index,
             node: nodePayload(
               `Path ${shapeCount.current}`,
               {
@@ -2849,6 +2939,11 @@ export function App() {
   // Keyboard: tool shortcuts, undo/redo, space-to-pan, escape-to-cancel.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (aWindowIsUp()) {
+        // The keys sheet is a window too, and has no Escape of its own.
+        if (e.key === "Escape" && showKeys) setShowKeys(false);
+        return;
+      }
       // A single letter is a tool switch, but only when it isn't being typed
       // into something: a text layer's content is edited in a textarea and a
       // layer is renamed in an input, and both contain the letters below.
@@ -2897,7 +2992,14 @@ export function App() {
       // the rest are guarded handed the field's own undo the page's
       // work, which the text-run block noticed at once.
       const fired = chords.byChord[chordFromEvent(e)];
-      if (fired === "undo" || fired === "redo") {
+      if (fired === "undo" && tool === "Pen" && penPoints.length > 0 && !typing) {
+        // Halfway through a path, undo takes back the last anchor put
+        // down, as every pen does — not the step before the path began,
+        // which used to vanish from the page with the anchors still up.
+        e.preventDefault();
+        setPenPoints((pts) => pts.slice(0, -1));
+        setPenHandles((hs) => hs.slice(0, -1));
+      } else if (fired === "undo" || fired === "redo") {
         e.preventDefault();
         if (fired === "redo") redo();
         else undo();
@@ -3542,6 +3644,22 @@ export function App() {
 
   /** Whatever one pointer had begun on the canvas, let go of: the
    * preview taken back, a band or a stroke dropped. */
+  // A path being drawn is kept when another tool is taken up, as Enter
+  // and Escape keep it — every way of changing tool used to throw it
+  // away. What the pen had down is remembered while it is in hand, since
+  // the switch has already let go of the anchors by the time this runs.
+  const penKept = useRef<{ pts: [number, number][]; hs: [number, number, number, number][] }>({ pts: [], hs: [] });
+  if (tool === "Pen") penKept.current = { pts: penPoints, hs: penHandles };
+  const toolWas = useRef(tool);
+  useEffect(() => {
+    const was = toolWas.current;
+    toolWas.current = tool;
+    if (was !== "Pen" || tool === "Pen") return;
+    const kept = penKept.current;
+    penKept.current = { pts: [], hs: [] };
+    if (kept.pts.length >= 2) finishPath(false, undefined, kept);
+  }, [tool]);
+
   const abandonGesture = () => {
     cancelGesture();
     marqueeRef.current = null;
@@ -3845,6 +3963,12 @@ export function App() {
    * only remembers that one is being drawn and how thick the last sample
    * was, so the width eases rather than jumping sample to sample. */
   const paintingRef = useRef<{ width: number; at: number } | null>(null);
+  /** The stroke in hand had to make what it lands on — a paint or clone
+   * layer, or a mask to rub into — which is a step of its own: when the
+   * stroke is kept the two are folded into one (one Undo takes the stroke
+   * and its layer away together, not the stroke and then an empty layer
+   * left behind), and when it is let go of, so is what it made. */
+  const strokeMade = useRef(false);
 
   /** The layer a paint stroke should land on: the picked one when it is a
    * paint layer, and a fresh one when it is not — so the first stroke of a
@@ -3860,6 +3984,7 @@ export function App() {
           ? s.add_clone_layer(`Clone ${paintCount.current}`)
           : s.add_paint_layer(`Paint ${paintCount.current}`)
       ) as NodeId;
+      strokeMade.current = true;
       setSelected(id);
       setMultiSel([]);
       return id;
@@ -3880,6 +4005,12 @@ export function App() {
     if (pinchRef.current) return; // the second finger, or a third
     if (!session || isPanTrigger(e) || e.button !== 0) return;
     e.stopPropagation();
+    // Text being typed into is finished by a press anywhere else on the
+    // canvas, before that press starts anything of its own: the press
+    // used to let go of the block, which took the editor away without
+    // its blur, so the edit stayed an open preview and no other block
+    // could be opened for editing.
+    if (inlineText) closeInlineText(true);
     // A finger alone on the page, held still, is asking for the menu a
     // mouse's right button opens. Not while painting, where a finger held
     // in one place is putting down paint, and is meant to.
@@ -4095,6 +4226,7 @@ export function App() {
         alert("Alt-click the place to clone from first.");
         return;
       }
+      strokeMade.current = false;
       const layer = paintTarget(session, true);
       if (layer === null) return;
       try {
@@ -4143,7 +4275,13 @@ export function App() {
         !picked.locked &&
         (erasing || picked.painted_mask);
       let layer: NodeId | null;
+      // The eraser with nothing it can rub at — nothing picked, or a
+      // locked layer — does nothing; it used to make an empty paint layer
+      // and rub at that, which changed nothing anyone could see.
+      if (erasing && !onMask && !(picked && picked.kind === "paint" && !picked.locked)) return;
+      strokeMade.current = false;
       if (onMask) {
+        const hadMask = picked.painted_mask;
         try {
           if (!session.ensure_painted_mask(picked.id)) {
             alert(`${picked.name} already carries a mask of another kind.`);
@@ -4153,6 +4291,7 @@ export function App() {
           alert(`Mask: ${err}`);
           return;
         }
+        if (!hadMask) strokeMade.current = true;
         layer = picked.id;
       } else {
         layer = paintTarget(session, false);
@@ -4183,6 +4322,8 @@ export function App() {
       if (from) {
         // The line is the whole gesture; there is nothing to drag.
         session.commit_preview();
+        if (strokeMade.current) session.merge_last();
+        strokeMade.current = false;
         refresh(session);
         return;
       }
@@ -4194,10 +4335,13 @@ export function App() {
     }
     if (tool === "Text") {
       shapeCount.current += 1;
+      const place = placeAmong([[x, y]]);
+      const [tx, ty] = place.points[0];
+      const before = new Set(layers.map((l) => l.id));
       run({
         AddNode: {
-          parent: session.root_id,
-          index: topLevelCount(layers),
+          parent: place.parent,
+          index: place.index,
           node: nodePayload(
             `Text ${shapeCount.current}`,
             {
@@ -4220,12 +4364,21 @@ export function App() {
                 runs: [],
               },
             },
-            x,
-            y,
+            tx,
+            ty,
           ),
         },
       });
       setTool("Move");
+      // And typing begins: the block is picked and opens for editing with
+      // its word picked, so what is typed next replaces it — rather than
+      // each letter taking up a tool (H the hand, e the ellipse…).
+      const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+      if (added) {
+        setSelected(added.id as NodeId);
+        setMultiSel([]);
+        typeIntoNewText.current = true;
+      }
       return;
     }
     if (tool === "Wand") {
@@ -5130,6 +5283,8 @@ export function App() {
       paintingRef.current = null;
       strokeEnd.current = lastPaint.current;
       session.commit_preview();
+      if (strokeMade.current) session.merge_last();
+      strokeMade.current = false;
       refresh(session);
       return;
     }
@@ -5199,7 +5354,13 @@ export function App() {
         if (selectionFeather > 0) session.feather_selection(selectionFeather);
         refresh(session);
       } catch (err) {
-        alert(`Select: ${err}`);
+        // A lasso drawn as a line, or too small to hold anything, picks
+        // out nothing: the same as a click, not an error to show.
+        if (String(err).includes("nothing was picked out")) {
+          if (how === "replace" && session.pick_none()) refresh(session);
+        } else {
+          alert(`Select: ${err}`);
+        }
       }
       return;
     }
@@ -5232,15 +5393,18 @@ export function App() {
       const pts = kept.map((i) => stroke[i]);
       const widths = kept.map((i) => strokeWidths[i] ?? 1);
       brushEndRef.current = pts[pts.length - 1];
+      // Into the frame it was drawn in, as a shape would be.
+      const place = placeAmong(pts);
+      const local = place.points;
       // Anchors are stored relative to the stroke's own origin, like every
       // other path, so the node's transform carries its position.
-      const minX = Math.min(...pts.map((p) => p[0]));
-      const minY = Math.min(...pts.map((p) => p[1]));
+      const minX = Math.min(...local.map((p) => p[0]));
+      const minY = Math.min(...local.map((p) => p[1]));
       shapeCount.current += 1;
       run({
         AddNode: {
-          parent: session.root_id,
-          index: topLevelCount(layers),
+          parent: place.parent,
+          index: place.index,
           node: nodePayload(
             `Stroke ${shapeCount.current}`,
             {
@@ -5248,7 +5412,7 @@ export function App() {
                 shape: {
                   Path: {
                     subpaths: [],
-                    points: pts.map(
+                    points: local.map(
                       (p) => [p[0] - minX, p[1] - minY] as [number, number],
                     ),
                     closed: false,
@@ -6439,6 +6603,16 @@ export function App() {
       inlineRef.current?.select();
     }, 0);
   };
+  /** A block just dropped by the Text tool, to open for typing once it
+   * is the picked layer (the render after it was added). */
+  const typeIntoNewText = useRef(false);
+  useEffect(() => {
+    if (!typeIntoNewText.current) return;
+    // Asked once, in the render after the block was added: if it is not
+    // the picked layer then, nothing later is opened in its place.
+    typeIntoNewText.current = false;
+    if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) beginInlineText();
+  });
   const typeInlineText = (value: string) => {
     if (
       !inlineText ||
@@ -6473,6 +6647,12 @@ export function App() {
     }
   };
 
+  // Any other way the block is let go of (a row in the layers panel,
+  // Escape on the page, a layer deleted) finishes the typing the same.
+  useEffect(() => {
+    if (inlineText && selected !== inlineText.id) closeInlineText(true);
+  }, [selected]);
+
   const commitRename = () => {
     if (renaming && renaming.value.trim()) {
       run({ SetName: { id: renaming.id, name: renaming.value.trim() } });
@@ -6502,6 +6682,19 @@ export function App() {
    * layers picked take one away and leave the picking in a state that
    * matched nothing on the canvas. */
   const deleteSelected = () => {
+    // With the node tool, an anchor taken hold of is what Delete takes
+    // away, as in every drawing program — not the whole shape round it.
+    const anchor = pickedAnchorRef.current;
+    if (tool === "Node" && session && anchor && anchor.id === selected) {
+      pickedAnchorRef.current = null;
+      try {
+        session.remove_anchor(anchor.id, anchor.idx);
+        refresh(session);
+      } catch (err) {
+        alert(`Remove anchor: ${err}`);
+      }
+      return;
+    }
     const ids = withoutNested(selectionSet);
     if (ids.length === 0) return;
     const cmds = ids.map((id) => ({ RemoveNode: { id } }) as Command);
@@ -6732,7 +6925,7 @@ export function App() {
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLSelectElement ||
         isTextEntry(e.target);
-      if (!step || !session || inControl || selectionSet.length === 0) {
+      if (!step || !session || inControl || selectionSet.length === 0 || aWindowIsUp()) {
         return;
       }
       e.preventDefault();
@@ -6912,7 +7105,12 @@ export function App() {
     );
     if (answer === null) return;
     const by = Number(answer);
-    if (!Number.isFinite(by) || by === 0) return;
+    if (answer.trim() === "" || !Number.isFinite(by) || by === 0) return;
+    // A billion pixels was taken, and made a shape a billion pixels out.
+    if (Math.abs(by) > 10000) {
+      alert("Offset path: at most 10,000 pixels either way.");
+      return;
+    }
     try {
       const id = session.offset_path(selected, by);
       setSelected(id);
@@ -9889,7 +10087,11 @@ export function App() {
           showGuides ? "Hide guides" : "Show guides",
           () => setShowGuides((v) => !v),
         ),
-        item("clear-guides", "trash", "Clear guides", () => setGuidesDoc([])),
+        // Nothing to clear is nothing done: it was a step in the history
+        // every time it was pressed on a page with no guides.
+        item("clear-guides", "trash", "Clear guides", () => {
+          if (docGuides.length > 0) setGuidesDoc([]);
+        }),
         // A grid is a view setting and a set of lines to catch on, so it
         // is offered by the size it should be rather than as a switch
         // with a number hidden somewhere else — four of them, behind one
@@ -9950,7 +10152,7 @@ export function App() {
   // and not while a field has the caret, like every chord but undo.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (isTextEntry(e.target) || e.target instanceof HTMLSelectElement) return;
+      if (isTextEntry(e.target) || e.target instanceof HTMLSelectElement || aWindowIsUp()) return;
       const row = chords.menuByChord[chordFromEvent(e)];
       if (!row) return;
       for (const m of menusRef.current) {
@@ -10400,7 +10602,9 @@ export function App() {
             }}
             onBlur={(e) => {
               const v = Number(e.currentTarget.value);
-              if (Number.isFinite(v) && v > 0) zoomTo(v / 100);
+              if (e.currentTarget.value.trim() !== "" && Number.isFinite(v) && v > 0) zoomTo(v / 100);
+              // What is not a zoom is not kept in the box.
+              else e.currentTarget.value = String(Math.round(view.zoom * 100));
             }}
             aria-label="Zoom"
             title="How far in the view is, as a percentage"
@@ -10656,7 +10860,16 @@ export function App() {
         />
       )}
       {subjectOffer !== null && (
-        <div className="modal-scrim">
+        <div
+          className="modal-scrim"
+          onPointerDown={() => {
+            // Put away like any other window, except while the model is
+            // on its way down.
+            if (subjectFetched !== null) return;
+            setSubjectOffer(null);
+            setSubjectAskNoMore(false);
+          }}
+        >
           <div
             className="modal subject-offer"
             role="dialog"
@@ -10974,6 +11187,7 @@ export function App() {
                         className="tool-flyout"
                         role="group"
                         aria-label="Ways to select"
+                        ref={pinFlyout}
                       >
                         {shownSelects.map((s) => (
                           <button
@@ -11023,7 +11237,7 @@ export function App() {
                       />
                     )}
                     {shapesOpen && (
-                      <div className="tool-flyout" role="group" aria-label="Shapes">
+                      <div className="tool-flyout" role="group" aria-label="Shapes" ref={pinFlyout}>
                         {shownShapes.map((s) => (
                           <button
                             key={s}
@@ -11079,7 +11293,7 @@ export function App() {
                   <Icon name={hiddenTools.includes(tool) ? TOOL_ICONS[tool] : "more"} size={20} />
                 </button>
                 {moreOpen && (
-                  <div className="tool-flyout" role="group" aria-label="Tools put away">
+                  <div className="tool-flyout" role="group" aria-label="Tools put away" ref={pinFlyout}>
                     {hiddenTools.map((s) => (
                       <button
                         key={s}
@@ -11106,17 +11320,15 @@ export function App() {
               panel shows, set before the region is handed to a layer
               rather than after. */}
           {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
-            <input
+            <NumberField
               className="tool-number"
-              type="number"
               min={0}
               max={200}
               step={1}
               value={Math.round(selectionFeather)}
               title="How far the edge is softened over, in page pixels"
               aria-label="Selection feather"
-              onChange={(e) => {
-                const want = Math.max(0, Number(e.target.value));
+              onValue={(want) => {
                 setSelectionFeather(want);
                 if (session?.feather_selection(want)) refresh(session);
               }}
@@ -11189,20 +11401,17 @@ export function App() {
               typed: each press is an edit of its own, so "grow by two"
               twice is four, and 2 on the way to 20 is not. */}
           {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
-            <input
+            <NumberField
               className="tool-number"
-              type="number"
               min={-200}
               max={200}
               step={1}
+              integer
               value={growBy}
               title="Press Enter to take what is picked this many page pixels further out; a minus sign takes it in"
               aria-label="Grow what is picked"
-              onChange={(e) =>
-                setGrowBy(Math.max(-200, Math.min(200, Number(e.target.value))))
-              }
+              onValue={setGrowBy}
               onKeyDown={(e) => {
-                e.stopPropagation();
                 if (e.key !== "Enter") return;
                 try {
                   if (session?.grow_selection(growBy)) refresh(session);
@@ -11215,20 +11424,15 @@ export function App() {
           {/* How far the wand's colour may stray. Only while it is the
               tool in hand, like the sides box below. */}
           {tool === "Wand" && (
-            <input
+            <NumberField
               className="tool-number"
-              type="number"
               min={0}
               max={100}
               step={1}
               value={Math.round(wandTolerance * 100)}
               title="How far the colour may stray, in percent"
               aria-label="Wand tolerance"
-              onChange={(e) =>
-                setWandTolerance(
-                  Math.min(1, Math.max(0, Number(e.target.value) / 100)),
-                )
-              }
+              onValue={(v) => setWandTolerance(v / 100)}
             />
           )}
           {/* And whether it is a question about the run of pixels the
@@ -11262,21 +11466,15 @@ export function App() {
             </button>
           )}
           {SELECT_TOOLS.includes(tool as never) && (
-            <input
+            <NumberField
               className="tool-number"
-              type="number"
               min={0}
               max={100}
               step={1}
               value={Math.round(subjectTolerance * 100)}
               title="How readily a colour counts as background, in percent — half leaves the decision to the picture, higher leaves less of it a subject"
               aria-label="Subject tolerance"
-              onChange={(e) =>
-                setSubjectTolerance(
-                  Math.min(1, Math.max(0, Number(e.target.value) / 100)),
-                )
-              }
-              onKeyDown={(e) => e.stopPropagation()}
+              onValue={(v) => setSubjectTolerance(v / 100)}
             />
           )}
           {/* How many sides, or points, the next one has. Only while one
@@ -11308,16 +11506,13 @@ export function App() {
             </div>
           )}
           {(tool === "Polygon" || tool === "Star") && (
-            <input
-              type="number"
+            <NumberField
               className="tool-number"
               min={3}
               max={24}
+              integer
               value={sides}
-              onChange={(e) =>
-                setSides(Math.max(3, Math.min(24, Number(e.target.value) || 3)))
-              }
-              onKeyDown={(e) => e.stopPropagation()}
+              onValue={setSides}
               title={tool === "Star" ? "Points" : "Sides"}
               aria-label={tool === "Star" ? "Points" : "Sides"}
             />
@@ -11551,16 +11746,11 @@ export function App() {
                 <>
                   <label className="tool-option">
                     Width
-                    <input
-                      type="number"
+                    <NumberField
                       min={1}
                       max={200}
                       value={paintSize}
-                      onChange={(e) =>
-                        setPaintSize(
-                          Math.max(1, Math.min(200, Number(e.target.value))),
-                        )
-                      }
+                      onValue={setPaintSize}
                       title="Brush width"
                       aria-label="Paint width"
                       className="brush-size"
@@ -11645,14 +11835,11 @@ export function App() {
               {tool === "Brush" && (
                 <label className="tool-option">
                   Width
-                  <input
-                    type="number"
+                  <NumberField
                     min={1}
                     max={64}
                     value={brushSize}
-                    onChange={(e) =>
-                      setBrushSize(Math.max(1, Math.min(64, Number(e.target.value))))
-                    }
+                    onValue={setBrushSize}
                     title="Brush width"
                     aria-label="Brush width"
                     className="brush-size"
@@ -13316,9 +13503,13 @@ export function App() {
                           if (e.key === "Enter") e.currentTarget.blur();
                         }}
                         onBlur={(e) => {
-                          const v = Number(e.currentTarget.value);
-                          if (Number.isFinite(v))
+                          // An emptied box is not nought: it was read as
+                          // one, and moved the layer to the page's edge.
+                          const text = e.currentTarget.value;
+                          const v = Number(text);
+                          if (text.trim() !== "" && Number.isFinite(v))
                             setGeometry(field, v / perPixel(units, docDpi));
+                          else e.currentTarget.value = String(inUnits(value, units, docDpi));
                         }}
                         aria-label={
                           field === "w" || field === "h"
@@ -13359,8 +13550,10 @@ export function App() {
                         if (e.key === "Enter") e.currentTarget.blur();
                       }}
                       onBlur={(e) => {
-                        const v = Number(e.currentTarget.value);
-                        if (Number.isFinite(v)) setAngle(v);
+                        const text = e.currentTarget.value;
+                        const v = Number(text);
+                        if (text.trim() !== "" && Number.isFinite(v)) setAngle(v);
+                        else e.currentTarget.value = String(Math.round(selAngle() * 10) / 10);
                       }}
                       aria-label="Angle"
                       title="Degrees clockwise"
@@ -13381,8 +13574,10 @@ export function App() {
                         if (e.key === "Enter") e.currentTarget.blur();
                       }}
                       onBlur={(e) => {
-                        const v = Number(e.currentTarget.value);
-                        if (Number.isFinite(v)) setSkew(v);
+                        const text = e.currentTarget.value;
+                        const v = Number(text);
+                        if (text.trim() !== "" && Number.isFinite(v)) setSkew(v);
+                        else e.currentTarget.value = String(Math.round(selSkew() * 10) / 10);
                       }}
                       aria-label="Skew"
                       title="Degrees the sides lean, from -85 to 85"
@@ -14088,7 +14283,7 @@ function NewDocDialog({
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
-      if (e.key === "Enter") create();
+      if (enterMeansGo(e)) create();
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
@@ -14097,13 +14292,7 @@ function NewDocDialog({
   const size = (label: string, value: number, set: (v: number) => void) => (
     <label className="row">
       {label}
-      <input
-        type="number"
-        min={1}
-        value={value}
-        onChange={(e) => set(Math.max(1, Math.round(Number(e.target.value))))}
-        aria-label={label}
-      />
+      <NumberField min={1} max={30000} integer value={value} onValue={set} aria-label={label} />
       <span className="hint unit">px</span>
     </label>
   );
@@ -14146,18 +14335,7 @@ function NewDocDialog({
         )}
         <label className="row">
           Resolution
-          <input
-            type="number"
-            min={1}
-            max={2400}
-            value={dpi}
-            onChange={(e) =>
-              setDpi(
-                Math.max(1, Math.min(2400, Math.round(Number(e.target.value)))),
-              )
-            }
-            aria-label="Resolution"
-          />
+          <NumberField min={1} max={2400} integer value={dpi} onValue={setDpi} aria-label="Resolution" />
           <span className="hint unit">dpi</span>
         </label>
         {/* What the resolution means on paper, on a line of its own: beside
@@ -14614,18 +14792,13 @@ function RawDevelopDialog({
       <span className="slider-head">
         <span>{label}</span>
         <span className="slider-value">
-          <input
-            type="number"
+          <NumberField
             className="develop-number"
             min={min}
             max={max}
             step={step}
             value={Math.round(value * 100) / 100}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v)) put(Math.min(max, Math.max(min, v)));
-            }}
-            onKeyDown={(e) => e.stopPropagation()}
+            onValue={put}
             onDoubleClick={(e) => e.stopPropagation()}
             aria-label={`${label} value`}
           />
@@ -15227,13 +15400,13 @@ function PdfDialog({
         {sizes.length > 1 && (
           <label className="row">
             Page
-            <input
-              type="number"
+            <NumberField
               min={1}
               max={sizes.length}
               step={1}
+              integer
               value={page}
-              onChange={(e) => setPage(Math.round(Number(e.target.value)) || 1)}
+              onValue={setPage}
               onKeyDown={enter}
               aria-label="Page"
             />
@@ -15242,16 +15415,12 @@ function PdfDialog({
         )}
         <label className="row">
           Resolution
-          <input
-            type="number"
+          <NumberField
             min={18}
             max={1200}
             step={1}
             value={dpi}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v)) setDpi(v);
-            }}
+            onValue={setDpi}
             onKeyDown={enter}
             aria-label="Resolution"
           />
@@ -15304,17 +15473,12 @@ function StrokeDialog({
         <h2>Stroke what is picked</h2>
         <label className="row">
           Width
-          <input
-            type="number"
+          <NumberField
             min={0.5}
             step={0.5}
             value={width}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v)) setWidth(v);
-            }}
+            onValue={setWidth}
             onKeyDown={(e) => {
-              e.stopPropagation();
               if (e.key === "Enter" && width > 0) onStroke(width, side);
             }}
             aria-label="Stroke width"
@@ -15368,17 +15532,13 @@ function RepeatDialog({
   const field = (key: keyof RepeatStep, label: string, unit: string, min?: number, max?: number) => (
     <label className="row">
       {label}
-      <input
-        type="number"
+      <NumberField
         value={step[key]}
         min={min}
         max={max}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v)) setStep({ ...step, [key]: v });
-        }}
+        integer={key === "copies"}
+        onValue={(v) => setStep({ ...step, [key]: v })}
         onKeyDown={(e) => {
-          e.stopPropagation();
           if (e.key === "Enter") onRepeat(step);
         }}
         aria-label={`Repeat ${label.toLowerCase()}`}
@@ -15566,7 +15726,7 @@ function FeatherDialog({
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onCancel();
-      if (e.key === "Enter") onApply();
+      if (enterMeansGo(e)) onApply();
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
@@ -15593,15 +15753,13 @@ function FeatherDialog({
         </label>
         <label className="row">
           Radius
-          <input
-            type="number"
+          <NumberField
             min={0}
             max={200}
             step={1}
             value={Math.round(radius)}
-            onChange={(e) => set(Number(e.target.value))}
+            onValue={set}
             onKeyDown={(e) => {
-              e.stopPropagation();
               if (e.key === "Enter") onApply();
             }}
             aria-label="Feather radius"
@@ -15684,15 +15842,13 @@ function StraightenDialog({
         </label>
         <label className="row">
           Degrees
-          <input
-            type="number"
+          <NumberField
             min={-45}
             max={45}
             step={0.1}
             value={degrees}
-            onChange={(e) => set(Number(e.target.value))}
+            onValue={set}
             onKeyDown={(e) => {
-              e.stopPropagation();
               if (e.key === "Enter") onApply();
             }}
             aria-label="Straighten degrees"
@@ -15785,17 +15941,12 @@ function ScalePageDialog({
   ) => (
     <label className="row">
       {label}
-      <input
-        type="number"
-        min={0}
+      <NumberField
+        min={step}
         step={step}
         value={value}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v) && v > 0) set(v);
-        }}
+        onValue={set}
         onKeyDown={(e) => {
-          e.stopPropagation();
           if (e.key === "Enter") apply();
         }}
         aria-label={label}
@@ -15892,14 +16043,14 @@ function CanvasSizeDialog({
   ) => (
     <label className="row">
       {label}
-      <input
-        type="number"
-        min={0}
+      <NumberField
+        // A page is at least a pixel each way: nought or less was taken
+        // and quietly made a one-pixel page.
+        min={units === "px" ? 1 : 0.01}
         step={units === "px" ? 1 : 0.01}
         value={value}
-        onChange={(e) => set(Number(e.target.value))}
+        onValue={set}
         onKeyDown={(e) => {
-          e.stopPropagation();
           if (e.key === "Enter") apply();
         }}
         aria-label={label}
@@ -18474,15 +18625,11 @@ function KindProps({
                     the anchor tool, or all of them. */}
                 {!path.smooth && (path.subpaths ?? []).length === 0 && (
                   <div className="row">
-                    <input
-                      type="number"
+                    <NumberField
                       min={0}
                       step={1}
                       value={roundBy}
-                      onChange={(e) => {
-                        const r = Number(e.target.value);
-                        if (Number.isFinite(r) && r >= 0) setRoundBy(r);
-                      }}
+                      onValue={setRoundBy}
                       aria-label="Round by"
                     />
                     <button

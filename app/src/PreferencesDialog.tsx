@@ -23,6 +23,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { NumberField } from "./NumberField";
 import { Icon, type IconName } from "./icons";
 import { SUBJECT_MODEL, fetchSubjectModel, forgetSubjectModel, hasSubjectModel } from "./subject";
 import { isTauri } from "./nativeMenu";
@@ -295,9 +296,10 @@ export function PreferencesDialog({
     return () => window.removeEventListener("keydown", key, true);
   }, [listening, keys, prefs.toolKeys, setPrefs]);
 
-  /** A whole number typed into a field. The value is only taken when it
-   * is one: a field cleared to type a new number reads as NaN for a
-   * keystroke, and clamping that to the minimum fights the typing. */
+  /** A number typed into a field, kept as typed until it is one in
+   * range (`NumberField`): a field cleared to type a new number read as
+   * nought — `Number("")` is 0, not NaN — and was clamped to the least
+   * at once, so clearing "0.5" and typing "5" gave 0.15. */
   const num = (
     label: string,
     value: number,
@@ -306,16 +308,12 @@ export function PreferencesDialog({
   ) => (
     <label className="row">
       {label}
-      <input
-        type="number"
+      <NumberField
         min={opts.min ?? 0}
         max={opts.max}
         step={opts.step ?? 1}
         value={value}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v)) set(v);
-        }}
+        onValue={set}
         aria-label={label}
       />
       {opts.hint && <span className="hint">{opts.hint}</span>}
@@ -832,7 +830,7 @@ export function PreferencesDialog({
                 <p className="modal-aside">
                   How this screen shows colour. Nothing here changes the
                   document — the profile it will be printed through is the
-                  file's own and is loaded from the File menu.
+                  file's own and is loaded from Page › Load press profile….
                 </p>
                 <div className="row">
                   <span>Monitor profile</span>

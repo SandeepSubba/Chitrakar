@@ -32,6 +32,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
 import { watermarkJson, type ExportArea, type ExportFormat, type ExportSetup, type Prefs } from "./prefs";
 import { WatermarkRow } from "./WatermarkRow";
+import { NumberField } from "./NumberField";
+import { enterMeansGo } from "./dialogKeys";
+
+/** As far as the engine scales a page going out (`render_scaled`). */
+const MOST_SCALE = 16;
 import type { Outgoing } from "./files";
 
 /** What each format is called, what it writes, and what it can do.
@@ -254,9 +259,13 @@ export function ExportDialog({
   const scale =
     spec.scales && !set
       ? longEdge > 0
-        ? longEdge / Math.max(1, baseW, baseH)
+        ? Math.min(MOST_SCALE, longEdge / Math.max(1, baseW, baseH))
         : prefs.exportScale
       : 1;
+  /** A long edge further than the engine will scale to: what goes out is
+   * as long as it can be, and the window says so rather than promising
+   * 4000 and writing 3200. */
+  const capped = longEdge > 0 && !set && longEdge / Math.max(1, baseW, baseH) > MOST_SCALE;
   /** Every scale that will be written. */
   const scales = set ? SET : [scale];
   /** What will actually be written, in pixels. */
@@ -273,8 +282,12 @@ export function ExportDialog({
     if (area === "selection" && !hasRegion && !selectionBounds()) {
       return "Nothing is picked.";
     }
-    if (outW > 16384 || outH > 16384) {
-      return `That comes to ${outW} × ${outH}, which is past what can be held at once.`;
+    // The engine's own limits (`canvas_fits`): asked for and refused
+    // here, before the export is pressed, rather than after it with a
+    // size the window never showed.
+    const most = set ? 3 : 1;
+    if (outW * most > 16384 || outH * most > 16384 || outW * most * outH * most > 100_000_000) {
+      return `That comes to ${outW * most} × ${outH * most}, which is past what can be held at once (16,384 a side, 100 megapixels).`;
     }
     return null;
   };
@@ -487,7 +500,7 @@ export function ExportDialog({
   // than for the scale that came to, which is a fraction nobody chose.
   const nameAt = (s: number, slice: string | null = null) =>
     `${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
-      longEdge > 0 && !set ? `-${longEdge}` : s !== 1 || set ? `@${s}x` : ""
+      longEdge > 0 && !set ? `-${Math.max(outW, outH)}` : s !== 1 || set ? `@${s}x` : ""
     }.${spec.ext}`;
   const name = set
     ? `${nameAt(1)}, @2x, @3x`
@@ -524,7 +537,7 @@ export function ExportDialog({
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
-      if (e.key === "Enter") runRef.current();
+      if (enterMeansGo(e)) runRef.current();
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
@@ -730,23 +743,23 @@ export function ExportDialog({
               className={longEdge ? "export-long active" : "export-long"}
               title="The long edge in pixels — 2048 for the web — whatever the picture's own size; empty for the scale"
             >
-              <input
-                type="number"
+              <NumberField
                 min={16}
                 max={16384}
                 step={1}
+                integer
+                blankAs={0}
+                show={longEdge ? undefined : ""}
                 placeholder="Long edge"
                 disabled={!spec.scales}
-                value={longEdge || ""}
-                onChange={(e) => {
-                  const v = Math.round(Number(e.target.value));
+                value={longEdge}
+                onValue={(v) =>
                   setPrefs({
-                    exportLongEdge: Number.isFinite(v) && v >= 16 ? Math.min(16384, v) : 0,
+                    exportLongEdge: v,
                     // Asked for one size, the set is let go of.
                     ...(set ? { exportScale: 1 } : {}),
-                  });
-                }}
-                onKeyDown={(e) => e.stopPropagation()}
+                  })
+                }
                 aria-label="Long edge"
               />
               px
@@ -759,7 +772,7 @@ export function ExportDialog({
                 ? `${outW} × ${outH} px, ×2, ×3`
                 : area === "regions"
                   ? `${outW} × ${outH} px, and each other region's own`
-                  : `${outW} × ${outH} px`}
+                  : `${outW} × ${outH} px${capped ? ` — as large as it goes, ${MOST_SCALE} times the page` : ""}`}
           </span>
         </div>
 

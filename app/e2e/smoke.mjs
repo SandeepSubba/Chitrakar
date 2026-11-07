@@ -2319,6 +2319,14 @@ assert(
   (await page.locator(".panel ul li", { hasText: "Text" }).count()) === 1,
   "text layer row appeared",
 );
+// The click begins typing, as in every editor: the block is open with
+// its word picked, so a letter typed is the text's and not a tool's key.
+assert(
+  await page.evaluate(() => document.activeElement?.classList.contains("inline-text") ?? false),
+  "the new block is open for typing",
+);
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
 const inkDefault = await inkCount(740, 590, 1100, 710);
 assert(inkDefault > 50, `glyph ink rendered (${inkDefault} px)`);
 
@@ -6111,7 +6119,8 @@ assert(
     (await maskShot.getAttribute("src")).startsWith("data:image/png"),
     "and it is a picture, not a glyph",
   );
-  await page.keyboard.press("Control+z");
+  // The brush, the rub (the mask it made and the stroke are one step)
+  // and the rect.
   await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");
@@ -6182,7 +6191,7 @@ assert(
     cloneThumb,
   );
   assert(cloneInk > 20, `the clone layer's thumbnail shows what it lays (${cloneInk} pixels)`);
-  await page.keyboard.press("Control+z");
+  // The stroke and the layer it made are one step.
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
   assert((await canvasPixel(170, 360))[3] === 0, "and it undoes away");
@@ -12045,6 +12054,24 @@ assert(
   await page.waitForTimeout(350);
   assert(await isRed(300, 250), "one undo hands the layer back");
 
+  // An ellipse picks out the box it was dragged across: it was once
+  // moved on by half its size, so its middle was hidden and a patch
+  // below and right of the box showed.
+  await pickTool("Select ellipse");
+  await region(60, 60, 180, 200);
+  await pickTool("Move");
+  await page.mouse.click(...at(120, 130));
+  await page.waitForTimeout(250);
+  await menuClick("Layer", "Reveal selection");
+  await page.waitForTimeout(450);
+  assert(await isRed(120, 130), "an ellipse picked out shows the middle of the box it was dragged in");
+  assert(!(await isRed(200, 220)), "and nothing below and right of it");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(350);
+  await pickTool("Select");
+
   // Picking out the rest instead swaps the two.
   await menuClick("Select", "Inverse");
   await page.waitForTimeout(300);
@@ -17344,6 +17371,37 @@ assert(
     await page.waitForTimeout(200);
   }
 
+  // A window's keys are its own. Escape that puts it away used to let go
+  // of the picked layer too, the editor hearing it after the window; and
+  // Enter anywhere in it ran its action, a focused Cancel included.
+  const pickedRows = () => page.locator(".panel ul li.selected, .panel ul li.multi").count();
+  await pickTool("Move");
+  await page.mouse.click(...at(570, 100));
+  await page.waitForTimeout(200);
+  const pickedBefore = await pickedRows();
+  assert(pickedBefore === 1, `a rectangle is picked (${pickedBefore})`);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.locator('[role=dialog][aria-label="Export"]').count()) === 0 && (await pickedRows()) === 1,
+    "Escape puts the Export window away and leaves the layer picked",
+  );
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  let downloadedOnEnter = false;
+  const sawDownload = () => (downloadedOnEnter = true);
+  page.on("download", sawDownload);
+  await page.locator('[role=dialog][aria-label="Export"] .modal-actions button:text-is("Cancel")').focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(700);
+  page.off("download", sawDownload);
+  assert(
+    !downloadedOnEnter && (await page.locator('[role=dialog][aria-label="Export"]').count()) === 0,
+    "Enter on a focused Cancel cancels rather than exporting",
+  );
+
   await page.keyboard.press("Control+Shift+E");
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
   assert(
@@ -17486,6 +17544,31 @@ assert(
     /-320\.png/.test(await page.textContent('[role=dialog][aria-label="Export"]')),
     "and the file is named for its size, not for a fraction of a scale",
   );
+  // Typed a key at a time, as a hand types it: "2" on the way to 2048
+  // is under the least, and once cleared the box and threw it away.
+  const longBox = page.locator('input[aria-label="Long edge"]');
+  await longBox.fill("");
+  await longBox.pressSequentially("1024");
+  await page.waitForTimeout(200);
+  assert(
+    (await longBox.inputValue()) === "1024" &&
+      (await page.textContent('[aria-label="Scale"] .hint')).includes("1024 \u00d7 768"),
+    `a long edge typed a key at a time is the number typed (${await longBox.inputValue()})`,
+  );
+  // Further than the engine scales a page (sixteen times), the window
+  // says the size that will really be written, and that it is as large
+  // as it goes — it used to promise 16384 and write 10240.
+  await longBox.fill("16384");
+  await page.waitForTimeout(200);
+  const capHint = await page.textContent('[aria-label="Scale"] .hint');
+  assert(
+    capHint.includes("10240 \u00d7 7680") && capHint.includes("as large as it goes"),
+    `a long edge past sixteen times the page says what it comes to (${capHint})`,
+  );
+  await longBox.fill("320");
+  // The same size it was before, so not a change for `weight` to wait for.
+  lastWeight = null;
+  await weight();
   await page.click('.export-scales .preset:text-is("1\u00d7")');
   assert(
     (await page.locator('input[aria-label="Long edge"]').inputValue()) === "",
@@ -20504,6 +20587,129 @@ assert(
     plainBottom[3] > 250 && keptBottom.every((v, i) => Math.abs(v - plainBottom[i]) < 6),
     `the bottom left as it was (${plainBottom} to ${keptBottom})`,
   );
+}
+
+// 9ct. The canvas tools as an audit found them, each driven as a person
+// would and put right. The pen's Ctrl+Z took back the step before the
+// path, not its last anchor, and changing tool threw the path away; a
+// first paint stroke was two steps, so one Undo left an empty layer, and
+// the eraser with nothing picked made a layer to rub at; text finished
+// by a press elsewhere stayed half open; a frame took shapes and nothing
+// else drawn in it; Delete with an anchor held took the whole shape; and
+// a lasso drawn as a line said so in an alert.
+{
+  await newDocument(800, 600, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 800) * b.width, b.y + (y / 600) * b.height];
+  const rows = (name) => page.locator(".panel ul li", { hasText: name }).count();
+  const dragOn = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+
+  // The pen: Ctrl+Z halfway takes back an anchor, and leaves the shape
+  // drawn before the path where it is.
+  await pickTool("Rect");
+  await dragOn(40, 40, 140, 120);
+  assert((await rows("Rect")) === 1, "a rectangle to stand before the path");
+  await pickTool("Pen");
+  await page.mouse.click(...at(300, 100));
+  await page.mouse.click(...at(400, 120));
+  await page.mouse.click(...at(500, 100));
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await page.locator(".pen-overlay .pen-anchor").count()) === 2, "Ctrl+Z halfway through a path takes back its last anchor");
+  assert((await rows("Rect")) === 1, "and not the rectangle drawn before it");
+  // Taking up another tool keeps the path, as Enter and Escape do.
+  await pickTool("Rect");
+  await page.waitForTimeout(300);
+  assert((await rows("Path")) === 1, "taking up another tool keeps the path drawn");
+
+  // Paint: the first stroke and the layer it made are one step.
+  await pickTool("Paint");
+  await dragOn(100, 300, 300, 320);
+  assert((await rows("Paint")) === 1, "a first stroke makes a paint layer");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(300);
+  assert((await rows("Paint")) === 0, "and one Undo takes the stroke and its layer away together");
+  // The eraser with nothing picked rubs at nothing and makes nothing.
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await pickTool("Eraser");
+  await dragOn(100, 400, 300, 420);
+  assert((await rows("Paint")) === 0, "the eraser with nothing picked makes no layer");
+
+  // Text finished by a press elsewhere is finished: another block opens.
+  await pickTool("Text");
+  await page.mouse.click(...at(560, 260));
+  await page.waitForTimeout(300);
+  await page.keyboard.type("Hi");
+  await page.waitForTimeout(150);
+  await page.mouse.click(...at(700, 560));
+  await page.waitForTimeout(300);
+  assert((await page.locator(".inline-text").count()) === 0, "a press elsewhere finishes the typing");
+  assert((await rows("Text")) === 1, "and keeps the block");
+  await pickTool("Text");
+  await page.mouse.click(...at(560, 420));
+  await page.waitForTimeout(300);
+  assert((await page.locator(".inline-text").count()) === 1, "and the next block opens for typing");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+
+  // A frame takes text and a pen path drawn inside it, as it takes shapes.
+  await newDocument(800, 600, "rgb");
+  await pickTool("Frame");
+  await dragOn(100, 100, 500, 400);
+  await pickTool("Text");
+  await page.mouse.click(...at(150, 150));
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+  await pickTool("Pen");
+  await page.mouse.click(...at(200, 300));
+  await page.mouse.click(...at(400, 320));
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  const indent = (name) =>
+    page.locator(".panel ul li", { hasText: name }).first().evaluate((el) => parseFloat(el.style.paddingLeft));
+  assert((await indent("Text")) > (await indent("Artboard")), "text drawn inside a frame goes into it");
+  assert((await indent("Path")) > (await indent("Artboard")), "and so does a pen path");
+
+  // The node tool: Delete with an anchor held takes that anchor.
+  await newDocument(800, 600, "rgb");
+  await pickTool("Rect");
+  await dragOn(200, 200, 400, 360);
+  await pickTool("Move");
+  await page.mouse.click(...at(300, 280));
+  await page.waitForTimeout(200);
+  await pickTool("Node");
+  // A press on the rectangle brings its corners out as anchors.
+  await page.mouse.click(...at(300, 280));
+  await page.waitForTimeout(300);
+  const anchors = await page.locator(".anchor").count();
+  await page.locator(".anchor").first().dispatchEvent("pointerdown", { button: 0, isPrimary: true, pointerId: 1 });
+  await page.locator(".anchor").first().dispatchEvent("pointerup", { button: 0, isPrimary: true, pointerId: 1 });
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(300);
+  assert((await rows("Rect")) === 1, "Delete with an anchor held keeps the shape");
+  assert((await page.locator(".anchor").count()) === anchors - 1, `and takes that anchor (${anchors} -> ${await page.locator(".anchor").count()})`);
+  await pickTool("Move");
+
+  // A lasso drawn as a line picks out nothing, quietly.
+  let alerted = null;
+  const sawAlert = (d) => (alerted = d.message());
+  page.on("dialog", sawAlert);
+  await pickTool("Lasso");
+  await dragOn(100, 500, 300, 500);
+  await page.waitForTimeout(200);
+  page.off("dialog", sawAlert);
+  assert(alerted === null, `a lasso drawn as a line says nothing (${alerted})`);
+  await pickTool("Move");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

@@ -807,14 +807,12 @@ impl WasmSession {
             },
             other => return Err(JsError::new(&format!("unknown region kind {other:?}"))),
         };
-        // An ellipse is placed by its middle and a box by its corner, so
-        // the caller gives the box either way and this puts the middle
-        // where it belongs.
+        // A box and an ellipse are both laid out from their corner (an
+        // ellipse's middle is at its radii), so the caller's box puts
+        // either where it was dragged. The ellipse was once moved on by
+        // half its size, which picked out a region below and right of
+        // the one drawn.
         let at = match kind {
-            "ellipse" => crate::Transform::translation(
-                x as f32 + width as f32 / 2.0,
-                y as f32 + height as f32 / 2.0,
-            ),
             "path" => crate::Transform::default(),
             _ => crate::Transform::translation(x as f32, y as f32),
         };

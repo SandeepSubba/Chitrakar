@@ -12,7 +12,7 @@
  * JPEGs, a few megabytes each, are kept until they are written together
  * — the downloads in a browser, one folder in the shell.
  */
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RAW_DEFAULTS, type DevelopPreset } from "./develop";
 import { WasmSession } from "./engine";
 import type { Outgoing } from "./files";
@@ -20,6 +20,7 @@ import { developElsewhere } from "./developer";
 import { giveLensProfiles, lensProfileTexts } from "./lensProfiles";
 import { watermarkJson, type Prefs } from "./prefs";
 import { WatermarkRow } from "./WatermarkRow";
+import { NumberField } from "./NumberField";
 import { readRaw } from "./raw";
 
 /** A file chosen, as read. */
@@ -85,6 +86,17 @@ export function BatchDialog({
   const [running, setRunning] = useState<string | null>(null);
   const [failures, setFailures] = useState<string[]>([]);
   const stop = useRef(false);
+  // Escape puts the window away like any other — not while a shoot is
+  // being developed, which "Stop after this one" is for.
+  const runningRef = useRef(running);
+  runningRef.current = running;
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !runningRef.current) onClose();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onClose]);
 
   const run = async () => {
     const kept = presets.find((p) => p.name === preset);
@@ -122,7 +134,9 @@ export function BatchDialog({
   return (
     <div className="modal-scrim">
       <div className="modal batch" role="dialog" aria-label="Batch export" onPointerDown={(e) => e.stopPropagation()}>
-        <h2>Develop and export {files.length} photographs</h2>
+        <h2>
+          Develop and export {files.length} {files.length === 1 ? "photograph" : "photographs"}
+        </h2>
         <p className="modal-aside" aria-label="Files">
           {files.length <= 4
             ? files.map((f) => f.name).join(", ")
@@ -141,18 +155,16 @@ export function BatchDialog({
         </label>
         <label className="row">
           Long edge
-          <input
-            type="number"
+          <NumberField
             min={16}
             max={16384}
+            integer
+            blankAs={0}
+            show={prefs.exportLongEdge ? undefined : ""}
             placeholder="Full size"
-            value={prefs.exportLongEdge || ""}
+            value={prefs.exportLongEdge}
             disabled={!!running}
-            onChange={(e) => {
-              const v = Math.round(Number(e.target.value));
-              setPrefs({ exportLongEdge: Number.isFinite(v) && v >= 16 ? Math.min(16384, v) : 0 });
-            }}
-            onKeyDown={(e) => e.stopPropagation()}
+            onValue={(v) => setPrefs({ exportLongEdge: v })}
             aria-label="Batch long edge"
           />
           px
