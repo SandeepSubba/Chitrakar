@@ -10773,8 +10773,13 @@ without reading anything else.*
   job once died with a segmentation fault inside the GPU crate's tests
   after one had passed, on a commit that touched nothing it reads; the
   same 109 passed three times here and on the job run again, so it was
-  the runner's software Vulkan (llvmpipe), not the code. If it comes
-  back it is worth pinning the runner's mesa rather than retrying.
+  the runner's software Vulkan (llvmpipe), not the code. It came back
+  on the next push, at the same place, so it was not left to retries:
+  each GPU test brought up an instance and a device of its own, a
+  hundred at once on the test threads, which Mesa's driver is known to
+  fault under. The tests now take the device one at a time
+  (`gpu_or_skip` hands back a renderer holding its turn, given up after
+  the device is gone); about seven minutes here, serial.
   **A watermark on what goes out** ✅. Nothing put a photographer's
   name on an export short of a text layer added by hand to every
   picture, and batch export could not at all. The Export window (PNG,

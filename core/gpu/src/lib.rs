@@ -8214,9 +8214,15 @@ mod tests {
     /// A renderer, or nothing where the machine has no adapter — except
     /// in CI, which installs a software driver on purpose: a skip there
     /// would quietly stop checking the thing the job exists to check.
-    fn gpu_or_skip() -> Option<GpuRenderer> {
+    fn gpu_or_skip() -> Option<Held> {
+        // One test on the device at a time. Each brings up an instance
+        // and a device of its own, and Mesa's software Vulkan, which CI
+        // runs on, faulted (SIGSEGV) now and then with a hundred of them
+        // being made and torn down at once on the test threads.
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let held = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
         match GpuRenderer::new() {
-            Some(gpu) => Some(gpu),
+            Some(gpu) => Some(Held { gpu, _held: held }),
             None if std::env::var("CI").is_ok() => {
                 panic!("no GPU adapter in CI: mesa-vulkan-drivers should have been installed")
             }
@@ -8224,6 +8230,26 @@ mod tests {
                 eprintln!("skipped: no GPU adapter");
                 None
             }
+        }
+    }
+
+    /// A renderer and the turn it was brought up in, given back when the
+    /// renderer has gone: fields drop in order, the device first.
+    struct Held {
+        gpu: GpuRenderer,
+        _held: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl std::ops::Deref for Held {
+        type Target = GpuRenderer;
+        fn deref(&self) -> &GpuRenderer {
+            &self.gpu
+        }
+    }
+
+    impl std::ops::DerefMut for Held {
+        fn deref_mut(&mut self) -> &mut GpuRenderer {
+            &mut self.gpu
         }
     }
 
