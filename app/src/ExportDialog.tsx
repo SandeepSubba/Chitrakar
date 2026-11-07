@@ -223,16 +223,9 @@ export function ExportDialog({
   /** A kept region's box, worked out by encoding nothing: the engine
    * knows where it is, and the window only needs its size. */
   const regionBox = (at: number): [number, number, number, number] | null => {
-    try {
-      const png = session.kept_region_png(at, 1);
-      // A PNG says its size in the header. Cheaper than asking the
-      // engine for a box it would have to be taught to hand back, and
-      // the same encode the export itself goes through.
-      const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-      return [0, 0, view.getUint32(16), view.getUint32(20)];
-    } catch {
-      return null;
-    }
+    // The box the engine exports the region in, whichever the format.
+    const b = session.region_export_box(at);
+    return b.length === 4 ? [0, 0, b[2], b[3]] : null;
   };
 
   /** What is exported at its own size: the page, or the box a picked
@@ -266,6 +259,24 @@ export function ExportDialog({
    * as long as it can be, and the window says so rather than promising
    * 4000 and writing 3200. */
   const capped = longEdge > 0 && !set && longEdge / Math.max(1, baseW, baseH) > MOST_SCALE;
+  /** The scale a slice is written at: a long edge is each kept
+   * region's own, since they are different sizes; anything else is the
+   * one scale. */
+  const scaleFor = (at: number | null): number => {
+    if (longEdge > 0 && !set && area === "regions" && at !== null) {
+      const box = regionBox(at);
+      if (box) return Math.min(MOST_SCALE, longEdge / Math.max(1, box[2] - box[0], box[3] - box[1]));
+    }
+    return scale;
+  };
+  /** The long edge a slice comes out at, which its file is named for. */
+  const edgeOf = (at: number | null): number => {
+    if (at !== null && area === "regions") {
+      const box = regionBox(at);
+      if (box) return Math.max(1, Math.round(Math.max(box[2] - box[0], box[3] - box[1]) * scaleFor(at)));
+    }
+    return Math.max(outW, outH);
+  };
   /** Every scale that will be written. */
   const scales = set ? SET : [scale];
   /** What will actually be written, in pixels. */
@@ -454,15 +465,18 @@ export function ExportDialog({
     const timer = setTimeout(() => {
       try {
         const bytes = encode();
-        setSize(
-          set
-            ? SET.slice(1).reduce((n, s) => n + encodeAt(s).length, bytes.length)
-            : many.length > 0
-              ? slices
-                  .slice(1)
-                  .reduce((n, _, i) => n + encodeAt(scale, i + 1).length, bytes.length)
-              : bytes.length,
-        );
+        // Every file that will be written: each scale of the set, and
+        // within it each slice, at the scale that slice is written at.
+        const at: (number | null)[] = many.length > 0 ? slices.map((_, i) => i) : [null];
+        let total = 0;
+        for (const s of set ? SET : [null]) {
+          for (const i of at) {
+            // The first of them is the one already made.
+            const first = (set ? s === 1 : true) && i === at[0];
+            total += first ? bytes.length : encodeAt(s ?? scaleFor(i), i).length;
+          }
+        }
+        setSize(total);
         setFailed(null);
         // The browser shows a PNG, a JPEG, a WebP or an SVG as it is; a PDF or
         // a TIFF it cannot, so the page stands in, drawn as the engine
@@ -498,14 +512,15 @@ export function ExportDialog({
 
   // Named for its size where a size was asked for — `-2048` — rather
   // than for the scale that came to, which is a fraction nobody chose.
-  const nameAt = (s: number, slice: string | null = null) =>
+  const nameAt = (s: number, slice: string | null = null, at: number | null = null) =>
     `${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
-      longEdge > 0 && !set ? `-${Math.max(outW, outH)}` : s !== 1 || set ? `@${s}x` : ""
+      longEdge > 0 && !set ? `-${edgeOf(at)}` : s !== 1 || set ? `@${s}x` : ""
     }.${spec.ext}`;
+  const more = many.length > 1 ? `, and ${many.length - 1} more` : "";
   const name = set
-    ? `${nameAt(1)}, @2x, @3x`
+    ? `${nameAt(1, many[0] ?? null)}, @2x, @3x${more}`
     : many.length > 0
-      ? `${nameAt(scale, many[0])}${many.length > 1 ? `, and ${many.length - 1} more` : ""}`
+      ? `${nameAt(scale, many[0], 0)}${more}`
       : nameAt(scale);
 
   const run = useCallback(async (via: "write" | "share" = "write") => {
@@ -516,9 +531,9 @@ export function ExportDialog({
     // four slices means by it.
     const files: Outgoing[] = scales.flatMap((s) =>
       slices.map((slice, at) => ({
-        name: nameAt(s, slice),
+        name: nameAt(s, slice, slice === null ? null : at),
         type: spec.mime,
-        make: () => encodeAt(s, slice === null ? null : at),
+        make: () => encodeAt(set ? s : scaleFor(slice === null ? null : at), slice === null ? null : at),
       })),
     );
     try {

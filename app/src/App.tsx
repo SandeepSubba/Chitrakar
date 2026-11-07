@@ -87,6 +87,7 @@ import {
   type GradeZone,
   type CurveKey,
   sliderToKelvin,
+  stepKelvin,
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
@@ -3447,11 +3448,14 @@ export function App() {
    * `bounds_of` answers [x, y, w, h]; everything here works in corners. */
   const unionBounds = (
     ids: NodeId[],
+    /** With what the layers' effects reach (an export), rather than the
+     * layers' own box (laying out, the panel's numbers). */
+    drawn = false,
   ): [number, number, number, number] | null => {
     if (!session) return null;
     let acc: [number, number, number, number] | null = null;
     for (const id of ids) {
-      const b = session.bounds_of(id);
+      const b = drawn ? session.drawn_bounds_of(id) : session.bounds_of(id);
       if (b.length !== 4) continue;
       const box: [number, number, number, number] = [
         b[0],
@@ -9019,6 +9023,11 @@ export function App() {
     [session, refresh, fitView],
   );
 
+  /** Files brought in are read one after another, so several dropped
+   * together are placed (and their raw files waiting) in the order they
+   * came, not in whichever order their reads finished. */
+  const placing = useRef<Promise<void>>(Promise.resolve());
+
   /** Bring a file in as a layer and pick it — whichever way it arrived:
    * the file dialog, a drop on the canvas, a share, or a paste. Which
    * road it takes is `importKind`'s to say: an SVG comes in as shapes, a
@@ -9028,7 +9037,7 @@ export function App() {
     (file: File) => {
       if (!session) return;
       const name = file.name || "Pasted image";
-      file.arrayBuffer().then(async (buf) => {
+      placing.current = placing.current.then(() => file.arrayBuffer()).then(async (buf) => {
         const raw = new Uint8Array(buf);
         const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
         setImportNotes(null);
@@ -9077,7 +9086,7 @@ export function App() {
         } finally {
           if (slow) setImporting(null);
         }
-      });
+      }).catch((err) => alert(`Could not read ${name}: ${err}`));
     },
     [session, placed],
   );
@@ -11055,23 +11064,15 @@ export function App() {
           share={canShareFiles() ? (files) => shareFiles(fileName(), files) : undefined}
           hasRegion={antRings.length > 0}
           selectionBounds={() => {
-            // A region is what leaves when there is one, so its own box
-            // is what the window should be sizing — the picked layers'
-            // box only answers when no region is up.
+            // A region is what leaves when there is one, so the box the
+            // engine exports it in is what the window should be sizing
+            // — the picked layers' box, with their shadows and glows,
+            // only answers when no region is up.
             if (antRings.length > 0) {
-              const pts = antRings.flat();
-              if (pts.length > 0) {
-                const xs = pts.map((q) => q[0]);
-                const ys = pts.map((q) => q[1]);
-                return [
-                  Math.min(...xs),
-                  Math.min(...ys),
-                  Math.max(...xs),
-                  Math.max(...ys),
-                ];
-              }
+              const b = session.region_export_box(-1);
+              if (b.length === 4) return [b[0], b[1], b[0] + b[2], b[1] + b[3]];
             }
-            return unionBounds(selectionSet);
+            return unionBounds(selectionSet, true);
           }}
           hasIcc={hasIcc}
           keptRegions={kept}
@@ -14534,7 +14535,22 @@ function GradeWheel({
           if (e.buttons) at(e);
         }}
         onDoubleClick={() => onChange(hue, 0)}
-        title="Drag the point: round for the hue, out for how much. Double-click to take it back"
+        onKeyDown={(e) => {
+          // Left and right turn the hue, up and down are how much; Shift
+          // moves ten at a time.
+          const by = e.shiftKey ? 10 : 1;
+          const move: Record<string, [number, number]> = {
+            ArrowLeft: [-by, 0],
+            ArrowRight: [by, 0],
+            ArrowUp: [0, by],
+            ArrowDown: [0, -by],
+          };
+          const m = move[e.key];
+          if (!m) return;
+          e.preventDefault();
+          onChange((hue + m[0] + 360) % 360, Math.min(100, Math.max(0, saturation + m[1])));
+        }}
+        title="Drag the point: round for the hue, out for how much (or the arrow keys). Double-click to take it back"
       >
         <span className="grade-dot" style={{ left: `${px}%`, top: `${py}%` }} />
       </div>
@@ -14701,11 +14717,28 @@ function RawDevelopDialog({
    * out from the picture's greys (`auto_white`), so it is this
    * photograph's own and not a preset's. Null where none could be read. */
   const [autoWhite, setAutoWhite] = useState<[number, number] | null | undefined>(undefined);
+  /** The light last chosen by name: Daylight and Flash are the same
+   * light, so the settings alone cannot say which was chosen. */
+  const [lightNamed, setLightNamed] = useState<string | null>(null);
+  const named = LIGHTS.find(([n]) => n === lightNamed)?.[1];
   const light =
-    autoWhite && s.white && s.white[0] === autoWhite[0] && s.white[1] === autoWhite[1] ? "Auto" : lightOf(s);
+    autoWhite && s.white && s.white[0] === autoWhite[0] && s.white[1] === autoWhite[1]
+      ? "Auto"
+      : named && s.white && s.white[0] === named[0] && s.white[1] === named[1]
+        ? lightNamed!
+        : lightOf(s);
+  /** Whether anything has been changed since the window opened: a click
+   * beside the window then is not taken as leaving it. */
+  const changed = JSON.stringify(s) !== JSON.stringify(initial);
+  const pickingRef = useRef(false);
+  pickingRef.current = picking;
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") {
+        // Escape while picking a grey ends the picking, not the window.
+        if (pickingRef.current) setPicking(false);
+        else onCancel();
+      }
       if (e.key === "\\" && !isTextEntry(e.target)) setBefore(true);
     };
     const up = (e: KeyboardEvent) => {
@@ -14859,7 +14892,14 @@ function RawDevelopDialog({
   };
   const percent = (f: number) => (f >= 0.001 ? `${(f * 100).toFixed(f < 0.1 ? 1 : 0)}%` : f > 0 ? "<0.1%" : "none");
   return (
-    <div className="modal-scrim" onPointerDown={onCancel}>
+    <div
+      className="modal-scrim"
+      // A stray click beside the window closes it only while nothing
+      // would be lost; once something is changed, Cancel or Escape it is.
+      onPointerDown={() => {
+        if (!changed) onCancel();
+      }}
+    >
       <div
         className={big ? "modal develop big" : "modal develop"}
         role="dialog"
@@ -14990,6 +15030,7 @@ function RawDevelopDialog({
                     return;
                   }
                   const w = LIGHTS.find(([n]) => n === e.target.value)?.[1];
+                  setLightNamed(e.target.value);
                   setS((o) => ({ ...o, white: w ?? (e.target.value === "Custom" ? white : undefined) }));
                 }}
                 aria-label="Light"
@@ -15023,6 +15064,16 @@ function RawDevelopDialog({
                 step={1}
                 value={kelvinToSlider(white[0])}
                 onChange={(e) => setS((o) => ({ ...o, white: [sliderToKelvin(Number(e.target.value)), white[1]] }))}
+                onKeyDown={(e) => {
+                  // A step of the slider is a few kelvin where it is warm,
+                  // less than the 50 K a temperature is kept to, so the
+                  // keys step by kelvin themselves: 50, or 500 with Shift.
+                  const by = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 10, PageDown: -10 }[e.key];
+                  if (by === undefined) return;
+                  e.preventDefault();
+                  const k = stepKelvin(white[0], by * (e.shiftKey ? 10 : 1));
+                  setS((o) => ({ ...o, white: [k, white[1]] }));
+                }}
                 aria-label="Temperature"
               />
             </label>

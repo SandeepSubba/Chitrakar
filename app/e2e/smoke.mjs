@@ -15447,6 +15447,61 @@ assert(
     Math.abs(picked[0] - picked[2]) <= 4 && Math.abs(picked[0] - picked[1]) <= 4,
     `picking the card makes it grey again (${picked})`,
   );
+  // Escape while picking ends the picking and leaves the window up; a
+  // click beside the window, with settings changed, does not throw them
+  // away (both used to close it and lose everything).
+  const pickGrey = win.locator('button:text-is("Pick grey")');
+  await pickGrey.click();
+  assert((await pickGrey.getAttribute("aria-pressed")) === "true", "Pick grey is picking");
+  await page.keyboard.press("Escape");
+  await settle();
+  assert(
+    (await win.count()) === 1 && (await pickGrey.getAttribute("aria-pressed")) === "false",
+    "Escape while picking a grey ends the picking, not the window",
+  );
+  const winBox = await win.boundingBox();
+  await page.mouse.click(Math.max(2, winBox.x - 6), winBox.y + 10);
+  await settle();
+  assert((await win.count()) === 1, "a stray click beside a changed window leaves it up");
+  // Flash is the same light as Daylight, and says Flash when chosen.
+  const lightSelect = win.locator('select[aria-label="Light"]');
+  const pickedWhite = await win.locator('input[aria-label="Temperature"]').inputValue();
+  await lightSelect.selectOption("Flash");
+  await settle();
+  assert((await lightSelect.inputValue()) === "Flash", "Flash chosen says Flash, not Daylight");
+  // The arrow keys move the temperature, 50 K a press, where a step of
+  // the slider is less than the 50 K a temperature is kept to.
+  const tempSlider = win.locator('input[aria-label="Temperature"]');
+  const tempWas = Number(await tempSlider.inputValue());
+  await tempSlider.focus();
+  await page.keyboard.press("ArrowRight");
+  await page.keyboard.press("ArrowRight");
+  await settle();
+  assert(Number(await tempSlider.inputValue()) > tempWas, "the arrow keys move the temperature");
+  // And a colour wheel turns with them.
+  const gradeWheel = win.locator('.grade-wheel[role="slider"]').first();
+  if ((await gradeWheel.count()) === 1 && (await gradeWheel.isVisible())) {
+    const was = await gradeWheel.getAttribute("aria-valuetext");
+    await gradeWheel.focus();
+    await page.keyboard.press("Shift+ArrowUp");
+    await page.keyboard.press("Shift+ArrowRight");
+    await settle();
+    const now = await gradeWheel.getAttribute("aria-valuetext");
+    assert(now !== was && now.includes("saturation 10"), `a colour wheel answers the arrow keys (${was} to ${now})`);
+    await gradeWheel.dblclick();
+    await settle();
+  }
+  // Back to the card picked grey, as the steps below expect.
+  await pickGrey.click();
+  await page.mouse.click(
+    box.x + (box.width - size[0] * k) / 2 + size[0] * k * 0.25,
+    box.y + (box.height - size[1] * k) / 2 + size[1] * k * 0.5,
+  );
+  await settle();
+  assert(
+    (await win.locator('input[aria-label="Temperature"]').inputValue()) === pickedWhite,
+    "picked grey again, the card is where it was",
+  );
   // Pushed three stops over, the light grey clips: the histogram's
   // corner says so, and pressed paints it red over the photograph.
   const clipHigh = win.locator('button[aria-label="Show clipped highlights"]');
@@ -19578,6 +19633,65 @@ assert(
       `${d.suggestedFilename()} is a JPEG, not a PNG under its name (${bytes[0]}, ${bytes[1]})`,
     );
   }
+  // A long edge is each region's own: both come out 300 along their
+  // longer side and are named for it. (The first region's scale was
+  // laid on every one, so the banner came out 597 wide.)
+  const exportRegions = async (fmt, setup) => {
+    await page.keyboard.press("Control+Shift+E");
+    await page.waitForSelector('[role=dialog][aria-label="Export"]');
+    await page.click(`.export-formats .preset:text-is("${fmt}")`);
+    await page.selectOption('select[aria-label="Area"]', "regions");
+    await setup();
+    await page.waitForFunction(() => /\d/.test(document.querySelector(".export-size")?.textContent ?? ""));
+    await page.waitForTimeout(600);
+    const shown = await page.textContent(".export-size");
+    const got = [];
+    const take = (d) => got.push(d);
+    page.on("download", take);
+    await page.click(".modal-actions .primary");
+    for (let i = 0; i < 80 && got.length < 6; i++) await page.waitForTimeout(100);
+    page.off("download", take);
+    const files = [];
+    for (const d of got) {
+      const bytes = await readFile(await d.path());
+      files.push({ name: d.suggestedFilename(), bytes, w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) });
+    }
+    return { shown, files };
+  };
+  const edged = await exportRegions("PNG", async () => {
+    await page.locator('input[aria-label="Long edge"]').fill("300");
+  });
+  assert(
+    edged.files.length === 2 && edged.files.every((f) => Math.max(f.w, f.h) === 300),
+    `a long edge is each region's own (${edged.files.map((f) => `${f.name} ${f.w}×${f.h}`)})`,
+  );
+  assert(
+    edged.files.some((f) => f.name.endsWith("-badge-300.png")) &&
+      edged.files.some((f) => f.name.endsWith("-banner-300.png")),
+    `and each is named for it (${edged.files.map((f) => f.name)})`,
+  );
+  // The set and the regions multiply: six files, and the window says
+  // their size and the set's names, not the page's.
+  const sixes = await exportRegions("PNG", async () => {
+    await page.locator('input[aria-label="Long edge"]').fill("");
+    await page.click('.export-scales .preset:text-is("Set")');
+  });
+  const total = sixes.files.reduce((n, f) => n + f.bytes.length, 0);
+  const said = Number(/([\d.]+) kB/.exec(sixes.shown)?.[1] ?? NaN) * 1024;
+  assert(sixes.files.length === 6, `a set of two regions is six files (${sixes.files.map((f) => f.name)})`);
+  assert(
+    Math.abs(said - total) <= 1024,
+    `the window says what the six come to (${sixes.shown} against ${total} bytes)`,
+  );
+  assert(
+    sixes.shown.includes("-badge@1x.png, @2x, @3x, and 1 more"),
+    `and names the first region's set (${sixes.shown})`,
+  );
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
   // Back to the whole page for whoever opens the window next.
   await page.keyboard.press("Control+Shift+E");
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
@@ -20710,6 +20824,67 @@ assert(
   page.off("dialog", sawAlert);
   assert(alerted === null, `a lasso drawn as a line says nothing (${alerted})`);
   await pickTool("Move");
+
+  // Pictures dropped together come in in the order they were dropped,
+  // the last on top, whichever is read first (a big one is read last).
+  await newDocument(800, 600, "rgb");
+  await page.evaluate(async () => {
+    const png = async (w, h, colour) => {
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const g = c.getContext("2d");
+      for (let y = 0; y < h; y += 7)
+        for (let x = 0; x < w; x += 7) {
+          g.fillStyle = `rgb(${colour[0]},${(x * 13 + y * 7) % 255},${colour[2]})`;
+          g.fillRect(x, y, 7, 7);
+        }
+      return new Promise((r) => c.toBlob(r, "image/png"));
+    };
+    const dt = new DataTransfer();
+    dt.items.add(new File([await png(1600, 1200, [255, 0, 0])], "first.png", { type: "image/png" }));
+    dt.items.add(new File([await png(20, 20, [0, 0, 255])], "second.png", { type: "image/png" }));
+    document.querySelector(".canvas-host").dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
+  await page.waitForFunction(() => document.querySelectorAll(".panel ul li").length === 2, null, { timeout: 15000 });
+  const stack = await page.locator(".panel ul li .layer-name").allTextContents();
+  assert(
+    stack.join(",") === "second.png,first.png",
+    `files dropped together stack in the order they were dropped (${stack})`,
+  );
+
+  // Exporting what is picked takes in what the layer's effects reach: a
+  // drop shadow is part of the picture (it was cut off at the layer's
+  // own box).
+  await newDocument(400, 300, "rgb");
+  await pickTool("Rect");
+  const b2 = await page.locator("#engine-page").boundingBox();
+  const at2 = (x, y) => [b2.x + (x / 400) * b2.width, b2.y + (y / 300) * b2.height];
+  await page.mouse.move(...at2(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at2(250, 200), { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.mouse.click(...at2(170, 150));
+  await page.waitForTimeout(200);
+  await page.selectOption('select[aria-label="Add effect"]', "DropShadow");
+  await page.waitForTimeout(300);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.selectOption('select[aria-label="Area"]', "selection");
+  await page.waitForTimeout(600);
+  const [shot] = await Promise.all([page.waitForEvent("download"), page.click(".modal-actions .primary")]);
+  const shotBytes = await readFile(await shot.path());
+  const [sw, sh] = [shotBytes.readUInt32BE(16), shotBytes.readUInt32BE(20)];
+  assert(sw > 155 && sh > 105, `what is picked goes out with its shadow (${sw} × ${sh} for a 150 × 100 rectangle)`);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

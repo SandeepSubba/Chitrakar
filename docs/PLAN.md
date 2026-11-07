@@ -10724,8 +10724,43 @@ without reading anything else.*
     "1 photographs".
   Smoke 9ct drives the tool fixes; 9bh the long edge typed and capped
   and the window's keys; 9al the ellipse; 9cn the develop window's
-  boxes. Left as found: Paste style onto the layer it was copied from,
-  and Merge on a lone picture, still each make a step.
+  boxes.
+
+  The photograph and the files-out halves of the audit, a second batch:
+  - *A photograph taken on its side came in on its side*: a phone's or
+    a camera's JPEG (and a TIFF) keeps its pixels as the sensor read
+    them and says in its EXIF which way is up; `decode` and the TIFF
+    reader now turn it (`upright`). Raw files already did.
+  - *A developed raw copied into another document lost its raw file*:
+    Develop again… there said the file was not in the document, and a
+    save had no `originals/`. The clipboard now carries the originals
+    and what the camera said (EXIF on export).
+  - *The develop window* closed on Escape while picking a grey (it
+    ends the picking now) and on a stray click beside it with changes
+    made (it stays up); Flash read as Daylight, which is the same light
+    (the name chosen is kept); the Temperature slider ignored its arrow
+    keys, each slider step rounding back to the same 50 K (`stepKelvin`
+    steps by 50, Shift 500), and the grading wheels had no keys at all.
+  - *Files dropped together* landed in whichever order their reads
+    finished; they are read in turn now.
+  - *Export*: a long edge under a twentieth of the page was ignored
+    (the floor is a thousandth now, `MIN_EXPORT_SCALE`), and Batch with
+    it; with "Each kept region" the first region's long edge was laid on
+    all of them; the Set with regions showed the page's size and name
+    for six files; a region's PNG and JPEG were a pixel apart and the
+    window a third size (one box now, `region_export_box`); "What is
+    picked" cut off a drop shadow (`drawn_bounds_of`).
+  - *A Photoshop file* darkened anything see-through under an
+    adjustment, whose picture stood over the layers it was made from;
+    where it is see-through, they are kept hidden beneath it.
+  - *An SVG opened* sat in the corner of a 1280×720 page; it gives the
+    page its size as a picture or a Photoshop file does.
+  - Paste style onto the layer it came from, and Merge on a picture
+    that is only itself, are no longer steps that change nothing.
+  Smoke 9by drives the regions' long edges and set, 9cn the develop
+  window's keys, 9ct the drop order and a shadow exported with its
+  layer. Left as judgement calls: a paste into an empty document is
+  still nudged 12 px, and an SVG brought back loses its layer names.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

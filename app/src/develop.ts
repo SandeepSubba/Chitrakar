@@ -323,6 +323,13 @@ export const kelvinToSlider = (k: number) =>
 export const sliderToKelvin = (p: number) =>
   Math.round(1e6 / (MIRED_WARM - (p / 1000) * (MIRED_WARM - MIRED_COOL)) / 50) * 50;
 
+/** A temperature moved by `steps` of 50 K (the steps a temperature is
+ * kept in), held to the slider's 2000 K to 25000 K: what an arrow key
+ * does, where a step of the slider itself can be less than 50 K and
+ * round back to where it was. */
+export const stepKelvin = (k: number, steps: number) =>
+  Math.min(25000, Math.max(2000, Math.round(k / 50) * 50 + steps * 50));
+
 /** A picture's histogram, a count per level per channel, and how much of
  * it is clipped: any channel at 255 (a highlight with nothing left in
  * it), or every channel at 0 (a shadow with nothing in it). */

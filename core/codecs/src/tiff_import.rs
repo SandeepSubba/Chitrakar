@@ -32,6 +32,15 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let mut dec = Decoder::new(Cursor::new(bytes)).map_err(bad)?;
     let (width, height) = dec.dimensions().map_err(bad)?;
     let color = dec.colortype().map_err(bad)?;
+    // Which way up the picture is meant to be seen (a camera turned on
+    // its side writes 6 or 8 here and leaves the pixels as they fell).
+    let orientation = dec
+        .find_tag_unsigned::<u16>(Tag::Orientation)
+        .ok()
+        .flatten()
+        .and_then(|o| u8::try_from(o).ok())
+        .and_then(image::metadata::Orientation::from_exif)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
     // The profile's bytes come back as a list of integers of whatever
     // width the reader settles on, which the byte-vector helper refuses.
     let icc = dec
@@ -158,11 +167,14 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     if let (Some(icc), ColorType::RGB(_) | ColorType::RGBA(_)) = (icc.as_deref(), color) {
         chitrakar_color::cms::normalize_rgba8_to_srgb(icc, &mut rgba8);
     }
-    Ok(SourceImage {
-        width,
-        height,
-        rgba8,
-    })
+    Ok(crate::upright(
+        SourceImage {
+            width,
+            height,
+            rgba8,
+        },
+        orientation,
+    ))
 }
 
 /// Samples narrower than a byte, packed along each row (a row starts on a
@@ -227,6 +239,21 @@ mod tests {
         let img = crate::decode(&bytes).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(img.rgba8, vec![255, 0, 0, 255, 10, 20, 30, 255]);
+    }
+
+    /// A TIFF from a camera turned on its side says so in its
+    /// Orientation tag, and comes in turned: 6 is a quarter turn
+    /// clockwise, so the left column is the top row.
+    #[test]
+    fn a_tiff_turned_on_its_side_comes_in_upright() {
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        let mut img = enc.new_image::<colortype::RGB8>(2, 1).unwrap();
+        img.encoder().write_tag(Tag::Orientation, 6u16).unwrap();
+        img.write_data(&[255, 0, 0, 0, 0, 255]).unwrap();
+        let img = crate::decode(&out.into_inner()).unwrap();
+        assert_eq!((img.width, img.height), (1, 2));
+        assert_eq!(img.rgba8, vec![255, 0, 0, 255, 0, 0, 255, 255]);
     }
 
     #[test]

@@ -26,6 +26,12 @@ pub use chitrakar_doc::{
 /// units.
 const DUPLICATE_OFFSET: f32 = 12.0;
 
+/// The smallest an export draws the page: a thousandth, so a long edge of
+/// 100 pixels is 100 for a photograph of any size rather than stopping at
+/// a twentieth of it. The pictures are read through their pyramid, so a
+/// small one is an average and not a scatter of samples.
+const MIN_EXPORT_SCALE: f32 = 0.001;
+
 /// The most bleed a PDF is given, in millimetres. Presses ask for three
 /// or five; past this it is a mistyped number, not a bleed.
 pub const MOST_BLEED_MM: f32 = 25.0;
@@ -66,7 +72,20 @@ struct Clipboard {
     /// Everything that was copied, in the order the document held it, so
     /// a paste rebuilds the stack rather than inverting it.
     roots: Vec<ClipNode>,
-    resources: Vec<(u32, u32, Vec<u8>)>,
+    /// The pictures, and what the camera said about each.
+    resources: Vec<ClippedPicture>,
+    /// The camera's raw files developed pictures were made from, by
+    /// name: without them a picture pasted into another document could
+    /// not be developed again there, nor saved with its raw file.
+    originals: Vec<(String, std::sync::Arc<[u8]>)>,
+}
+
+#[derive(Clone)]
+struct ClippedPicture {
+    width: u32,
+    height: u32,
+    rgba8: Vec<u8>,
+    capture: Option<chitrakar_doc::Capture>,
 }
 
 thread_local! {
@@ -1398,6 +1417,26 @@ impl Session {
                 "nothing picked is showing to merge".into(),
             ));
         };
+        // A picture on its own, drawn as it is — nothing worn, nothing
+        // faded or blended, on whole pixels at its own size — is already
+        // what merging it would make: no step for nothing.
+        if let [only] = ordered.as_slice() {
+            let node = self.doc.node(*only)?;
+            let t = node.transform;
+            if matches!(node.kind, NodeKind::Raster(_))
+                && node.effects.is_empty()
+                && node.mask.is_none()
+                && node.opacity >= 1.0
+                && node.blend == chitrakar_doc::BlendMode::Normal
+                && !node.clipped
+                && (t.a, t.b, t.c, t.d) == (1.0, 0.0, 0.0, 1.0)
+                && t.e.fract() == 0.0
+                && t.f.fract() == 0.0
+                && chitrakar_render::ancestor_space(&self.doc, *only) == Transform::default()
+            {
+                return Ok(*only);
+            }
+        }
         // A scratch copy of the page with the layers gathered as Group
         // gathers them: their own group is what draws them together.
         let mut scratch = self.doc.clone();
@@ -3471,7 +3510,7 @@ impl Session {
     /// A frame's contents as a PNG, at the size the frame shows on the
     /// page times `scale`. Errors when the node is not a frame.
     pub fn artboard_png(&self, id: NodeId, scale: f32) -> Result<Vec<u8>, EngineError> {
-        let scale = scale.clamp(0.05, 16.0);
+        let scale = scale.clamp(MIN_EXPORT_SCALE, 16.0);
         let Some(surface) = chitrakar_render::artboard_pixels(&self.doc, id, scale)? else {
             return Err(EngineError::BadCommand("that layer is not a frame".into()));
         };
@@ -4883,11 +4922,17 @@ impl Session {
             .iter()
             .map(|id| self.clip_of(*id))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut resources = Vec::new();
+        let (mut resources, mut originals) = (Vec::new(), Vec::new());
         for root in &roots {
-            self.collect_resources(root, &mut resources);
+            self.collect_resources(root, &mut resources, &mut originals);
         }
-        CLIPBOARD.with(|c| *c.borrow_mut() = Some(Clipboard { roots, resources }));
+        CLIPBOARD.with(|c| {
+            *c.borrow_mut() = Some(Clipboard {
+                roots,
+                resources,
+                originals,
+            })
+        });
         Ok(())
     }
 
@@ -4927,17 +4972,34 @@ impl Session {
         })
     }
 
-    fn collect_resources(&self, clip: &ClipNode, out: &mut Vec<(u32, u32, Vec<u8>)>) {
+    fn collect_resources(
+        &self,
+        clip: &ClipNode,
+        out: &mut Vec<ClippedPicture>,
+        originals: &mut Vec<(String, std::sync::Arc<[u8]>)>,
+    ) {
         let mut take = |rid: &str| {
             if let Some(r) = self.doc.resource(rid) {
                 if !r.rgba8.is_empty() {
-                    out.push((r.width, r.height, r.rgba8.clone()));
+                    out.push(ClippedPicture {
+                        width: r.width,
+                        height: r.height,
+                        rgba8: r.rgba8.clone(),
+                        capture: r.capture.clone(),
+                    });
                 }
             }
         };
         clip.node.each_resource(&mut take);
+        if let NodeKind::Raster(r) = &clip.node.kind {
+            if let Some(developed) = &r.develop {
+                if let Some(o) = self.doc.original(&developed.original) {
+                    originals.push((o.name.clone(), o.bytes.clone()));
+                }
+            }
+        }
         for child in &clip.children {
-            self.collect_resources(child, out);
+            self.collect_resources(child, out, originals);
         }
     }
 
@@ -4951,8 +5013,16 @@ impl Session {
         };
         // Restore pixels first: content-addressed ids mean this is a no-op
         // when pasting back into the document the copy came from.
-        for (w, h, bytes) in &clip.resources {
-            self.doc.add_resource(*w, *h, bytes.clone());
+        for picture in &clip.resources {
+            let id = self
+                .doc
+                .add_resource(picture.width, picture.height, picture.rgba8.clone());
+            if let Some(capture) = &picture.capture {
+                self.doc.set_capture(&id, capture.clone());
+            }
+        }
+        for (name, bytes) in &clip.originals {
+            self.doc.add_original(name, bytes.to_vec());
         }
         let parent = parent.unwrap_or_else(|| self.doc.root());
         let index = self.doc.children_of(parent)?.len();
@@ -7019,13 +7089,17 @@ impl Session {
         scale: f32,
         quality: u8,
     ) -> Result<Vec<u8>, EngineError> {
-        let Some(kept) = self.doc.regions().get(index) else {
+        if self.doc.regions().get(index).is_none() {
             return Err(EngineError::BadCommand("no region is kept there".into()));
-        };
-        let Some([x0, y0, x1, y1]) = self.region_bounds(&kept.mask) else {
+        }
+        let Some([x, y, w, h]) = self.region_export_box(Some(index)) else {
             return Err(EngineError::BadCommand("that region has no outline".into()));
         };
-        self.export_jpeg_at(scale, Some([x0, y0, x1 - x0, y1 - y0]), quality)
+        self.export_jpeg_at(
+            scale,
+            Some([x as f32, y as f32, w as f32, h as f32]),
+            quality,
+        )
     }
 
     /// A kept region as a file of either kind.
@@ -7045,6 +7119,37 @@ impl Session {
         self.raster_of_region(&region, box_, scale, kind)
     }
 
+    /// The whole pixels of the page a region's export covers: its box,
+    /// with room for its feather, on the page. Every file made of a
+    /// region — a PNG, a WebP, a JPEG — is this box, and the export
+    /// window says its size from it.
+    fn region_clip(
+        &self,
+        region: &chitrakar_doc::Mask,
+        [x0, y0, x1, y1]: [f32; 4],
+    ) -> chitrakar_render::ClipRect {
+        let pad = region.feather * 3.0;
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        chitrakar_render::ClipRect {
+            x0: (x0 - pad).max(0.0).floor() as u32,
+            y0: (y0 - pad).max(0.0).floor() as u32,
+            x1: ((x1 + pad).min(pw as f32).ceil() as u32).min(pw),
+            y1: ((y1 + pad).min(ph as f32).ceil() as u32).min(ph),
+        }
+    }
+
+    /// The box `[x, y, w, h]` an export of a region is: the kept region
+    /// at `index`, or what is picked out when there is none. None where
+    /// there is no such region or it is off the page.
+    pub fn region_export_box(&self, index: Option<usize>) -> Option<[u32; 4]> {
+        let region = match index {
+            Some(i) => &self.doc.regions().get(i)?.mask,
+            None => self.doc.selection()?,
+        };
+        let clip = self.region_clip(region, self.region_bounds(region)?);
+        (!clip.is_empty()).then(|| [clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0])
+    }
+
     /// A region of the page as a picture: what is inside its box, with
     /// everything outside the region itself taken back to nothing.
     fn raster_of_region(
@@ -7054,14 +7159,7 @@ impl Session {
         scale: f32,
         kind: Raster,
     ) -> Result<Vec<u8>, EngineError> {
-        let pad = region.feather * 3.0;
-        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
-        let clip = chitrakar_render::ClipRect {
-            x0: (x0 - pad).max(0.0).floor() as u32,
-            y0: (y0 - pad).max(0.0).floor() as u32,
-            x1: ((x1 + pad).min(pw as f32).ceil() as u32).min(pw),
-            y1: ((y1 + pad).min(ph as f32).ceil() as u32).min(ph),
-        };
+        let clip = self.region_clip(region, [x0, y0, x1, y1]);
         if clip.is_empty() {
             return Err(EngineError::BadCommand(
                 "what is picked out is not on the page".into(),
@@ -7071,7 +7169,7 @@ impl Session {
         // picture in it is drawn bigger — the same thing an export at
         // twice does to the page, so an asset picked out of a design
         // comes out at the size the screen it is for wants.
-        let scale = scale.clamp(0.05, 16.0);
+        let scale = scale.clamp(MIN_EXPORT_SCALE, 16.0);
         let (bx, by) = (clip.x0 as f32, clip.y0 as f32);
         let mut out = self.render_scaled(
             scale,
@@ -7747,7 +7845,20 @@ impl Session {
         if cmds.is_empty() {
             return Ok(());
         }
-        self.apply_labeled(Command::Batch(cmds), Some(label))
+        // A look given to layers that already wear it changes nothing,
+        // and is no step: its way back would be the same commands again.
+        let given = serde_json::to_value(&cmds).ok();
+        self.commit_preview();
+        let inverse = self.apply_internal(Command::Batch(cmds))?;
+        if let (Some(given), Command::Batch(back)) = (given, &inverse) {
+            let back: Vec<&Command> = back.iter().rev().collect();
+            if serde_json::to_value(&back).ok() == Some(given) {
+                return Ok(());
+            }
+        }
+        self.undo.push(HistoryEntry { inverse, label });
+        self.redo.clear();
+        Ok(())
     }
 
     /// The commands that give a look to every layer named.
@@ -8681,6 +8792,23 @@ impl Session {
                     notes,
                 );
             }
+            // A picture of everything under it with it applied stands
+            // over the layers it was made from, which are still there;
+            // where that picture is see-through they would show through
+            // it a second time and darken it. There they are kept, but
+            // hidden, so the file looks as the page does.
+            if applies && rgba.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255) {
+                note(
+                    "under an adjustment over see-through pixels, the layers it was made from are kept hidden",
+                    notes,
+                );
+                for item in out.iter_mut() {
+                    match item {
+                        PsdOutItem::Layer(l) => l.visible = false,
+                        PsdOutItem::Group { visible, .. } => *visible = false,
+                    }
+                }
+            }
             let mut layer =
                 PsdOutLayer::trimmed(&name, self.doc.meta.width, self.doc.meta.height, &rgba);
             if !applies {
@@ -8879,7 +9007,7 @@ impl Session {
         scale: f32,
         region: Option<[f32; 4]>,
     ) -> Result<Surface, EngineError> {
-        let scale = scale.clamp(0.05, 16.0);
+        let scale = scale.clamp(MIN_EXPORT_SCALE, 16.0);
         let [x, y, w, h] = region.unwrap_or([
             0.0,
             0.0,
@@ -9782,11 +9910,32 @@ impl Session {
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
         let group = self.doc.peek_next_id();
-        let mut cmds = vec![Command::AddNode {
+        let mut cmds = Vec::new();
+        // Into an empty document it is the file being opened, and the page
+        // takes the drawing's size, as a picture's or a Photoshop file's.
+        let (width, height) = (
+            imported.width.round() as u32,
+            imported.height.round() as u32,
+        );
+        if index == 0
+            && self.undo.is_empty()
+            && width > 0
+            && height > 0
+            && chitrakar_doc::canvas_fits(width, height)
+            && (width, height) != (self.doc.meta.width, self.doc.meta.height)
+        {
+            cmds.push(Command::ResizeCanvas {
+                width,
+                height,
+                dx: 0.0,
+                dy: 0.0,
+            });
+        }
+        cmds.push(Command::AddNode {
             parent: root,
             index,
             node: Box::new(Node::group(name)),
-        }];
+        });
         // The file's own layers, in the groups it keeps (a group seen
         // through a mask with grey in it), numbered on from the group
         // that holds them all.
@@ -10031,6 +10180,22 @@ impl Session {
         // number the panel shows, the box alignment lines up, and the
         // lines snapping catches on.
         match chitrakar_render::node_visual_bounds(&self.doc, id).ok()? {
+            Bounds::None => None,
+            Bounds::Everything => Some([
+                0.0,
+                0.0,
+                self.doc.meta.width as f32,
+                self.doc.meta.height as f32,
+            ]),
+            Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1 - x0, y1 - y0]),
+        }
+    }
+
+    /// Doc-space bounds of a node with everything it can draw — a drop
+    /// shadow's or a glow's reach as well as the layer — as `[x, y, w,
+    /// h]`: what an export of the layer has to hold.
+    pub fn drawn_bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
+        match chitrakar_render::node_bounds(&self.doc, id).ok()? {
             Bounds::None => None,
             Bounds::Everything => Some([
                 0.0,
@@ -12914,6 +13079,105 @@ mod tests {
             other.render().unwrap().get(4, 4),
             graded,
             "and with a copy into another document"
+        );
+    }
+
+    /// Pasting a layer's own style back onto it, and merging a picture
+    /// that is already only itself, change nothing and are no step.
+    #[test]
+    fn a_change_to_nothing_is_no_step() {
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        let rect = add_rect(&mut s, "Rect", 10.0, 10.0);
+        let style = s.copy_style(rect).unwrap();
+        let steps = s.history_labels().0.len();
+        s.paste_style(&style, &[rect]).unwrap();
+        assert_eq!(s.history_labels().0.len(), steps, "its own style back");
+
+        let picture = s
+            .place_developed(
+                chitrakar_codecs::SourceImage {
+                    width: 2,
+                    height: 2,
+                    rgba8: [90u8, 120, 150, 255].repeat(4),
+                },
+                "pic.png",
+                None,
+                None,
+            )
+            .unwrap();
+        let steps = s.history_labels().0.len();
+        assert_eq!(s.merge_layers(&[picture]).unwrap(), picture);
+        assert_eq!(s.history_labels().0.len(), steps, "a lone picture merged");
+        // Faded, merging it is something: the fade goes into the pixels.
+        s.apply(Command::SetOpacity {
+            id: picture,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let steps = s.history_labels().0.len();
+        s.merge_layers(&[picture]).unwrap();
+        assert_eq!(s.history_labels().0.len(), steps + 1);
+    }
+
+    /// An export as small as a long edge asks — a 4000-pixel page at 100
+    /// is a fortieth — comes out that size, not a twentieth of the page.
+    #[test]
+    fn an_export_goes_as_small_as_asked() {
+        let session = Session::new(4000, 3000, ColorMode::Rgb);
+        let out = session.render_scaled(100.0 / 4000.0, None).unwrap();
+        assert_eq!((out.width, out.height), (100, 75));
+    }
+
+    /// A developed picture copied into another document takes its raw
+    /// file and what the camera said with it: there it can be developed
+    /// again, saved with its raw file, and exported with its EXIF.
+    #[test]
+    fn a_developed_picture_pasted_elsewhere_keeps_its_raw_file_and_camera() {
+        let mut session = Session::new(8, 8, ColorMode::Rgb);
+        let original = session.doc.add_original("shot.CR2", vec![1, 2, 3, 4]);
+        let capture = chitrakar_doc::Capture {
+            make: "Canon".into(),
+            model: "Canon EOS 6D".into(),
+            ..Default::default()
+        };
+        let id = session
+            .place_developed(
+                chitrakar_codecs::SourceImage {
+                    width: 2,
+                    height: 2,
+                    rgba8: [90u8, 120, 150, 255].repeat(4),
+                },
+                "shot.CR2",
+                Some(Developed {
+                    original: original.clone(),
+                    settings: RawDevelop::default(),
+                }),
+                Some(capture.clone()),
+            )
+            .unwrap();
+        session.copy_nodes(&[id]).unwrap();
+        let mut other = Session::new(8, 8, ColorMode::Rgb);
+        let pasted = other.paste(None).unwrap()[0];
+        assert_eq!(
+            other
+                .doc
+                .original(&original)
+                .map(|o| (&o.name[..], &o.bytes[..])),
+            Some(("shot.CR2", &[1u8, 2, 3, 4][..])),
+            "the raw file came along"
+        );
+        let NodeKind::Raster(r) = &other.doc.node(pasted).unwrap().kind else {
+            panic!("a picture was pasted");
+        };
+        assert_eq!(
+            other.doc.resource(&r.resource_id).unwrap().capture.as_ref(),
+            Some(&capture),
+            "and what the camera said"
+        );
+        let opened = Session::load(&other.save().unwrap()).unwrap();
+        assert!(
+            opened.doc.original(&original).is_some(),
+            "and is saved with it"
         );
     }
 
@@ -24764,6 +25028,93 @@ mod tests {
         assert!(session
             .place_svg(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "empty.svg")
             .is_err());
+    }
+
+    /// An SVG opened into an empty document is the file being opened:
+    /// the page takes the drawing's size, and Undo gives the old page
+    /// back with the drawing. Placed onto a page with something on it,
+    /// the page stays as it is.
+    #[test]
+    fn an_svg_opened_gives_the_page_its_size() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300">
+            <rect x="10" y="10" width="40" height="30" fill="#ff0000"/></svg>"##;
+        let mut session = Session::new(1280, 720, ColorMode::Rgb);
+        session.place_svg(svg, "drawing.svg").unwrap();
+        let meta = &session.document().meta;
+        assert_eq!((meta.width, meta.height), (400, 300));
+        assert!(session.undo().unwrap());
+        let meta = &session.document().meta;
+        assert_eq!((meta.width, meta.height), (1280, 720));
+        assert!(session.layers().is_empty());
+
+        add_rect(&mut session, "already", 10.0, 10.0);
+        session.place_svg(svg, "drawing.svg").unwrap();
+        let meta = &session.document().meta;
+        assert_eq!((meta.width, meta.height), (1280, 720), "placed, not opened");
+    }
+
+    /// An adjustment over a see-through layer comes into a Photoshop file
+    /// as a picture of what it makes of it, and the layer under it is
+    /// kept but hidden: shown, it would lay its half-strength pixels down
+    /// a second time under the picture and the file would look darker
+    /// than the page.
+    #[test]
+    fn a_psd_stamp_over_see_through_pixels_hides_what_it_was_made_from() {
+        use chitrakar_codecs::psd::{read_psd, PsdItem};
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        let half = add_rect(&mut s, "Half", 10.0, 10.0);
+        s.apply(Command::SetOpacity {
+            id: half,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let root = s.document().root();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "Hue",
+                chitrakar_doc::Adjustment::Exposure { stops: 0.0 },
+            )),
+        })
+        .unwrap();
+        let (bytes, notes) = s.export_psd().unwrap();
+        let f = read_psd(&bytes).unwrap();
+        let shown: Vec<(String, bool)> = f
+            .items
+            .iter()
+            .map(|i| match i {
+                PsdItem::Pixels(p) => (p.name.clone(), p.visible),
+                PsdItem::Group { name, .. } => (name.clone(), true),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("Half".to_string(), false),
+                ("Hue (applied)".to_string(), true)
+            ]
+        );
+        assert!(notes.iter().any(|n| n.contains("kept hidden")), "{notes:?}");
+
+        // Over an opaque page nothing is shown twice, and nothing hidden.
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        add_rect(&mut s, "Ground", 20.0, 20.0);
+        let root = s.document().root();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "Hue",
+                chitrakar_doc::Adjustment::Exposure { stops: 0.0 },
+            )),
+        })
+        .unwrap();
+        let f = read_psd(&s.export_psd().unwrap().0).unwrap();
+        assert!(f
+            .items
+            .iter()
+            .all(|i| matches!(i, PsdItem::Pixels(p) if p.visible)));
     }
 
     /// A picture inside an SVG comes in with the shapes, in its place.

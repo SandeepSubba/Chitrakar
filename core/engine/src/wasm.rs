@@ -1076,6 +1076,16 @@ impl WasmSession {
         self.inner.selection_png(scale).map_err(to_js)
     }
 
+    /// The box `[x, y, w, h]` an export of a region is, in page pixels:
+    /// the kept region at `index`, or with a negative index what is
+    /// picked out. Empty where there is none.
+    pub fn region_export_box(&self, index: i32) -> Vec<u32> {
+        self.inner
+            .region_export_box(usize::try_from(index).ok())
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+
     /// A region kept by name as its own PNG, without picking it first —
     /// what a set of slices is written from.
     pub fn kept_region_png(&self, index: usize, scale: f32) -> Result<Vec<u8>, JsError> {
@@ -1405,6 +1415,15 @@ impl WasmSession {
     pub fn bounds_of(&self, id: f64) -> Vec<f32> {
         self.inner
             .bounds_of(NodeId(id as u64))
+            .map(|b| b.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Doc-space bounds of a node with its effects' reach, as `[x, y, w,
+    /// h]`; empty if it has none.
+    pub fn drawn_bounds_of(&self, id: f64) -> Vec<f32> {
+        self.inner
+            .drawn_bounds_of(NodeId(id as u64))
             .map(|b| b.to_vec())
             .unwrap_or_default()
     }

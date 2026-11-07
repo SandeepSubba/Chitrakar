@@ -94,6 +94,11 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let icc = image::ImageDecoder::icc_profile(&mut decoder)
         .ok()
         .flatten();
+    // A camera or a phone held on its side keeps its pixels as the sensor
+    // read them and says in the EXIF which way is up; every viewer turns
+    // the picture to match, so it comes in turned.
+    let orientation = image::ImageDecoder::orientation(&mut decoder)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
     let (width, height, mut rgba8) = match eight_bit(decoder)? {
         Ok(done) => done,
         Err(decoder) => {
@@ -106,11 +111,35 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         // Best effort: an unparseable or non-RGB profile leaves pixels as-is.
         chitrakar_color::cms::normalize_rgba8_to_srgb(&icc, &mut rgba8);
     }
-    Ok(SourceImage {
-        width,
-        height,
-        rgba8,
-    })
+    Ok(upright(
+        SourceImage {
+            width,
+            height,
+            rgba8,
+        },
+        orientation,
+    ))
+}
+
+/// A decoded picture turned the way its file says it is seen.
+pub(crate) fn upright(img: SourceImage, orientation: image::metadata::Orientation) -> SourceImage {
+    use image::metadata::Orientation;
+    if orientation == Orientation::NoTransforms
+        || img.rgba8.len() != img.width as usize * img.height as usize * 4
+    {
+        return img;
+    }
+    let Some(buffer) = image::RgbaImage::from_raw(img.width, img.height, img.rgba8) else {
+        unreachable!("the length was checked above");
+    };
+    let mut turned = image::DynamicImage::ImageRgba8(buffer);
+    turned.apply_orientation(orientation);
+    let turned = turned.into_rgba8();
+    SourceImage {
+        width: turned.width(),
+        height: turned.height(),
+        rgba8: turned.into_raw(),
+    }
 }
 
 /// Decode a picture whose file name is known. A camera's raw file is told
@@ -320,6 +349,52 @@ pub(crate) fn blended_page(
 
 #[cfg(test)]
 mod tests {
+
+    /// A phone's JPEG taken upright is stored on its side with an EXIF
+    /// orientation saying so (6: a quarter turn clockwise to be seen),
+    /// and comes in as it is seen: the left half on top. And 8, the
+    /// other way: the right half on top.
+    #[test]
+    fn a_jpeg_turned_on_its_side_comes_in_upright() {
+        use super::*;
+        let (w, h) = (32u32, 16u32);
+        let mut px = Vec::new();
+        for _ in 0..h {
+            for x in 0..w {
+                px.extend_from_slice(if x < w / 2 {
+                    &[255, 0, 0]
+                } else {
+                    &[0, 0, 255]
+                });
+            }
+        }
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .encode(&px, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        for (orientation, top_red) in [(6u8, true), (8u8, false)] {
+            // An APP1 segment holding a one-entry EXIF: Orientation.
+            let mut exif = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+            exif.extend_from_slice(&[orientation, 0, 0, 0, 0, 0, 0, 0]);
+            let mut file = jpeg[..2].to_vec();
+            file.extend_from_slice(&[0xff, 0xe1]);
+            file.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+            file.extend_from_slice(&exif);
+            file.extend_from_slice(&jpeg[2..]);
+            let img = decode(&file).unwrap();
+            assert_eq!((img.width, img.height), (h, w), "orientation {orientation}");
+            let red_at = |y: u32| {
+                let p = &img.rgba8[(y * img.width + img.width / 2) as usize * 4..][..3];
+                p[0] > 200 && p[2] < 60
+            };
+            assert_eq!(red_at(2), top_red, "orientation {orientation}: the top");
+            assert_eq!(
+                red_at(w - 3),
+                !top_red,
+                "orientation {orientation}: the bottom"
+            );
+        }
+    }
 
     #[test]
     fn a_picture_named_as_a_raw_file_is_the_picture() {

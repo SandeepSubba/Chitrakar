@@ -38,6 +38,13 @@ check(Math.abs(step(2000, 2500) - step(5000, 10000)) < 1, "2000 to 2500 K is as 
 for (let p = 0; p < 1000; p += 37) check(d.sliderToKelvin(p + 37) >= d.sliderToKelvin(p), `warmer to the right at ${p}`);
 
 // The lights, named and not.
+// An arrow key moves the temperature by 50 K wherever it is, though a
+// step of the slider is a few kelvin where it is warm.
+for (const k of [2000, 2850, 5500, 7500, 24950]) {
+  check(d.stepKelvin(k, 1) === Math.min(25000, k + 50), `${k} K steps up by 50`);
+  check(d.stepKelvin(k, -1) === Math.max(2000, k - 50), `${k} K steps down by 50`);
+}
+check(d.stepKelvin(25000, 10) === 25000 && d.stepKelvin(2000, -10) === 2000, "and stays on the slider");
 check(d.lightOf(d.RAW_DEFAULTS) === "As shot", "no white balance is the camera's");
 check(d.lightOf({ ...d.RAW_DEFAULTS, white: [2850, 0] }) === "Tungsten", "a named light by its numbers");
 check(d.lightOf({ ...d.RAW_DEFAULTS, white: [2851, 0] }) === "Custom", "anything else is one's own");
