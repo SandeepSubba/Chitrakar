@@ -1,0 +1,78 @@
+<!doctype html><meta charset="utf-8"><title>Chitrakar engine bench: in and out</title><script type="module">
+// What happens to a photograph on its way in and out, rather than what a
+// frame costs: a 12-megapixel PNG read and placed; the document saved
+// (the first save encodes the picture, the second has it kept); the
+// draft's skeleton; and a 24-megapixel camera raw — a mosaic made
+// here, packed as the raw reader packs one — opened, previewed and
+// developed in full, as Bayer and as X-Trans. Each the least of `n` runs.
+const q = new URLSearchParams(location.search);
+const mod = await import(`./${q.get("pkg") || "pkg"}/chitrakar_engine.js`);
+await mod.default();
+const W = 4032, H = 3024;
+const c = new OffscreenCanvas(W, H); const g = c.getContext("2d");
+const grad = g.createLinearGradient(0, 0, W, H); grad.addColorStop(0, "#203050"); grad.addColorStop(0.5, "#e0a040"); grad.addColorStop(1, "#40a0c0");
+g.fillStyle = grad; g.fillRect(0, 0, W, H);
+for (let i = 0; i < 400; i++) { g.fillStyle = `hsl(${i * 37 % 360},60%,50%)`; g.fillRect((i * 97) % W, (i * 61) % H, 80, 50); }
+// A little noise, as a photograph has, so the PNG is not all runs.
+const px = g.getImageData(0, 0, W, H);
+for (let i = 0; i < px.data.length; i += 4) { const n = ((i * 2654435761) >>> 28) - 8; px.data[i] += n; px.data[i + 1] += n; px.data[i + 2] += n; }
+g.putImageData(px, 0, 0);
+const png = new Uint8Array(await (await c.convertToBlob({ type: "image/png" })).arrayBuffer());
+
+const least = (n, f) => { let best = Infinity; for (let i = 0; i < n; i++) { const t0 = performance.now(); f(i); best = Math.min(best, performance.now() - t0); } return best; };
+const out = [];
+let s;
+out.push(["place a 12 MP PNG", least(3, () => { s = new mod.WasmSession(W, H, false); s.place_image(png, "photo"); })]);
+out.push(["save, encoding it", least(3, () => { s = new mod.WasmSession(W, H, false); s.place_image(png, "photo"); s.save(); }) - out[0][1]]);
+out.push(["save, PNG kept", least(5, () => s.save())]);
+out.push(["draft skeleton", least(5, () => s.save_skeleton())]);
+
+// A 6000 x 4000 mosaic, twelve bits, packed (core/rawin's form):
+// Bayer (RGGB) and Fuji's X-Trans, which develop differently.
+const RW = 6000, RH = 4000;
+const XTRANS = [[1, 1, 0, 1, 1, 2], [1, 1, 2, 1, 1, 0], [2, 0, 1, 0, 2, 1], [1, 1, 2, 1, 1, 0], [1, 1, 0, 1, 1, 2], [0, 2, 1, 2, 0, 1]];
+const samples = new Uint16Array(RW * RH);
+for (let y = 0; y < RH; y++) for (let x = 0; x < RW; x++) samples[y * RW + x] = (((x * 7 + y * 3) & 2047) + ((x * y) % 1500)) & 4095;
+function packedRaw(colourAt, lens) {
+  const head = new ArrayBuffer(4 + 4 * 5 + 4 * 24 + 16);
+  const dv = new DataView(head);
+  [67, 75, 82, 87].forEach((b, i) => dv.setUint8(i, b));
+  [2, RW, RH, 1, 1].forEach((v, i) => dv.setUint32(4 + i * 4, v, true));
+  const floats = [0, 0, 0, 0, 4095, 4095, 4095, 4095, 2, 1, 1.5, NaN,
+    3.2405, -1.5371, -0.4985, -0.9693, 1.876, 0.0416, 0.0556, -0.204, 1.0572, 0, 0, 0];
+  floats.forEach((v, i) => dv.setFloat32(24 + i * 4, v, true));
+  const pattern = new Uint8Array(48 * 48);
+  for (let r = 0; r < 48; r++) for (let k = 0; k < 48; k++) pattern[r * 48 + k] = colourAt(r, k);
+  // Version 2 ends with the lens's corrections: a count, then radii,
+  // distortion, red, blue and light, that many each.
+  const tail = new DataView(new ArrayBuffer(4 + (lens ? lens.length * 4 : 0)));
+  tail.setUint32(0, lens ? lens.length / 5 : 0, true);
+  (lens || []).forEach((v, i) => tail.setFloat32(4 + i * 4, v, true));
+  const packed = new Uint8Array(head.byteLength + pattern.length + 1 + samples.byteLength + tail.byteLength);
+  packed.set(new Uint8Array(head), 0);
+  packed.set(pattern, head.byteLength);
+  packed[head.byteLength + pattern.length] = 0;
+  packed.set(new Uint8Array(samples.buffer), head.byteLength + pattern.length + 1);
+  packed.set(new Uint8Array(tail.buffer), packed.length - tail.byteLength);
+  return packed;
+}
+const file = new Uint8Array(1 << 20); // stands in for the raw file, kept beside the picture
+
+const r = new mod.WasmSession(RW, RH, false);
+const bayer = packedRaw((y, x) => y % 2 === 0 ? (x % 2 === 0 ? 0 : 1) : x % 2 === 0 ? 1 : 2);
+out.push(["open a 24 MP raw", least(3, () => { r.raw_close(); r.raw_open(bayer, file.slice(), "photo.dng"); })]);
+out.push(["preview it, 1600 px", least(3, (i) => r.raw_preview(JSON.stringify({ exposure: i * 0.1 }), 1600))]);
+out.push(["develop and place it", least(2, () => { r.place_raw("{}"); r.undo(); })]);
+const xtrans = packedRaw((y, x) => XTRANS[y % 6][x % 6]);
+r.raw_close();
+r.raw_open(xtrans, file.slice(), "photo.raf");
+out.push(["develop and place, X-Trans", least(2, () => { r.place_raw("{}"); r.undo(); })]);
+// An X-T3's lens, as its file has it: barrel distortion, a little colour
+// fringing, the corners a fifth darker.
+const radii = [0.354, 0.5, 0.612, 0.707, 0.791, 0.866, 0.935, 1.0, 1.061];
+const lens = [...radii, ...radii.map((r) => -5 * r * r), ...radii.map((r) => 0.0005 * r), ...radii.map((r) => -0.0004 * r), ...radii.map((r) => 100 - 20 * r * r)];
+r.raw_close();
+r.raw_open(packedRaw((y, x) => XTRANS[y % 6][x % 6], lens), file.slice(), "photo.raf");
+out.push(["develop and place, lens corrected", least(2, () => { r.place_raw("{}"); r.undo(); })]);
+window.result = out.map(([n, t]) => [n, t.toFixed(0)]);
+</script>

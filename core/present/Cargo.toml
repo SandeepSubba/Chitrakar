@@ -1,0 +1,20 @@
+[package]
+name = "chitrakar-present"
+description = "Frames drawn by the GPU backend from a mirror of the document, for a shell that owns a native process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chitrakar-doc.workspace = true
+chitrakar-color.workspace = true
+chitrakar-render.workspace = true
+chitrakar-gpu = { path = "../gpu" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+chitrakar-doc = { workspace = true, features = ["fixture"] }
+chitrakar-engine = { path = "../engine" }
+chitrakar-codecs = { path = "../codecs" }

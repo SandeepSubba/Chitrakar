@@ -1,0 +1,29 @@
+[package]
+name = "chitrakar-pdf-in"
+description = "Reading a PDF (or an Illustrator file) as a page drawn at a resolution asked for; its own WASM module, loaded only when one is opened"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# cdylib for its own wasm-bindgen module, rlib for the engine's tests.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[dependencies]
+serde_json.workspace = true
+# A PDF renderer in Rust that runs where the engine does. The fourteen
+# standard fonts come with it (Foxit's, BSD-licensed). It is most of the
+# weight of reading a PDF — a megabyte compressed — which is why this is
+# a module of its own rather than part of the engine every visit loads.
+hayro = { version = "0.8", features = ["embed-fonts"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[dev-dependencies]
+chitrakar-codecs.workspace = true
+chitrakar-color.workspace = true
