@@ -102,6 +102,148 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// A shape's gradient carried from the box it was laid in (`was`, local
+/// `(x0, y0, x1, y1)`) to another box in the same space (`now`), so it
+/// draws the same on the page: a gradient is written in its shape's own
+/// unit box, and a shape cut in pieces or combined into another outline
+/// has a box of another size, which stretched the ramp across it.
+pub(crate) fn rebox_gradient(
+    g: &chitrakar_doc::Gradient,
+    was: (f32, f32, f32, f32),
+    now: (f32, f32, f32, f32),
+) -> chitrakar_doc::Gradient {
+    use chitrakar_doc::Gradient;
+    let span = |a: f32, b: f32| if (b - a).abs() > 1e-6 { b - a } else { 1.0 };
+    let (w0, h0) = (span(was.0, was.2), span(was.1, was.3));
+    let (w1, h1) = (span(now.0, now.2), span(now.1, now.3));
+    if (was.0, was.1, w0, h0) == (now.0, now.1, w1, h1) {
+        return g.clone();
+    }
+    let at = |u: [f32; 2]| {
+        [
+            (was.0 + u[0] * w0 - now.0) / w1,
+            (was.1 + u[1] * h0 - now.1) / h1,
+        ]
+    };
+    let (sx, sy) = (w1 / w0, h1 / h0);
+    match g {
+        Gradient::Linear {
+            from,
+            to,
+            stops,
+            spread,
+        } => Gradient::Linear {
+            from: at(*from),
+            to: at(*to),
+            stops: stops.clone(),
+            spread: *spread,
+        },
+        Gradient::Radial {
+            center,
+            radius,
+            stops,
+            axes,
+            spread,
+            focus,
+        } => {
+            // An offset in the new box's units is the old one scaled by
+            // the boxes' ratio, which the axes take in before the length.
+            let [a, b, c, d] = axes.unwrap_or([1.0, 0.0, 0.0, 1.0]);
+            Gradient::Radial {
+                center: at(*center),
+                radius: *radius,
+                stops: stops.clone(),
+                axes: Some([a * sx, b * sy, c * sx, d * sy]),
+                spread: *spread,
+                focus: focus.map(at),
+            }
+        }
+        Gradient::Conic {
+            center,
+            angle,
+            stops,
+        } => {
+            // The start's direction carried into the new box; between,
+            // a turn in a box of another shape is not quite the same.
+            let r = angle.to_radians();
+            let turned = (r.sin() / sy).atan2(r.cos() / sx).to_degrees();
+            Gradient::Conic {
+                center: at(*center),
+                angle: turned,
+                stops: stops.clone(),
+            }
+        }
+    }
+}
+
+/// A gradient `t` of the way from one to another: point by point and
+/// stop by stop where they are the same kind with as many stops, else
+/// the nearer of the two.
+fn blended_gradient(
+    a: &chitrakar_doc::Gradient,
+    b: &chitrakar_doc::Gradient,
+    t: f32,
+) -> chitrakar_doc::Gradient {
+    use chitrakar_doc::{Gradient, GradientStop};
+    let at = |x: f32, y: f32| x + (y - x) * t;
+    let pt = |x: [f32; 2], y: [f32; 2]| [at(x[0], y[0]), at(x[1], y[1])];
+    let stops = |x: &[GradientStop], y: &[GradientStop]| -> Vec<GradientStop> {
+        x.iter()
+            .zip(y)
+            .map(|(p, q)| GradientStop {
+                offset: at(p.offset, q.offset),
+                color: blended_color(&p.color, &q.color, t),
+            })
+            .collect()
+    };
+    let nearer = || if t < 0.5 { a.clone() } else { b.clone() };
+    match (a, b) {
+        (
+            Gradient::Linear {
+                from: f0,
+                to: t0,
+                stops: s0,
+                spread,
+            },
+            Gradient::Linear {
+                from: f1,
+                to: t1,
+                stops: s1,
+                ..
+            },
+        ) if s0.len() == s1.len() => Gradient::Linear {
+            from: pt(*f0, *f1),
+            to: pt(*t0, *t1),
+            stops: stops(s0, s1),
+            spread: *spread,
+        },
+        (
+            Gradient::Radial {
+                center: c0,
+                radius: r0,
+                stops: s0,
+                axes,
+                spread,
+                focus,
+            },
+            Gradient::Radial {
+                center: c1,
+                radius: r1,
+                stops: s1,
+                ..
+            },
+        ) if s0.len() == s1.len() => Gradient::Radial {
+            center: pt(*c0, *c1),
+            radius: at(*r0, *r1),
+            stops: stops(s0, s1),
+            axes: *axes,
+            spread: *spread,
+            focus: *focus,
+        },
+        _ => nearer(),
+    }
+}
+
 /// Is there anything to paste?
 pub fn clipboard_has_content() -> bool {
     CLIPBOARD.with(|c| c.borrow().is_some())
@@ -1163,13 +1305,21 @@ impl Session {
                     format!("{} guides", guides.len())
                 }
             }
-            Command::SetSelection { selection } => {
-                if selection.is_none() {
-                    "Deselect".into()
-                } else {
-                    "Select".into()
+            Command::SetSelection { selection } => match (self.doc.selection(), selection) {
+                (_, None) => "Deselect".into(),
+                // The same region with another edge: what the Feather
+                // window does, and was called "Select".
+                (Some(was), Some(now))
+                    if was.feather != now.feather && {
+                        let mut same = now.clone();
+                        same.feather = was.feather;
+                        serde_json::to_value(&same).ok() == serde_json::to_value(was).ok()
+                    } =>
+                {
+                    "Soften the edge".into()
                 }
-            }
+                _ => "Select".into(),
+            },
             Command::SetSwatches { swatches } => {
                 let had = self.doc.swatches().len();
                 if swatches.is_empty() {
@@ -2407,10 +2557,27 @@ impl Session {
             fill,
             stroke,
             gradient,
-            ..
+            shape: bottom_shape,
         } = node.kind
         else {
             unreachable!("checked above")
+        };
+        // The gradient laid in the result's box as it lay in the bottom
+        // shape's: the result's box is the whole combined outline.
+        let gradient = match (gradient, local) {
+            (Some(g), true) => {
+                let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+                for p in std::iter::once(&points).chain(subpaths.iter()).flatten() {
+                    x1 = x1.max(p[0] + x0);
+                    y1 = y1.max(p[1] + y0);
+                }
+                Some(rebox_gradient(
+                    &g,
+                    chitrakar_render::gradient_box(&bottom_shape),
+                    (x0, y0, x1, y1),
+                ))
+            }
+            (g, _) => g,
         };
         node.kind = NodeKind::Vector {
             shape: chitrakar_doc::VectorShape::Path {
@@ -2459,6 +2626,15 @@ impl Session {
     /// left as they were. With nothing named, every visible, unlocked
     /// shape on the page is asked. One step; the answer is the pieces,
     /// bottom first, and none of them is refused.
+    /// How many live copies follow a layer: deleting it, or cutting it in
+    /// pieces (which takes it away), leaves each of them showing nothing.
+    pub fn copies_following(&self, id: NodeId) -> usize {
+        self.doc
+            .nodes()
+            .filter(|(_, n)| matches!(n.kind, NodeKind::Instance { of, .. } if of == id))
+            .count()
+    }
+
     pub fn knife(
         &mut self,
         ids: &[NodeId],
@@ -2492,7 +2668,23 @@ impl Session {
                 .map(|(id, _)| *id)
                 .collect()
         } else {
-            ids.to_vec()
+            // A picked group is cut through: the shapes in it, at any
+            // depth. It was passed over, and the knife did nothing.
+            let mut out = Vec::new();
+            let mut stack: Vec<NodeId> = ids.to_vec();
+            while let Some(id) = stack.pop() {
+                match self.doc.node(id).map(|n| &n.kind) {
+                    Ok(NodeKind::Vector { .. }) => out.push(id),
+                    Ok(NodeKind::Group) => stack.extend(
+                        self.doc
+                            .children_of(id)
+                            .map(|c| c.to_vec())
+                            .unwrap_or_default(),
+                    ),
+                    _ => {}
+                }
+            }
+            out
         };
         // Whether a point is inside a ring, and how much a ring covers.
         let within = |ring: &Ring, p: [f32; 2]| {
@@ -2567,11 +2759,14 @@ impl Session {
             else {
                 continue;
             };
+            // A shape live copies follow is left whole: cut, it is taken
+            // away, and every copy of it would show nothing.
             if node.locked
                 || matches!(
                     shape,
                     chitrakar_doc::VectorShape::Path { closed: false, .. }
                 )
+                || self.copies_following(id) > 0
             {
                 continue;
             }
@@ -2589,10 +2784,34 @@ impl Session {
             };
             let (pa, pb) = (carry(back, a), carry(back, b));
             let t = node.transform;
-            let rings: Vec<Ring> = chitrakar_render::shape_rings(shape)
-                .into_iter()
-                .map(|ring| ring.into_iter().map(|p| carry(t, p)).collect())
-                .collect();
+            // Worked in the shape's own space, which the pieces keep: a
+            // stroke's width and a gradient are measured there, and a
+            // shape scaled up had its pieces' outline thinned.
+            let Some(own) = chitrakar_render::invert(t) else {
+                continue;
+            };
+            let (pa, pb) = (carry(own, pa), carry(own, pb));
+            let rings: Vec<Ring> = chitrakar_render::shape_rings(shape);
+            // The cut is the line dragged, not the whole line through it:
+            // a shape it does not cross is left alone. Every shape along
+            // the line's run was cut.
+            let crosses = rings.iter().any(|ring| {
+                let n = ring.len();
+                (0..n).any(|i| {
+                    let (p, q) = (ring[i], ring[(i + 1) % n]);
+                    let side = |o: [f32; 2], u: [f32; 2], v: [f32; 2]| {
+                        (v[0] - u[0]) * (o[1] - u[1]) - (v[1] - u[1]) * (o[0] - u[0])
+                    };
+                    side(p, pa, pb) * side(q, pa, pb) < 0.0 && side(pa, p, q) * side(pb, p, q) < 0.0
+                })
+            });
+            // And through it: a line ending inside the shape does not
+            // divide it, and splitting along the whole line through it
+            // would cut where nothing was drawn.
+            let inside = |p: [f32; 2]| rings.iter().filter(|r| within(r, p)).count() % 2 == 1;
+            if !crosses || inside(pa) || inside(pb) {
+                continue;
+            }
             let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
             for p in rings.iter().flatten() {
                 lo = [lo[0].min(p[0]), lo[1].min(p[1])];
@@ -2633,11 +2852,36 @@ impl Session {
             if halves.iter().any(|h| h.is_empty()) {
                 continue;
             }
-            let mut index = work
+            let index = work
                 .children_of(parent)?
                 .iter()
                 .position(|c| *c == id)
                 .unwrap_or(0);
+            // Layers held to the shape are held to all of its pieces: the
+            // pieces go in a group of the shape's name, which is one layer
+            // to be held to. Loose, each piece but the top one let go of
+            // what was held to it.
+            let held = {
+                let siblings = work.children_of(parent)?;
+                siblings
+                    .get(index + 1)
+                    .is_some_and(|s| work.node(*s).is_ok_and(|n| n.clipped))
+            };
+            let (into, at_start) = if held {
+                let group = Command::AddNode {
+                    parent,
+                    index,
+                    node: Box::new(Node::group(&node.name)),
+                };
+                work.apply(group.clone())?;
+                cmds.push(group);
+                let g = work.children_of(parent)?[index];
+                (g, 0)
+            } else {
+                (parent, index)
+            };
+            let mut index = at_start;
+            let was_box = chitrakar_render::gradient_box(shape);
             for half in halves {
                 for piece in pieces(half) {
                     let (mut x0, mut y0) = (f32::MAX, f32::MAX);
@@ -2648,10 +2892,20 @@ impl Session {
                     let shift = |ring: &Ring| -> Ring {
                         ring.iter().map(|p| [p[0] - x0, p[1] - y0]).collect()
                     };
+                    let (mut x1, mut y1) = (f32::MIN, f32::MIN);
+                    for p in piece.iter().flatten() {
+                        x1 = x1.max(p[0]);
+                        y1 = y1.max(p[1]);
+                    }
                     // A copy of the shape, so its look and its effects and
                     // its mask (in the parent's space) come along, as a
                     // boolean's result does.
                     let mut cut = node.clone();
+                    if held {
+                        // The group is held to nothing; its pieces are not
+                        // held to one another either.
+                        cut.clipped = false;
+                    }
                     cut.kind = NodeKind::Vector {
                         shape: chitrakar_doc::VectorShape::Path {
                             points: shift(&piece[0]),
@@ -2665,16 +2919,21 @@ impl Session {
                             widths: Vec::new(),
                             ..s.clone()
                         }),
-                        gradient: gradient.clone(),
+                        // Laid in the piece's own box, as the whole shape's
+                        // gradient lay in its box: copied as it was, each
+                        // piece showed the whole ramp.
+                        gradient: gradient
+                            .as_ref()
+                            .map(|g| rebox_gradient(g, was_box, (x0, y0, x1, y1))),
                     };
-                    cut.transform = Transform::translation(x0, y0);
+                    cut.transform = t.compose(Transform::translation(x0, y0));
                     let add = Command::AddNode {
-                        parent,
+                        parent: into,
                         index,
                         node: Box::new(cut),
                     };
                     work.apply(add.clone())?;
-                    made.push(work.children_of(parent)?[index]);
+                    made.push(work.children_of(into)?[index]);
                     cmds.push(add);
                     index += 1;
                 }
@@ -2754,17 +3013,24 @@ impl Session {
             NodeKind::Vector {
                 fill: fill_a,
                 stroke: stroke_a,
+                gradient: grad_a,
                 ..
             },
             NodeKind::Vector {
                 fill: fill_b,
                 stroke: stroke_b,
+                gradient: grad_b,
                 ..
             },
         ) = (&from.kind, &to.kind)
         else {
             unreachable!("both are shapes, checked above")
         };
+        // A stroke's width as it shows: the shapes between are drawn in
+        // the parent's space, and a shape scaled three times had its line
+        // blended as if it were not.
+        let shown = |t: Transform| (t.a * t.d - t.b * t.c).abs().sqrt();
+        let (scale_a, scale_b) = (shown(from.transform), shown(to.transform));
         for k in 1..=steps {
             let t = k as f32 / (steps + 1) as f32;
             let ring = chitrakar_render::morph::between(&pa, &pb, t);
@@ -2782,7 +3048,7 @@ impl Session {
                 (Some(x), Some(y)) => {
                     let mut s = if t < 0.5 { x.clone() } else { y.clone() };
                     s.color = blended_color(&x.color, &y.color, t);
-                    s.width = x.width + (y.width - x.width) * t;
+                    s.width = x.width * scale_a + (y.width * scale_b - x.width * scale_a) * t;
                     s.widths.clear();
                     Some(s)
                 }
@@ -2798,12 +3064,26 @@ impl Session {
                     subpaths: Vec::new(),
                 },
             );
+            // A gradient goes between the two as the colours do, where
+            // the two are the same kind with as many stops; otherwise the
+            // nearer end's. It was dropped, and the shapes between showed
+            // the fill neither end shows.
+            let gradient = match (grad_a, grad_b) {
+                (Some(x), Some(y)) => Some(blended_gradient(x, y, t)),
+                (Some(x), None) if t < 0.5 => Some(x.clone()),
+                (None, Some(y)) if t >= 0.5 => Some(y.clone()),
+                _ => None,
+            };
             if let NodeKind::Vector {
-                fill: f, stroke: s, ..
+                fill: f,
+                stroke: s,
+                gradient: g,
+                ..
             } = &mut n.kind
             {
                 *f = fill;
                 *s = stroke;
+                *g = gradient;
             }
             n.opacity = from.opacity + (to.opacity - from.opacity) * t;
             n.transform = Transform::translation(x0, y0);
@@ -2961,7 +3241,18 @@ impl Session {
         let parent = self.doc.root();
         let mut node = chitrakar_doc::Node::artboard(name, width, height, background);
         node.transform = Transform::translation(x, y);
-        let index = self.doc.children_of(parent)?.len();
+        // Above the frames already there and under everything else, as
+        // said: put on top, a frame drawn round a shape hid it.
+        let index = self
+            .doc
+            .children_of(parent)?
+            .iter()
+            .take_while(|c| {
+                self.doc
+                    .node(**c)
+                    .is_ok_and(|n| matches!(n.kind, NodeKind::Artboard { .. }))
+            })
+            .count();
         self.apply(Command::AddNode {
             parent,
             index,
@@ -3390,9 +3681,10 @@ impl Session {
             .map(|i| i + 1)
             .unwrap_or(0);
         let mut copy = chitrakar_doc::Node::instance(&name, target);
-        // Written in the copy's parent space, which is where the
-        // original's own transform is written too.
-        copy.transform = self.doc.node(target)?.transform;
+        // Where the layer picked is, in the space it and the new copy
+        // share: a copy of a moved copy landed on the original instead,
+        // and one in another group somewhere unrelated to either.
+        copy.transform = self.doc.node(of)?.transform;
         self.apply(Command::AddNode {
             parent,
             index,
@@ -3492,6 +3784,64 @@ impl Session {
         );
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
         Ok(made)
+    }
+
+    /// Delete layers, one step. A layer that is a live copy's own, in
+    /// place of one of the original's, is let go of in the copy's record
+    /// too: its stand-ins are matched to what they replace by place, and
+    /// one deleted alone left the copy's next layer standing in for the
+    /// wrong one, and a slot showing nothing.
+    pub fn delete_layers(&mut self, ids: &[NodeId]) -> Result<(), EngineError> {
+        let ids = self.in_document_order(ids);
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut freed: std::collections::BTreeMap<NodeId, Vec<usize>> = Default::default();
+        for &id in &ids {
+            let Some(parent) = self.doc.parent_of(id) else {
+                continue;
+            };
+            if let NodeKind::Instance { .. } = self.doc.node(parent)?.kind {
+                if let Some(k) = self.doc.children_of(parent)?.iter().position(|c| *c == id) {
+                    freed.entry(parent).or_default().push(k);
+                }
+            }
+        }
+        let mut cmds: Vec<Command> = ids
+            .iter()
+            .map(|id| Command::RemoveNode { id: *id })
+            .collect();
+        for (instance, mut gone) in freed {
+            if ids.contains(&instance) {
+                continue;
+            }
+            let NodeKind::Instance { of, replaces } = &self.doc.node(instance)?.kind else {
+                continue;
+            };
+            let mut replaces = replaces.clone();
+            gone.sort_unstable();
+            for k in gone.into_iter().rev() {
+                if k < replaces.len() {
+                    replaces.remove(k);
+                }
+            }
+            cmds.push(Command::SetKind {
+                id: instance,
+                kind: Box::new(NodeKind::Instance { of: *of, replaces }),
+            });
+        }
+        let label = match ids.as_slice() {
+            [one] => format!("Delete {}", self.doc.node(*one)?.name),
+            many => format!("Delete {} layers", many.len()),
+        };
+        // One layer alone goes as itself rather than as a batch of one,
+        // so its undo brings it back picked, as it always did.
+        let cmd = if cmds.len() == 1 {
+            cmds.remove(0)
+        } else {
+            Command::Batch(cmds)
+        };
+        self.apply_labeled(cmd, Some(label))
     }
 
     /// Take a stand-in away again, so the copy follows the original there
@@ -5625,14 +5975,27 @@ impl Session {
     ///
     /// Counting corners is not the question: a box dragged out to no
     /// width still has four of them, and a click is exactly that.
+    ///
+    /// Nor is the signed area: a lasso crossing itself in a figure eight
+    /// has two lobes going opposite ways, which cancel to nothing though
+    /// both are picked out. So each edge's triangle to the ring's middle
+    /// is counted without its sign — nought only where every point is on
+    /// one line, which is what a lasso drawn as a line is.
     fn worth_picking(shape: &VectorShape) -> bool {
         chitrakar_render::shape_rings(shape).iter().any(|ring| {
+            if ring.len() < 3 {
+                return false;
+            }
+            let n = ring.len() as f32;
+            let c = ring
+                .iter()
+                .fold([0.0f32, 0.0], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n]);
             let mut twice = 0.0f32;
             for i in 0..ring.len() {
                 let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
-                twice += p[0] * q[1] - q[0] * p[1];
+                twice += ((p[0] - c[0]) * (q[1] - c[1]) - (q[0] - c[0]) * (p[1] - c[1])).abs();
             }
-            twice.abs() / 2.0 > 0.25
+            twice / 2.0 > 0.25
         })
     }
 
@@ -7145,6 +7508,16 @@ impl Session {
         if w < 1 || h < 1 {
             return Err(EngineError::BadCommand(
                 "what is picked out is not on the page".into(),
+            ));
+        }
+        // The page already: a region reaching every edge (one picked
+        // inside out, round a hole) crops nothing, and is no step.
+        if x0 == 0.0
+            && y0 == 0.0
+            && (w as u32, h as u32) == (self.doc.meta.width, self.doc.meta.height)
+        {
+            return Err(EngineError::BadCommand(
+                "what is picked out reaches every edge of the page already".into(),
             ));
         }
         self.apply_labeled(
@@ -10267,20 +10640,33 @@ impl Session {
         if !(x >= 0.0 && y >= 0.0 && x < w && y < h) {
             return None;
         }
-        let mut surface = Surface::new(1, 1);
+        // Drawn with room round it for whatever reads its neighbours — a
+        // blur, a feathered edge, a shadow: drawn alone, a pixel at a
+        // feathered edge had no neighbours to be softened by and picked
+        // up the colour of one side or the other.
+        let reach = chitrakar_render::filter_reach(&self.doc) as f32
+            + chitrakar_render::effects_reach(&self.doc)
+            + chitrakar_render::softening_reach(&self.doc);
+        let pad = if reach.is_finite() {
+            reach.ceil().clamp(0.0, 1024.0) as u32
+        } else {
+            0
+        };
+        let side = 2 * pad + 1;
+        let mut surface = Surface::new(side, side);
         chitrakar_render::render_region_at(
             &self.doc,
             &mut surface,
             ClipRect {
                 x0: 0,
                 y0: 0,
-                x1: 1,
-                y1: 1,
+                x1: side,
+                y1: side,
             },
-            Transform::translation(-x.floor(), -y.floor()),
+            Transform::translation(pad as f32 - x.floor(), pad as f32 - y.floor()),
         )
         .ok()?;
-        Some(surface.get(0, 0).to_srgb8())
+        Some(surface.get(pad, pad).to_srgb8())
     }
 
     /// Topmost clickable node at a document-space point.
@@ -19643,6 +20029,285 @@ mod tests {
             (w - 140.0).abs() < 1.0,
             "100 wide moved out 20 each side: {w}"
         );
+    }
+
+    /// The eyedropper picks up what the page shows where a pixel reads
+    /// its neighbours: at a blurred edge it is between the two sides.
+    #[test]
+    fn the_colour_at_a_blurred_edge_is_what_the_page_shows() {
+        let mut s = Session::new(60, 40, ColorMode::Rgb);
+        add_rect(&mut s, "half", 30.0, 40.0);
+        let root = s.document().root();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::filter(
+                "soft",
+                chitrakar_doc::Filter::GaussianBlur { sigma: 4.0 },
+            )),
+        })
+        .unwrap();
+        let page = s.render().unwrap();
+        for x in [26u32, 29, 30, 33] {
+            let want = page.get(x, 20).to_srgb8();
+            let got = s.color_at(x as f32 + 0.5, 20.5).unwrap();
+            assert!(
+                want.iter().zip(got).all(|(a, b)| a.abs_diff(b) <= 1),
+                "at {x}: the page shows {want:?}, the eyedropper read {got:?}"
+            );
+        }
+    }
+
+    /// A lasso crossing itself in a figure eight picks out both lobes;
+    /// one drawn as a line still picks out nothing.
+    #[test]
+    fn a_figure_eight_lasso_picks_out_its_lobes() {
+        let lasso = |points: Vec<[f32; 2]>| VectorShape::Path {
+            points,
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let mut s = Session::new(300, 300, ColorMode::Rgb);
+        s.pick_region(
+            lasso(vec![
+                [50.0, 150.0],
+                [250.0, 250.0],
+                [250.0, 150.0],
+                [50.0, 250.0],
+            ]),
+            Transform::default(),
+            "replace",
+        )
+        .unwrap();
+        assert!(s.document().selection().is_some());
+        assert!(s
+            .pick_region(
+                lasso(vec![[10.0, 10.0], [100.0, 100.0], [200.0, 200.0]]),
+                Transform::default(),
+                "replace",
+            )
+            .is_err());
+    }
+
+    /// The knife cuts what its line crosses and leaves the picture as it
+    /// was: a shape off to the side along the line's run is not cut, a
+    /// gradient is laid in each piece where it lay in the whole, and a
+    /// scaled shape's pieces keep their scale.
+    #[test]
+    fn the_knife_cuts_only_what_it_crosses_and_changes_no_pixel() {
+        let mut s = Session::new(300, 120, ColorMode::Rgb);
+        let far = add_rect(&mut s, "far", 40.0, 40.0);
+        s.apply(Command::SetTransform {
+            id: far,
+            transform: Transform::translation(10.0, 40.0),
+        })
+        .unwrap();
+        let near = add_rect(&mut s, "near", 50.0, 25.0);
+        let mut kind = s.document().node(near).unwrap().kind.clone();
+        if let NodeKind::Vector { gradient, .. } = &mut kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.5],
+                to: [1.0, 0.5],
+                stops: vec![
+                    chitrakar_doc::GradientStop {
+                        offset: 0.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 0.1,
+                            g: 0.2,
+                            b: 0.9,
+                            a: 1.0,
+                        },
+                    },
+                    chitrakar_doc::GradientStop {
+                        offset: 1.0,
+                        color: chitrakar_color::AuthoredColor::Srgb {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                    },
+                ],
+                spread: Default::default(),
+            });
+        }
+        s.apply(Command::SetKind {
+            id: near,
+            kind: Box::new(kind),
+        })
+        .unwrap();
+        s.apply(Command::SetTransform {
+            id: near,
+            transform: Transform {
+                a: 2.0,
+                d: 2.0,
+                e: 150.0,
+                f: 30.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let before = s.render().unwrap();
+        let made = s.knife(&[], [160.0, 60.0], [240.0, 60.0]).unwrap();
+        assert_eq!(made.len(), 0, "a line inside the shape crosses no edge");
+        let made = s.knife(&[], [160.0, 60.0], [290.0, 60.0]).unwrap();
+        assert_eq!(made.len(), 0, "nor one that leaves by one edge only");
+        let made = s.knife(&[], [200.0, 10.0], [200.0, 110.0]).unwrap();
+        assert_eq!(made.len(), 2, "the shape the line crosses is cut in two");
+        assert!(
+            s.document().node(far).is_ok(),
+            "the one along its run is not"
+        );
+        let after = s.render().unwrap();
+        let worst = apart(&before, &after);
+        assert!(
+            worst.0 < 0.02,
+            "the cut changed {},{}: {:?}",
+            worst.1,
+            worst.2,
+            worst.0
+        );
+        let t = s.document().node(made[0]).unwrap().transform;
+        assert!(
+            (t.a - 2.0).abs() < 1e-6,
+            "the pieces keep the shape's scale: {t:?}"
+        );
+    }
+
+    /// A shape with a layer held to it is cut into a group of its pieces,
+    /// so what is held to it still shows across all of them; and a shape
+    /// live copies follow is not cut.
+    #[test]
+    fn the_knife_keeps_what_is_held_and_what_is_copied() {
+        let mut s = Session::new(100, 100, ColorMode::Rgb);
+        let base = add_rect(&mut s, "base", 80.0, 80.0);
+        let held = add_rect(&mut s, "held", 100.0, 100.0);
+        s.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        let before = s.render().unwrap();
+        s.knife(&[base], [0.0, 40.0], [100.0, 40.0]).unwrap();
+        let after = s.render().unwrap();
+        assert!(
+            apart(&before, &after).0 < 0.02,
+            "the held layer shows as it did"
+        );
+
+        let mut s = Session::new(100, 100, ColorMode::Rgb);
+        let original = add_rect(&mut s, "o", 80.0, 80.0);
+        s.make_instance(original).unwrap();
+        assert!(s
+            .knife(&[original], [0.0, 40.0], [100.0, 40.0])
+            .unwrap()
+            .is_empty());
+        assert!(s.document().node(original).is_ok());
+    }
+
+    /// A frame drawn round a shape goes under it, above the frames there.
+    #[test]
+    fn a_new_frame_goes_under_what_is_there() {
+        let mut s = Session::new(200, 200, ColorMode::Rgb);
+        let first = s.add_artboard("one", 0.0, 0.0, 50.0, 50.0, None).unwrap();
+        let shape = add_rect(&mut s, "shape", 20.0, 20.0);
+        let second = s.add_artboard("two", 100.0, 0.0, 50.0, 50.0, None).unwrap();
+        let root = s.document().root();
+        assert_eq!(
+            s.document().children_of(root).unwrap(),
+            &[first, second, shape]
+        );
+    }
+
+    /// A blend goes between the lines as they show: a shape scaled three
+    /// times shows its line three times as wide.
+    #[test]
+    fn a_blend_goes_between_the_lines_as_they_show() {
+        let mut s = Session::new(300, 100, ColorMode::Rgb);
+        let stroke = |s: &mut Session, id: NodeId| {
+            let mut kind = s.document().node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    width: 4.0,
+                    widths: Vec::new(),
+                    cap: Default::default(),
+                    join: Default::default(),
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    align: None,
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            s.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        };
+        let a = add_rect(&mut s, "a", 10.0, 10.0);
+        stroke(&mut s, a);
+        let b = add_rect(&mut s, "b", 10.0, 10.0);
+        stroke(&mut s, b);
+        s.apply(Command::SetTransform {
+            id: b,
+            transform: Transform {
+                a: 3.0,
+                d: 3.0,
+                e: 200.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let group = s.blend_shapes(a, b, 1).unwrap();
+        let mid = s.document().children_of(group).unwrap()[0];
+        let NodeKind::Vector {
+            stroke: Some(line), ..
+        } = &s.document().node(mid).unwrap().kind
+        else {
+            panic!("a stroked shape between");
+        };
+        assert!(
+            (line.width - 8.0).abs() < 0.01,
+            "halfway between 4 and 12: {}",
+            line.width
+        );
+    }
+
+    /// A copy's own layer deleted lets the copy follow the original there
+    /// again, and a copy of a moved copy lands where that copy is.
+    #[test]
+    fn a_copys_own_layer_deleted_follows_again() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let one = add_rect(&mut s, "one", 10.0, 10.0);
+        let two = add_rect(&mut s, "two", 10.0, 10.0);
+        let group = s.group_nodes(&[one, two], "g").unwrap();
+        let copy = s.make_instance(group).unwrap();
+        let first = s.override_child(copy, 0).unwrap();
+        s.override_child(copy, 1).unwrap();
+        s.delete_layers(&[first]).unwrap();
+        let NodeKind::Instance { replaces, .. } = &s.document().node(copy).unwrap().kind else {
+            panic!("still a copy");
+        };
+        assert_eq!(replaces, &[two], "only the second is the copy's own now");
+        assert_eq!(s.document().children_of(copy).unwrap().len(), 1);
+
+        s.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(120.0, 0.0),
+        })
+        .unwrap();
+        let again = s.make_instance(copy).unwrap();
+        let t = s.document().node(again).unwrap().transform;
+        assert_eq!((t.e, t.f), (120.0, 0.0), "on the copy it was made from");
     }
 
     /// A paste lands where it was copied from, except over its own

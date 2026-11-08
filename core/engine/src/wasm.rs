@@ -1430,6 +1430,18 @@ impl WasmSession {
         serde_json::to_string(&self.inner.colour_names_in_use()).unwrap_or_else(|_| "[]".into())
     }
 
+    /// Delete layers in one step, letting a live copy's stand-ins go
+    /// from its record as well (`Session::delete_layers`).
+    pub fn delete_layers(&mut self, ids: &[f64]) -> Result<(), JsError> {
+        let ids: Vec<NodeId> = ids.iter().map(|i| NodeId(*i as u64)).collect();
+        self.inner.delete_layers(&ids).map_err(to_js)
+    }
+
+    /// How many live copies follow a layer.
+    pub fn copies_following(&self, id: f64) -> usize {
+        self.inner.copies_following(NodeId(id as u64))
+    }
+
     /// Doc-space bounds of a node with its effects' reach, as `[x, y, w,
     /// h]`; empty if it has none.
     pub fn drawn_bounds_of(&self, id: f64) -> Vec<f32> {

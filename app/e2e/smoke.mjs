@@ -21038,6 +21038,88 @@ assert(
   await pickTool("Move");
 }
 
+// 9cw. The third audit, of selections and the remaining tools: Shift
+// held from the press added a square whatever was dragged; Escape during
+// a new marquee threw away the region already picked; the knife cut
+// shapes its line never touched; a frame drawn round a shape hid it; and
+// [ and ] with the Brush changed the paint brush's size.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const dragOn = async (x0, y0, x1, y1, keys = []) => {
+    for (const k of keys) await page.keyboard.down(k);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    for (const k of keys) await page.keyboard.up(k);
+    await page.waitForTimeout(250);
+  };
+  const antsBox = () =>
+    page.$$eval(".ants polygon", (els) => {
+      const xs = [], ys = [];
+      for (const el of els)
+        for (const p of el.points ? Array.from(el.points) : []) {
+          xs.push(p.x);
+          ys.push(p.y);
+        }
+      return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    });
+
+  // Shift held from the press adds the box as dragged, wide and short.
+  await pickTool("Select");
+  await dragOn(20, 20, 80, 80);
+  await dragOn(200, 150, 350, 190, ["Shift"]);
+  const box = await antsBox();
+  const tall = (box[3] - box[1]) / (b.height / 300);
+  assert(tall < 180, `Shift from the press adds a wide box, not a square (${tall.toFixed(0)} tall)`);
+  // Escape halfway through another marquee keeps what is picked.
+  await page.keyboard.down("Shift");
+  await page.mouse.move(...at(100, 220));
+  await page.mouse.down();
+  await page.mouse.move(...at(160, 260), { steps: 4 });
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await page.keyboard.up("Shift");
+  await page.waitForTimeout(250);
+  assert((await page.locator(".ants").count()) === 1, "Escape during a marquee keeps the region already picked");
+  await menuClick("Select", "Deselect");
+  await page.waitForTimeout(150);
+
+  // The knife cuts what its line crosses, not what lies along its run.
+  await newDocument(400, 300, "rgb");
+  await pickTool("Rect");
+  await dragOn(40, 100, 140, 200);
+  await dragOn(240, 100, 340, 200);
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await pickTool("Knife");
+  await dragOn(220, 150, 360, 150);
+  const rows = await page.locator(".panel ul li .layer-name").allTextContents();
+  assert(rows.length === 3, `the knife cut the one shape it crossed (${rows})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+
+  // A frame drawn round a shape goes under it.
+  await pickTool("Frame");
+  await dragOn(20, 60, 380, 260);
+  const pxInRect = await canvasPixel(90, 150);
+  assert(pxInRect[3] === 255 && pxInRect[0] + pxInRect[1] + pxInRect[2] < 700, `a frame drawn round a shape does not hide it (${pxInRect})`);
+
+  // [ and ] size the brush in hand.
+  await pickTool("Brush");
+  await page.waitForTimeout(100);
+  const brushBox = page.locator('input[aria-label="Brush width"]');
+  const before = Number(await brushBox.inputValue());
+  await page.mouse.move(...at(200, 20));
+  await page.keyboard.press("]");
+  await page.keyboard.press("]");
+  await page.waitForTimeout(150);
+  assert(Number(await brushBox.inputValue()) > before, `] widens the Brush (${before} to ${await brushBox.inputValue()})`);
+  await pickTool("Move");
+}
+
 // 9cv. Two tabs each keep a draft of their own: both wrote one draft,
 // and only the last one's work came back after a crash. A context of its
 // own, so this storage is not the suite's.

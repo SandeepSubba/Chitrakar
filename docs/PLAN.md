@@ -10761,6 +10761,58 @@ without reading anything else.*
   window's keys, 9ct the drop order and a shadow exported with its
   layer. Left as judgement calls: a paste into an empty document is
   still nudged 12 px, and an SVG brought back loses its layer names.
+  **A third audit: selections, masks and colour, and the tools the
+  first two did not reach (November 2026).** Put right:
+  - *The eyedropper* read a pixel drawn on its own, so where the page
+    reads neighbours — a feathered edge, a blur, a shadow — it picked
+    up one side or the other; it is drawn with room round it now
+    (`color_at`, as far as the filters, effects and feathers reach).
+  - *Marquee keys*: Shift held from the press both added and squared,
+    and Alt both took away and drew from the middle, so no box but a
+    square could be added and none but a centred one taken away. Held
+    at the press they say how the region meets what is picked; pressed
+    during the drag they shape it (Photoshop's reading). Escape during
+    a drag of a region or a new marquee threw away what was picked;
+    it lets go of the gesture only. A figure-eight lasso's lobes
+    cancelled to nothing (`worth_picking` counts them unsigned). A
+    picked feather made a second step; it is folded into the pick.
+  - *Masks*: a box or oval mask on a turned layer was laid from two of
+    its corners; it is the layer's own box, turned with it.
+  - *Colour*: in a CMYK document, a stroke turned on or recoloured, a
+    fill turned back on, a text colour and a pen line came in as sRGB;
+    they are inks. Add stop between palette colours copied the first;
+    `mixAuthored` mixes what they stand for. Cancelling Feather left
+    its value for the next marquee, and its step was called "Select"
+    (now "Soften the edge"). A profile that cannot proof (a scanner's)
+    now says so when loaded, not as a colour-engine error at every
+    Proof. The wand off the page, a blank kept-region name and Crop to
+    a region reaching every edge no longer alert or make empty steps.
+  - *The knife* cut every shape along its line's run, not the ones the
+    stroke crossed (it cuts only what it runs right through now),
+    re-stretched a gradient across each piece and thinned a scaled
+    shape's outline (pieces keep the shape's own space, and a gradient
+    is laid in each piece's box as it lay in the whole —
+    `rebox_gradient`, which Combine uses too), let go of what was
+    clipped to a cut base (the pieces go in a group), did nothing with
+    a group picked, and cut the original of live copies, blanking them
+    (it leaves such a shape whole).
+  - *Frames*: resized from the west or north edge, a frame was thrown
+    across the page (each step worked from the last step's preview; it
+    starts from where the drag began now), and a new one went on top of
+    everything instead of under it.
+  - *Live copies*: deleting a copy's own layer left the copy's record
+    of which layers it stands in for out of step, blanking another
+    (`delete_layers`); deleting an original asks first; Duplicate
+    linked on a moved copy landed on the original.
+  - *Gradients and the rest*: the gradient tool reset the spread and
+    a radial's focus when aimed again, and held Shift's angles in the
+    shape's box rather than on the page; Add stop read stops dragged
+    out of order as they stood; Blend shapes blended the line as if no
+    shape were scaled and dropped gradients; [ and ] with the Brush
+    sized the paint brush; Repeat's Enter used the count before the
+    one typed, and its clock example was a copy too many.
+  Smoke 9cw drives the marquee, Escape, knife, frame and brush fixes;
+  the engine tests the rest.
   **A second audit: the panel, text and paths, and the editor over
   time (November 2026).** Three more helpers drove the parts the first
   round skimmed. Put right:

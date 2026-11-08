@@ -124,6 +124,7 @@ import {
   VectorShape,
   WasmSession,
   colorToHex,
+  flatColor,
   display_p3_profile,
   engine_version,
   effectBody,
@@ -156,6 +157,10 @@ function mixAuthored(
   t: number,
 ): AuthoredColor {
   const at = (x: number, y: number) => x + (y - x) * t;
+  // A palette colour is mixed as the colour it stands for: a stop added
+  // between a named colour and another was a copy of the first, and the
+  // ramp changed when it should not have.
+  [a, b] = [flatColor(a), flatColor(b)];
   if ("Srgb" in a && "Srgb" in b) {
     return {
       Srgb: {
@@ -677,6 +682,15 @@ const textSelections = new WeakMap<HTMLTextAreaElement, [number, number]>();
  * caret, as bytes of its text, and when. */
 let lastInlinePick: { range: [number, number]; text: string; at: number } | null = null;
 
+/** What a proofing failure means, in words: the colour engine's own
+ * names for it say nothing to a person. */
+function proofingTrouble(err: unknown): string {
+  const said = String(err);
+  return /UnsupportedProfileConnection|profile/i.test(said)
+    ? "it cannot be used to proof: it is not a printer's (output) profile. A press profile, such as the printer or the press supplies, can be."
+    : said;
+}
+
 /** A tool's flyout, pinned to the window beside the button it opened
  * from: the rail scrolls when the window is too short for it, and a
  * flyout placed inside a scrolling rail would be cut off at its edge.
@@ -956,6 +970,12 @@ interface ToolDrag {
   /** A box tool: the point the drag began is the box's middle rather
    * than a corner, because alt was held. */
   fromCentre?: boolean;
+  /** A region tool, with something picked out already: how the new one
+   * meets it, said by Shift and Alt held at the press. Held from the
+   * start they say that; pressed during the drag they shape the box
+   * (square, from the middle) — Photoshop's reading, and the only one
+   * that lets an added box be any shape. */
+  combine?: "union" | "subtract" | "intersect";
   /** Move tool: the node being dragged and its full starting transform. */
   target?: NodeId;
   t0?: Transform;
@@ -1979,6 +1999,9 @@ export function App() {
     vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
     unit: (x: number, y: number) => [number, number];
     start: [number, number];
+    /** Where the drag began on the page, which Shift's angles are
+     * measured from. */
+    from: [number, number];
     radial: boolean;
   } | null>(null);
   /** The knife being dragged: where the line started, in document
@@ -2673,8 +2696,14 @@ export function App() {
 
   const keepSelection = () => {
     if (!session) return;
-    const name = window.prompt("Keep what is picked out as:", "");
-    if (name === null) return;
+    // A name of its own by default, as a comp and a style have: an empty
+    // answer was an error from the engine.
+    const taken = new Set(kept);
+    let n = kept.length + 1;
+    while (taken.has(`Region ${n}`)) n++;
+    const answer = window.prompt("Keep what is picked out as:", `Region ${n}`);
+    if (answer === null) return;
+    const name = answer.trim() || `Region ${n}`;
     try {
       session.keep_selection(name);
       refresh(session);
@@ -2877,12 +2906,16 @@ export function App() {
       alert(`Stroke: ${err}`);
     }
   };
+  /** The softness regions were being given when the Feather window
+   * opened, which Cancel puts back. */
+  const featherWas = useRef(0);
   const openFeather = () => {
     if (!session) return;
     if (!session.selection_json() || session.selection_json() === "null") {
       alert("Pick something out first: there is no edge to soften yet.");
       return;
     }
+    featherWas.current = selectionFeather;
     setFeatherOpen(true);
   };
   const previewFeather = (radius: number) => {
@@ -2960,9 +2993,19 @@ export function App() {
     setMultiSel([]);
   }, []);
 
-  const cancelGesture = useCallback(() => {
-    if (!session) return;
+  /** Let go of whatever is in flight, and say whether anything was. */
+  const cancelGesture = useCallback((): boolean => {
+    if (!session) return false;
+    const inFlight =
+      toolDragRef.current !== null ||
+      handleDragRef.current !== null ||
+      gradToolRef.current !== null ||
+      knifeRef.current !== null ||
+      zoomBoxRef.current !== null ||
+      cropEditRef.current !== null ||
+      paintingRef.current !== null;
     toolDragRef.current = null;
+    setRegionDrag(null);
     handleDragRef.current = null;
     gradToolRef.current = null;
     knifeRef.current = null;
@@ -2981,6 +3024,7 @@ export function App() {
       strokeMade.current = false;
       refresh(session);
     } else if (cancelled) refresh(session);
+    return inFlight || cancelled;
   }, [session, refresh]);
 
   /** Commit the pen path being drawn: closed shapes get the current fill,
@@ -3051,7 +3095,9 @@ export function App() {
                   stroke: closed
                     ? null
                     : {
-                        color: hexColor(fill),
+                        // In a CMYK document, an ink: an sRGB stroke took
+                        // another road to the press than the inks did.
+                        color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
                         width: 4,
                         widths: [],
                         dash: [],
@@ -3114,13 +3160,14 @@ export function App() {
         // and the large ones do not take forever.
         if (e.key === "[" || e.key === "]") {
           e.preventDefault();
-          setPaintSize((size) => {
-            // Rounded away from where it started, so a small brush can
-            // still be made smaller rather than rounding back to itself.
-            const next =
-              e.key === "]" ? Math.ceil(size * 1.25) : Math.floor(size / 1.25);
-            return Math.max(1, Math.min(200, next));
-          });
+          // Rounded away from where it started, so a small brush can
+          // still be made smaller rather than rounding back to itself.
+          const step = (most: number) => (size: number) =>
+            Math.max(1, Math.min(most, e.key === "]" ? Math.ceil(size * 1.25) : Math.floor(size / 1.25)));
+          // The size of the brush in hand: the vector brush has a width
+          // of its own (to 64), and the keys changed the paint brush's.
+          if (tool === "Brush") setBrushSize(step(64));
+          else setPaintSize(step(200));
         }
       }
       // Undo and redo come off the same table the file and layer keys
@@ -3187,7 +3234,9 @@ export function App() {
           finishPath(false);
           return;
         }
-        cancelGesture();
+        // Something in flight is all Escape means: a drag of a region
+        // or a new marquee let go of, the region picked before it stays.
+        if (cancelGesture()) return;
         // Escape lets go of the region first when there is one and a
         // marquee is in hand: that is what the key was last used for,
         // and the layers being picked is not what the user is looking
@@ -4228,7 +4277,7 @@ export function App() {
         const [lx, ly] = inv ? inv(px, py) : [px, py];
         return [(lx - lb[0]) / span(lb[0], lb[2]), (ly - lb[1]) / span(lb[1], lb[3])];
       };
-      gradToolRef.current = { id, vector, unit, start: unit(x, y), radial: e.altKey };
+      gradToolRef.current = { id, vector, unit, start: unit(x, y), from: [x, y], radial: e.altKey };
       if (id !== selected) {
         setSelected(id);
         setMultiSel([]);
@@ -4556,10 +4605,12 @@ export function App() {
           : "replace";
       try {
         session.pick_similar(x, y, wandTolerance, wandTouching, how);
-        if (selectionFeather > 0) session.feather_selection(selectionFeather);
+        if (selectionFeather > 0 && session.feather_selection(selectionFeather)) session.merge_last();
         refresh(session);
       } catch (err) {
-        alert(`Select: ${err}`);
+        // A click off the page has nothing to spread through: quiet, as
+        // a marquee dragged there is.
+        if (!String(err).includes("not on the page")) alert(`Select: ${err}`);
       }
       return;
     }
@@ -4620,7 +4671,14 @@ export function App() {
         lastX: sx,
         lastY: sy,
         moved: false,
-        fromCentre: e.altKey && tool !== "Lasso",
+        // With a region already picked, Shift and Alt at the press say how
+        // the new one meets it; with none, they shape it from the start.
+        ...(antRings.length > 0 && (e.shiftKey || e.altKey)
+          ? {
+              fromCentre: false,
+              combine: e.shiftKey ? (e.altKey ? ("intersect" as const) : ("union" as const)) : ("subtract" as const),
+            }
+          : { fromCentre: e.altKey && tool !== "Lasso" }),
         stroke: [[sx, sy]],
         snapX,
         snapY,
@@ -5017,15 +5075,19 @@ export function App() {
     const gradTool = gradToolRef.current;
     if (gradTool && session) {
       if (e.buttons === 0) return;
-      const [x, y] = docPoint(e);
-      let [u, v] = gradTool.unit(x, y);
-      const [su, sv] = gradTool.start;
+      let [x, y] = docPoint(e);
+      // Shift holds the line to an eighth of a turn on the page, as the
+      // line tool and the knife do: held in the shape's own box, a wide
+      // box turned 45° into 26.6° on the page.
       if (e.shiftKey && !gradTool.radial) {
-        const len = Math.hypot(u - su, v - sv);
+        const [fx, fy] = gradTool.from;
+        const len = Math.hypot(x - fx, y - fy);
         const eighth = Math.PI / 4;
-        const ang = Math.round(Math.atan2(v - sv, u - su) / eighth) * eighth;
-        [u, v] = [su + Math.cos(ang) * len, sv + Math.sin(ang) * len];
+        const ang = Math.round(Math.atan2(y - fy, x - fx) / eighth) * eighth;
+        [x, y] = [fx + Math.cos(ang) * len, fy + Math.sin(ang) * len];
       }
+      const [u, v] = gradTool.unit(x, y);
+      const [su, sv] = gradTool.start;
       const had = gradTool.vector.gradient;
       const white = cmyk ? hexToCmykColor("#ffffff") : hexColor("#ffffff");
       const stops: GradientStop[] = had
@@ -5034,15 +5096,21 @@ export function App() {
             { offset: 0, color: currentInk() },
             { offset: 1, color: white },
           ];
+      // Aimed again, a gradient keeps what else it says — how it spreads
+      // past its ends, a radial one's focus and axes — when it stays the
+      // same kind; it went back to padding and plain circles.
+      const same = (k: "Linear" | "Radial") =>
+        had && k in had ? ((had as Record<string, Record<string, unknown>>)[k] ?? {}) : {};
       const gradient: Gradient = gradTool.radial
-        ? {
+        ? ({
             Radial: {
+              ...same("Radial"),
               center: [su, sv],
               radius: Math.max(0.02, Math.hypot(u - su, v - sv)),
               stops,
             },
-          }
-        : { Linear: { from: [su, sv], to: [u, v], stops } };
+          } as Gradient)
+        : ({ Linear: { ...same("Linear"), from: [su, sv], to: [u, v], stops } } as Gradient);
       preview({
         SetKind: {
           id: gradTool.id,
@@ -5129,7 +5197,10 @@ export function App() {
             drag.stroke?.push([x, y]);
           }
         }
-        setRegionDrag(regionOutline(drag, e.shiftKey));
+        // A key held from the press is the combining, not the shape: only
+        // one pressed during the drag (or with nothing picked) shapes it.
+        drag.fromCentre = e.altKey && drag.tool !== "Lasso" && !drag.combine;
+        setRegionDrag(regionOutline(drag, e.shiftKey && drag.combine !== "union" && drag.combine !== "intersect"));
         return;
       }
     }
@@ -5487,15 +5558,9 @@ export function App() {
       // Shift adds to what is picked out, alt takes from it, and both
       // together keep only the overlap — the modifiers every editor
       // uses, and the shape combinations this one already had.
-      const [shift, alt] = [e?.shiftKey ?? false, e?.altKey ?? false];
-      const how = shift
-        ? alt
-          ? "intersect"
-          : "union"
-        : alt
-          ? "subtract"
-          : "replace";
-      const shape = regionOutline(drag, shift);
+      const shift = e?.shiftKey ?? false;
+      const how = drag.combine ?? "replace";
+      const shape = regionOutline(drag, shift && how !== "union" && how !== "intersect");
       if (!shape) {
         // A click rather than a drag: with nothing added or taken away,
         // it means let go of what is picked out.
@@ -5514,7 +5579,8 @@ export function App() {
         );
         // The softness carries from one region to the next, the way a
         // brush size does, rather than having to be set again each time.
-        if (selectionFeather > 0) session.feather_selection(selectionFeather);
+        // One step with the picking, not a second one to undo apart.
+        if (selectionFeather > 0 && session.feather_selection(selectionFeather)) session.merge_last();
         refresh(session);
       } catch (err) {
         // A lasso drawn as a line, or too small to hold anything, picks
@@ -6066,6 +6132,12 @@ export function App() {
   ) => {
     if (!session) return;
     try {
+      // A drag says where the frame is to be from where the drag began
+      // (its origin's shift, `dx`/`dy`, is from there), so each step is
+      // worked out from the frame as it was, not as the last step left
+      // it: from there, a pull on the west edge added each step's shift
+      // to the last and threw the frame across the page.
+      if (gesture) session.cancel_preview();
       const cmd = JSON.parse(
         session.artboard_resize(id, width, height, dx, dy),
       ) as Command;
@@ -6880,9 +6952,24 @@ export function App() {
       return;
     }
     const ids = withoutNested(selectionSet);
-    if (ids.length === 0) return;
-    const cmds = ids.map((id) => ({ RemoveNode: { id } }) as Command);
-    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+    if (ids.length === 0 || !session) return;
+    // A layer live copies follow is asked about: gone, every copy of it
+    // shows nothing, and nothing said so.
+    const followed = ids.reduce((n, id) => n + session.copies_following(id), 0);
+    if (
+      followed > 0 &&
+      !window.confirm(
+        `${followed === 1 ? "A live copy follows" : `${followed} live copies follow`} what is being deleted, and will show nothing. Delete it anyway?`,
+      )
+    )
+      return;
+    try {
+      session.delete_layers(new Float64Array(ids));
+    } catch (err) {
+      alert(`Delete: ${err}`);
+      return;
+    }
+    refresh(session);
     setSelected(null);
     setMultiSel([]);
   };
@@ -8538,14 +8625,16 @@ export function App() {
       own.length === 4
         ? toTransform(session.transform_of(selectedLayer.id))
         : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
-    const xs = [
-      t.a * lb[0] + t.c * lb[1] + t.e,
-      t.a * lb[2] + t.c * lb[3] + t.e,
+    // All four corners: two opposite ones give the box of a layer that
+    // is not turned, and a corner-to-corner sliver of one that is.
+    const corners = [
+      [lb[0], lb[1]],
+      [lb[2], lb[1]],
+      [lb[2], lb[3]],
+      [lb[0], lb[3]],
     ];
-    const ys = [
-      t.b * lb[0] + t.d * lb[1] + t.f,
-      t.b * lb[2] + t.d * lb[3] + t.f,
-    ];
+    const xs = corners.map(([x, y]) => t.a * x + t.c * y + t.e);
+    const ys = corners.map(([x, y]) => t.b * x + t.d * y + t.f);
     const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
     const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
     const [w, h] = [x1 - x0, y1 - y0];
@@ -8577,11 +8666,14 @@ export function App() {
         mask: {
           kind: {
             Vector: {
+              // The layer's own box, turned and scaled with it: a box
+              // mask on a turned layer is that layer's outline, and an
+              // ellipse fits inside it rather than inside its bounds.
               shape:
                 kind === "rect"
-                  ? { Rect: { width: w, height: h, radius: 0 } }
-                  : { Ellipse: { rx: w / 2, ry: h / 2 } },
-              transform: { a: 1, b: 0, c: 0, d: 1, e: x0, f: y0 },
+                  ? { Rect: { width: lb[2] - lb[0], height: lb[3] - lb[1], radius: 0 } }
+                  : { Ellipse: { rx: (lb[2] - lb[0]) / 2, ry: (lb[3] - lb[1]) / 2 } },
+              transform: composeT(t, { a: 1, b: 0, c: 0, d: 1, e: lb[0], f: lb[1] }),
             },
           },
           invert: false,
@@ -9730,7 +9822,7 @@ export function App() {
       setGamutWarn(gamut);
       refresh(session);
     } catch (err) {
-      alert(`Soft proofing: ${err}`);
+      alert(`Soft proofing: ${proofingTrouble(err)}`);
     }
   };
 
@@ -9797,6 +9889,24 @@ export function App() {
         refresh(session);
       } catch (err) {
         alert(`Could not use ICC profile: ${err}`);
+        return;
+      }
+      // Said now rather than at every press of Proof: a profile that
+      // turns colours into inks but cannot be printed through (a
+      // scanner's, an input profile) was taken in silence and then
+      // answered each Proof with an error from the colour engine.
+      try {
+        session.set_proofing(true, false);
+        session.set_proofing(proofing, gamutWarn);
+      } catch (err) {
+        try {
+          session.set_proofing(false, false);
+        } catch {
+          // Off is always possible.
+        }
+        setProofing(false);
+        setGamutWarn(false);
+        alert(`The profile is loaded for the inks, but ${proofingTrouble(err)}`);
       }
     });
   };
@@ -11085,6 +11195,10 @@ export function App() {
           }}
           onCancel={() => {
             setFeatherOpen(false);
+            // The softness the next region is given goes back too: it
+            // was set as the window was typed in, and a cancelled window
+            // left it for the next marquee.
+            setSelectionFeather(featherWas.current);
             session?.cancel_preview();
             refresh(session!);
           }}
@@ -15930,7 +16044,15 @@ function RepeatDialog({
         integer={key === "copies"}
         onValue={(v) => setStep({ ...step, [key]: v })}
         onKeyDown={(e) => {
-          if (e.key === "Enter") onRepeat(step);
+          if (e.key !== "Enter") return;
+          // What is typed, settled as the box will settle it — held to
+          // its range — rather than the last value it handed on: 600
+          // typed and Enter repeated the old count, not 500.
+          const typed = Number(e.currentTarget.value);
+          const v = Number.isFinite(typed) && e.currentTarget.value.trim() !== ""
+            ? Math.min(max ?? Infinity, Math.max(min ?? -Infinity, key === "copies" ? Math.round(typed) : typed))
+            : step[key];
+          onRepeat({ ...step, [key]: v });
         }}
         aria-label={`Repeat ${label.toLowerCase()}`}
       />
@@ -15957,8 +16079,9 @@ function RepeatDialog({
           Each copy is one step on from the one before: moved, turned about
           the point that far from the middle of what is picked, and scaled
           about that middle. A row is a move; a ring is a turn about a
-          point away from the middle — twelve copies at 30° about a point
-          below is a clock face. One step to undo.
+          point away from the middle — eleven copies at 30° about a point
+          below, with the layer itself, are a clock face's twelve. One step
+          to undo.
         </p>
         <div className="modal-actions">
           <button className="mask-button" onClick={onCancel}>
@@ -17190,23 +17313,27 @@ function StopList({
   /** Insert a stop in the widest gap, coloured by what the ramp already
    * shows there, so adding one changes nothing until it is moved. */
   const add = () => {
+    // In the order the ramp has them: a stop dragged past another on the
+    // canvas leaves the list out of order, and the widest gap and the
+    // colour in it were read from the list as it stood.
+    const sorted = [...stops].sort((p, q) => p.offset - q.offset);
     let at = 0;
-    for (let i = 1; i < stops.length; i++) {
+    for (let i = 1; i < sorted.length; i++) {
       if (
-        stops[i].offset - stops[i - 1].offset >
-        stops[at + 1].offset - stops[at].offset
+        sorted[i].offset - sorted[i - 1].offset >
+        sorted[at + 1].offset - sorted[at].offset
       )
         at = i - 1;
     }
-    const [a, b] = [stops[at], stops[at + 1]];
+    const [a, b] = [sorted[at], sorted[at + 1]];
     onChange(
       [
-        ...stops.slice(0, at + 1),
+        ...sorted.slice(0, at + 1),
         {
           offset: (a.offset + b.offset) / 2,
           color: mixAuthored(a.color, b.color, 0.5),
         },
-        ...stops.slice(at + 1),
+        ...sorted.slice(at + 1),
       ],
       false,
     );
@@ -18507,7 +18634,7 @@ function KindProps({
             type="color"
             value={colorToHex(t.fill)}
             onChange={(e) =>
-              onEdit(styled({ fill: hexColor(e.target.value) }), true)
+              onEdit(styled({ fill: cmyk ? hexToCmykColor(e.target.value) : hexColor(e.target.value) }), true)
             }
             onBlur={onGestureEnd}
             aria-label="Text color"
@@ -18761,7 +18888,7 @@ function KindProps({
             checked={v.fill !== null}
             onChange={(e) =>
               onEdit(
-                patch({ fill: e.target.checked ? hexColor("#6c8cff") : null }),
+                patch({ fill: e.target.checked ? authored("#6c8cff") : null }),
                 false,
               )
             }
@@ -18773,7 +18900,7 @@ function KindProps({
               type="color"
               value={colorToHex(v.fill)}
               onChange={(e) =>
-                onEdit(patch({ fill: hexColor(e.target.value) }), true)
+                onEdit(patch({ fill: authored(e.target.value) }), true)
               }
               onBlur={onGestureEnd}
               aria-label="Fill color"
@@ -18807,7 +18934,7 @@ function KindProps({
                 patch({
                   stroke: e.target.checked
                     ? {
-                        color: hexColor("#1a1a1e"),
+                        color: authored("#1a1a1e"),
                         width: 4,
                         widths: [],
                         dash: [],
@@ -18832,7 +18959,7 @@ function KindProps({
               onChange={(e) =>
                 onEdit(
                   patch({
-                    stroke: { ...v.stroke!, color: hexColor(e.target.value) },
+                    stroke: { ...v.stroke!, color: authored(e.target.value) },
                   }),
                   true,
                 )
