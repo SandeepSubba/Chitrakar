@@ -10761,6 +10761,73 @@ without reading anything else.*
   window's keys, 9ct the drop order and a shadow exported with its
   layer. Left as judgement calls: a paste into an empty document is
   still nudged 12 px, and an SVG brought back loses its layer names.
+  **A second audit: the panel, text and paths, and the editor over
+  time (November 2026).** Three more helpers drove the parts the first
+  round skimmed. Put right:
+  - *Saved or not*: saved, undone and done otherwise, the work read as
+    saved — the history was as long — and New and a reload asked
+    nothing. Each step has a number now (`history_mark`), and saved
+    means the newest step is the one saved at.
+  - *A stored unit the rulers did not know* ("cm") left the page blank
+    on every load; `units` is held to px, mm and in.
+  - *The draft*: Restore lost the pictures of a draft when anything was
+    done before pressing it (they were deleted as stale while it was
+    offered; `putDraft` spares them now), replaced unsaved work without
+    asking (it asks, as New does), a page emptied by hand was not kept
+    (so a crash brought the deleted work back), and with drafts turned
+    off the old one was still offered.
+  - *Offline*: the service worker pruned what the page had not loaded
+    this visit, so the raw and PDF readers and the workers, which load
+    later or from a worker, went and failed offline (and the raw one
+    said the file was damaged). The build writes `build-assets.json`
+    and nothing in it is pruned.
+  - *The view*: the grid was drawn in the overlay's default 300×150;
+    Fit was not held to the zoom's range, so on a one-pixel page Zoom
+    in shrank it (and the floor is a hundredth now); the develop
+    window's footer ran off a phone's left edge (it wraps); the keys
+    sheet said M and a pixel after the Select key and nudge had been
+    changed.
+  - *Layers*: a live copy pasted alone into another document took up
+    whatever layer there had its id (a clipboard knows its document
+    now, `Session::origin`, and elsewhere what the copy followed); a
+    layer's base deleted, put back or moved left what was clipped to
+    it stale on screen (`held_bounds`); a pasted layer kept a style
+    link to a style the document did not have, which the next style
+    kept under that name then restyled it to; two palette entries of
+    one colour were one name (entries are "Swatch N", never a name a
+    colour in the document still stands for, and say their colour);
+    the default comp name could overwrite one; a double-click to rename
+    a comp also showed it; a typed X, W or angle moved a locked layer;
+    folds and group numbers carried into the next document; grouping
+    layers of different groups was offered and then refused; a drop
+    just under an open group's row landed below the whole group; the
+    Opacity slider showed nothing until let go; rows had no keyboard
+    (Tab and Enter now, F2 to rename); and steps that changed nothing — a
+    rename to the same name, a style given or kept again as it was, a
+    comp kept over itself, a swatch set to its own colour — were
+    recorded, and some labels said "Multiple edits" or "1 colours".
+  - *Paths*: the Node tool drew a turned path's anchors, and one in a
+    moved group, where they would be unturned and at the origin, and
+    dragged them there; a press just outside a path's edge let it go
+    instead of putting an anchor there; Combine dropped the bottom
+    shape's transform (a scaled stroke halved, a turned gradient turned
+    back); Offset path moved a scaled shape's outline by the shape's
+    units; Space evenly spaced the middles rather than the gaps; a
+    stroked line's box was a whole width out from its ink, not half; a
+    star's Border side was offered and did nothing.
+  - *Text*: styling slid off a word when the text cut or put in beside
+    it shared its letters ("the " out of "Take the theme" left "me"
+    bold) — the edit is said exactly now (`editOf`, and Find and
+    replace passes its match); Bold pressed with a word picked in the
+    on-canvas editor styled the whole block; aligning text already so,
+    replacing "a" with "a", and naming the face a block is already in
+    were steps.
+  Smoke 9cu drives the panel, view and path fixes; the engine tests and
+  `runs.test.mjs` the rest. Left as found: two tabs share one draft,
+  the last to write keeping it; and "Make a path" and Combine move a
+  rect's or an ellipse's inside border to straddle the edge, since a
+  path has no side to its stroke — closed paths honouring Border side
+  in all five renderers is the fix, and a piece of work of its own.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -18,6 +18,14 @@ export function keepForOffline() {
         // seven megabytes fetched by the script, and finishes after the
         // page's load as often as not — said only once, it was missing
         // from what was kept, and the editor opened offline without it.
+        // And the build's whole list (`build-assets.json`), which the
+        // worker keeps from being pruned though this visit did not load
+        // all of it: the raw and PDF readers load when first asked for,
+        // some from a worker, and pruned they failed offline.
+        const built = fetch("./build-assets.json")
+          .then((r) => (r.ok ? (r.json() as Promise<string[]>) : []))
+          .then((list) => list.map((f) => new URL(`./${f}`, location.href).href))
+          .catch(() => [] as string[]);
         const say = () => {
           const keep = [
             new URL("./", location.href).href,
@@ -26,7 +34,7 @@ export function keepForOffline() {
               .map((e) => e.name)
               .filter((u) => new URL(u).origin === location.origin),
           ];
-          reg.active?.postMessage({ keep });
+          void built.then((build) => reg.active?.postMessage({ keep, build }));
         };
         say();
         if (typeof PerformanceObserver !== "undefined") {

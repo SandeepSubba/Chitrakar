@@ -1938,12 +1938,13 @@ assert(
   );
 }
 
-// 8r. Ungroup via the button.
+// 8r. Ungroup via the button. Numbered after the groups the document has,
+// the first having been dissolved, this one is Group 1 again.
 await page.locator(".panel ul li", { hasText: "Path" }).first().click();
 await page.locator(".panel ul li", { hasText: "Path" }).nth(1).click({ modifiers: [MOD] });
 await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
 await page.waitForTimeout(200);
-await page.locator(".panel ul li", { hasText: "Group 2" }).click();
+await page.locator(".panel ul li", { hasText: "Group 1" }).click();
 await page.waitForTimeout(200);
 
 // 8r2. A group moves as a unit, and dissolving it leaves its contents put.
@@ -1973,11 +1974,11 @@ assert(
   "and the move undoes as one step",
 );
 
-await page.locator(".panel ul li", { hasText: "Group 2" }).click();
+await page.locator(".panel ul li", { hasText: "Group 1" }).click();
 await page.click('button[title="Ungroup selected group"]');
 await page.waitForTimeout(200);
 assert(
-  (await page.locator(".panel ul li", { hasText: "Group 2" }).count()) === 0 &&
+  (await page.locator(".panel ul li", { hasText: "Group 1" }).count()) === 0 &&
     (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
   "ungroup dissolved the group",
 );
@@ -6791,10 +6792,10 @@ assert(
     Number(await page.locator('input[aria-label="H size"]').inputValue()),
   ];
   // 200 across and 40 down is nearest the level eighth, so the segment
-  // lies flat at the length it was dragged — 204 — inside a box the
-  // stroke's own width reaches four past at either end.
+  // lies flat at the length it was dragged — 204 — inside a box its
+  // round ends reach half the stroke's width past at either end.
   assert(
-    Math.abs(pw - 212) < 4 && ph < 12,
+    Math.abs(pw - 208) < 3 && ph < 12,
     `the segment went level rather than where it was clicked (${pw}x${ph})`,
   );
 }
@@ -16585,7 +16586,7 @@ assert(
   await page.locator(".panel ul li", { hasText: "Rect 2" }).click({ modifiers: [MOD] });
   await page.click('button[title="Group selected layers (ctrl-click to select several)"]');
   await page.waitForTimeout(300);
-  const wrap = page.locator(".panel ul li", { hasText: "Group 2" }).first();
+  const wrap = page.locator(".panel ul li", { hasText: "Group 1" }).first();
   await wrap.locator("button.visibility").first().click();
   await page.waitForTimeout(300);
   assert((await canvasPixel(80, 80))[3] === 0, "the hidden group draws nothing");
@@ -16593,7 +16594,7 @@ assert(
   await page.click('button[title="Ungroup selected group"]');
   await page.waitForTimeout(300);
   assert(
-    (await page.locator(".panel ul li", { hasText: "Group 2" }).count()) === 0,
+    (await page.locator(".panel ul li", { hasText: "Group 1" }).count()) === 0,
     "the hidden group dissolves",
   );
   assert(
@@ -16608,7 +16609,7 @@ assert(
   await page.keyboard.press("Control+z");
   await page.waitForTimeout(300);
   assert(
-    (await page.locator(".panel ul li", { hasText: "Group 2" }).count()) === 1 &&
+    (await page.locator(".panel ul li", { hasText: "Group 1" }).count()) === 1 &&
       (await page.locator(".panel ul li button[title^='Show layer']").count()) === 1,
     "and one undo takes the whole thing back",
   );
@@ -20885,6 +20886,156 @@ assert(
   await page.selectOption('select[aria-label="Area"]', "page");
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
+}
+
+// 9cu. The second audit, of the panel, the view, text and paths: work
+// saved, undone and done otherwise read as saved; two palette entries of
+// one colour were one name; a typed X moved a locked layer; a rename to
+// the same name, and aligning text already so, were steps; the Opacity
+// slider showed nothing until let go; a layer row could not be reached
+// from the keyboard; the grid was drawn in a 300 by 150 corner; and the
+// Node tool's dots stood where a turned path would be unturned.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  const dragOn = async (x0, y0, x1, y1) => {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 6 });
+    await page.mouse.up();
+    await page.waitForTimeout(250);
+  };
+  const steps = () => page.locator(".history li:not(.history-start):not(.future)").count();
+
+  // Saved, undone, and something else done: not saved.
+  await pickTool("Rect");
+  await dragOn(40, 40, 140, 120);
+  await Promise.all([page.waitForEvent("download"), page.keyboard.press("Control+s")]);
+  await page.waitForTimeout(200);
+  assert((await page.locator(".unsaved-dot").count()) === 0, "saved, the dot goes");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  await pickTool("Ellipse");
+  await dragOn(200, 60, 300, 160);
+  assert(
+    (await page.locator(".unsaved-dot").count()) === 1,
+    "undone and done otherwise, the work is unsaved again though the history is as long",
+  );
+
+  // Two entries of one colour are two names: one changed leaves the
+  // other alone.
+  await setColor("Fill colour", "#ff0000");
+  await page.click('button[aria-label="Add to the palette"]');
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Add to the palette"]');
+  await page.waitForTimeout(150);
+  const swatchNames = await page.locator('[aria-label="Palette"] .swatch:not(.add)').evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+  assert(
+    swatchNames.length === 2 && swatchNames[0] !== swatchNames[1],
+    `two entries of one colour have names of their own (${swatchNames})`,
+  );
+
+  // A locked layer does not move when its X is typed.
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  const xBox = page.locator('input[aria-label="X position"]');
+  const xWas = await xBox.inputValue();
+  await page.locator(".panel ul li").first().locator('button[aria-label="Lock layer"]').click();
+  await page.waitForTimeout(150);
+  const before = await steps();
+  await xBox.fill(String(Number(xWas) + 50));
+  await xBox.press("Enter");
+  await page.waitForTimeout(200);
+  assert((await steps()) === before, "a typed X does not move a locked layer");
+  await page.locator(".panel ul li").first().locator('button[aria-label="Unlock layer"]').click();
+  await page.waitForTimeout(150);
+
+  // A rename to the name it has is no step.
+  const top = page.locator(".panel ul li").first();
+  const name = (await top.locator(".layer-name").textContent()).trim();
+  await top.locator(".layer-name").dblclick();
+  await page.waitForTimeout(150);
+  const renameBox = page.locator(".panel ul li input").first();
+  const stepsBefore = await steps();
+  await renameBox.fill(name);
+  await renameBox.press("Enter");
+  await page.waitForTimeout(200);
+  assert((await steps()) === stepsBefore, "renaming a layer to its own name is no step");
+
+  // The Opacity slider shows as it is dragged, before it is let go.
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  const opacity = page.locator('input[aria-label="Layer opacity"]');
+  const ob = await opacity.boundingBox();
+  const solid = await canvasPixel(250, 110);
+  await page.mouse.move(ob.x + ob.width - 2, ob.y + ob.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(ob.x + ob.width * 0.2, ob.y + ob.height / 2, { steps: 5 });
+  await page.waitForTimeout(250);
+  const midDrag = await canvasPixel(250, 110);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  assert(midDrag[3] < solid[3] - 40, `the page fades as the slider moves (${solid[3]} to ${midDrag[3]} mid-drag)`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await canvasPixel(250, 110))[3] === solid[3], "and the whole drag is one step");
+
+  // A layer row from the keyboard: reached, and picked with Enter.
+  await pickTool("Rect");
+  await dragOn(20, 200, 80, 260);
+  await pickTool("Move");
+  const second = page.locator(".panel ul li").nth(1);
+  await second.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(150);
+  assert((await second.getAttribute("class")).includes("selected"), "Enter on a focused row picks its layer");
+
+  // The grid covers the canvas, not a corner of it.
+  await menuClick("View", "Grid of 32 px");
+  await page.waitForTimeout(200);
+  const gridBox = await page.locator(".grid-overlay").boundingBox();
+  const hostBox = await page.locator(".canvas-host").boundingBox();
+  assert(
+    gridBox && gridBox.width > hostBox.width * 0.9 && gridBox.height > hostBox.height * 0.9,
+    `the grid is laid over the whole canvas (${gridBox?.width}×${gridBox?.height} of ${hostBox.width}×${hostBox.height})`,
+  );
+  await menuClick("View", "Grid of 32 px");
+  await page.waitForTimeout(150);
+
+  // The Node tool's dots on a turned path are on its corners.
+  await newDocument(400, 300, "rgb");
+  await pickTool("Pen");
+  for (const [x, y] of [[100, 100], [200, 100], [200, 200]]) {
+    await page.mouse.click(...at(x, y));
+    await page.waitForTimeout(80);
+  }
+  await page.mouse.click(...at(100, 100));
+  await page.waitForTimeout(300);
+  await pickTool("Move");
+  await page.locator(".panel ul li").first().click();
+  await page.waitForTimeout(150);
+  const angle = page.locator('input[aria-label="Angle"]');
+  await angle.fill("90");
+  await angle.press("Enter");
+  await page.waitForTimeout(250);
+  await pickTool("Node");
+  await page.waitForTimeout(250);
+  const dots = await page.locator(".anchor").evaluateAll((els) =>
+    els.map((e) => {
+      const r = e.getBoundingClientRect();
+      return [r.left + r.width / 2, r.top + r.height / 2];
+    }),
+  );
+  // Turned a quarter about its box's middle (150, 150): (100,100) goes
+  // to (200,100), (200,100) to (200,200), (200,200) to (100,200).
+  const want = [[200, 100], [200, 200], [100, 200]].map(([x, y]) => at(x, y));
+  const off = Math.max(
+    ...want.map((w) => Math.min(...dots.map((d) => Math.hypot(d[0] - w[0], d[1] - w[1])))),
+  );
+  assert(dots.length >= 3 && off < 4, `the anchors of a turned path sit on its corners (${off.toFixed(1)} px out)`);
+  await pickTool("Move");
 }
 
 await page.screenshot({ path: join(OUT, "editor-final.png") });

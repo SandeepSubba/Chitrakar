@@ -106,8 +106,15 @@ self.addEventListener("message", (e) => {
     (async () => {
       const cache = await caches.open(CACHE);
       const wanted = new Set(urls.map((u) => new URL(u).href.split("#")[0]));
+      // The build's own files stay whether or not this visit loaded them
+      // (the readers load later, some from a worker); only a file no
+      // longer in the build goes. Without the list, what was loaded.
+      const build = Array.isArray(e.data?.build)
+        ? new Set(e.data.build.filter((u) => typeof u === "string" && ours(u)).map((u) => new URL(u).href))
+        : null;
+      const stays = (url) => wanted.has(url) || (build !== null && build.size > 0 && build.has(url));
       for (const req of await cache.keys()) {
-        if (named(req.url) && !wanted.has(req.url)) await cache.delete(req);
+        if (named(req.url) && !stays(req.url)) await cache.delete(req);
       }
       for (const url of wanted) {
         if (!(await cache.match(url))) {

@@ -638,6 +638,9 @@ body {
 .modal-actions {
   display: flex;
   justify-content: flex-end;
+  /* Onto a second row rather than off the window's left edge, where on
+     a phone the develop window's Reset could not be reached. */
+  flex-wrap: wrap;
   gap: 0.4rem;
   margin-top: 0.3rem;
   /* Kept against the bottom of a dialog that has had to scroll, so that
@@ -1270,6 +1273,10 @@ body {
 .grid-overlay {
   position: absolute;
   inset: 0;
+  /* An svg placed absolutely does not stretch from inset alone: without
+     these it is 300×150 and the grid was drawn in that corner. */
+  width: 100%;
+  height: 100%;
   pointer-events: none;
   z-index: 1;
 }

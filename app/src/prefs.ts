@@ -332,6 +332,9 @@ export function clamp(p: Prefs): Prefs {
     sliderColor: HEX.test(p.sliderColor) ? p.sliderColor.toLowerCase() : "",
     uiScale: UI_SCALES.includes(p.uiScale) ? p.uiScale : 1,
     finger: p.finger === "draw" || p.finger === "pan" ? p.finger : "auto",
+    // A unit the rulers know: one they did not ("cm" written by hand, or
+    // a later version's) left the page blank on every load.
+    units: p.units === "mm" || p.units === "in" ? p.units : "px",
     alignTo: p.alignTo === "page" || p.alignTo === "key" ? p.alignTo : "selection",
     grid: n(Math.round(p.grid), 0, 512, 0),
     snap: n(Math.round(p.snap), 0, 64, 6),

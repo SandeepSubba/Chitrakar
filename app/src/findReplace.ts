@@ -60,7 +60,8 @@ export function replaceIn(
   for (const [start, end] of found) {
     const [from, to] = [start + shift, end + shift];
     const next = out.slice(0, from) + replace + out.slice(to);
-    carried = shiftRuns(out, next, carried);
+    // The match is where the edit is: said, not guessed from the texts.
+    carried = shiftRuns(out, next, carried, [from, to]);
     out = next;
     shift += replace.length - (end - start);
   }

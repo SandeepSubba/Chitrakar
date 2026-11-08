@@ -7136,10 +7136,17 @@ pub fn stroke_pad(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> f32 {
         StrokeAlign::Centre => 1.0,
         StrokeAlign::Outside => 2.0,
     };
+    // A round or a bevelled corner reaches half a width from the line,
+    // as a round end does; a square end reaches its own corners, half a
+    // width along and half across. The whole width, which this was, put
+    // a stroked line's box half a width out from its ink, and alignment,
+    // snapping and the distances shown were out by as much.
     let corner = if stroke.join == chitrakar_doc::StrokeJoin::Miter {
         stroke.width * chitrakar_doc::MITER_LIMIT / 2.0
+    } else if stroke.cap == chitrakar_doc::StrokeCap::Square {
+        stroke.width * std::f32::consts::FRAC_1_SQRT_2
     } else {
-        stroke.width
+        stroke.width / 2.0
     } * out;
     // A head reaches past the last point rather than around it, and
     // further than any corner does.

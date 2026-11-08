@@ -140,9 +140,40 @@ export function rangeSays<K extends keyof Styling>(
  * after it move by the change in length, and offsets inside it collapse
  * to where it began. Without this, typing a word in front of a bold one
  * would leave the bold on whatever letters happened to land there. */
-export function shiftRuns(before: string, after: string, runs: StyleRun[]): StyleRun[] {
+export function shiftRuns(
+  before: string,
+  after: string,
+  runs: StyleRun[],
+  /** Where in `before` the edit was, `[from, to)` in its characters
+   * (UTF-16), when the caller knows: worked out from the two texts it is
+   * a guess, and where the text cut or put in shares letters with what
+   * is beside it ("the " taken from "Take the theme") the guess put the
+   * edit in the wrong place and the styling slid. */
+  edit?: [number, number],
+): StyleRun[] {
   if (before === after || runs.length === 0) return runs;
   const enc = new TextEncoder();
+  if (edit) {
+    const [from, to] = edit;
+    const kept = before.length - to;
+    if (
+      from >= 0 &&
+      from <= to &&
+      to <= before.length &&
+      after.length >= from + kept &&
+      after.startsWith(before.slice(0, from)) &&
+      after.endsWith(before.slice(to))
+    ) {
+      const head = enc.encode(before.slice(0, from)).length;
+      const cutEnd = enc.encode(before.slice(0, to)).length;
+      const delta = enc.encode(after).length - enc.encode(before).length;
+      const moveStart = (i: number) => (i < head ? i : i >= cutEnd ? i + delta : head);
+      const moveEnd = (i: number) => (i <= head ? i : i >= cutEnd ? i + delta : head);
+      return runs
+        .map((r) => ({ ...r, start: moveStart(r.start), end: moveEnd(r.end) }))
+        .filter((r) => r.end > r.start);
+    }
+  }
   const [b, a] = [enc.encode(before), enc.encode(after)];
   // A byte that is not a UTF-8 continuation byte starts a character.
   const starts = (u: Uint8Array, i: number) => i >= u.length || (u[i] & 0xc0) !== 0x80;
@@ -175,4 +206,33 @@ export function shiftRuns(before: string, after: string, runs: StyleRun[]): Styl
   return runs
     .map((r) => ({ ...r, start: moveStart(r.start), end: moveEnd(r.end) }))
     .filter((r) => r.end > r.start);
+}
+
+/** Where in `before` one edit of a text box was, from the selection it
+ * had before the edit (`[start, end)`) and the caret after it: what was
+ * picked replaced, a character taken back before the caret or after it,
+ * or text put in at it. `undefined` where the two texts do not agree
+ * with that reading (a paste the browser reshaped, an undo), and the
+ * edit is worked out from the texts alone. */
+export function editOf(
+  before: string,
+  after: string,
+  selection: [number, number],
+  caret: number,
+): [number, number] | undefined {
+  const [s0, e0] = selection;
+  const fits = (from: number, to: number) =>
+    from >= 0 &&
+    to <= before.length &&
+    after.length >= from + (before.length - to) &&
+    after.startsWith(before.slice(0, from)) &&
+    after.endsWith(before.slice(to));
+  if (s0 !== e0) return fits(s0, e0) ? [s0, e0] : undefined;
+  if (caret < s0) return fits(caret, s0) ? [caret, s0] : undefined;
+  if (caret === s0 && after.length < before.length) {
+    const to = s0 + (before.length - after.length);
+    return fits(s0, to) ? [s0, to] : undefined;
+  }
+  if (caret > s0) return fits(s0, s0) ? [s0, s0] : undefined;
+  return undefined;
 }

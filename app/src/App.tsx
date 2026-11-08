@@ -8,7 +8,7 @@ import {
   type MenuEntry,
   type MenuSpec,
 } from "./nativeMenu";
-import { byteAt, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
+import { byteAt, editOf, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import { onColour, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
 import {
   DOCUMENTS,
@@ -485,7 +485,13 @@ function draftPartsKept(db: IDBDatabase): Promise<Set<string>> {
  * — so whatever moment the tab is closed at, the skeleton kept has its
  * parts. `stillLatest` says whether a later draft has begun, which
  * writes its own skeleton: this one's would be older. */
-async function putDraft(session: WasmSession, stillLatest: () => boolean): Promise<void> {
+async function putDraft(
+  session: WasmSession,
+  stillLatest: () => boolean,
+  /** Parts another draft still needs: the one offered back and not yet
+   * answered, whose pictures were deleted from under it as stale. */
+  spare: string[] = [],
+): Promise<void> {
   const db = await draftDb();
   if (!db) return;
   const names = JSON.parse(session.draft_parts()) as string[];
@@ -500,7 +506,7 @@ async function putDraft(session: WasmSession, stillLatest: () => boolean): Promi
     ["current", session.save_skeleton()],
     ["parts", JSON.stringify(names)],
   ]);
-  const wanted = new Set(names);
+  const wanted = new Set([...names, ...spare]);
   const stale = [...kept].filter((n) => !wanted.has(n)).map((n) => PART + n);
   if (stale.length) await draftWrite(db, [], stale);
 }
@@ -563,6 +569,13 @@ async function clearDraft(): Promise<void> {
   const parts = [...(await draftPartsKept(db))].map((n) => PART + n);
   await draftWrite(db, [], ["current", "parts", "name", "path", "saved", ...parts]).catch(() => {});
 }
+
+/** Each text box's selection as it was before its latest edit, so the
+ * edit is known exactly rather than guessed (`editOf`). */
+const textSelections = new WeakMap<HTMLTextAreaElement, [number, number]>();
+/** What was picked in the on-canvas text editor when it last lost the
+ * caret, as bytes of its text, and when. */
+let lastInlinePick: { range: [number, number]; text: string; at: number } | null = null;
 
 /** A tool's flyout, pinned to the window beside the button it opened
  * from: the rail scrolls when the window is too short for it, and a
@@ -779,7 +792,9 @@ function inUnits(px: number, units: Units, dpi: number): number {
   const places = units === "px" ? 2 : units === "mm" ? 2 : 3;
   return Math.round(v * 10 ** places) / 10 ** places;
 }
-const MIN_ZOOM = 0.05;
+/** A hundredth: a page sixteen thousand pixels long fits a phone's
+ * screen, which at a twentieth it did not. */
+const MIN_ZOOM = 0.01;
 const MAX_ZOOM = 8;
 
 /** A full frame slower than this draws the view as a draft while it
@@ -1662,6 +1677,8 @@ export function App() {
    * artboards is a long list otherwise, and most of it is not what is
    * being worked on. */
   const [collapsed, setCollapsed] = useState<number[]>([]);
+  // Folded groups are a document's: another one's ids are other layers.
+  useEffect(() => setCollapsed([]), [session]);
   /** The document's palette, re-read whenever the document changes. */
   const [swatches, setSwatches] = useState<Swatch[]>([]);
   /** The looks kept by name in the document, beside the palette. */
@@ -1920,6 +1937,8 @@ export function App() {
    * `saveTick` is bumped on every refresh, so the draft follows the
    * document. */
   const [recoverable, setRecoverable] = useState<Draft | null>(null);
+  const recoverableRef = useRef<Draft | null>(null);
+  recoverableRef.current = recoverable;
   const [saveTick, setSaveTick] = useState(0);
   /** What this document is called: the name it was opened under, or the
    * one typed in the bar. Every save and every export is named after it,
@@ -1937,6 +1956,8 @@ export function App() {
    * stop rather than write an older skeleton over it. */
   const draftRun = useRef(0);
   useEffect(() => {
+    // Not offered where it would not have been kept.
+    if (!prefs.keepDraft) return;
     getDraft().then(
       (draft) => draft && setRecoverable(draft),
     );
@@ -1947,10 +1968,6 @@ export function App() {
     getDraftNote("saved").then((saved) => (draftSaved.current = saved === "yes"));
   }, []);
   useEffect(() => {
-    // Nothing to keep until there is something on the page: the empty
-    // document every visit starts with must not overwrite a draft that
-    // has not been taken back yet.
-    if (!session || saveTick === 0 || layers.length === 0) return;
     // Turned off in Preferences: nothing is kept, and whatever was kept
     // before goes — a setting that stops writing but leaves the last
     // draft behind is not the setting it says it is.
@@ -1958,9 +1975,15 @@ export function App() {
       clearDraft();
       return;
     }
+    // Nothing to keep until something is done: the empty document every
+    // visit starts with must not overwrite a draft that has not been
+    // taken back yet. A page emptied by hand is something done, and is
+    // kept as it is — a crash after deleting the last layer brought it
+    // back.
+    if (!session || saveTick === 0) return;
     const t = setTimeout(() => {
       const mine = ++draftRun.current;
-      putDraft(session, () => draftRun.current === mine)
+      putDraft(session, () => draftRun.current === mine, recoverableRef.current?.parts ?? [])
         .then(() => {
           putDraftNote("name", docName);
           putDraftNote("path", docPath ?? "");
@@ -2113,7 +2136,6 @@ export function App() {
    * since a rounded box, an ellipse and a freehand path each flatten
    * differently and two answers would show as ants off the edge. */
   const [antRings, setAntRings] = useState<[number, number][][]>([]);
-  const groupCount = useRef(0);
 
   /** The engine's own frame laid on the canvas: what changed since the
    * last one, or — after a frame the graphics card drew, which the
@@ -2308,11 +2330,15 @@ export function App() {
   const fitView = useCallback(() => {
     const host = hostRef.current;
     if (!host) return;
-    const zoom =
-      Math.min(
-        host.clientWidth / docSizeRef.current[0],
-        host.clientHeight / docSizeRef.current[1],
-      ) * 0.9;
+    // Held to the zoom's own range: a one-pixel page fitted at 73980%
+    // was then "zoomed in" to 800% and shrank.
+    const zoom = Math.min(
+      MAX_ZOOM,
+      Math.max(
+        MIN_ZOOM,
+        Math.min(host.clientWidth / docSizeRef.current[0], host.clientHeight / docSizeRef.current[1]) * 0.9,
+      ),
+    );
     setView({
       zoom,
       x: (host.clientWidth - docSizeRef.current[0] * zoom) / 2,
@@ -2326,7 +2352,7 @@ export function App() {
     const host = hostRef.current;
     if (!host) return;
     setView((v) => {
-      const zoom = Math.min(8, Math.max(0.05, v.zoom * factor));
+      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
       const k = zoom / v.zoom;
       const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
       return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
@@ -2348,7 +2374,7 @@ export function App() {
     const host = hostRef.current;
     if (!host) return;
     setView((v) => {
-      const k = Math.min(8, Math.max(0.05, zoom)) / v.zoom;
+      const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)) / v.zoom;
       const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
       return {
         zoom: v.zoom * k,
@@ -2491,9 +2517,16 @@ export function App() {
    * lost both. */
   /** Keep the page as it is under a name: which layers show, where, and
    * how strongly. */
+  /** The comp a press just showed, for a double-click to take back. */
+  const compShownBy = useRef<{ name: string; at: number } | null>(null);
   const keepComp = () => {
     if (!session) return;
-    const name = window.prompt("Keep the page as it is now as:", `Comp ${comps.length + 1}`);
+    // A name no comp has: the count alone named the next one after a
+    // comp forgotten, and accepting it wrote over that comp.
+    const taken = new Set(comps.map((c) => c.name));
+    let n = comps.length + 1;
+    while (taken.has(`Comp ${n}`)) n++;
+    const name = window.prompt("Keep the page as it is now as:", `Comp ${n}`);
     if (name === null) return;
     try {
       session.keep_comp(name);
@@ -2511,8 +2544,10 @@ export function App() {
         session.forget_comp(name);
       } else if (e.shiftKey) {
         session.keep_comp(name);
-      } else {
-        session.apply_comp(name);
+      } else if (e.detail <= 1) {
+        // A double-click's first press shows the comp; the second is
+        // the rename, which takes that back (`renameCompChip`).
+        compShownBy.current = session.apply_comp(name) ? { name, at: Date.now() } : null;
       }
       refresh(session);
     } catch (err) {
@@ -4110,6 +4145,25 @@ export function App() {
     // the anchors themselves answer to a drag and to alt, whatever the
     // tool. A press on another layer picks it; on nothing, lets go.
     if (tool === "Node") {
+      // On the picked path's outline first, from either side of it: the
+      // hit test is the fill, so a press just outside the edge found
+      // nothing and let the path go instead of putting an anchor there.
+      if (
+        selected !== null &&
+        !e.altKey &&
+        selectedKind &&
+        typeof selectedKind === "object" &&
+        "Vector" in selectedKind &&
+        "Path" in selectedKind.Vector.shape
+      ) {
+        try {
+          session.insert_anchor(selected, x, y, 10 / view.zoom);
+          refresh(session);
+          return;
+        } catch {
+          // Not near the outline: what the press is on decides.
+        }
+      }
       const hit = session.hit_test(x, y);
       if (hit === undefined) {
         setSelected(null);
@@ -6301,9 +6355,11 @@ export function App() {
       const r = replaceIn(spec.text, spec.runs ?? [], find, replace, opts);
       if (r.count === 0) continue;
       total += r.count;
+      // "a" for "a" finds and changes nothing: no step for it.
+      if (r.text === spec.text && JSON.stringify(r.runs) === JSON.stringify(spec.runs ?? [])) continue;
       cmds.push({ SetKind: { id, kind: { Text: { ...spec, text: r.text, runs: r.runs } } } });
     }
-    if (cmds.length === 0) return 0;
+    if (cmds.length === 0) return total;
     try {
       session.apply_as(
         JSON.stringify(cmds.length === 1 ? cmds[0] : { Batch: cmds }),
@@ -6557,6 +6613,16 @@ export function App() {
       parent = target.id;
       index = layers.filter((l) => l.parent === target.id).length;
       if (me.parent === parent) index -= 1;
+    } else if (
+      where === "below" &&
+      layers.some((l) => l.parent === target.id) &&
+      !collapsed.includes(target.id)
+    ) {
+      // Just under an open group's row is where its top layer is, and
+      // the line is drawn there: the top of the group, not under it.
+      parent = target.id;
+      index = layers.filter((l) => l.parent === target.id).length;
+      if (me.parent === parent) index -= 1;
     } else {
       parent = target.parent;
       index = where === "above" ? target.index + 1 : target.index;
@@ -6617,7 +6683,10 @@ export function App() {
     typeIntoNewText.current = false;
     if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) beginInlineText();
   });
-  const typeInlineText = (value: string) => {
+  /** The on-canvas editor's selection as it was before the latest
+   * keystroke, so the keystroke's edit is known exactly (`editOf`). */
+  const inlineSel = useRef<[number, number]>([0, 0]);
+  const typeInlineText = (value: string, caret?: number) => {
     if (
       !inlineText ||
       !selectedKind ||
@@ -6634,7 +6703,12 @@ export function App() {
           Text: {
             ...was,
             text: value,
-            runs: shiftRuns(was.text, value, was.runs ?? []),
+            runs: shiftRuns(
+              was.text,
+              value,
+              was.runs ?? [],
+              caret === undefined ? undefined : editOf(was.text, value, inlineSel.current, caret),
+            ),
           },
         },
       },
@@ -6658,7 +6732,8 @@ export function App() {
   }, [selected]);
 
   const commitRename = () => {
-    if (renaming && renaming.value.trim()) {
+    const was = renaming ? layers.find((l) => l.id === renaming.id)?.name : undefined;
+    if (renaming && renaming.value.trim() && renaming.value.trim() !== was) {
       run({ SetName: { id: renaming.id, name: renaming.value.trim() } });
     }
     setRenaming(null);
@@ -6867,6 +6942,9 @@ export function App() {
    * inside a picked group is already travelling with the group — acting
    * on it again moves it twice, which is a nudge of two pixels for every
    * one asked and a flip that flips it back. */
+  /** Whether the picked layers can be grouped: they share a parent. */
+  const groupable =
+    new Set(withoutNested(selectionSet).map((id) => layers.find((l) => l.id === id)?.parent)).size <= 1;
   const movableSelection = withoutNested(selectionSet).filter(
     (id) => !layers.find((l) => l.id === id)?.locked,
   );
@@ -7253,12 +7331,16 @@ export function App() {
   ];
 
   const groupSelection = () => {
-    if (!session || selectionSet.length === 0) return;
+    if (!session || selectionSet.length === 0 || !groupable) return;
     try {
-      groupCount.current += 1;
+      // Numbered after the groups this document has, not a count kept
+      // across documents (and of tries that failed).
+      const taken = new Set(layers.map((l) => l.name));
+      let n = layers.filter((l) => l.kind === "group").length + 1;
+      while (taken.has(`Group ${n}`)) n++;
       const id = session.group_nodes(
         new Float64Array(selectionSet),
-        `Group ${groupCount.current}`,
+        `Group ${n}`,
       );
       setSelected(id);
       setMultiSel([]);
@@ -7360,7 +7442,11 @@ export function App() {
     const { t0 } = drag;
     const path = drag.vector.shape.Path;
     const pts = path.points.map((p) => [...p] as [number, number]);
-    pts[drag.idx] = [(dx - t0.e) / t0.a, (dy - t0.f) / t0.d];
+    // Into the path's own space through the whole of its transform, a
+    // turn and a skew as well as a scale.
+    const own = inverseOf(t0);
+    if (!own) return;
+    pts[drag.idx] = own(dx, dy);
     // Keep anchors normalized to a (0,0) origin; the shift moves into the
     // node transform so bounds and handles stay correct.
     const minX = Math.min(...pts.map((p) => p[0]));
@@ -7386,8 +7472,8 @@ export function App() {
             id: selected,
             transform: {
               ...t0,
-              e: t0.e + minX * t0.a,
-              f: t0.f + minY * t0.d,
+              e: t0.e + minX * t0.a + minY * t0.c,
+              f: t0.f + minX * t0.b + minY * t0.d,
             },
           },
         },
@@ -7442,8 +7528,11 @@ export function App() {
     const path = drag.vector.shape.Path;
     const anchor = path.points[idx];
     // Offsets are in the path's own space, like the anchors themselves.
-    const ox = (dx - t0.e) / t0.a - anchor[0];
-    const oy = (dy - t0.f) / t0.d - anchor[1];
+    const own = inverseOf(t0);
+    if (!own) return;
+    const [lx, ly] = own(dx, dy);
+    const ox = lx - anchor[0];
+    const oy = ly - anchor[1];
     const handles = withHandles(path).map(
       (h, i) => (i === idx ? [...h] : h) as [number, number, number, number],
     );
@@ -7544,8 +7633,11 @@ export function App() {
    * for turning by eye, and this is for the times a thing has to be at
    * forty-five degrees exactly. About the middle of its own box, like
    * the knob, so typing an angle turns it where it stands. */
+  /** Whether the layer the panel shows is locked: nothing moves it, as
+   * nothing nudges, flips or aligns it. */
+  const selectedLocked = () => layers.find((l) => l.id === selected)?.locked === true;
   const setAngle = (degrees: number) => {
-    if (!session || selected === null || !selBounds || selBounds.length !== 4) {
+    if (!session || selected === null || !selBounds || selBounds.length !== 4 || selectedLocked()) {
       return;
     }
     const t = toTransform(session.transform_of(selected));
@@ -7594,7 +7686,7 @@ export function App() {
   /** Lean the picked layer's sides to an angle, keeping its turn, its
    * scale and the middle of its box where they are. */
   const setSkew = (degrees: number) => {
-    if (!session || selected === null) return;
+    if (!session || selected === null || selectedLocked()) return;
     const lb = session.local_bounds_of(selected);
     if (lb.length !== 4) return;
     const d = Math.max(-85, Math.min(85, degrees));
@@ -8240,7 +8332,7 @@ export function App() {
    * box is the one around it, so a size typed there is the size of that
    * box rather than of the layer's own axes. */
   const setGeometry = (field: "x" | "y" | "w" | "h", value: number) => {
-    if (!session || selected === null || !selBox) return;
+    if (!session || selected === null || !selBox || selectedLocked()) return;
     const [x, y, w, h] = selBox;
     const t0 = toTransform(session.transform_of(selected));
     if (field === "x" || field === "y") {
@@ -8409,7 +8501,8 @@ export function App() {
       alert("Masking needs a layer underneath the shape.");
       return;
     }
-    run({
+    // Named for what it did: "Multiple edits" said nothing.
+    const masked: Command = {
       Batch: [
         {
           SetMask: {
@@ -8427,7 +8520,13 @@ export function App() {
         },
         { RemoveNode: { id: selected } },
       ],
-    });
+    } as Command;
+    try {
+      session.apply_as(JSON.stringify(masked), `Mask ${below.name} with ${selectedLayer?.name ?? "the shape"}`);
+    } catch (err) {
+      alert(`Mask: ${err}`);
+    }
+    refresh(session);
     setSelected(below.id);
   };
 
@@ -8440,7 +8539,10 @@ export function App() {
     }
   }
   /** Whether there is work here that has not been saved. */
-  const unsaved = history.past.length !== savedAt;
+  // Measured by which step the history stands at, not how long it is:
+  // saved, undone and edited otherwise, it is as long as it was and is
+  // not what was saved.
+  const unsaved = session ? session.history_mark() !== savedAt : false;
   // The step the document is at stays in sight in the history list.
   useEffect(() => {
     // The list's own box is scrolled and nothing else: scrollIntoView
@@ -8668,6 +8770,9 @@ export function App() {
    * the lot, named after how many it touched. */
   const commitOpacity = () => {
     if (opacityDraft !== null && session && selectionSet.length > 0) {
+      // What the drag showed goes back, and comes again as the one step
+      // named for how many layers it touched.
+      session.cancel_preview();
       session.set_opacity_of(new Float64Array(selectionSet), opacityDraft);
       refresh(session);
     }
@@ -8718,7 +8823,7 @@ export function App() {
     try {
       // What is saved is the document as it is now, so it is now that
       // is marked saved, whatever is done while the panel is up.
-      const at = history.past.length;
+      const at = session.history_mark();
       const bytes = session.save();
       const target =
         path ?? (await chooseToSave("Save", `${fileName()}.chitra`, docPath, DOCUMENTS));
@@ -8741,7 +8846,7 @@ export function App() {
   const saveFile = async () => {
     if (!session) return;
     if (isTauri()) return saveToPath(docPath);
-    const at = history.past.length;
+    const at = session.history_mark();
     const written = await saveAs(
       "Save",
       `${fileName()}.chitra`,
@@ -9147,8 +9252,13 @@ export function App() {
       void startDeveloper();
       setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
     } catch (err) {
+      // The reader is fetched the first time a raw file is opened; with
+      // no network and no copy kept, it is the reader that is missing,
+      // not the file that is wrong.
       alert(
-        `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
+        navigator.onLine === false
+          ? `Could not open ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
+          : `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
       );
       rawDone.current += 1;
       void openNextRaw();
@@ -10229,9 +10339,12 @@ export function App() {
           <button
             type="button"
             onClick={async () => {
+              // In place of what is on the page, so what is there and
+              // not saved is asked about first, as New and Open ask.
+              if (!mayDiscard()) return;
               const draft = recoverable;
-              setRecoverable(null);
               const parts = await getDraftParts(draft.parts);
+              setRecoverable(null);
               if (!openDocumentBytes(draft.bytes, draftName.current ?? undefined, parts)) return;
               // Back with the file it had, so Save writes there again;
               // and, unless that file already held it, as work still to
@@ -10709,6 +10822,7 @@ export function App() {
           own={keyableRows(menus)
             .filter((r) => chords.menuOf[r.id])
             .map((r) => [chordLabel(chords.menuOf[r.id]), `${r.path} › ${r.label}`])}
+          nudge={[prefs.nudge, prefs.nudgeBig]}
           onClose={() => setShowKeys(false)}
         />
       )}
@@ -11581,8 +11695,8 @@ export function App() {
                 key={i}
                 className="swatch"
                 style={{ background: colorToHex(sw.color) }}
-                title={`${sw.name} — shift-click to make it mean the colour in hand, alt-click to take it out`}
-                aria-label={`Colour ${sw.name}`}
+                title={`${sw.name} (${colorToHex(sw.color)}) — shift-click to make it mean the colour in hand, alt-click to take it out`}
+                aria-label={`Colour ${sw.name}, ${colorToHex(sw.color)}`}
                 aria-pressed={linkedSwatch === sw.name}
                 onClick={(e) => {
                   if (e.altKey) {
@@ -11590,6 +11704,8 @@ export function App() {
                     return;
                   }
                   if (e.shiftKey) {
+                    // The same colour again is nothing to keep.
+                    if (colorToHex(sw.color).toLowerCase() === fill.toLowerCase()) return;
                     setPalette(
                       swatches.map((other, j) =>
                         j === i
@@ -11610,15 +11726,29 @@ export function App() {
             ))}
             <button
               className="swatch add"
-              onClick={() =>
+              onClick={() => {
+                // A name no colour in the document stands for: named by
+                // its hex, two of the same colour were one name (the
+                // second's change moved both), and a colour let go of
+                // from an entry taken out was picked up again by the
+                // next entry of that hex.
+                let taken: string[] = [];
+                try {
+                  taken = session ? (JSON.parse(session.colour_names_in_use()) as string[]) : [];
+                } catch {
+                  taken = [];
+                }
+                const used = new Set([...taken, ...swatches.map((sw) => sw.name)]);
+                let n = swatches.length + 1;
+                while (used.has(`Swatch ${n}`)) n++;
                 setPalette([
                   ...swatches,
                   {
-                    name: fill,
+                    name: `Swatch ${n}`,
                     color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
                   },
-                ])
-              }
+                ]);
+              }}
               title="Keep this colour in the document's palette"
               aria-label="Add to the palette"
             >
@@ -12277,12 +12407,18 @@ export function App() {
             "Vector" in selectedKind &&
             "Path" in selectedKind.Vector.shape &&
             (() => {
-              const t = toTransform(session.transform_of(selected));
+              // Through the whole transform, the layer's and its parents':
+              // a path turned or in a moved group had its dots drawn
+              // where it would be unturned and at the page's origin.
+              const t = composeT(
+                toTransform(session.parent_space_of(selected)),
+                toTransform(session.transform_of(selected)),
+              );
               const path = selectedKind.Vector.shape.Path;
               const handles = withHandles(path);
               const screen = (x: number, y: number) => ({
-                left: view.x + (t.e + x * t.a) * view.zoom,
-                top: view.y + (t.f + y * t.d) * view.zoom,
+                left: view.x + (t.a * x + t.c * y + t.e) * view.zoom,
+                top: view.y + (t.b * x + t.d * y + t.f) * view.zoom,
               });
               return path.points.flatMap((p, i) => {
                 const at = screen(p[0], p[1]);
@@ -12388,8 +12524,32 @@ export function App() {
                     caretColor: caret,
                     ...(mirrored ? {} : { color: caret }),
                   }}
-                  onChange={(e) => typeInlineText(e.target.value)}
-                  onBlur={() => closeInlineText(true)}
+                  onChange={(e) => {
+                    typeInlineText(e.target.value, e.target.selectionEnd);
+                    inlineSel.current = [e.target.selectionStart, e.target.selectionEnd];
+                  }}
+                  onSelect={(e) => {
+                    inlineSel.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd];
+                  }}
+                  onBlur={(e) => {
+                    // A press on Bold (or any of the panel's styling)
+                    // takes the caret, and the editor closes before the
+                    // press is heard: what was picked in it is kept a
+                    // moment so the press styles that, not the block.
+                    const el = e.currentTarget;
+                    lastInlinePick =
+                      el.selectionStart !== el.selectionEnd
+                        ? {
+                            range: [
+                              byteAt(el.value, Math.min(el.selectionStart, el.selectionEnd)),
+                              byteAt(el.value, Math.max(el.selectionStart, el.selectionEnd)),
+                            ],
+                            text: el.value,
+                            at: Date.now(),
+                          }
+                        : null;
+                    closeInlineText(true);
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Escape") {
                       e.preventDefault();
@@ -12973,8 +13133,12 @@ export function App() {
               </button>
               <button
                 onClick={groupSelection}
-                disabled={selectionSet.length === 0}
-                title="Group selected layers (ctrl-click to select several)"
+                disabled={selectionSet.length === 0 || !groupable}
+                title={
+                  groupable
+                    ? "Group selected layers (ctrl-click to select several)"
+                    : "Layers in different groups cannot be grouped together"
+                }
                 aria-label="Group selected layers (ctrl-click to select several)"
               >
                 <Icon name="group" size={16} />
@@ -13034,7 +13198,17 @@ export function App() {
                 aria-label={`Comp ${c.name}`}
                 title={`${c.name} — shift-click keeps the page as it is now under this name, double-click renames, ctrl-click forgets`}
                 onClick={(e) => onComp(c.name, e)}
-                onDoubleClick={() => renameComp(c.name)}
+                onDoubleClick={() => {
+                  // The double-click's first press showed the comp; a
+                  // rename is not a wish to see it, so that is taken back.
+                  const shown = compShownBy.current;
+                  if (session && shown && shown.name === c.name && Date.now() - shown.at < 800) {
+                    session.undo();
+                    refresh(session);
+                  }
+                  compShownBy.current = null;
+                  renameComp(c.name);
+                }}
               >
                 {c.name}
               </button>
@@ -13103,6 +13277,33 @@ export function App() {
                   .filter(Boolean)
                   .join(" ")}
                 style={{ paddingLeft: `${l.depth * 14 + 2}px` }}
+                tabIndex={0}
+                aria-selected={l.id === selected || multiSel.includes(l.id)}
+                // Tab reaches a row; Enter picks it (with Ctrl or Shift,
+                // adds it) and F2 renames it. Not Space nor the arrows: a
+                // row keeps the caret after a click, and Space held pans
+                // the view and the arrows nudge the picked layer.
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                      if (l.id !== selected) {
+                        setMultiSel((prev) =>
+                          prev.includes(l.id) ? prev.filter((id) => id !== l.id) : [...prev, l.id],
+                        );
+                      }
+                    } else {
+                      setSelected(l.id);
+                      setMultiSel([]);
+                    }
+                  } else if (e.key === "F2") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setRenaming({ id: l.id, value: l.name });
+                  }
+                }}
                 onPointerDown={(e) => onRowPointerDown(e, l.id)}
                 // A right-click on a row is the same question as one on the
                 // layer on the canvas — what can be done with this — and
@@ -13622,7 +13823,21 @@ export function App() {
                   max={1}
                   step={0.01}
                   value={opacityDraft ?? selectedLayer.opacity}
-                  onChange={(e) => setOpacityDraft(Number(e.target.value))}
+                  onChange={(e) => {
+                    // Shown as it moves, on every picked layer, and kept
+                    // as one step when it is let go of (`commitOpacity`).
+                    const v = Number(e.target.value);
+                    setOpacityDraft(v);
+                    if (!session || selectionSet.length === 0) return;
+                    try {
+                      session.preview(
+                        JSON.stringify({ Batch: selectionSet.map((id) => ({ SetOpacity: { id, opacity: v } })) }),
+                      );
+                      refresh(session);
+                    } catch (err) {
+                      console.warn("opacity preview:", err);
+                    }
+                  }}
                   onPointerUp={commitOpacity}
                   onKeyUp={commitOpacity}
                   onBlur={commitOpacity}
@@ -13996,6 +14211,8 @@ const keyHelp = (
   chordOf: Record<CommandId, string>,
   /** The menu rows a person gave chords of their own: label and chord. */
   own: [string, string][] = [],
+  /** How far the arrow keys nudge, and with shift (Preferences). */
+  nudge: [number, number] = [1, 10],
 ): [string, [string, string][]][] => {
   const k = (t: Tool) => hint[t] || "(no key)";
   // A command's chord as it reads, or "(no key)" for one given none;
@@ -14061,7 +14278,12 @@ const keyHelp = (
       ["Shift-click with the pen", "Hold the segment to 45°"],
       ["Ctrl while dragging", "Ignore the snapping"],
       ["Alt-drag", "Leave the original and carry a copy"],
-      ["Arrow keys", "Nudge a pixel; shift for ten"],
+      [
+        "Arrow keys",
+        nudge[0] === 1 && nudge[1] === 10
+          ? "Nudge a pixel; shift for ten"
+          : `Nudge ${nudge[0]} px; shift for ${nudge[1]}`,
+      ],
       ["Drag a layer row", "Reorder, or drop into a group"],
     ],
   ],
@@ -14096,7 +14318,10 @@ const keyHelp = (
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
       [c("select-all"), "Select all — the page with a marquee in hand, else every layer"],
-      ["M", "Pick a region out of the page (shift+M for the ellipse, the lasso and the wand)"],
+      // The Select tool's key as it is bound, not as it shipped.
+      hint.Select
+        ? [hint.Select.toUpperCase(), `Pick a region out of the page (shift+${hint.Select.toUpperCase()} for the ellipse, the lasso and the wand)`]
+        : ["(no key)", "Pick a region out of the page (the Select tool)"],
       ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
       [c("deselect"), "Deselect — the selection first, then the layers"],
       [c("pick-inverse"), "Inverse — select everything the selection leaves out"],
@@ -14197,14 +14422,16 @@ function KeysDialog({
   hint,
   chordOf,
   own,
+  nudge,
   onClose,
 }: {
   hint: Record<Tool, string>;
   chordOf: Record<CommandId, string>;
   own: [string, string][];
+  nudge: [number, number];
   onClose: () => void;
 }) {
-  const KEY_HELP = keyHelp(hint, chordOf, own);
+  const KEY_HELP = keyHelp(hint, chordOf, own, nudge);
   return (
     <div className="modal-scrim" onPointerDown={onClose}>
       <div
@@ -17863,6 +18090,9 @@ function KindProps({
           return [byteAt(el.value, a), byteAt(el.value, b)];
         }
       }
+      // What was picked in the on-canvas editor the press just closed.
+      const kept = lastInlinePick;
+      if (kept && kept.text === t.text && Date.now() - kept.at < 1500) return kept.range;
       return null;
     };
     // Apply one styling choice: over the selection as a run, or over the
@@ -17907,18 +18137,27 @@ function KindProps({
           <textarea
             value={t.text}
             rows={2}
-            onChange={(e) =>
+            onChange={(e) => {
+              const el = e.target;
+              const was = textSelections.get(el);
+              textSelections.set(el, [el.selectionStart, el.selectionEnd]);
               onEdit(
                 {
                   Text: {
                     ...t,
-                    text: e.target.value,
-                    runs: shiftRuns(t.text, e.target.value, t.runs ?? []),
+                    text: el.value,
+                    runs: shiftRuns(
+                      t.text,
+                      el.value,
+                      t.runs ?? [],
+                      was ? editOf(t.text, el.value, was, el.selectionEnd) : undefined,
+                    ),
                   },
                 },
                 true,
-              )
-            }
+              );
+            }}
+            onSelect={(e) => textSelections.set(e.currentTarget, [e.currentTarget.selectionStart, e.currentTarget.selectionEnd])}
             onBlur={onGestureEnd}
             aria-label="Text content"
           />
@@ -17950,7 +18189,10 @@ function KindProps({
               className={(t.align ?? "Left") === mode ? "active" : undefined}
               title={title}
               aria-label={title}
-              onClick={() => onEdit({ Text: { ...t, align: mode } }, false)}
+              // Already so, it is no step.
+              onClick={() => {
+                if ((t.align ?? "Left") !== mode) onEdit({ Text: { ...t, align: mode } }, false);
+              }}
             >
               <Icon name={icon} />
             </button>
@@ -18102,9 +18344,12 @@ function KindProps({
           <select
             id="text-font"
             value={t.font || fonts[0]}
-            onChange={(e) =>
-              onEdit({ Text: { ...t, font: e.target.value } }, false)
-            }
+            onChange={(e) => {
+              // The face it is shown in already (an unnamed block is in
+              // the first): naming it changes nothing to see.
+              if ((t.font || fonts[0]) === e.target.value) return;
+              onEdit({ Text: { ...t, font: e.target.value } }, false);
+            }}
             aria-label="Font"
           >
             {fonts.map((n) => (
@@ -18536,8 +18781,10 @@ function KindProps({
         {/* Which side of the edge the border lies on. A rect's and an
             ellipse's outline has a distance of its own, so a band to
             either side of it is exact; a path is stroked down the middle
-            of its line, which is what a line means. */}
-        {v.stroke && !("Path" in v.shape) && (
+            of its line, which is what a line means — and a polygon or a
+            star is the path through its corners, stroked as that path
+            is, so it has no side to choose either. */}
+        {v.stroke && ("Rect" in v.shape || "Ellipse" in v.shape) && (
           <label className="row">
             Border
             <select

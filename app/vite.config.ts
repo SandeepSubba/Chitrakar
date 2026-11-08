@@ -1,6 +1,7 @@
 import { defaultClientConditions, defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
+import type { Plugin } from "vite";
 
 /** The app's version, from the one place it is written, for the About
  * window. */
@@ -15,8 +16,29 @@ const ISOLATION = {
   "Cross-Origin-Embedder-Policy": "require-corp",
 };
 
+/** Every file the build put in assets/, listed beside it for the service
+ * worker (`public/sw.js`): kept files of this build are never pruned,
+ * whether or not this visit loaded them. A list made from what the page
+ * loaded lost the raw reader, the PDF reader and the workers, which
+ * load later or from a worker, and they failed offline. */
+function listAssets(): Plugin {
+  let out = "dist";
+  return {
+    name: "chitrakar-list-assets",
+    apply: "build",
+    configResolved(config) {
+      out = config.build.outDir;
+    },
+    closeBundle() {
+      const dir = `${out}/assets`;
+      if (!existsSync(dir)) return;
+      writeFileSync(`${out}/build-assets.json`, JSON.stringify(readdirSync(dir).map((f) => `assets/${f}`)));
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), listAssets()],
   define: { __APP_VERSION__: JSON.stringify(version) },
   // Tauri dev server contract: fixed port, fail rather than drift.
   server: {

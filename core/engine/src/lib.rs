@@ -78,6 +78,13 @@ struct Clipboard {
     /// name: without them a picture pasted into another document could
     /// not be developed again there, nor saved with its raw file.
     originals: Vec<(String, std::sync::Arc<[u8]>)>,
+    /// The document it was copied from (`Session::origin`).
+    from: u64,
+    /// What each layer a copied live copy follows was, where that layer
+    /// did not travel with it: in another document the same id is some
+    /// other layer, and a copy is only taken to follow the one there
+    /// that is this one (a document saved and opened again).
+    followed: std::collections::HashMap<NodeId, String>,
 }
 
 #[derive(Clone)]
@@ -130,6 +137,10 @@ impl From<chitrakar_doc::DocError> for EngineError {
 struct HistoryEntry {
     inverse: Command,
     label: String,
+    /// Which step this is, one number to each step ever recorded: what
+    /// "saved here" is measured by (`history_mark`), since two different
+    /// edits can leave the history the same length.
+    serial: u64,
 }
 
 /// One thing a command writes to, which is how a gesture knows whether it
@@ -461,6 +472,11 @@ const OUTPUT_SHARPEN_SIGMA: f32 = 0.7;
 
 pub struct Session {
     doc: Document,
+    /// Which document this is, for the clipboard: a layer's id means
+    /// something only in the document it was made in.
+    origin: u64,
+    /// The last step's number (`HistoryEntry::serial`).
+    serials: u64,
     undo: Vec<HistoryEntry>,
     redo: Vec<HistoryEntry>,
     cache: Option<Surface>,
@@ -570,6 +586,9 @@ pub struct Session {
     /// that can only make it true says so itself, and one that could
     /// have taken the last one away sends the session to look.
     reaches: bool,
+    /// Whether any layer is held to the one below it — `held_bounds`
+    /// has nothing to find in a document with none.
+    has_held: bool,
 }
 
 /// What a command says about a fact the session keeps about the whole
@@ -607,12 +626,23 @@ impl Session {
         // they had.
         session.note_copies();
         session.note_reach();
+        session.note_held();
         session
     }
 
+    /// Whether any layer is held to the one below it (`held_bounds`),
+    /// asked of the whole document only when it arrives whole or a
+    /// command could have brought one in.
+    fn note_held(&mut self) {
+        self.has_held = self.doc.nodes().any(|(_, n)| n.clipped);
+    }
+
     fn empty_over(doc: Document) -> Self {
+        static NEXT_ORIGIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             doc,
+            origin: NEXT_ORIGIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            serials: 0,
             undo: Vec::new(),
             redo: Vec::new(),
             cache: None,
@@ -644,6 +674,7 @@ impl Session {
             showing: chitrakar_render::Showing::Everything,
             has_copies: false,
             reaches: false,
+            has_held: false,
         }
     }
 
@@ -772,6 +803,37 @@ impl Session {
     fn bounds_of_target(&self, id: Option<NodeId>) -> Bounds {
         id.and_then(|id| chitrakar_render::node_bounds(&self.doc, id).ok())
             .unwrap_or(Bounds::None)
+    }
+
+    /// Where the layers held to a layer are: the clipped ones just above
+    /// it, which show only through it, so it going, coming back or moving
+    /// changes what they show (a base deleted left them on the screen
+    /// cut to where it had been).
+    fn held_bounds(&self, id: Option<NodeId>) -> Bounds {
+        // Almost no document holds a layer to another, and this runs on
+        // every command: finding a layer among its siblings is a walk,
+        // which on every edit made building a page cost its square.
+        if !self.has_held {
+            return Bounds::None;
+        }
+        let Some(id) = id else {
+            return Bounds::None;
+        };
+        let Some(parent) = self.doc.parent_of(id) else {
+            return Bounds::None;
+        };
+        let Ok(siblings) = self.doc.children_of(parent) else {
+            return Bounds::None;
+        };
+        let Some(at) = siblings.iter().position(|s| *s == id) else {
+            return Bounds::None;
+        };
+        siblings[at + 1..]
+            .iter()
+            .take_while(|s| self.doc.node(**s).is_ok_and(|n| n.clipped))
+            .fold(Bounds::None, |b, s| {
+                b.union(chitrakar_render::node_bounds(&self.doc, *s).unwrap_or(Bounds::None))
+            })
     }
 
     /// Where every live copy of a layer is — of the layer itself, of a
@@ -943,7 +1005,8 @@ impl Session {
         let pre = self
             .stroke_bounds(&cmd)
             .unwrap_or_else(|| self.bounds_of_target(target))
-            .union(self.copies_bounds(target));
+            .union(self.copies_bounds(target))
+            .union(self.held_bounds(target));
         // Whether the document still holds a copy is a question about
         // the whole document, and asking it that way after every
         // structural command is what made building one cost the square
@@ -954,7 +1017,19 @@ impl Session {
         let copies = Self::copies_after(&cmd);
         let reaching = Self::reach_after(&cmd);
         let was_sized = (self.doc.meta.width, self.doc.meta.height);
+        let held = match &cmd {
+            Command::SetClipped { clipped: true, .. } => Told::Yes,
+            Command::AddNode { node, .. } if node.clipped => Told::Yes,
+            Command::RestoreSubtree { .. } | Command::Batch(_) => Told::Ask,
+            _ => Told::Keep,
+        };
         let inverse = self.doc.apply(cmd)?;
+        match held {
+            Told::Keep => {}
+            Told::Yes => self.has_held = true,
+            Told::Ask if !self.has_held => self.note_held(),
+            Told::Ask => {}
+        }
         match copies {
             Told::Keep => {}
             Told::Yes => self.has_copies = true,
@@ -979,7 +1054,8 @@ impl Session {
         let post = self
             .stroke_bounds(&inverse)
             .unwrap_or_else(|| self.bounds_of_target(post_target))
-            .union(self.copies_bounds(post_target));
+            .union(self.copies_bounds(post_target))
+            .union(self.held_bounds(post_target));
         self.last_touched = post_target.or(target);
         if batch {
             self.mark_dirty(Bounds::Everything);
@@ -1024,6 +1100,10 @@ impl Session {
                 Command::SetVisible { visible: false, .. } => "Hide",
                 Command::SetLocked { locked: true, .. } => "Lock",
                 Command::SetLocked { locked: false, .. } => "Unlock",
+                Command::SetClipped { clipped: true, .. } => "Clip",
+                Command::SetClipped { clipped: false, .. } => "Unclip",
+                Command::SetMask { mask: Some(_), .. } => "Mask",
+                Command::SetMask { mask: None, .. } => "Unmask",
                 _ => return None,
             })
         }
@@ -1091,10 +1171,15 @@ impl Session {
                 }
             }
             Command::SetSwatches { swatches } => {
+                let had = self.doc.swatches().len();
                 if swatches.is_empty() {
                     "Clear the palette".into()
+                } else if swatches.len() > had {
+                    "Add a colour to the palette".into()
+                } else if swatches.len() < had {
+                    "Take a colour out of the palette".into()
                 } else {
-                    format!("{} colours in the palette", swatches.len())
+                    "Change a palette colour".into()
                 }
             }
             Command::SetStyles { styles } => {
@@ -1162,11 +1247,59 @@ impl Session {
         self.apply_labeled(cmd, None)
     }
 
+    /// The same, but no step when it changed nothing — its way back the
+    /// very commands it was (a style given to the layers wearing it, a
+    /// comp kept again over itself). Whether it changed anything.
+    fn apply_labeled_if_changed(
+        &mut self,
+        cmd: Command,
+        label: String,
+    ) -> Result<bool, EngineError> {
+        let given = serde_json::to_value(&cmd).ok();
+        self.commit_preview();
+        let inverse = self.apply_internal(cmd)?;
+        let back = match &inverse {
+            Command::Batch(back) => {
+                serde_json::to_value(Command::Batch(back.iter().rev().cloned().collect())).ok()
+            }
+            other => serde_json::to_value(other).ok(),
+        };
+        if given.is_some() && back == given {
+            return Ok(false);
+        }
+        let serial = self.next_serial();
+        self.undo.push(HistoryEntry {
+            inverse,
+            label,
+            serial,
+        });
+        self.redo.clear();
+        Ok(true)
+    }
+
+    fn next_serial(&mut self) -> u64 {
+        self.serials += 1;
+        self.serials
+    }
+
+    /// Where the history stands: the newest step's number, or 0 before
+    /// the first. A document saved at one mark is unchanged exactly while
+    /// the mark is that — after an undo and a different edit the history
+    /// is as long as it was and the mark is not what it was.
+    pub fn history_mark(&self) -> u64 {
+        self.undo.last().map_or(0, |e| e.serial)
+    }
+
     fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
         self.commit_preview(); // a stray preview must not leak into this edit
         let label = label.unwrap_or_else(|| self.describe(&cmd));
         let inverse = self.apply_internal(cmd)?;
-        self.undo.push(HistoryEntry { inverse, label });
+        let serial = self.next_serial();
+        self.undo.push(HistoryEntry {
+            inverse,
+            label,
+            serial,
+        });
         self.redo.clear();
         Ok(())
     }
@@ -1225,9 +1358,11 @@ impl Session {
         match self.preview_gesture.take() {
             Some(gesture) => {
                 let label = gesture.label.clone();
+                let serial = self.next_serial();
                 self.undo.push(HistoryEntry {
                     inverse: gesture.undoing(),
                     label,
+                    serial,
                 });
                 self.redo.clear();
                 true
@@ -1252,9 +1387,11 @@ impl Session {
             return false;
         };
         // Undone newest first: the drag taken back, then the copy.
+        let serial = self.next_serial();
         self.undo.push(HistoryEntry {
             inverse: Command::Batch(vec![newer.inverse, older.inverse]),
             label: older.label,
+            serial,
         });
         true
     }
@@ -1281,6 +1418,7 @@ impl Session {
                 self.redo.push(HistoryEntry {
                     inverse: redo,
                     label: entry.label,
+                    serial: entry.serial,
                 });
                 Ok(true)
             }
@@ -1295,6 +1433,7 @@ impl Session {
                 self.undo.push(HistoryEntry {
                     inverse,
                     label: entry.label,
+                    serial: entry.serial,
                 });
                 Ok(true)
             }
@@ -1958,6 +2097,17 @@ impl Session {
             .doc
             .parent_of(id)
             .ok_or_else(|| EngineError::BadCommand("the root has no outline".into()))?;
+        // The distance asked for is in page pixels, and the outline is
+        // in the shape's own units: a shape drawn at twice its size moved
+        // out twice as far. Scaled unevenly there is no one distance
+        // that is that many pixels every way; the average scale is used.
+        let seen = chitrakar_render::ancestor_space(&self.doc, id).compose(node.transform);
+        let scale = (seen.a * seen.d - seen.b * seen.c).abs().sqrt();
+        let by = if scale > 1e-6 && scale.is_finite() {
+            by / scale
+        } else {
+            by
+        };
         let rings = chitrakar_render::offset_outline(shape, by).ok_or_else(|| {
             EngineError::BadCommand(if by < 0.0 {
                 "moved in that far, nothing of the shape is left".into()
@@ -2203,6 +2353,27 @@ impl Session {
                 .into(),
             ));
         }
+        // Written in the bottom shape's own space, which the result keeps:
+        // its stroke's width and its gradient are measured there, so a
+        // shape scaled to twice its size kept a stroke of twice its
+        // width, and one turned kept its gradient turned, only while the
+        // transform that does the scaling and turning stays. One that
+        // cannot be undone (a shape squashed flat) is left as it was.
+        let bottom = self.doc.node(ordered[0])?.transform;
+        let det = bottom.a * bottom.d - bottom.b * bottom.c;
+        let local = det.abs() > 1e-9;
+        if local {
+            let (a, b, c, d) = (
+                bottom.d / det,
+                -bottom.b / det,
+                -bottom.c / det,
+                bottom.a / det,
+            );
+            for p in acc.iter_mut().flatten() {
+                let (x, y) = (p[0] - bottom.e, p[1] - bottom.f);
+                *p = [a * x + c * y, b * x + d * y];
+            }
+        }
         // Anchors are stored relative to the node's own origin, like every
         // other path, so the transform carries the position.
         let (mut x0, mut y0) = (f32::MAX, f32::MAX);
@@ -2253,7 +2424,11 @@ impl Session {
             stroke,
             gradient,
         };
-        node.transform = Transform::translation(x0, y0);
+        node.transform = if local {
+            bottom.compose(Transform::translation(x0, y0))
+        } else {
+            Transform::translation(x0, y0)
+        };
         let index = siblings
             .iter()
             .position(|s| *s == ordered[0])
@@ -4926,11 +5101,17 @@ impl Session {
         for root in &roots {
             self.collect_resources(root, &mut resources, &mut originals);
         }
+        let mut followed = std::collections::HashMap::new();
+        for root in &roots {
+            self.collect_followed(root, &mut followed);
+        }
         CLIPBOARD.with(|c| {
             *c.borrow_mut() = Some(Clipboard {
                 roots,
                 resources,
                 originals,
+                from: self.origin,
+                followed,
             })
         });
         Ok(())
@@ -4970,6 +5151,22 @@ impl Session {
                 .map(|c| self.clip_of(*c))
                 .collect::<Result<_, _>>()?,
         })
+    }
+
+    /// What every layer a copied live copy follows is, as text.
+    fn collect_followed(
+        &self,
+        clip: &ClipNode,
+        out: &mut std::collections::HashMap<NodeId, String>,
+    ) {
+        if let NodeKind::Instance { of, .. } = &clip.node.kind {
+            if let Ok(node) = self.doc.node(*of) {
+                out.insert(*of, serde_json::to_string(&node.kind).unwrap_or_default());
+            }
+        }
+        for child in &clip.children {
+            self.collect_followed(child, out);
+        }
     }
 
     fn collect_resources(
@@ -5040,7 +5237,7 @@ impl Session {
         // document either would arrive drawing nothing at all, which is
         // the quiet kind of failure. Say so instead.
         for root in &clip.roots {
-            if let Some(name) = self.orphaned_copy(root, &becomes) {
+            if let Some(name) = self.orphaned_copy(root, &becomes, &clip) {
                 return Err(EngineError::BadCommand(format!(
                     "{name} is a copy of a layer that is not here: copy that layer too"
                 )));
@@ -5075,6 +5272,18 @@ impl Session {
                 )
             })
             .collect();
+        // A layer following a style this document does not keep follows
+        // nothing here: left linked, the first style kept under that name
+        // would restyle it.
+        let kept: std::collections::HashSet<&str> =
+            self.doc.styles().iter().map(|s| s.name.as_str()).collect();
+        for cmd in &mut cmds {
+            if let Command::AddNode { node, .. } = cmd {
+                if node.style.as_deref().is_some_and(|s| !kept.contains(s)) {
+                    node.style = None;
+                }
+            }
+        }
         let label = match clip.roots.as_slice() {
             [only] => format!("Paste {}", only.node.name),
             many => format!("Paste {} layers", many.len()),
@@ -5103,15 +5312,27 @@ impl Session {
         &self,
         clip: &ClipNode,
         becomes: &std::collections::HashMap<NodeId, NodeId>,
+        board: &Clipboard,
     ) -> Option<String> {
         if let NodeKind::Instance { of, .. } = &clip.node.kind {
-            if !becomes.contains_key(of) && self.doc.node(*of).is_err() {
+            // Here if it travelled, or if this is the document it was
+            // copied from and it is still in it, or if what has that id
+            // here is what it followed there.
+            let here = becomes.contains_key(of)
+                || match self.doc.node(*of) {
+                    Err(_) => false,
+                    Ok(_) if board.from == self.origin => true,
+                    Ok(node) => board.followed.get(of).is_some_and(|was| {
+                        serde_json::to_string(&node.kind).is_ok_and(|now| &now == was)
+                    }),
+                };
+            if !here {
                 return Some(clip.node.name.clone());
             }
         }
         clip.children
             .iter()
-            .find_map(|c| self.orphaned_copy(c, becomes))
+            .find_map(|c| self.orphaned_copy(c, becomes, board))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5324,34 +5545,32 @@ impl Session {
                         .partial_cmp(&centre(&b.1))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                // The outermost two stay put and the rest space evenly
-                // between them, which is what makes the result stable if you
-                // run it twice. Spread over the page, the outermost two go
-                // to its edges first — the first's near edge on the page's
-                // near edge, the last's far edge on its far edge. A key
-                // has nothing to add: the outermost already stay.
-                let (mut first, mut last) =
-                    (centre(&boxes[0].1), centre(&boxes[boxes.len() - 1].1));
+                // The outermost two stay put and the rest go between them
+                // with the same gap between each two — the gaps, not the
+                // middles, which is what spaced evenly means for layers of
+                // different sizes, and what makes the result stable if
+                // you run it twice. Spread over the page, the outermost
+                // two go to its edges first. A key has nothing to add:
+                // the outermost already stay.
+                let (near, far) = if horizontal { (0, 2) } else { (1, 3) };
+                let n = boxes.len();
+                let (mut from, mut to_edge) = (boxes[0].1[near], boxes[n - 1].1[far]);
                 if to == AlignTo::Page {
                     let ground = self.ground_of(boxes[0].0);
-                    let (b0, b1) = (&boxes[0].1, &boxes[boxes.len() - 1].1);
-                    if horizontal {
-                        first = ground[0] + (b0[2] - b0[0]) / 2.0;
-                        last = ground[2] - (b1[2] - b1[0]) / 2.0;
-                    } else {
-                        first = ground[1] + (b0[3] - b0[1]) / 2.0;
-                        last = ground[3] - (b1[3] - b1[1]) / 2.0;
-                    }
+                    from = ground[near];
+                    to_edge = ground[far];
                 }
-                let step = (last - first) / (boxes.len() - 1) as f32;
-                for (i, (id, b)) in boxes.iter().enumerate() {
-                    let want = first + step * i as f32;
-                    let d = want - centre(b);
+                let sizes: f32 = boxes.iter().map(|(_, b)| b[far] - b[near]).sum();
+                let gap = (to_edge - from - sizes) / (n - 1) as f32;
+                let mut at = from;
+                for (id, b) in boxes.iter() {
+                    let d = at - b[near];
                     deltas.push((
                         *id,
                         if horizontal { d } else { 0.0 },
                         if horizontal { 0.0 } else { d },
                     ));
+                    at += b[far] - b[near] + gap;
                 }
             }
             other => {
@@ -7573,7 +7792,9 @@ impl Session {
                 if others.len() == 1 { "layer" } else { "layers" }
             )
         };
-        self.apply_labeled(Command::Batch(cmds), Some(label))
+        // Kept again as it was, it is no step.
+        self.apply_labeled_if_changed(Command::Batch(cmds), label)
+            .map(|_| ())
     }
 
     /// Give the look kept under `name` to every layer named, in one
@@ -7600,7 +7821,8 @@ impl Session {
                 style: Some(name.to_string()),
             });
         }
-        self.apply_labeled(Command::Batch(cmds), Some(label))
+        self.apply_labeled_if_changed(Command::Batch(cmds), label)
+            .map(|_| ())
     }
 
     /// Take a kept style out of the document. Layers that followed it
@@ -7664,7 +7886,8 @@ impl Session {
                 format!("Keep the comp {name}")
             }
         };
-        self.apply_labeled(Command::SetComps { comps }, Some(label))
+        self.apply_labeled_if_changed(Command::SetComps { comps }, label)
+            .map(|_| ())
     }
 
     /// Put the page back as the comp `name` kept it, in one entry: each
@@ -7858,19 +8081,9 @@ impl Session {
             return Ok(());
         }
         // A look given to layers that already wear it changes nothing,
-        // and is no step: its way back would be the same commands again.
-        let given = serde_json::to_value(&cmds).ok();
-        self.commit_preview();
-        let inverse = self.apply_internal(Command::Batch(cmds))?;
-        if let (Some(given), Command::Batch(back)) = (given, &inverse) {
-            let back: Vec<&Command> = back.iter().rev().collect();
-            if serde_json::to_value(&back).ok() == Some(given) {
-                return Ok(());
-            }
-        }
-        self.undo.push(HistoryEntry { inverse, label });
-        self.redo.clear();
-        Ok(())
+        // and is no step.
+        self.apply_labeled_if_changed(Command::Batch(cmds), label)
+            .map(|_| ())
     }
 
     /// The commands that give a look to every layer named.
@@ -10201,6 +10414,24 @@ impl Session {
             ]),
             Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1 - x0, y1 - y0]),
         }
+    }
+
+    /// Every palette name a colour in the document stands for, the
+    /// palette's own and any a layer still reaches for after its entry
+    /// was taken out: a new entry is given a name none of them has, or a
+    /// colour let go of would be picked up by it.
+    pub fn colour_names_in_use(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> =
+            self.doc.swatches().iter().map(|s| s.name.clone()).collect();
+        for (_, node) in self.doc.nodes() {
+            let mut node = node.clone();
+            node.each_color_mut(&mut |c| {
+                if let chitrakar_color::AuthoredColor::Named { name, .. } = c {
+                    names.insert(name.clone());
+                }
+            });
+        }
+        names.into_iter().collect()
     }
 
     /// Doc-space bounds of a node with everything it can draw — a drop
@@ -19196,6 +19427,224 @@ mod tests {
     /// twentieth of a step of linear light at its worst here, and it is
     /// what the tolerance is for — anything structural is worth far more
     /// than that.
+    /// A layer held to the one below shows only through it, so deleting,
+    /// restoring or moving the one below repaints the held layer too.
+    #[test]
+    fn a_base_changed_repaints_what_is_held_to_it() {
+        let mut s = Session::new(40, 20, ColorMode::Rgb);
+        let base = add_rect(&mut s, "base", 10.0, 10.0);
+        let held = add_rect(&mut s, "held", 30.0, 10.0);
+        s.apply(Command::SetClipped {
+            id: held,
+            clipped: true,
+        })
+        .unwrap();
+        s.render_cached().unwrap();
+        let check = |s: &mut Session, step: &str| {
+            let patched = s.render_cached().unwrap().0.clone();
+            let whole = Session::from_document(s.document().clone())
+                .render()
+                .unwrap();
+            let worst = apart(&patched, &whole);
+            assert!(
+                worst.0 < 0.002,
+                "{step}: {},{} left as it was",
+                worst.1,
+                worst.2
+            );
+        };
+        s.apply(Command::RemoveNode { id: base }).unwrap();
+        check(&mut s, "the base deleted");
+        s.undo().unwrap();
+        check(&mut s, "and put back");
+        let root = s.document().root();
+        s.apply(Command::MoveNode {
+            id: base,
+            parent: root,
+            index: 1,
+        })
+        .unwrap();
+        check(&mut s, "the base moved over it");
+    }
+
+    /// A live copy pasted alone into another document is refused there,
+    /// though a layer there has the id of the one it copies: an id means
+    /// nothing outside the document it was made in.
+    #[test]
+    fn a_live_copy_alone_does_not_follow_another_documents_layer() {
+        let mut a = Session::new(40, 20, ColorMode::Rgb);
+        add_rect(&mut a, "one", 10.0, 10.0);
+        let two = add_rect(&mut a, "two", 10.0, 10.0);
+        let copy = a.make_instance(two).unwrap();
+        a.copy_node(copy).unwrap();
+        let mut b = Session::new(40, 20, ColorMode::Rgb);
+        add_rect(&mut b, "green", 10.0, 10.0);
+        let mut other = filled_rect("two", 10.0, 10.0);
+        if let NodeKind::Vector { fill, .. } = &mut other.kind {
+            *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                r: 0.9,
+                g: 0.9,
+                b: 0.0,
+                a: 1.0,
+            });
+        }
+        let root = b.document().root();
+        b.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: other,
+        })
+        .unwrap();
+        let refused = b.paste(None).unwrap_err().to_string();
+        assert!(refused.contains("copy that layer too"), "{refused}");
+        // Back in its own document it pastes as it always did.
+        assert_eq!(a.paste(None).unwrap().len(), 1);
+    }
+
+    /// A layer pasted into a document without the style it follows
+    /// follows nothing there.
+    #[test]
+    fn a_style_link_does_not_travel_where_the_style_is_not() {
+        let mut a = Session::new(20, 20, ColorMode::Rgb);
+        let rect = add_rect(&mut a, "r", 10.0, 10.0);
+        a.keep_style("Style 1", rect).unwrap();
+        a.copy_node(rect).unwrap();
+        let mut b = Session::new(20, 20, ColorMode::Rgb);
+        let pasted = b.paste(None).unwrap()[0];
+        assert_eq!(b.document().node(pasted).unwrap().style, None);
+        let back = a.paste(None).unwrap()[0];
+        assert_eq!(
+            a.document().node(back).unwrap().style.as_deref(),
+            Some("Style 1")
+        );
+    }
+
+    /// A style given to layers already wearing it, and kept again as it
+    /// was, and a comp kept again over itself, are no steps.
+    #[test]
+    fn styles_and_comps_kept_or_given_again_are_no_steps() {
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        let rect = add_rect(&mut s, "r", 10.0, 10.0);
+        s.keep_style("Style 1", rect).unwrap();
+        let steps = s.history_labels().0.len();
+        s.apply_style("Style 1", &[rect]).unwrap();
+        s.keep_style("Style 1", rect).unwrap();
+        s.keep_comp("C").unwrap();
+        let after = s.history_labels().0.len();
+        s.keep_comp("C").unwrap();
+        assert_eq!(s.history_labels().0.len(), after, "a comp kept over itself");
+        assert_eq!(
+            after,
+            steps + 1,
+            "only keeping the comp the first time was a step"
+        );
+    }
+
+    /// Saved, undone and edited otherwise, the history is as long as it
+    /// was and its mark is not; undone and redone, it is the same again.
+    #[test]
+    fn the_history_mark_tells_one_edit_from_another() {
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        assert_eq!(s.history_mark(), 0);
+        add_rect(&mut s, "a", 5.0, 5.0);
+        let saved = s.history_mark();
+        s.undo().unwrap();
+        add_rect(&mut s, "b", 5.0, 5.0);
+        assert_ne!(s.history_mark(), saved, "another edit at the same depth");
+        s.undo().unwrap();
+        assert_eq!(s.history_mark(), 0);
+        s.redo().unwrap();
+        let again = s.history_mark();
+        s.undo().unwrap();
+        s.redo().unwrap();
+        assert_eq!(s.history_mark(), again, "undone and redone");
+    }
+
+    /// Spaced evenly, layers of different sizes have the same gap between
+    /// each two, the outermost staying where they were.
+    #[test]
+    fn spacing_evenly_is_the_gaps() {
+        let mut s = Session::new(400, 100, ColorMode::Rgb);
+        let mut place = |name: &str, x: f32, w: f32| {
+            let id = add_rect(&mut s, name, w, 10.0);
+            s.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(x, 0.0),
+            })
+            .unwrap();
+            id
+        };
+        let a = place("a", 0.0, 10.0);
+        let b = place("b", 50.0, 80.0);
+        let c = place("c", 300.0, 20.0);
+        s.align_nodes(&[a, b, c], "distribute-h").unwrap();
+        let edge = |id| s.bounds_of(id).unwrap();
+        let (ba, bb, bc) = (edge(a), edge(b), edge(c));
+        let gaps = (bb[0] - (ba[0] + ba[2]), bc[0] - (bb[0] + bb[2]));
+        assert!((gaps.0 - gaps.1).abs() < 1e-3, "{gaps:?}");
+        assert!(
+            ba[0].abs() < 1e-3 && (bc[0] - 300.0).abs() < 1e-3,
+            "the outermost stay"
+        );
+    }
+
+    /// Combined, the result keeps the bottom shape's own space, so a
+    /// stroke scaled with its shape stays the width it looked.
+    #[test]
+    fn a_combine_keeps_the_bottom_shapes_scale() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let a = add_rect(&mut s, "a", 50.0, 20.0);
+        s.apply(Command::SetTransform {
+            id: a,
+            transform: Transform {
+                a: 2.0,
+                d: 2.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let b = add_rect(&mut s, "b", 20.0, 20.0);
+        s.apply(Command::SetTransform {
+            id: b,
+            transform: Transform::translation(90.0, 30.0),
+        })
+        .unwrap();
+        let before = s.bounds_of(a).unwrap();
+        let united = s.boolean_nodes(&[a, b], "union").unwrap();
+        let t = s.document().node(united).unwrap().transform;
+        assert!(
+            (t.a - 2.0).abs() < 1e-6 && (t.d - 2.0).abs() < 1e-6,
+            "{t:?}"
+        );
+        let after = s.bounds_of(united).unwrap();
+        assert!(
+            (after[0] - before[0]).abs() < 0.01 && (after[2] - 110.0).abs() < 0.01,
+            "{after:?}"
+        );
+    }
+
+    /// Offset by 20 is 20 page pixels, whatever the shape is scaled by.
+    #[test]
+    fn an_offset_is_in_page_pixels() {
+        let mut s = Session::new(400, 200, ColorMode::Rgb);
+        let id = add_rect(&mut s, "r", 50.0, 25.0);
+        s.apply(Command::SetTransform {
+            id,
+            transform: Transform {
+                a: 2.0,
+                d: 2.0,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let moved = s.offset_path(id, 20.0).unwrap();
+        let w = s.bounds_of(moved).unwrap()[2];
+        assert!(
+            (w - 140.0).abs() < 1.0,
+            "100 wide moved out 20 each side: {w}"
+        );
+    }
+
     /// A paste lands where it was copied from, except over its own
     /// original, where it is nudged clear so it can be seen.
     #[test]
@@ -20916,9 +21365,13 @@ mod tests {
             (right(&session, c) - 200.0).abs() < 1e-3,
             "the last to its right edge"
         );
+        let gaps = (
+            x0(&session, b) - right(&session, a),
+            x0(&session, c) - right(&session, b),
+        );
         assert!(
-            (mid(&session, b) - (mid(&session, a) + mid(&session, c)) / 2.0).abs() < 1e-3,
-            "and the middle one between"
+            (gaps.0 - gaps.1).abs() < 1e-3,
+            "and the middle one with the same gap either side: {gaps:?}"
         );
         assert_cache_matches_fresh(&mut session);
         session.undo().unwrap();

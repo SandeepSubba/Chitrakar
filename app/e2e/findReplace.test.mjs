@@ -81,6 +81,20 @@ const loose = { matchCase: false, wholeWord: false };
   check(r5.text === "keep keep" && r5.runs.length === 0, `a run over what went goes: ${JSON.stringify(r5.runs)}`);
 }
 
+// The match is where the edit is, so text next to a styled word that
+// shares letters with it does not move its styling.
+{
+  const t6 = "Take the theme";
+  const r6 = replaceIn(t6, [runOver(t6, "theme")], "the ", "", loose);
+  check(
+    r6.text === "Take theme" && covered(r6.text, r6.runs[0]) === "theme",
+    `the styling stays on "theme": ${covered(r6.text, r6.runs[0])}`,
+  );
+  const t7 = "one two";
+  const r7 = replaceIn(t7, [runOver(t7, "two")], "one", "one t", loose);
+  check(covered(r7.text, r7.runs[0]) === "two", `and on "two": ${covered(r7.text, r7.runs[0])}`);
+}
+
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));
   process.exit(1);

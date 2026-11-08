@@ -1419,6 +1419,17 @@ impl WasmSession {
             .unwrap_or_default()
     }
 
+    /// Where the history stands (`Session::history_mark`): what a save
+    /// is remembered against.
+    pub fn history_mark(&self) -> f64 {
+        self.inner.history_mark() as f64
+    }
+
+    /// Every palette name a colour in the document stands for, as JSON.
+    pub fn colour_names_in_use(&self) -> String {
+        serde_json::to_string(&self.inner.colour_names_in_use()).unwrap_or_else(|_| "[]".into())
+    }
+
     /// Doc-space bounds of a node with its effects' reach, as `[x, y, w,
     /// h]`; empty if it has none.
     pub fn drawn_bounds_of(&self, id: f64) -> Vec<f32> {

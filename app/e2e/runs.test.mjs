@@ -25,7 +25,7 @@ const src = readFileSync(join(here, "..", "src", "runs.ts"), "utf8");
 const js = (await transform(src, { loader: "ts", format: "esm" })).code;
 const tmp = join(here, "out", "runs.generated.mjs");
 writeFileSync(tmp, js);
-const { byteAt, shiftRuns, styleRange, rangeSays } = await import(
+const { byteAt, shiftRuns, styleRange, rangeSays, editOf } = await import(
   "file://" + tmp
 );
 unlinkSync(tmp);
@@ -254,6 +254,27 @@ check(byteAt("😀", 2) === 4, "and the whole of it is four");
     rangeSays("hello world", runs, 0, 11, "bold", false) === undefined,
     "a range of two minds says nothing",
   );
+}
+
+// An edit said exactly: where the text cut shares letters with what is
+// beside it, the texts alone put the edit in the wrong place.
+{
+  const before = "Take the theme";
+  const bold = [{ start: 9, end: 14, bold: true }];
+  const sel = [5, 9]; // "the " picked
+  const after = "Take theme";
+  const edit = editOf(before, after, sel, 5);
+  check(JSON.stringify(edit) === "[5,9]", `the cut is where it was picked (${JSON.stringify(edit)})`);
+  const runs = shiftRuns(before, after, bold, edit);
+  check(
+    runs.length === 1 && after.slice(runs[0].start, runs[0].end) === "theme",
+    `"theme" stays bold (${JSON.stringify(runs)})`,
+  );
+  // Backspace, delete and typing, with the caret where it was.
+  check(JSON.stringify(editOf("abc", "ac", [2, 2], 1)) === "[1,2]", "backspace takes the one before");
+  check(JSON.stringify(editOf("abc", "ac", [1, 1], 1)) === "[1,2]", "delete takes the one after");
+  check(JSON.stringify(editOf("ac", "abc", [1, 1], 2)) === "[1,1]", "typing goes in at the caret");
+  check(editOf("abc", "xyz", [1, 1], 2) === undefined, "and a change that is none of those is not read as one");
 }
 
 for (const f of fails) console.error("FAIL: " + f);
