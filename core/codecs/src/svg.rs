@@ -15,6 +15,7 @@ use std::fmt::Write;
 
 /// Serialize the document's renderable tree as an SVG string.
 pub fn export_svg(doc: &Document) -> Result<String, DocError> {
+    LAYER_IDS.with(|ids| ids.borrow_mut().clear());
     let mut out = String::new();
     let _ = write!(
         out,
@@ -269,6 +270,7 @@ fn write_node(
         } else {
             common_attrs(node)
         };
+        let common = format!("{}{common}", layer_id(child, &node.name));
         // A copy of a blended layer, wearing no blend of its own but
         // wrapped — held, masked, or with effects: the engine draws the
         // copied layer where the copy stands and mixes it back, so its
@@ -610,7 +612,7 @@ fn write_node(
                     if effects.is_some() {
                         plain.blend = BlendMode::Normal;
                     }
-                    common_attrs(&plain)
+                    format!("{}{}", layer_id(child, &node.name), common_attrs(&plain))
                 };
                 let fade = node.opacity;
                 // A stroke whose width varies along it has no SVG stroke:
@@ -2208,6 +2210,70 @@ fn run_look(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>) 
     out
 }
 
+thread_local! {
+    /// The layer names written as ids in the file being written, so each
+    /// is given once (`layer_id`).
+    static LAYER_IDS: std::cell::RefCell<LayerIds> = std::cell::RefCell::new(LayerIds::default());
+}
+
+/// The ids given so far, and to which layer: a layer's attributes are
+/// put together in more than one place, and it is one id however often.
+#[derive(Default)]
+struct LayerIds {
+    taken: std::collections::HashSet<String>,
+    given: std::collections::HashMap<NodeId, String>,
+}
+
+impl LayerIds {
+    fn clear(&mut self) {
+        self.taken.clear();
+        self.given.clear();
+    }
+}
+
+/// A layer's name as the `id` of its element, which is where every
+/// drawing program — this one's reader too — looks for a layer's name: a
+/// file sent out and brought back keeps its layers' names, as Figma's and
+/// Illustrator's do. An id is one to a file, so a name met again is given
+/// `_2`, `_3`; and one that could be taken for an id this writer makes
+/// for its own references (`soft4`, `mask12`, `chitrakar-grad-3`) is
+/// given `_` so a gradient's `url(#…)` cannot find a layer instead.
+fn layer_id(layer: NodeId, name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    let ours = name.starts_with("chitrakar-")
+        || ["soft", "guide", "fx", "mask", "pattern", "marker", "clip"]
+            .iter()
+            .any(|p| {
+                name.strip_prefix(p).is_some_and(|rest| {
+                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+                })
+            });
+    let base = if ours {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    };
+    let id = LAYER_IDS.with(|ids| {
+        let mut ids = ids.borrow_mut();
+        if let Some(id) = ids.given.get(&layer) {
+            return id.clone();
+        }
+        let mut id = base.clone();
+        let mut n = 2;
+        while ids.taken.contains(&id) {
+            id = format!("{base}_{n}");
+            n += 1;
+        }
+        ids.taken.insert(id.clone());
+        ids.given.insert(layer, id.clone());
+        id
+    });
+    format!(r#" id="{}""#, escape_xml(&id).replace('"', "&quot;"))
+}
+
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -3514,7 +3580,7 @@ mod tests {
         assert!(svg.starts_with("<svg "), "root element");
         assert!(svg.contains(r#"viewBox="0 0 320 200""#));
         assert!(svg.contains(
-            r##"<rect width="40" height="30" transform="matrix(1 0 0 1 10 20)" fill="#ff0000""##
+            r##"<rect width="40" height="30" id="r" transform="matrix(1 0 0 1 10 20)" fill="#ff0000""##
         ));
         assert!(
             !svg.contains(" rx="),

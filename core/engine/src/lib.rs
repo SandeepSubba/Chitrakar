@@ -5004,7 +5004,7 @@ impl Session {
     }
 
     /// Paste the clipboard into `parent` (the root when None), nudged clear
-    /// of wherever it was copied from. One undo step whatever was copied;
+    /// of the original when it is here and where it was copied from. One undo step whatever was copied;
     /// an empty answer when there is nothing to paste. The layers come
     /// back in the order they were in, bottom first.
     pub fn paste(&mut self, parent: Option<NodeId>) -> Result<Vec<NodeId>, EngineError> {
@@ -5046,6 +5046,18 @@ impl Session {
                 )));
             }
         }
+        // Nudged clear of the original where the original is here to be
+        // hidden behind — pasted back into the document it was copied
+        // from, where it still stands. Into another document, or after
+        // the original was cut or moved, it lands where it was copied
+        // from, as Figma and Illustrator paste.
+        let over_original = clip.roots.iter().any(|r| {
+            self.doc.node(r.id).is_ok_and(|n| {
+                n.transform == r.node.transform
+                    && n.name == r.node.name
+                    && std::mem::discriminant(&n.kind) == std::mem::discriminant(&r.node.kind)
+            })
+        });
         let mut cmds = Vec::new();
         let ids: Vec<NodeId> = clip
             .roots
@@ -5056,7 +5068,7 @@ impl Session {
                     root,
                     parent,
                     index + n,
-                    true,
+                    over_original,
                     &mut next,
                     &becomes,
                     &mut cmds,
@@ -16002,7 +16014,8 @@ mod tests {
             to.paste(None).unwrap();
             let arrived = to.render().unwrap();
 
-            let by = DUPLICATE_OFFSET as u32;
+            // Into another document a copy lands where it was copied from.
+            let by = 0u32;
             let mut worst = (0.0f32, 0u32, 0u32);
             for y in 0..(f.doc.meta.height - by) {
                 for x in 0..(f.doc.meta.width - by) {
@@ -16502,16 +16515,16 @@ mod tests {
                 format!("{:?}", here.kind),
                 "{what} arrived as something else"
             );
-            // A paste nudges what it pastes so the copy is not hidden
-            // behind the original, and a mask is authored in the layer's
-            // parent's space — so the mask that should arrive is the
-            // original's carried the same distance, not the original's
-            // unchanged. Which is the rule stated as an expectation: a
-            // mask that arrived unmoved is a mask over the wrong part of
-            // the layer.
-            let nudged = here.mask.as_ref().map(|m| {
-                m.carried_through(Transform::translation(DUPLICATE_OFFSET, DUPLICATE_OFFSET))
-            });
+            // A mask is authored in the layer's parent's space, so the
+            // mask that should arrive is the original's carried as far as
+            // the layer was (into another document that is nowhere; over
+            // its original, a nudge): a mask that did not move with its
+            // layer is a mask over the wrong part of it.
+            let moved = Transform::translation(
+                there.transform.e - here.transform.e,
+                there.transform.f - here.transform.f,
+            );
+            let nudged = here.mask.as_ref().map(|m| m.carried_through(moved));
             for (field, a, b) in [
                 (
                     "its mask",
@@ -16591,7 +16604,8 @@ mod tests {
             // is excluded is a band as wide as the effect reaches, on the
             // sides the window actually crossed — nothing at all for a
             // layer that sits clear of the edges, which is most of them.
-            let by = DUPLICATE_OFFSET as u32;
+            // Into another document a copy lands where it was copied from.
+            let by = 0u32;
             let reach = from
                 .document()
                 .node(id)
@@ -19182,6 +19196,61 @@ mod tests {
     /// twentieth of a step of linear light at its worst here, and it is
     /// what the tolerance is for — anything structural is worth far more
     /// than that.
+    /// A paste lands where it was copied from, except over its own
+    /// original, where it is nudged clear so it can be seen.
+    #[test]
+    fn a_paste_is_nudged_only_over_its_original() {
+        let mut s = Session::new(100, 80, ColorMode::Rgb);
+        let rect = add_rect(&mut s, "box", 10.0, 10.0);
+        s.copy_node(rect).unwrap();
+        let back = s.paste(None).unwrap()[0];
+        let t = s.document().node(back).unwrap().transform;
+        assert_eq!(
+            (t.e, t.f),
+            (DUPLICATE_OFFSET, DUPLICATE_OFFSET),
+            "over the original"
+        );
+        let mut other = Session::new(100, 80, ColorMode::Rgb);
+        let there = other.paste(None).unwrap()[0];
+        let t = other.document().node(there).unwrap().transform;
+        assert_eq!(
+            (t.e, t.f),
+            (0.0, 0.0),
+            "into another document, where it was"
+        );
+    }
+
+    /// An SVG sent out and brought back keeps its layers' names: each is
+    /// written as its element's id, which is where readers look, given
+    /// once in a file, and kept clear of the ids the writer makes for
+    /// its own references.
+    #[test]
+    fn layer_names_go_out_to_svg_and_come_back() {
+        let mut s = Session::new(100, 60, ColorMode::Rgb);
+        for name in ["Sky & sea", "box", "box", "soft3"] {
+            add_rect(&mut s, name, 10.0, 10.0);
+        }
+        let svg = s.export_svg().unwrap();
+        for id in [
+            r#"id="Sky &amp; sea""#,
+            r#"id="box""#,
+            r#"id="box_2""#,
+            r#"id="soft3_""#,
+        ] {
+            assert!(svg.contains(id), "{id} in {svg}");
+        }
+        let mut back = Session::new(100, 60, ColorMode::Rgb);
+        let group = back.place_svg(svg.as_bytes(), "again.svg").unwrap();
+        let names: Vec<String> = back
+            .layers()
+            .into_iter()
+            .filter(|l| l.parent == group.0)
+            .map(|l| l.name)
+            .collect();
+        // Top first, as the panel lists them.
+        assert_eq!(names, ["soft3_", "box_2", "box", "Sky & sea"]);
+    }
+
     #[test]
     fn a_page_of_shapes_survives_being_written_as_svg_and_read_back() {
         let mut s = Session::new(120, 90, ColorMode::Rgb);
