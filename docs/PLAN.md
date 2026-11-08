@@ -29,8 +29,11 @@ without reading anything else.*
      crash and no page error in hours of hostile use, and one bug that
      lost work, now fixed. The eighth, over what the seventh changed,
      found nothing that loses work and nine smaller bugs, three of them
-     the seventh's own, all fixed. A last short pass over the eighth's
-     changes is what should say quiet. ⬜
+     the seventh's own, all fixed. The ninth, over the eighth's changes,
+     found every fix holding and six small things (two the eighth's
+     own), all fixed. The rounds have gone from twenty-odd bugs to six,
+     none of them losing work since the seventh. ⬜ until a pass over
+     the ninth's changes finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11180,6 +11183,23 @@ without reading anything else.*
   sixty. Left: a run of colour across a ligature is drawn as the
   ligature in the SVG and as letters on the page (same width); the same
   press profile loaded twice counts as a change.
+  **A ninth audit, over what the eighth changed (November 2026).** Every
+  fix the eighth made held where it was aimed — eleven arrangements of
+  frames, locks and groups with every drawing tool; the phone's text
+  tap, pinch and two-finger undo; tracked text agreeing to a pixel
+  across the page, PNG, SVG and PDF; every cancelled or failed Open
+  putting the document back. Two small regressions of its own and four
+  older nits, put right: Save cut a long document name to sixty (only
+  an export's name is held to that now, `exportName`); Alt-measure from
+  a layer in a frame in a locked group measured to the page (it finds
+  the layer's own frame by going up from it); the bar with a press
+  profile loaded still ran off with a mouse, and off a phone (Soft proof
+  and Gamut warning are rows of View too, so a narrow bar gives them
+  up); Canvas size took an emptied box as its last digit, and offered
+  Resize for a page larger than one can be; Escape did nothing in the
+  PDF window from its field; the same box Shift-added twice said the
+  regions could not be combined; and a raw being opened that failed to
+  develop left an empty page. No crash, no page error, nothing lost.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

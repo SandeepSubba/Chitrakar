@@ -5412,9 +5412,21 @@ export function App() {
       to = boxOf(session.bounds_of(hit));
     }
     if (!to) {
-      const frame = session.frame_at((a[0] + a[2]) / 2, (a[1] + a[3]) / 2);
-      if (frame >= 0 && !selectionSet.includes(frame as NodeId)) {
-        to = boxOf(session.bounds_of(frame));
+      // The frame the picked layer sits in, found by going up from it —
+      // not by what is under its middle, which a locked frame or a layer
+      // laid over it answered with nothing, and the page was measured to.
+      const byId = new Map(layers.map((l) => [l.id as NodeId, l]));
+      let up = byId.get(selectionSet[0])?.parent as NodeId | undefined;
+      for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
+        const layer = byId.get(up);
+        if (!layer) break;
+        if (layer.kind === "artboard") {
+          to = boxOf(session.bounds_of(up));
+          break;
+        }
+        const next = layer.parent as NodeId | undefined;
+        if (next === up) break;
+        up = next;
       }
     }
     to = to ?? [0, 0, docSize[0], docSize[1]];
@@ -9569,9 +9581,11 @@ export function App() {
 
   /** The document's name as a file's: trimmed, and never empty. */
   const fileName = () =>
-    // Sixty at most, so a long document name leaves room in an export's
-    // name for the region, comp or frame it was made from.
-    [...(docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled")].slice(0, 60).join("").trim();
+    docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled";
+  /** The document's part of an export's name: sixty at most, so a long
+   * document name leaves room for the region, comp or frame the file was
+   * made from. A save keeps the whole name — it is the document's. */
+  const exportName = () => [...fileName()].slice(0, 60).join("").trim() || "untitled";
 
   /** Every path that writes a file goes through here. Making the bytes
    * can fail — a picture too big to hold at that multiple, a profile
@@ -9645,7 +9659,7 @@ export function App() {
 
   const exportPng = () => {
     if (!session) return;
-    saveAs("PNG export", `${fileName()}.png`, "image/png", () =>
+    saveAs("PNG export", `${exportName()}.png`, "image/png", () =>
       session.export_png(),
     );
   };
@@ -9670,7 +9684,7 @@ export function App() {
     return 1;
   };
   const frameFile = (name: string, at: number) =>
-    `${fileName()} - ${name}${at !== 1 ? `@${at}x` : ""}.png`;
+    `${exportName()} - ${name}${at !== 1 ? `@${at}x` : ""}.png`;
 
   /** The picked frame on its own, at its own size — one screen out of a
    * page of them.
@@ -9713,7 +9727,7 @@ export function App() {
    * document — a brochure laid out as artboards comes out a brochure. */
   const exportPdfFrames = () => {
     if (!session) return;
-    saveAs("PDF export", `${fileName()}-pages.pdf`, "application/pdf", () =>
+    saveAs("PDF export", `${exportName()}-pages.pdf`, "application/pdf", () =>
       // The bleed and marks the export window was last left asking for:
       // a brochure goes to the same press as its pages.
       session.export_pdf_marked(true, prefs.pdfBleed, prefs.pdfCropMarks),
@@ -10159,6 +10173,11 @@ export function App() {
       }
     } catch (err) {
       alert(`Could not develop ${d.name}: ${said(err)}`);
+      // An Open that came to nothing: the document it was opened over.
+      if (d.layer === null) {
+        rawUndoOpen.current?.();
+        rawUndoOpen.current = null;
+      }
     } finally {
       session.raw_close();
       rawPacked.current = null;
@@ -11132,6 +11151,20 @@ export function App() {
           },
           untouched ? "✓" : undefined,
         ),
+        // The bar's Proof and Gamut, here too, so a narrow bar can give
+        // them up without the proof going out of reach.
+        ...(hasIcc
+          ? [
+              item("soft-proof", proofing ? "check" : "proof", "Soft proof", () => applyProofing(!proofing, false), proofing ? "✓" : undefined),
+              item(
+                "gamut-warning",
+                gamutWarn ? "check" : "gamut",
+                "Gamut warning",
+                () => (gamutWarn ? applyProofing(proofing, false) : applyProofing(true, true)),
+                gamutWarn ? "✓" : undefined,
+              ),
+            ]
+          : []),
         SEP,
         item(
           "guides",
@@ -12128,7 +12161,7 @@ export function App() {
           session={session}
           prefs={prefs}
           setPrefs={setPrefs}
-          fileName={fileName}
+          fileName={exportName}
           write={(files) => writeFiles("Export", files, docPath)}
           share={canShareFiles() ? (files) => shareFiles(fileName(), files) : undefined}
           hasRegion={antRings.length > 0}
@@ -16685,7 +16718,13 @@ function PdfDialog({
   const ok = page >= 1 && page <= sizes.length && dpi > 0;
   const go = () => ok && onPlace(page - 1, dpi);
   const enter = (e: React.KeyboardEvent) => {
+    // The field's keys are its own, but Escape puts the window away from
+    // it too: kept to the field, it did nothing at all.
     e.stopPropagation();
+    if (e.key === "Escape") {
+      onCancel();
+      return;
+    }
     if (e.key === "Enter") {
       // Kept from the menu row the focus goes back to as the
       // window closes, which the key would otherwise press.
@@ -17353,7 +17392,16 @@ function CanvasSizeDialog({
   // A page is at least a pixel each way: nought or less, typed and sent
   // with Enter before the field could hold it to that, made a one-pixel
   // page in one step.
-  const fits = Number.isFinite(w) && Number.isFinite(h) && w / per >= 0.5 && h / per >= 0.5;
+  // Nor past what a page can be (30,000 a side, a hundred megapixels),
+  // which closed the window and said no after, with what was typed gone.
+  const fits =
+    Number.isFinite(w) &&
+    Number.isFinite(h) &&
+    w / per >= 0.5 &&
+    h / per >= 0.5 &&
+    px(w) <= MAX_SIDE &&
+    px(h) <= MAX_SIDE &&
+    px(w) * px(h) <= 100e6;
   const apply = () => {
     if (!fits) return;
     const [nw, nh] = [px(w), px(h)];
@@ -17385,8 +17433,10 @@ function CanvasSizeDialog({
       <NumberField
         // No floor of its own: held to one, nought typed became a
         // one-pixel page the moment Resize was pressed. The window says
-        // no instead (`fits`), with the button put out.
+        // no instead (`fits`), with the button put out — and an emptied
+        // box is no number at all, not the last one it held on the way.
         step={units === "px" ? 1 : 0.01}
+        blankAs={NaN}
         value={value}
         onValue={set}
         onKeyDown={(e) => {

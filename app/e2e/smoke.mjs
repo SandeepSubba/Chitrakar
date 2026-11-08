@@ -21611,6 +21611,13 @@ assert(
     await sizeWindow.locator('button[aria-label="Resize the page"]').isDisabled(),
     "a page of nought pixels cannot be asked for",
   );
+  // Nor an emptied box, which held on to the last digit it had.
+  await sizeWindow.locator("input").first().fill("");
+  await page.waitForTimeout(100);
+  assert(
+    await sizeWindow.locator('button[aria-label="Resize the page"]').isDisabled(),
+    "nor a page with no width at all",
+  );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(150);
 

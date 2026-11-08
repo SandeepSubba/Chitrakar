@@ -266,6 +266,26 @@ body {
   }
 }
 
+/* With a mouse, too, a little later than without the profile: and on a
+   phone the proof's own words give way to the zoom and the panel's
+   button (View has Soft proof and Gamut warning). */
+@media (max-width: 1000px) {
+  .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+@media (max-width: 1000px) {
+  :root[data-scale="large"] .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Before"],
+  :root[data-scale="larger"] .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Before"] {
+    display: none;
+  }
+}
+@media (max-width: 640px) {
+  .topbar .chrome-group[aria-label="Soft proofing"] {
+    display: none;
+  }
+}
+
 /* The narrowest phones at a larger interface size: the before-and-after
    button gives way (View has it too), or the panel's button was pushed
    off the edge. */
