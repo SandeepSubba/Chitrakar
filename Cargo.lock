@@ -269,6 +269,8 @@ dependencies = [
  "tiff",
  "usvg",
  "zip",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

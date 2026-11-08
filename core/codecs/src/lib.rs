@@ -133,8 +133,17 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         }
     };
     if let Some(icc) = icc {
-        // Best effort: an unparseable or non-RGB profile leaves pixels as-is.
-        chitrakar_color::cms::normalize_rgba8_to_srgb(&icc, &mut rgba8);
+        // A CMYK JPEG with the press profile it was separated for is read
+        // again for its inks and taken through that profile: the decoder
+        // above has already made RGB of them the plain way, which a
+        // profile for RGB cannot correct (a red ink came in as pure red,
+        // not the red the press prints).
+        if let Some(inked) = cmyk_jpeg(bytes, &icc) {
+            rgba8 = inked;
+        } else {
+            // Best effort: an unparseable or non-RGB profile leaves pixels as-is.
+            chitrakar_color::cms::normalize_rgba8_to_srgb(&icc, &mut rgba8);
+        }
     }
     Ok(upright(
         SourceImage {
@@ -144,6 +153,62 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         },
         orientation,
     ))
+}
+
+/// A CMYK JPEG's pixels through its own profile, as 8-bit sRGB RGBA in
+/// the decoder's order — or `None` when it is not a CMYK JPEG, or the
+/// profile is not a CMYK one. The inks come as Photoshop writes them,
+/// inverted (the decoder reads every CMYK JPEG so), and go through the
+/// profile as a TIFF's do (`tiff_import`).
+fn cmyk_jpeg(bytes: &[u8], icc: &[u8]) -> Option<Vec<u8>> {
+    use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
+    if !bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        return None;
+    }
+    let cms = chitrakar_color::cms::CmykCms::new(icc).ok()?;
+    // Asked for in the space the file holds them in, untouched: plain
+    // CMYK, or YCCK (Photoshop's usual, its C, M and Y carried as a
+    // colour and brightness the way an RGB JPEG's are).
+    let peek = {
+        let mut d = zune_jpeg::JpegDecoder::new(ZCursor::new(bytes));
+        d.decode_headers().ok()?;
+        d.input_colorspace()?
+    };
+    if !matches!(peek, ColorSpace::CMYK | ColorSpace::YCCK) {
+        return None;
+    }
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(peek);
+    let mut decoder = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    decoder.decode_headers().ok()?;
+    let info = decoder.info()?;
+    fits(info.width as u32, info.height as u32).ok()?;
+    let raw = decoder.decode().ok()?;
+    let pixels = info.width as usize * info.height as usize;
+    if raw.len() != pixels * 4 {
+        return None;
+    }
+    let srgb = |v: f32| (chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8;
+    let mut out = vec![0u8; pixels * 4];
+    for (i, p) in raw.as_chunks::<4>().0.iter().enumerate() {
+        // Each ink from 0 to 1. Stored inverted, as every reader takes
+        // them (a YCCK's colour, once it is RGB again, is the inks the
+        // right way round).
+        let [c, m, y] = if peek == ColorSpace::YCCK {
+            let (l, cb, cr) = (p[0] as f32, p[1] as f32 - 128.0, p[2] as f32 - 128.0);
+            [
+                l + 1.402 * cr,
+                l - 0.344_136 * cb - 0.714_136 * cr,
+                l + 1.772 * cb,
+            ]
+            .map(|v| (v / 255.0).clamp(0.0, 1.0))
+        } else {
+            [p[0], p[1], p[2]].map(|v| 1.0 - v as f32 / 255.0)
+        };
+        let k = 1.0 - p[3] as f32 / 255.0;
+        let w = cms.to_working(c, m, y, k, 1.0);
+        out[i * 4..i * 4 + 4].copy_from_slice(&[srgb(w.r), srgb(w.g), srgb(w.b), 255]);
+    }
+    Some(out)
 }
 
 /// A decoded picture turned the way its file says it is seen.

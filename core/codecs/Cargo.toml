@@ -14,6 +14,11 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# The JPEG decoder `image` already carries, asked directly for a CMYK
+# JPEG's inks, which `image` turns into RGB the plain way before a
+# profile the file carries can be applied.
+zune-jpeg = "0.5"
+zune-core = { version = "0.5", default-features = false }
 image-webp = "0.2"
 # Container format. Default features pull native compression stacks that
 # don't build on wasm32; deflate alone is pure Rust.

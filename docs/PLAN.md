@@ -11031,9 +11031,15 @@ without reading anything else.*
     3,000, and both now say the engine's own limits, which a refused
     size states. Layers nested eight deep lost their names to the
     indent; the list scrolls under a row dragged to its edge.
-  Left as found, for the next round: a nested SVG image placed at its
-  own origin, a gradient or pattern stroke in an SVG brought in flat or
-  not at all, and a CMYK JPEG's own profile (a TIFF's is honoured).
+  Then, from what that round left: an SVG embedded as an image came in
+  at the page's corner at its own size, and lands where the image stands
+  now; a stroke painted with a gradient came in as its first colour and
+  comes in as its outline filled with the gradient (`painted_stroke`);
+  and a CMYK JPEG's own profile was ignored — its inks are read again
+  (plain CMYK, or Photoshop's YCCK) and taken through it, as a TIFF's
+  are (`cmyk_jpeg`: the audit's sample gives 237, 28, 36 as its TIFF
+  twin does, where Chromium shows 236, 31, 37). Still left: a stroke
+  painted with a pattern comes in without it.
   Memory running out (a dozen 48-megapixel pictures in one document)
   still stops the engine, which now reloads the page with the draft
   offered rather than leaving it blank; refusing beforehand wants the

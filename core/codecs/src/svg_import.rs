@@ -1844,8 +1844,25 @@ fn walk(
                 match img.kind() {
                     // A nested SVG is not a picture at all — it is more
                     // of the same file, and it comes in as shapes.
+                    // Its own canvas is placed where the image stands — the
+                    // image's x, y, width and height, its view box and its
+                    // ancestors' transforms are all on the image — and what
+                    // is walked inside is in that canvas. It came in at the
+                    // page's corner at its own size, wherever it was put.
                     usvg::ImageKind::SVG(tree) => {
-                        walk(tree.root(), opacity, clip, place.clone(), None, got)
+                        let (shapes, pics) = (got.shapes.len(), got.pics.len());
+                        walk(tree.root(), opacity, clip, place.clone(), None, got);
+                        let a = img.abs_transform();
+                        let placed = match fix(a) {
+                            Some(f) => f.compose(as_doc(a)),
+                            None => as_doc(a),
+                        };
+                        for node in &mut got.shapes[shapes..] {
+                            node.transform = placed.compose(node.transform);
+                        }
+                        for pic in &mut got.pics[pics..] {
+                            pic.transform = placed.compose(pic.transform);
+                        }
                     }
                     kind => {
                         if let Some(mut pic) = picture_of(img, kind, opacity, got.shapes.len()) {
@@ -2760,6 +2777,67 @@ fn shapes_of(path: &usvg::Path, abs: usvg::Transform, opacity: f32) -> Vec<Node>
 /// The layers a path comes in as, its rings through `t` — the page's
 /// transform, or none when the layer is to carry it (`own_space`).
 fn shapes_in(path: &usvg::Path, t: usvg::Transform, opacity: f32) -> Vec<Node> {
+    let mut out = shapes_painted(path, t, opacity);
+    painted_stroke(path, t, opacity, &mut out);
+    out
+}
+
+/// A stroke painted with a gradient is a thing this engine's strokes
+/// cannot be — a stroke is one colour — so it comes in as what it covers:
+/// the stroke's outline, a shape of its own above the path, filled with
+/// the gradient. It came in as the gradient's first colour, flat.
+fn painted_stroke(path: &usvg::Path, t: usvg::Transform, opacity: f32, out: &mut Vec<Node>) {
+    let Some(s) = path.stroke() else { return };
+    if !matches!(
+        s.paint(),
+        usvg::Paint::LinearGradient(_) | usvg::Paint::RadialGradient(_)
+    ) {
+        return;
+    }
+    let Some(at) = out.iter().rposition(|n| {
+        matches!(
+            &n.kind,
+            NodeKind::Vector {
+                stroke: Some(_),
+                ..
+            }
+        )
+    }) else {
+        return;
+    };
+    let line = &mut out[at];
+    let NodeKind::Vector { shape, stroke, .. } = &mut line.kind else {
+        return;
+    };
+    let Some(pen) = stroke.take() else { return };
+    let Some(mut rings) = chitrakar_render::stroke_outline(shape, &pen) else {
+        return;
+    };
+    rings.retain(|r| r.len() >= 3);
+    if rings.is_empty() {
+        return;
+    }
+    let main = rings.remove(0);
+    let outline = VectorShape::Path {
+        handles: vec![[0.0; 4]; main.len()],
+        points: main,
+        closed: true,
+        smooth: false,
+        subpaths: rings,
+    };
+    let (x0, y0, x1, y1) = chitrakar_render::gradient_box(&outline);
+    let alpha = s.opacity().get() * opacity;
+    let mut band = Node::vector(&format!("{} stroke", line.name), outline);
+    band.transform = line.transform;
+    band.mask = line.mask.clone();
+    if let NodeKind::Vector { fill, gradient, .. } = &mut band.kind {
+        *gradient = gradient_of(s.paint(), t, [x0, y0, x1, y1], alpha);
+        *fill = solid_of(s.paint(), alpha);
+    }
+    out.insert(at + 1, band);
+}
+
+fn shapes_painted(path: &usvg::Path, t: usvg::Transform, opacity: f32) -> Vec<Node> {
     let rings = rings_in(path, t);
     if rings.is_empty() {
         return Vec::new();
@@ -3953,6 +4031,65 @@ mod tests {
             square(10.0, 10.0),
             "and a mask the same"
         );
+    }
+
+    /// A stroke painted with a gradient comes in as its outline filled
+    /// with the gradient, red at one side and blue at the other — it came
+    /// in as the gradient's first colour, flat. (A line with no height has
+    /// no box for a box-relative gradient, which then draws nothing, as
+    /// the format says; a rectangle has one.)
+    #[test]
+    fn a_gradient_stroke_comes_in_as_its_gradient() {
+        for units in ["objectBoundingBox", "userSpaceOnUse"] {
+            let (x1, x2) = if units == "userSpaceOnUse" {
+                ("10", "70")
+            } else {
+                ("0", "1")
+            };
+            let svg = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60" viewBox="0 0 80 60"><defs><linearGradient id="g" gradientUnits="{units}" x1="{x1}" y1="0" x2="{x2}" y2="0"><stop offset="0" stop-color="#ff0000"/><stop offset="1" stop-color="#0000ff"/></linearGradient></defs><rect x="10" y="20" width="60" height="20" stroke="url(#g)" stroke-width="6" fill="none"/></svg>"##
+            );
+            let doc = brought_in(&svg, 80, 60);
+            let ours = chitrakar_render::render(&doc).unwrap();
+            // The rect's left and right sides, down their middles.
+            let (left, right) = (ours.get(10, 30).to_srgb8(), ours.get(69, 30).to_srgb8());
+            assert!(
+                left[0] > 200 && left[2] < 90,
+                "{units}: red at the start {left:?}"
+            );
+            assert!(
+                right[2] > 200 && right[0] < 90,
+                "{units}: blue at the end {right:?}"
+            );
+            assert!(
+                ours.get(40, 30).a < 0.05 && ours.get(40, 20).a > 0.95,
+                "{units}: as wide as the pen"
+            );
+        }
+    }
+
+    /// An SVG embedded as an image lands where the image stands, at the
+    /// image's size: it came in at the page's corner at its own.
+    #[test]
+    fn an_svg_inside_an_image_lands_where_the_image_stands() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60" viewBox="0 0 80 60"><g transform="translate(4 2)"><image x="20" y="10" width="40" height="40" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCI+PHJlY3Qgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjZmYwMDAwIi8+PC9zdmc+"/></g></svg>"##;
+        let doc = brought_in(svg, 80, 60);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        // Its box: 24..64 across, 12..52 down.
+        for (x, y) in [(26, 14), (44, 32), (62, 50)] {
+            assert!(
+                ours.get(x, y).a > 0.95,
+                "inside it at ({x}, {y}): {:?}",
+                ours.get(x, y)
+            );
+        }
+        for (x, y) in [(5, 5), (22, 32), (66, 32), (44, 56)] {
+            assert!(
+                ours.get(x, y).a < 0.05,
+                "and nothing outside at ({x}, {y}): {:?}",
+                ours.get(x, y)
+            );
+        }
     }
 
     /// Groups nested past what the reader can recurse through are refused
