@@ -125,15 +125,19 @@ export function fileSafe(name: string): string {
     .replace(/[\\/:*?"<>|]/g, "-")
     .replace(/[. ]+$/, "")
     .trim();
-  // Most systems refuse a name past 255 bytes: a long region name is
-  // cut, keeping what it ends with (`@2x.png`).
+  // Most systems refuse a name past 255 bytes — bytes, and a character
+  // of Chinese is three of them: a long region name is cut to fit,
+  // keeping what it ends with (`@2x.png`, `-1000.jpg`).
   const MOST = 120;
-  if ([...cleaned].length > MOST) {
+  const bytes = (t: string) => new TextEncoder().encode(t).length;
+  if ([...cleaned].length > MOST || bytes(cleaned) > 240) {
     const dot = cleaned.lastIndexOf(".");
     const end = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : "";
-    const tail = cleaned.slice(0, cleaned.length - end.length).match(/@\d+(\.\d+)?x$/)?.[0] ?? "";
-    const stem = [...cleaned.slice(0, cleaned.length - end.length - tail.length)];
-    cleaned = stem.slice(0, MOST - [...tail].length - [...end].length).join("").trim() + tail + end;
+    const tail = cleaned.slice(0, cleaned.length - end.length).match(/(@\d+(\.\d+)?x|-\d+)$/)?.[0] ?? "";
+    let stem = [...cleaned.slice(0, cleaned.length - end.length - tail.length)];
+    stem = stem.slice(0, MOST - [...tail].length - [...end].length);
+    while (stem.length > 0 && bytes(stem.join("") + tail + end) > 240) stem.pop();
+    cleaned = stem.join("").trim() + tail + end;
   }
   return cleaned || "untitled";
 }

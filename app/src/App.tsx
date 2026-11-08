@@ -3251,13 +3251,13 @@ export function App() {
       setSelected(added.id as NodeId);
       setMultiSel([]);
       typeIntoNewText.current = true;
-      justDropped.current = { mark: session.history_mark(), at: performance.now() };
+      justDropped.current = { mark: session.history_mark(), at: performance.now(), pointer: null };
     }
   };
   /** The block the Text tool put down a moment ago, for a pinch begun
    * with the same finger to take back: the finger had moved far enough
    * to be the tool's before the second one landed. */
-  const justDropped = useRef<{ mark: number; at: number } | null>(null);
+  const justDropped = useRef<{ mark: number; at: number; pointer: number | null } | null>(null);
 
   /** A shape put in the middle of the view at a size it can be seen at,
    * picked — so a rectangle, an ellipse, a line or a text block can be
@@ -4237,7 +4237,17 @@ export function App() {
     // done since, takes the block back: a pinch is not a wish for text.
     const dropped = justDropped.current;
     justDropped.current = null;
-    if (session && dropped && performance.now() - dropped.at < 1000 && session.history_mark() === dropped.mark) {
+    // Only while the finger that dropped it is still down: a tap that
+    // has lifted put the block down for good, and a two-finger tap (undo)
+    // or a pinch a moment later took it, and the step before, away.
+    if (
+      session &&
+      dropped &&
+      dropped.pointer !== null &&
+      pointersDown.current.has(dropped.pointer) &&
+      performance.now() - dropped.at < 1000 &&
+      session.history_mark() === dropped.mark
+    ) {
       typeIntoNewText.current = false;
       setInlineText(null);
       session.cancel_preview();
@@ -4995,6 +5005,9 @@ export function App() {
     }
     if (tool === "Text") {
       dropText(x, y);
+      // The finger that dropped it, for a pinch it goes on into to take
+      // the block back (`abandonGesture`).
+      if (justDropped.current) justDropped.current.pointer = e.pointerId;
       return;
     }
     if (tool === "Wand") {
@@ -5009,11 +5022,14 @@ export function App() {
           : "replace";
       try {
         const before = session.history_mark();
+        const was = session.selection_json();
         session.pick_similar(x, y, wandTolerance, wandTouching, how);
         // Folded into the picking only when the picking was a step: the
         // same region picked again is none, and the softness is its own.
         const picked = session.history_mark() !== before;
         if (selectionFeather > 0 && session.feather_selection(selectionFeather) && picked) session.merge_last();
+        // Picked sharp and softened again to just what it was: no step.
+        if (session.history_mark() !== before && session.selection_json() === was) session.take_back();
         refresh(session);
       } catch (err) {
         // A click off the page has nothing to spread through: quiet, as
@@ -5996,6 +6012,7 @@ export function App() {
       }
       try {
         const before = session.history_mark();
+        const was = session.selection_json();
         session.pick_region(
           REGION_KIND[drag.tool],
           shape.x,
@@ -6011,6 +6028,8 @@ export function App() {
         // when the picking was a step at all.
         const picked = session.history_mark() !== before;
         if (selectionFeather > 0 && session.feather_selection(selectionFeather) && picked) session.merge_last();
+        // Picked sharp and softened again to just what it was: no step.
+        if (session.history_mark() !== before && session.selection_json() === was) session.take_back();
         refresh(session);
       } catch (err) {
         // A lasso drawn as a line, or too small to hold anything, picks
@@ -9550,7 +9569,9 @@ export function App() {
 
   /** The document's name as a file's: trimmed, and never empty. */
   const fileName = () =>
-    docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled";
+    // Sixty at most, so a long document name leaves room in an export's
+    // name for the region, comp or frame it was made from.
+    [...(docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled")].slice(0, 60).join("").trim();
 
   /** Every path that writes a file goes through here. Making the bytes
    * can fail — a picture too big to hold at that multiple, a profile
@@ -9815,10 +9836,14 @@ export function App() {
     name: string;
     path: string | null;
     savedAt: number;
+    proofing: boolean;
+    gamutWarn: boolean;
   } | null>(null);
   const openForeign = (file: File) => {
     pendingOpen.current = file;
-    openedOver.current = session ? { session, name: docName, path: docPath, savedAt } : null;
+    openedOver.current = session
+      ? { session, name: docName, path: docPath, savedAt, proofing, gamutWarn }
+      : null;
     newDocument(false);
     setDocName(file.name.replace(/\.[a-z0-9]+$/i, "") || "untitled");
   };
@@ -9945,6 +9970,9 @@ export function App() {
             // The files after it wait for its answer: two PDFs dropped
             // together each ask in turn, where the second's question
             // used to replace the first's and the first was lost.
+            // An Open waits on the window's answer: put away, or failing,
+            // the document it was opened over comes back.
+            pdfUndoOpen.current = undoOpen ?? null;
             await new Promise<void>((answered) => {
               pdfAnswered.current = answered;
               setPdfAsk({ name, bytes: raw, sizes });
@@ -9962,7 +9990,7 @@ export function App() {
         // A camera's raw file goes to the develop window, one at a time:
         // several dropped together wait their turn.
         if (kind === "raw") {
-          rawQueue.current.push({ name, bytes: raw });
+          rawQueue.current.push({ name, bytes: raw, undoOpen });
           setRawWaiting(rawQueue.current.length);
           if (!rawBusy.current) void openNextRaw();
           return;
@@ -9984,7 +10012,7 @@ export function App() {
             setImportNotes(notes.length > 0 ? { name, notes } : null);
           }
         } catch (err) {
-          alert(kind === "picture" ? unreadable(name, raw, err) : `Could not ${verb} ${name}: ${said(err)}`);
+          alert(kind === "picture" ? unreadable(name, raw, err, verb) : `Could not ${verb} ${name}: ${said(err)}`);
           undoOpen?.();
         } finally {
           if (slow) setImporting(null);
@@ -10018,6 +10046,9 @@ export function App() {
             setDocName(before.name);
             setDocPath(before.path);
             setSavedAt(before.savedAt);
+            // The session kept its proof; the buttons say so again.
+            setProofing(before.proofing);
+            setGamutWarn(before.gamutWarn);
             setSelected(null);
             setMultiSel([]);
             refresh(s);
@@ -10041,7 +10072,10 @@ export function App() {
   /** Raw files waiting for the develop window, in the order they came,
    * and whether it is in use — a ref, since several files arrive before
    * any state has been set. */
-  const rawQueue = useRef<{ name: string; bytes: Uint8Array }[]>([]);
+  const rawQueue = useRef<{ name: string; bytes: Uint8Array; undoOpen?: () => void }[]>([]);
+  /** The raw file in the develop window was an Open: what puts back the
+   * document it was opened over, if the window is put away. */
+  const rawUndoOpen = useRef<(() => void) | null>(null);
   const rawBusy = useRef(false);
   const [rawWaiting, setRawWaiting] = useState(0);
   /** How many have gone through the window in this run, for "2 of 3". */
@@ -10072,6 +10106,7 @@ export function App() {
       await giveLensProfiles(session);
       const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
       rawPacked.current = packed;
+      rawUndoOpen.current = next.undoOpen ?? null;
       // The pool's workers start while the sliders are moved.
       void startDeveloper();
       setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
@@ -10084,6 +10119,7 @@ export function App() {
           ? `Could not open ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
           : `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
       );
+      next.undoOpen?.();
       rawDone.current += 1;
       void openNextRaw();
     } finally {
@@ -10150,6 +10186,8 @@ export function App() {
       }
     }
     setImporting(null);
+    // Developed and placed: the Open is done, nothing to go back to.
+    rawUndoOpen.current = null;
     if (d.layer === null) void openNextRaw();
   };
   const cancelDevelop = () => {
@@ -10158,6 +10196,10 @@ export function App() {
     session?.raw_close();
     rawPacked.current = null;
     if (d?.layer === null) {
+      // A raw file opened, put away undeveloped: the document it was
+      // opened over comes back, not an empty page named after it.
+      rawUndoOpen.current?.();
+      rawUndoOpen.current = null;
       rawDone.current += 1;
       void openNextRaw();
     }
@@ -10240,6 +10282,9 @@ export function App() {
   /** The PDF waiting for its page and resolution has been answered — or
    * put away — and the files dropped after it may come in. */
   const pdfAnswered = useRef<(() => void) | null>(null);
+  /** The PDF waiting was an Open: what puts back the document it was
+   * opened over, should the window be put away or the page not drawn. */
+  const pdfUndoOpen = useRef<(() => void) | null>(null);
   const answerPdf = () => {
     const go = pdfAnswered.current;
     pdfAnswered.current = null;
@@ -10262,8 +10307,11 @@ export function App() {
       // Named after the file and, for a file of more than one page, the page.
       const label = ask.sizes.length > 1 ? `${ask.name} — page ${page + 1}` : ask.name;
       placed(session.place_rgba(drawn.width, drawn.height, drawn.rgba, label), was);
+      pdfUndoOpen.current = null;
     } catch (err) {
-      alert(`Could not place ${ask.name}: ${said(err)}`);
+      alert(`Could not ${pdfUndoOpen.current ? "open" : "place"} ${ask.name}: ${said(err)}`);
+      pdfUndoOpen.current?.();
+      pdfUndoOpen.current = null;
     } finally {
       setImporting(null);
       answerPdf();
@@ -12049,6 +12097,8 @@ export function App() {
           sizes={pdfAsk.sizes}
           onCancel={() => {
             setPdfAsk(null);
+            pdfUndoOpen.current?.();
+            pdfUndoOpen.current = null;
             answerPdf();
           }}
           onPlace={placePdf}
@@ -17333,9 +17383,9 @@ function CanvasSizeDialog({
     <label className="row">
       {label}
       <NumberField
-        // A page is at least a pixel each way: nought or less was taken
-        // and quietly made a one-pixel page.
-        min={units === "px" ? 1 : 0.01}
+        // No floor of its own: held to one, nought typed became a
+        // one-pixel page the moment Resize was pressed. The window says
+        // no instead (`fits`), with the button put out.
         step={units === "px" ? 1 : 0.01}
         value={value}
         onValue={set}

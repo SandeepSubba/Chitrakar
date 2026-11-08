@@ -12049,11 +12049,14 @@ fn frame_in(
         let t = parent.compose(node.transform);
         match &node.kind {
             NodeKind::Artboard { width, height, .. } => {
-                if node.locked {
-                    continue;
-                }
                 if let Some((lx, ly)) = to_local(t, x, y) {
                     if lx >= 0.0 && ly >= 0.0 && lx < *width && ly < *height {
+                        // A locked frame is still there, over what is
+                        // under it; nothing drawn goes into it, where
+                        // it could not be picked.
+                        if node.locked {
+                            return Ok(Under::Covered);
+                        }
                         // A frame inside a frame is the one that counts,
                         // unless something of this one's covers it — then
                         // what is drawn goes on top, in this one.
@@ -12066,6 +12069,9 @@ fn frame_in(
             }
             NodeKind::Group => match frame_in(doc, child, x, y, t)? {
                 Under::Open => {}
+                // A frame in a locked group: drawn into, it could not be
+                // picked or moved, so what is drawn goes over it instead.
+                Under::Frame(_) if node.locked => return Ok(Under::Covered),
                 found => return Ok(found),
             },
             _ => {

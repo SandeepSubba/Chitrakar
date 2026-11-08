@@ -21600,6 +21600,20 @@ assert(
   const drawn = await canvasPixel(580, 380);
   assert(!(drawn[0] > 240 && drawn[1] < 15 && drawn[2] > 240), `a shape drawn over a frame a picture covers shows (${drawn})`);
 
+  // A page of nought pixels is refused before Resize can be pressed:
+  // held to one, it made a one-pixel page in one step.
+  await menuClick("Page", "Canvas size…");
+  await page.waitForTimeout(200);
+  const sizeWindow = page.locator('[role="dialog"][aria-label="Canvas size"]');
+  await sizeWindow.locator("input").first().fill("0");
+  await page.waitForTimeout(100);
+  assert(
+    await sizeWindow.locator('button[aria-label="Resize the page"]').isDisabled(),
+    "a page of nought pixels cannot be asked for",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
   // A file that cannot be read, opened over this: the document stays.
   const rowsBefore = await page.locator(".panel ul li .layer-name").count();
   lastDialog = "";

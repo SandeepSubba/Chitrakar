@@ -31,6 +31,10 @@ const check = (cond, msg) => {
 // family's, a bracket alone the brush's; with ctrl or alt anything is.
 check(!claimable("k"), "a letter alone is a tool's");
 check(!claimable(" "), "Space alone is the hand's");
+check(
+  boundChords({ duplicate: " " }, {}).of.duplicate !== " ",
+  "and a Space kept from before is not a chord read back",
+);
 check(claimable("-") && typesAlone("-") && typesAlone("shift+/"), "a sign alone may be taken, and is a character typed");
 check(!typesAlone("mod+-") && !typesAlone("alt+shift+x"), "with Ctrl or Alt it is not");
 check(!claimable("shift+k"), "shift and a letter walk a tool family");

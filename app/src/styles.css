@@ -171,6 +171,15 @@ body {
   display: none;
 }
 
+/* Nor where the pointer is a finger, which is only over the page while
+   it presses: a hundred and fifty pixels of the bar for a figure that
+   follows nothing. */
+@media (pointer: coarse) {
+  .cursor-readout {
+    display: none;
+  }
+}
+
 /* The name of what is open, at the menus' far end. */
 .topbar-menus .doc-name {
   margin-left: auto;
@@ -232,6 +241,27 @@ body {
 @media (pointer: coarse) and (max-width: 1100px) {
   :root[data-scale="large"] .topbar-tools .chrome-group[aria-label="Selection"],
   :root[data-scale="larger"] .topbar-tools .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+
+/* A press profile loaded brings Proof and Gamut into the row, which the
+   widths above were not measured with: the row gives the selection's
+   buttons up that much sooner, and on touch screens before-and-after
+   too (both are rows of the menus). */
+@media (max-width: 1150px) {
+  :root[data-scale="large"] .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Selection"],
+  :root[data-scale="larger"] .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+@media (pointer: coarse) and (max-width: 1200px) {
+  .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+@media (pointer: coarse) and (max-width: 1300px) {
+  :root:not([data-scale="compact"]) .topbar-tools:has(.chrome-group[aria-label="Soft proofing"]) .chrome-group[aria-label="Before"] {
     display: none;
   }
 }

@@ -59,6 +59,10 @@ check(
 check(fileSafe("a\u000bb.png") === "ab.png", "control characters go");
 check(fileSafe("Hero. ") === "Hero", "nor do the dots and spaces Windows drops");
 check(fileSafe("///") === "---" && fileSafe("") === "untitled", "and it is never empty");
+const wide = fileSafe(`${"漢".repeat(110)}@2x.png`);
+check(new TextEncoder().encode(wide).length <= 240 && wide.endsWith("@2x.png"), `cut by its bytes (${new TextEncoder().encode(wide).length})`);
+const edge = fileSafe(`untitled-${"r".repeat(300)}-1000.jpg`);
+check(edge.endsWith("-1000.jpg"), `a long edge's size is kept (${edge.slice(-12)})`);
 const long = fileSafe(`untitled-${"r".repeat(300)}@2x.png`);
 check(
   [...long].length <= 120 && long.endsWith("@2x.png") && long.startsWith("untitled-rrr"),

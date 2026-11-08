@@ -22832,6 +22832,37 @@ mod tests {
             Some(frame),
             "hidden, it is not there"
         );
+        // Nor into a frame that cannot be picked: locked, or in a locked
+        // group.
+        let lock = |session: &mut Session, id, locked| {
+            session.apply(Command::SetLocked { id, locked }).unwrap();
+        };
+        lock(&mut session, frame, true);
+        assert_eq!(
+            session.frame_at(300.0, 200.0),
+            None,
+            "a locked frame takes nothing"
+        );
+        lock(&mut session, frame, false);
+        session
+            .apply(Command::SetVisible {
+                id: photo,
+                visible: true,
+            })
+            .unwrap();
+        session.apply(Command::RemoveNode { id: photo }).unwrap();
+        let group = session.group_nodes(&[frame], "g").unwrap();
+        assert_eq!(
+            session.frame_at(300.0, 200.0),
+            Some(frame),
+            "grouped, it still takes it"
+        );
+        lock(&mut session, group, true);
+        assert_eq!(
+            session.frame_at(300.0, 200.0),
+            None,
+            "nor in a locked group"
+        );
     }
 
     #[test]

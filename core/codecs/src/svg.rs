@@ -75,11 +75,17 @@ fn carried_faces(doc: &Document) -> String {
                 run.italic && run.lean == 0.0,
                 run.face.name.clone(),
             );
-            faces
+            let entry = faces
                 .entry(key)
-                .or_insert_with(|| (run.face.bytes, Default::default()))
+                .or_insert_with(|| (run.face.bytes, Default::default()));
+            entry.1.extend(run.glyphs.iter().map(|g| g.id));
+            // And what a browser may ask of the face that this did not set.
+            entry
                 .1
-                .extend(run.glyphs.iter().map(|g| g.id));
+                .extend(chitrakar_render::text::glyphs_a_reader_may_ask(
+                    run.face.bytes,
+                    &spec.text,
+                ));
         }
     }
     let mut css = String::new();

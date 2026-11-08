@@ -110,7 +110,10 @@ export function said(err: unknown): string {
     .trim()
     .replace(/^(?:Error|RuntimeError|JsError):\s*/i, "")
     .replace(/^invalid command:\s*/i, "")
-    .replace(/^(?:Error|io error):\s*/i, "");
+    .replace(/^(?:Error|io error):\s*/i, "")
+    // A library's own name for what went wrong, in brackets after the
+    // sentence that already says it.
+    .replace(/\s*\((?:InvalidProfile|UnsupportedProfileConnection|InvalidFont)\)/g, "");
   const plain: [RegExp, string][] = [
     [/out of memory|memory limit exceeded|capacity overflow|allocation/i, "it is larger than the editor can hold in memory"],
     [
@@ -121,6 +124,9 @@ export function said(err: unknown): string {
     [/svg data parsing failed|xml|unexpected .* tag|expected '.*' tag/i, "the SVG is not well-formed (an unclosed or mismatched tag)"],
     [/invalid zip|zip archive|could not find central directory/i, "the file is damaged: it is not a whole .chitra"],
     [/image format \w+ is not supported/i, "the picture could not be decoded here (it may be damaged)"],
+    [/image format could not be determined/i, "it is not a picture this editor can read"],
+    [/^InvalidFont$/i, "it is not a font file this editor can read"],
+    [/specified file not found in archive/i, "the file is damaged: it is not a whole .chitra"],
   ];
   for (const [re, says] of plain) if (re.test(text)) return says;
   return text;
@@ -129,7 +135,7 @@ export function said(err: unknown): string {
 /** The sentence to say when a picture could not be read, rather than a
  * decoder's error: for HEIC, which only a system with its own decoder
  * can read, how to get it in anyway. */
-export function unreadable(name: string, bytes: Uint8Array, err: unknown): string {
+export function unreadable(name: string, bytes: Uint8Array, err: unknown, verb = "place"): string {
   if (heifBrand(bytes) === "heic") {
     return (
       `${name} is a HEIC picture, which this system has no decoder for. ` +
@@ -140,5 +146,5 @@ export function unreadable(name: string, bytes: Uint8Array, err: unknown): strin
   if (heifBrand(bytes) === "avif") {
     return `${name} is an AVIF picture, which this browser cannot decode. Open it in a current Chrome, Firefox or Safari, or save it as PNG first.`;
   }
-  return `Could not place ${name}: ${said(err)}`;
+  return `Could not ${verb} ${name}: ${said(err)}`;
 }

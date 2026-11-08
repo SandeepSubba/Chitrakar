@@ -106,6 +106,9 @@ export function isChord(s: unknown): s is string {
     if (!["mod", "alt", "shift"].includes(p) || seen.has(p)) return false;
     seen.add(p);
   }
+  // Space alone (or with shift) is the hand's, whatever a person's older
+  // settings gave it: kept, it panned and ran the command both.
+  if (key === " " && !seen.has("mod") && !seen.has("alt")) return false;
   // In the order they are written, so one chord is one string.
   return parts.join("+") === ["mod", "alt", "shift"].filter((m) => seen.has(m)).join("+");
 }

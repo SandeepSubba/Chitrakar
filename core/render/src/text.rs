@@ -46,6 +46,35 @@ fn registry() -> &'static RwLock<HashMap<String, &'static Fonts>> {
     REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+/// Every glyph a reader setting `text` in this face may ask for, on top
+/// of the ones this engine set: each character's own (a browser setting
+/// tracked text leaves the face's ligatures off and asks for the plain
+/// letters), and those the face makes of the whole text shaped as one
+/// (a browser shapes across a run of colour, where this stops at it, and
+/// so makes a ligature this never did). Cut to only what was set here, an
+/// SVG's embedded face drew those letters as nothing.
+pub fn glyphs_a_reader_may_ask(face_bytes: &[u8], text: &str) -> std::collections::BTreeSet<u16> {
+    let mut out = std::collections::BTreeSet::new();
+    let Some(face) = rustybuzz::Face::from_slice(face_bytes, 0) else {
+        return out;
+    };
+    for c in text.chars() {
+        if let Some(id) = face.glyph_index(c) {
+            out.insert(id.0);
+        }
+    }
+    for line in text.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(line);
+        let shaped = rustybuzz::shape(&face, &[], buffer);
+        out.extend(shaped.glyph_infos().iter().map(|g| g.glyph_id as u16));
+    }
+    out
+}
+
 /// Make a face available under `name` for the rest of the process. The
 /// bytes are kept for good: a registered font is referenced from every
 /// text block that names it, so there is no moment it could be dropped.
@@ -475,7 +504,10 @@ fn shape_piece(
     // move that much further or a synthesized bold would set tighter
     // than the upright it is made from.
     let heavier = smear(spec, scale);
-    let out = shaped(fonts, face, piece);
+    // Spaced out, a line sets its letters one by one, as a browser and
+    // every type tool do: a ligature tracked as one glyph left the page
+    // narrower than the same text anywhere else, an SVG of it included.
+    let out = shaped(fonts, face, piece, spec.letter_spacing == 0.0);
     glyphs.reserve(out.len());
     for g in out.iter() {
         glyphs.push(Shaped {
@@ -511,12 +543,13 @@ fn shaped(
     fonts: &'static Fonts,
     face: &rustybuzz::Face<'static>,
     piece: &str,
+    ligatures: bool,
 ) -> std::sync::Arc<Vec<Placed>> {
     use std::sync::{Arc, Mutex};
-    type Kept = HashMap<(usize, String), Arc<Vec<Placed>>>;
+    type Kept = HashMap<(usize, String, bool), Arc<Vec<Placed>>>;
     static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
     const MOST: usize = 4096;
-    let key = (fonts as *const Fonts as usize, piece.to_string());
+    let key = (fonts as *const Fonts as usize, piece.to_string(), ligatures);
     if let Some(found) = KEPT
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -527,7 +560,14 @@ fn shaped(
     }
     let mut buffer = rustybuzz::UnicodeBuffer::new();
     buffer.push_str(piece);
-    let out = rustybuzz::shape(face, &[], buffer);
+    let off =
+        |tag: &[u8; 4]| rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..);
+    let features = if ligatures {
+        Vec::new()
+    } else {
+        vec![off(b"liga"), off(b"clig")]
+    };
+    let out = rustybuzz::shape(face, &features, buffer);
     let placed: Arc<Vec<Placed>> = Arc::new(
         out.glyph_infos()
             .iter()
@@ -2062,6 +2102,26 @@ fn rasterize_along(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
 
 #[cfg(test)]
 mod tests {
+
+    /// What a browser may ask of a face, past what this set: each letter
+    /// on its own (tracked text drops the ligatures) and the ligatures
+    /// of the text taken whole (a run of colour does not stop a browser
+    /// making one).
+    #[test]
+    fn a_reader_may_ask_for_the_letters_and_the_ligatures() {
+        let face = rustybuzz::Face::from_slice(FONT_BYTES, 0).unwrap();
+        let asked = glyphs_a_reader_may_ask(FONT_BYTES, "Office fluff");
+        for c in "Officeflu".chars() {
+            assert!(asked.contains(&face.glyph_index(c).unwrap().0), "{c}");
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str("Office fluff");
+        let whole = rustybuzz::shape(&face, &[], buffer);
+        for g in whole.glyph_infos() {
+            assert!(asked.contains(&(g.glyph_id as u16)));
+        }
+    }
+
     use super::*;
 
     /// The lines a block wraps to, without the offsets that say which
@@ -2547,11 +2607,13 @@ mod tests {
             decomposed.0[0].id, composed.0[0].id,
             "and it is the same glyph as the precomposed letter"
         );
-        // Tracking spaces glyphs, not the letters inside a ligature, so a
-        // ligature still counts as one.
+        // Spaced out, a line sets its letters apart, ligatures and all,
+        // as a browser does (CSS turns them off under letter-spacing): a
+        // ligature tracked as one glyph left the page narrower than the
+        // same text in its own SVG.
         let mut tracked = spec("fi", 40.0);
         tracked.letter_spacing = 0.5;
-        assert_eq!(shape_line("fi", 0, &tracked, 1.0).0.len(), 1);
+        assert_eq!(shape_line("fi", 0, &tracked, 1.0).0.len(), 2);
     }
 
     #[test]

@@ -24,12 +24,13 @@ without reading anything else.*
   The editor itself is broad and well tested, but four audits in a row
   each found twenty or more bugs, and a release wants a round that finds
   nothing serious. What stands between this branch and a 1.0, in order:
-  1. *Audits until they come back quiet.* Seven rounds are in (below,
+  1. *Audits until they come back quiet.* Eight rounds are in (below,
      under the audits). The seventh, over everything again, found no
      crash and no page error in hours of hostile use, and one bug that
-     lost work (paint confined to a picture's region, on save), now
-     fixed; the rest were gestures and polish. An eighth, smaller one
-     over what the seventh changed, is what should say quiet. ⬜
+     lost work, now fixed. The eighth, over what the seventh changed,
+     found nothing that loses work and nine smaller bugs, three of them
+     the seventh's own, all fixed. A last short pass over the eighth's
+     changes is what should say quiet. ⬜
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11150,6 +11151,35 @@ without reading anything else.*
   the browser's prompt; a 100 MP wand or trace freezes the page for
   seconds without a word; emoji draw as boxes (the bundled face has
   none).
+  **An eighth audit, over what the seventh changed (November 2026).**
+  Two auditors, one on gestures and history, one on files, export and
+  the interface. Nothing lost a picture, in any of a dozen ways one can
+  be named — save, draft, paste, every kind of layer, mask and region;
+  every handle and tool let go of with Escape and Ctrl+Z; every slider
+  one step. Nine bugs, three of them the seventh round's own: a
+  two-finger tap (undo) or a pinch a moment after a Text tap took the
+  block away with the step before (the take-back now waits for the
+  finger that dropped it to still be down); a shape drawn over a frame
+  in a locked group went into it where it could not be picked (a locked
+  frame, or one in a locked group, takes nothing); and a failed Open
+  left the canvas proofed with Proof shown off. Put right besides: an
+  SVG's embedded face dropped letters where a browser shapes otherwise —
+  tracked text, where it leaves the ligatures off, and a run of colour,
+  which it shapes across (`glyphs_a_reader_may_ask` keeps each
+  character's glyph and the whole text's ligatures; and the editor now
+  sets tracked text without ligatures too, as CSS does, so the two
+  agree to a pixel's edge); cancelling the window of a PDF or a raw
+  file being opened, or a raw that would not read, left an empty page
+  in place of the document; Canvas size took nought on a press of
+  Resize; the bar ran off a touch screen with a press profile loaded
+  (the selection's and before-and-after's buttons give way to Proof and
+  Gamut, and the pointer's position is not shown to a finger); the same
+  region picked twice with a feather set made an empty step; a Space
+  binding saved before Space was refused still fired; and names: cut by
+  their bytes, keeping a long edge's size, the document's part held to
+  sixty. Left: a run of colour across a ligature is drawn as the
+  ligature in the SVG and as letters on the page (same width); the same
+  press profile loaded twice counts as a change.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot
