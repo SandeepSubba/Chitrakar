@@ -118,6 +118,14 @@ export type Outgoing = { name: string; type: string; make: () => Uint8Array };
  * "icon/small", a colon is refused outright) become "-", control
  * characters go, and so do the dots and spaces Windows drops off the
  * end. Never empty. */
+/** A string as the characters a person sees: an emoji with its skin
+ * tone, a letter with its accent — so a name cut short is not cut
+ * through one. Code points where the browser cannot say. */
+export function graphemes(text: string): string[] {
+  const Seg = (Intl as unknown as { Segmenter?: new (l?: string, o?: { granularity: string }) => { segment(t: string): Iterable<{ segment: string }> } }).Segmenter;
+  return Seg ? [...new Seg(undefined, { granularity: "grapheme" }).segment(text)].map((g) => g.segment) : [...text];
+}
+
 export function fileSafe(name: string): string {
   let cleaned = name
     // eslint-disable-next-line no-control-regex
@@ -130,11 +138,11 @@ export function fileSafe(name: string): string {
   // keeping what it ends with (`@2x.png`, `-1000.jpg`).
   const MOST = 120;
   const bytes = (t: string) => new TextEncoder().encode(t).length;
-  if ([...cleaned].length > MOST || bytes(cleaned) > 240) {
+  if (graphemes(cleaned).length > MOST || bytes(cleaned) > 240) {
     const dot = cleaned.lastIndexOf(".");
     const end = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : "";
     const tail = cleaned.slice(0, cleaned.length - end.length).match(/(@\d+(\.\d+)?x|-\d+)$/)?.[0] ?? "";
-    let stem = [...cleaned.slice(0, cleaned.length - end.length - tail.length)];
+    let stem = graphemes(cleaned.slice(0, cleaned.length - end.length - tail.length));
     stem = stem.slice(0, MOST - [...tail].length - [...end].length);
     while (stem.length > 0 && bytes(stem.join("") + tail + end) > 240) stem.pop();
     cleaned = stem.join("").trim() + tail + end;

@@ -20,6 +20,7 @@ import {
   openedFiles,
   readPath,
   writeFiles,
+  graphemes,
   canShareFiles,
   shareFiles,
   writePath,
@@ -5420,7 +5421,9 @@ export function App() {
       for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
         const layer = byId.get(up);
         if (!layer) break;
-        if (layer.kind === "artboard") {
+        // A frame picked along with what is in it is part of what is
+        // measured, not what it is measured to.
+        if (layer.kind === "artboard" && !selectionSet.includes(up)) {
           to = boxOf(session.bounds_of(up));
           break;
         }
@@ -9585,7 +9588,7 @@ export function App() {
   /** The document's part of an export's name: sixty at most, so a long
    * document name leaves room for the region, comp or frame the file was
    * made from. A save keeps the whole name — it is the document's. */
-  const exportName = () => [...fileName()].slice(0, 60).join("").trim() || "untitled";
+  const exportName = () => graphemes(fileName()).slice(0, 60).join("").trim() || "untitled";
 
   /** Every path that writes a file goes through here. Making the bytes
    * can fail — a picture too big to hold at that multiple, a profile

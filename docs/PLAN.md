@@ -31,9 +31,10 @@ without reading anything else.*
      found nothing that loses work and nine smaller bugs, three of them
      the seventh's own, all fixed. The ninth, over the eighth's changes,
      found every fix holding and six small things (two the eighth's
-     own), all fixed. The rounds have gone from twenty-odd bugs to six,
-     none of them losing work since the seventh. ⬜ until a pass over
-     the ninth's changes finds nothing.
+     own), all fixed. The tenth found three, all in one corner — boxes
+     combined over regions made of boxes — and Alt-measure, fixed. The
+     rounds have gone from twenty-odd bugs to three, none losing work
+     since the seventh. ⬜ until a pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11200,6 +11201,20 @@ without reading anything else.*
   PDF window from its field; the same box Shift-added twice said the
   regions could not be combined; and a raw being opened that failed to
   develop left an empty page. No crash, no page error, nothing lost.
+  **A tenth audit, over what the ninth changed (November 2026).** Every
+  ninth-round fix held — names saved whole and exported held to sixty,
+  measuring in frames and locked groups, the bar with a press profile at
+  every width, size and pointer, Canvas size, the PDF window's Escape —
+  and nothing threw. Three small things, two the ninth's own, put right:
+  a box Shift-added over a region with a hole or a bite in it did
+  nothing (the shortcut for a box already in the region tested only the
+  box's corners; it now also asks that none of the region's lie inside
+  the box), and taking away or adding a box over edges an earlier nudge
+  had made still said the regions could not be combined (the nudge is
+  tried each way round, and a box wholly over the region takes it
+  away); and Alt-measure from a layer and its own frame both picked
+  measured nothing. Names are cut by the characters a person sees, so
+  an emoji keeps its skin tone.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

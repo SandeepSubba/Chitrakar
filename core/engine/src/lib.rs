@@ -22873,6 +22873,60 @@ mod tests {
         assert_eq!(copy_name("Notes copy of"), "Notes copy of copy");
     }
 
+    /// Boxes picked over a region made of the same boxes: each comes to
+    /// what it means, and none to "their edges overlap exactly". A hole
+    /// or a bite taken out and the box added over it again is filled, not
+    /// kept for the box's corners lying on the region's own edges.
+    #[test]
+    fn boxes_over_a_region_made_of_them_combine() {
+        let mut session = Session::new(300, 300, ColorMode::Rgb);
+        let pick = |s: &mut Session, x: f32, y: f32, w: f32, h: f32, how: &str| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+                Transform::translation(x, y),
+                how,
+            )
+        };
+        // A hole, filled again.
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "union").unwrap();
+        pick(&mut session, 80.0, 80.0, 40.0, 40.0, "subtract").unwrap();
+        assert!(
+            !session.selection_covers(100.0, 100.0),
+            "the hole is taken out"
+        );
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "union").unwrap();
+        assert!(session.selection_covers(100.0, 100.0), "and filled again");
+        // A bite, filled again.
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "union").unwrap();
+        pick(&mut session, 80.0, 40.0, 40.0, 30.0, "subtract").unwrap();
+        assert!(!session.selection_covers(100.0, 55.0));
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "union").unwrap();
+        assert!(session.selection_covers(100.0, 55.0), "the bite is filled");
+        // The same box taken away after it was added: nothing left.
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "union").unwrap();
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "subtract").unwrap();
+        assert!(!session.selection_covers(100.0, 100.0), "taken away whole");
+        // A bigger box sharing three edges, added.
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "union").unwrap();
+        pick(&mut session, 50.0, 50.0, 150.0, 100.0, "union").unwrap();
+        assert!(session.selection_covers(175.0, 100.0));
+        // Half taken away twice, then the other half.
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
+        pick(&mut session, 50.0, 50.0, 50.0, 100.0, "subtract").unwrap();
+        pick(&mut session, 50.0, 50.0, 50.0, 100.0, "subtract").unwrap();
+        assert!(!session.selection_covers(75.0, 100.0) && session.selection_covers(125.0, 100.0));
+        pick(&mut session, 100.0, 50.0, 50.0, 100.0, "subtract").unwrap();
+        assert!(!session.selection_covers(125.0, 100.0), "nothing left");
+    }
+
     /// A step taken back is gone: not undone into the redo list, where
     /// redoing it brought back what was let go of.
     #[test]

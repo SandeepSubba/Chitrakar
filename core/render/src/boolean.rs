@@ -253,23 +253,39 @@ pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>>
         return Some(rings);
     }
     const NUDGE: f32 = 1.0 / 512.0;
-    let moved: Vec<Ring> = b
-        .iter()
-        .map(|ring| ring.iter().map(|p| [p[0] + NUDGE, p[1] + NUDGE]).collect())
-        .collect();
-    let Some(rings) = combine(a, &moved, op) else {
-        // The second wholly within the first — the same box added to a
-        // selection twice, the second time over the first's own nudged
-        // edges: added, or kept where both are, it is the first.
-        if matches!(op, BoolOp::Union) && within(b, a, 2.0 * NUDGE) {
-            return Some(a.to_vec());
+    let moved_by = |dx: f32, dy: f32| -> Vec<Ring> {
+        b.iter()
+            .map(|ring| ring.iter().map(|p| [p[0] + dx, p[1] + dy]).collect())
+            .collect()
+    };
+    // Each way round, not one: a region whose own edges came from a box
+    // nudged one way lines up exactly with the next box nudged the same
+    // way, and every combine after the first failed the same.
+    let mut found = None;
+    for (dx, dy) in [(1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0)] {
+        if let Some(rings) = combine(a, &moved_by(dx * NUDGE, dy * NUDGE), op) {
+            found = Some(rings);
+            break;
         }
-        if matches!(op, BoolOp::Intersect) && within(a, b, 2.0 * NUDGE) {
-            return Some(a.to_vec());
+    }
+    let Some(rings) = found else {
+        // Still nothing traced: one wholly within the other — the same
+        // box over a region made of it — is answered by what it means.
+        // Wholly: its corners in or on the other, and none of the other's
+        // corners inside it, which a hole or a bite in the other would be.
+        let slack = 2.0 * NUDGE;
+        let inside_of = |inner: &[Ring], outer: &[Ring]| contains(outer, inner, slack);
+        match op {
+            BoolOp::Union if inside_of(b, a) => return Some(a.to_vec()),
+            BoolOp::Union if inside_of(a, b) => return Some(b.to_vec()),
+            BoolOp::Intersect if inside_of(a, b) => return Some(a.to_vec()),
+            BoolOp::Intersect if inside_of(b, a) => return Some(b.to_vec()),
+            BoolOp::Subtract if inside_of(a, b) => return Some(Vec::new()),
+            _ => {}
         }
         // Two that only touched, moved apart: an intersection of nothing,
         // or all of the first taken away. Said as what it is.
-        return leaves_nothing(a, &moved, op).then(Vec::new);
+        return leaves_nothing(a, &moved_by(NUDGE, NUDGE), op).then(Vec::new);
     };
     // Thinner on average than two nudges: area against perimeter is half
     // the thickness of a long thin ring.
@@ -286,44 +302,61 @@ pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>>
     Some(rings.into_iter().filter(thick).collect())
 }
 
+/// Whether `outer` holds all of `inner`: every corner of `inner` in or
+/// on `outer`, and no corner of `outer` strictly inside `inner` — which
+/// a hole or a notch in `outer` under `inner` would put there.
+fn contains(outer: &[Ring], inner: &[Ring], slack: f32) -> bool {
+    within(inner, outer, slack)
+        && !outer
+            .iter()
+            .flatten()
+            .any(|&p| strictly_inside(p, inner) && !near_edge(p, inner, slack))
+}
+
+fn near_edge(p: [f32; 2], rings: &[Ring], slack: f32) -> bool {
+    rings.iter().any(|ring| {
+        let n = ring.len();
+        (0..n).any(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 > 0.0 {
+                (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (cx, cy) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
+            cx * cx + cy * cy <= slack * slack
+        })
+    })
+}
+
+/// Even-odd: whether a point is inside the rings.
+fn strictly_inside(p: [f32; 2], rings: &[Ring]) -> bool {
+    let mut odd = false;
+    for ring in rings {
+        let n = ring.len();
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            if (a[1] > p[1]) != (b[1] > p[1])
+                && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
+            {
+                odd = !odd;
+            }
+        }
+    }
+    odd
+}
+
 /// Whether every corner of `inner` lies inside `outer` (even-odd) or
 /// within `slack` of one of its edges.
 fn within(inner: &[Ring], outer: &[Ring], slack: f32) -> bool {
-    let near_edge = |p: [f32; 2]| {
-        outer.iter().any(|ring| {
-            let n = ring.len();
-            (0..n).any(|i| {
-                let (a, b) = (ring[i], ring[(i + 1) % n]);
-                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-                let len2 = dx * dx + dy * dy;
-                let t = if len2 > 0.0 {
-                    (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                let (cx, cy) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
-                cx * cx + cy * cy <= slack * slack
-            })
-        })
-    };
-    let inside = |p: [f32; 2]| {
-        let mut odd = false;
-        for ring in outer {
-            let n = ring.len();
-            for i in 0..n {
-                let (a, b) = (ring[i], ring[(i + 1) % n]);
-                if (a[1] > p[1]) != (b[1] > p[1])
-                    && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
-                {
-                    odd = !odd;
-                }
-            }
-        }
-        odd
-    };
     !inner.is_empty()
         && !outer.is_empty()
-        && inner.iter().flatten().all(|&p| inside(p) || near_edge(p))
+        && inner
+            .iter()
+            .flatten()
+            .all(|&p| strictly_inside(p, outer) || near_edge(p, outer, slack))
 }
 
 /// Combine two sets of rings. Returns the result as rings, or `None` when

@@ -18,7 +18,7 @@ const src = readFileSync(join(here, "..", "src", "files.ts"), "utf8").replace(
 const js = (await transform(src, { loader: "ts", format: "esm" })).code;
 const tmp = join(here, "out", "files.generated.mjs");
 writeFileSync(tmp, js);
-const { baseName, folderName, replacing, fileSafe, distinctNames } = await import("file://" + tmp);
+const { baseName, folderName, replacing, fileSafe, distinctNames, graphemes } = await import("file://" + tmp);
 unlinkSync(tmp);
 
 let ran = 0;
@@ -61,6 +61,8 @@ check(fileSafe("Hero. ") === "Hero", "nor do the dots and spaces Windows drops")
 check(fileSafe("///") === "---" && fileSafe("") === "untitled", "and it is never empty");
 const wide = fileSafe(`${"漢".repeat(110)}@2x.png`);
 check(new TextEncoder().encode(wide).length <= 240 && wide.endsWith("@2x.png"), `cut by its bytes (${new TextEncoder().encode(wide).length})`);
+const thumbs = fileSafe(`${"👍🏽".repeat(130)}.png`);
+check(graphemes(thumbs.slice(0, -4)).every((g) => g === "👍🏽"), "a cut never splits a skin tone from its thumb");
 const edge = fileSafe(`untitled-${"r".repeat(300)}-1000.jpg`);
 check(edge.endsWith("-1000.jpg"), `a long edge's size is kept (${edge.slice(-12)})`);
 const long = fileSafe(`untitled-${"r".repeat(300)}@2x.png`);
