@@ -467,6 +467,70 @@ mod tests {
         .unwrap();
     }
 
+    /// A stroke painted inside a region read off a picture carries that
+    /// picture as its confinement, on a paint layer and on a brushed mask
+    /// alike — and nothing else may point at it once the region is let
+    /// go of. The file kept the strokes and lost the picture, and they
+    /// drew nowhere when it was opened again.
+    #[test]
+    fn a_stroke_keeps_the_picture_it_was_confined_to() {
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let matte = doc.add_resource(2, 2, [255, 255, 255, 255].repeat(4));
+        let other = doc.add_resource(2, 2, [9, 9, 9, 255].repeat(4));
+        let confined = |id: &str| chitrakar_doc::PaintStroke {
+            points: vec![[1.0, 1.0], [8.0, 8.0]],
+            radii: vec![2.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 0.0,
+            erase: false,
+            source: [0.0, 0.0],
+            heal: false,
+            clip: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Raster {
+                    resource_id: id.into(),
+                    width: 2,
+                    height: 2,
+                    transform: Default::default(),
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        };
+        let root = doc.root();
+        let mut paint = Node::paint("paint");
+        if let chitrakar_doc::NodeKind::Paint { strokes } = &mut paint.kind {
+            strokes.push(confined(&matte));
+        }
+        let mut masked = Node::paint("masked");
+        masked.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Painted {
+                strokes: vec![confined(&other)],
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        for (index, node) in [paint, masked].into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index,
+                node: Box::new(node),
+            })
+            .unwrap();
+        }
+        let back = load_chitra(&save_chitra(&doc).unwrap()).unwrap();
+        for id in [&matte, &other] {
+            assert!(
+                back.resource(id).is_some_and(|r| !r.rgba8.is_empty()),
+                "the picture a stroke was confined to travels: {id}"
+            );
+        }
+    }
+
     /// The stores keep every picture and raw file ever put in them, which
     /// undo needs; a file keeps only those a layer still shows. A
     /// photograph placed and deleted, or a raw developed again, stayed

@@ -109,6 +109,11 @@ impl WasmSession {
         self.inner.undo().map_err(to_js)
     }
 
+    /// Undo the newest step and forget it (`Session::take_back`).
+    pub fn take_back(&mut self) -> Result<bool, JsError> {
+        self.inner.take_back().map_err(to_js)
+    }
+
     pub fn redo(&mut self) -> Result<bool, JsError> {
         self.inner.redo().map_err(to_js)
     }

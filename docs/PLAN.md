@@ -24,13 +24,12 @@ without reading anything else.*
   The editor itself is broad and well tested, but four audits in a row
   each found twenty or more bugs, and a release wants a round that finds
   nothing serious. What stands between this branch and a 1.0, in order:
-  1. *Audits until they come back quiet.* Six rounds are in (below,
-     under the audits): the editor, the panel and paths, selections and
-     colour, the keyboard, phones and other programs' files, and undo,
-     saving and what each export keeps. The sixth found the engine's
-     undo exact over hundreds of random runs; what it found was around
-     the edges. A seventh, over everything again, is what says whether
-     they have come back quiet. ⬜
+  1. *Audits until they come back quiet.* Seven rounds are in (below,
+     under the audits). The seventh, over everything again, found no
+     crash and no page error in hours of hostile use, and one bug that
+     lost work (paint confined to a picture's region, on save), now
+     fixed; the rest were gestures and polish. An eighth, smaller one
+     over what the seventh changed, is what should say quiet. ⬜
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11110,6 +11109,47 @@ without reading anything else.*
   layer covers its base's shadow and a faded layer's shadow fades with
   it; a bevel drawn at half size is a little wider; translucency mixes
   in linear light on the page and in sRGB in SVG and PDF, by design.
+  **A seventh audit: everything again, as a designer, a photographer and
+  a hostile first-time user (November 2026).** No crash, no engine stop
+  and no page error anywhere — six walks of every menu row, every
+  preferences page, every panel field of fifteen kinds of layer, 100 MP
+  pages, phones and tablets — but not yet quiet. Put right: paint
+  confined to a region read off a picture (a matte, a subject, a PSD's
+  mask) lost its confinement on save, draft and paste, because the
+  picture was named only on the stroke (`Node::each_resource` walks
+  every stroke's clip now, `Mask::each_resource`); a drag brought back
+  to its press stayed a pointer's step off; Escape and Ctrl+Z let go of
+  the tool drags but not the knob, anchor, curve, warp, gradient or mask
+  handles; a second slider dragged after another was two steps (the
+  first's blur ended the second's gesture), and Ctrl+Z on a held opacity
+  slider kept its draft; cancelled starts — an alt-drag's copy, a
+  stroke's layer, an unwritten text block — stood in the redo list
+  (`Session::take_back`); a shape drawn over a frame went into it under
+  a picture covering the page, where it could not be seen (`frame_at`
+  answers only the frame that shows there); a live copy pasted without
+  its original failed silently; Enter in the Page windows reopened the
+  menu; setting a value to what it is — the fill tool with a shape's own
+  colour, Canvas size at the page's size — made a step (any command
+  restating a value that changes nothing is none now); a pinch begun
+  with the Text tool left a block; a command given a bare sign fired
+  while typing (and Space, the hand, could be taken); Escape in X, Y, W
+  or H kept what was typed; a width of a millionth left a layer that
+  could not grow back (held to a tenth of a pixel); a refused or clamped
+  number stayed in its field; copies of copies were "copy copy copy"
+  (numbered now); Ctrl+A over a window painted the app blue; Canvas
+  size took nought; the bar ran off a touch screen at 910–970 wide and
+  off a 320 phone at a large size; 87 alerts said the engine's own
+  words (`said`); the embedded SVG face lost its kerning (GPOS, GSUB,
+  GDEF and kern travel now); the CMYK TIFF said no resolution; loading
+  a press profile did not count as work to save; and a file that could
+  not be opened threw away the document it was opened over. Left as
+  judgement: Escape in a new text block throws its typing away, as
+  Photoshop does; the develop window's Cancel asks nothing; the Node
+  tool converts on the press; a mask of a shape or a gradient cannot be
+  brushed; Offset, Simplify, Blend and the kept-name windows still use
+  the browser's prompt; a 100 MP wand or trace freezes the page for
+  seconds without a word; emoji draw as boxes (the bundled face has
+  none).
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

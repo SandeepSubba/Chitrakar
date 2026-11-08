@@ -150,6 +150,16 @@ fn subset(font: &[u8], glyphs: &BTreeSet<u16>, web: bool) -> Option<Vec<u8>> {
         for tag in [b"cmap", b"name", b"OS/2"] {
             out_tables.push((*tag, table(tag)?.to_vec()));
         }
+        // How the face sets its glyphs side by side — kerning, ligatures
+        // — which a page asks the browser to do, where the PDF is handed
+        // each glyph where it stands. Left behind, a line was set wider
+        // than the editor sets it and right-aligned text ran past its
+        // edge. Ids stay put, so the tables hold as they are.
+        for tag in [b"GDEF", b"GPOS", b"GSUB", b"kern"] {
+            if let Some(data) = table(tag) {
+                out_tables.push((*tag, data.to_vec()));
+            }
+        }
         let post = table(b"post")?;
         let mut short = post.get(..32)?.to_vec();
         short[..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
@@ -219,7 +229,14 @@ mod tests {
         let mut sorted = tags.clone();
         sorted.sort();
         assert_eq!(tags, sorted, "in order, as a reader checks");
-        assert!(web.len() * 4 < SANS.len(), "{} bytes", web.len());
+        assert!(web.len() * 2 < SANS.len(), "{} bytes", web.len());
+        for tag in [b"GPOS", b"GSUB"] {
+            assert!(
+                tags.contains(tag),
+                "how glyphs are set travels: {}",
+                String::from_utf8_lossy(tag)
+            );
+        }
     }
 
     #[test]

@@ -59,6 +59,11 @@ check(
 check(fileSafe("a\u000bb.png") === "ab.png", "control characters go");
 check(fileSafe("Hero. ") === "Hero", "nor do the dots and spaces Windows drops");
 check(fileSafe("///") === "---" && fileSafe("") === "untitled", "and it is never empty");
+const long = fileSafe(`untitled-${"r".repeat(300)}@2x.png`);
+check(
+  [...long].length <= 120 && long.endsWith("@2x.png") && long.startsWith("untitled-rrr"),
+  `a long name is cut, keeping how it ends (${long.length}: ${long.slice(-12)})`,
+);
 // Files written together never land on one another, case or no case.
 const distinct = distinctNames(["Hero.png", "hero.png", "Hero.png", "Other.png"]);
 check(

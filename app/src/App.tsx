@@ -45,6 +45,7 @@ import {
 import {
   boundChords,
   chordFromEvent,
+  typesAlone,
   chordLabel,
   firesWhileTyping,
   onAMac,
@@ -776,6 +777,13 @@ function aWindowIsUp(): boolean {
  * the focus is put back on the new one by its name. */
 function fieldKeys(e: React.KeyboardEvent<HTMLInputElement>): void {
   if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+  // Escape puts back what the field said, as the text box's does: what
+  // was typed is not taken when the field is let go of.
+  if (e.key === "Escape") {
+    e.currentTarget.value = e.currentTarget.defaultValue;
+    e.currentTarget.select();
+    return;
+  }
   if (e.key !== "Enter") return;
   const el = e.currentTarget;
   const name = el.getAttribute("aria-label");
@@ -2699,7 +2707,7 @@ export function App() {
       session.pick_all();
       refresh(session);
     } catch (err) {
-      alert(`Select: ${err}`);
+      alert(`Select: ${said(err)}`);
     }
   };
   const pickInverse = () => {
@@ -2740,7 +2748,7 @@ export function App() {
       session.keep_comp(name);
       refresh(session);
     } catch (err) {
-      alert(`Comp: ${err}`);
+      alert(`Comp: ${said(err)}`);
     }
   };
   /** A comp chip pressed: shown; with shift, brought up to the page as
@@ -2759,7 +2767,7 @@ export function App() {
       }
       refresh(session);
     } catch (err) {
-      alert(`Comp: ${err}`);
+      alert(`Comp: ${said(err)}`);
     }
   };
   const renameComp = (name: string) => {
@@ -2770,7 +2778,7 @@ export function App() {
       session.rename_comp(name, to);
       refresh(session);
     } catch (err) {
-      alert(`Comp: ${err}`);
+      alert(`Comp: ${said(err)}`);
     }
   };
 
@@ -2788,7 +2796,7 @@ export function App() {
       session.keep_selection(name);
       refresh(session);
     } catch (err) {
-      alert(`Keep: ${err}`);
+      alert(`Keep: ${said(err)}`);
     }
   };
   /** Pick a kept region up again — with the same modifiers a marquee
@@ -2799,7 +2807,7 @@ export function App() {
       session.pick_kept(index, how);
       refresh(session);
     } catch (err) {
-      alert(`Select: ${err}`);
+      alert(`Select: ${said(err)}`);
     }
   };
   const forgetRegion = (index: number) => {
@@ -2808,7 +2816,7 @@ export function App() {
       session.forget_region(index);
       refresh(session);
     } catch (err) {
-      alert(`Forget: ${err}`);
+      alert(`Forget: ${said(err)}`);
     }
   };
   /** Pick every layer that shares the picked one's fill colour, stroke
@@ -2823,7 +2831,7 @@ export function App() {
       setSelected(found.includes(selected) ? selected : found[0]);
       setMultiSel(found);
     } catch (err) {
-      alert(`Select: ${err}`);
+      alert(`Select: ${said(err)}`);
     }
   };
 
@@ -2833,7 +2841,7 @@ export function App() {
       session.pick_from_layer(selected, "replace");
       refresh(session);
     } catch (err) {
-      alert(`Select: ${err}`);
+      alert(`Select: ${said(err)}`);
     }
   };
   /** Pick the subject out of a photograph — what stands in front of its
@@ -2927,7 +2935,7 @@ export function App() {
       session.pick_subject(id, subjectTolerance, selectionFeather, "replace");
       refresh(session);
     } catch (err) {
-      alert(`Select subject: ${err}`);
+      alert(`Select subject: ${said(err)}`);
     }
   };
   /** The subject model's matte for the page, held to picture `id`; false
@@ -2983,7 +2991,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Stroke: ${err}`);
+      alert(`Stroke: ${said(err)}`);
     }
   };
   /** The softness regions were being given when the Feather window
@@ -3020,7 +3028,7 @@ export function App() {
       session.pick_layer_mask(selected, "replace");
       refresh(session);
     } catch (err) {
-      alert(`Select: ${err}`);
+      alert(`Select: ${said(err)}`);
     }
   };
   /** Hand the region to the picked layer as its mask. This is what a
@@ -3032,7 +3040,7 @@ export function App() {
       session.mask_from_selection(selected, hide);
       refresh(session);
     } catch (err) {
-      alert(`Mask: ${err}`);
+      alert(`Mask: ${said(err)}`);
     }
   };
   /** The region as a shape layer of its own, in the fill colour. A lasso
@@ -3046,7 +3054,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Fill: ${err}`);
+      alert(`Fill: ${said(err)}`);
     }
   };
   const cropToSelection = () => {
@@ -3057,7 +3065,7 @@ export function App() {
       refresh(session);
       fitView();
     } catch (err) {
-      alert(`Crop: ${err}`);
+      alert(`Crop: ${said(err)}`);
     }
   };
 
@@ -3078,7 +3086,7 @@ export function App() {
   const dropCopies = useCallback(
     (drag: ToolDrag) => {
       if (!session || !drag.duplicated) return;
-      session.undo();
+      session.take_back();
       const from = drag.copiedFrom ?? [];
       setSelected(from[0] ?? null);
       setMultiSel(from.length > 1 ? from : []);
@@ -3087,19 +3095,62 @@ export function App() {
     [session, refresh],
   );
 
+  // Focus going from one slider to the next is not the first one let go
+  // of — its own pointer coming up did that. Its blur came after the
+  // second slider's first move, and ended that one's gesture there: one
+  // drag, two steps, the first undoing to the value at the press.
+  useEffect(() => {
+    const isRange = (t: EventTarget | null) => t instanceof HTMLInputElement && t.type === "range";
+    const onFocusOut = (e: FocusEvent) => {
+      if (isRange(e.target) && isRange(e.relatedTarget)) e.stopPropagation();
+    };
+    window.addEventListener("focusout", onFocusOut, true);
+    return () => window.removeEventListener("focusout", onFocusOut, true);
+  }, []);
+
+  /** The pointers pressed on the page now, by id. */
+  const pointersDown = useRef(new Set<number>());
+  useEffect(() => {
+    const down = (e: PointerEvent) => pointersDown.current.add(e.pointerId);
+    const up = (e: PointerEvent) => pointersDown.current.delete(e.pointerId);
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+    };
+  }, []);
+
+  /** Whether a drag is held: a tool's, or one on any handle. */
+  const handleHeld = (): boolean =>
+    toolDragRef.current !== null ||
+    handleDragRef.current !== null ||
+    gradToolRef.current !== null ||
+    knifeRef.current !== null ||
+    cropEditRef.current !== null ||
+    paintingRef.current !== null ||
+    warpDragRef.current !== null ||
+    anchorDragRef.current !== null ||
+    curveDragRef.current !== null ||
+    rotateDragRef.current !== null ||
+    gradDragRef.current !== null ||
+    maskDragRef.current !== null ||
+    gradMaskRef.current !== null;
+
   /** Let go of whatever is in flight, and say whether anything was. */
   const cancelGesture = useCallback((): boolean => {
     if (!session) return false;
     const held = toolDragRef.current;
-    const inFlight =
-      toolDragRef.current !== null ||
-      handleDragRef.current !== null ||
-      gradToolRef.current !== null ||
-      knifeRef.current !== null ||
-      zoomBoxRef.current !== null ||
-      cropEditRef.current !== null ||
-      paintingRef.current !== null;
+    const inFlight = handleHeld() || zoomBoxRef.current !== null;
     toolDragRef.current = null;
+    // The handles on the canvas each keep their own drag: let go of all
+    // of them, or the next pointer move previews again and the release
+    // commits what Escape was pressed to throw away.
+    for (const ref of [warpDragRef, anchorDragRef, curveDragRef, rotateDragRef, gradDragRef, maskDragRef, gradMaskRef] as { current: unknown }[]) {
+      ref.current = null;
+    }
     setRegionDrag(null);
     handleDragRef.current = null;
     gradToolRef.current = null;
@@ -3117,7 +3168,7 @@ export function App() {
     // A stroke let go of takes what it made for itself with it.
     if (paintingRef.current) {
       paintingRef.current = null;
-      if (strokeMade.current) session.undo();
+      if (strokeMade.current) session.take_back();
       strokeMade.current = false;
       refresh(session);
     } else if (cancelled) refresh(session);
@@ -3130,16 +3181,13 @@ export function App() {
    * part-way is let go of the same way. */
   const undoMidGesture = useCallback((): boolean => {
     if (!session) return false;
-    const dragging =
-      toolDragRef.current !== null ||
-      handleDragRef.current !== null ||
-      gradToolRef.current !== null ||
-      knifeRef.current !== null ||
-      zoomBoxRef.current !== null ||
-      cropEditRef.current !== null ||
-      paintingRef.current !== null;
-    if (dragging) return cancelGesture();
+    // Only while a pointer is down: a drag's ref outliving its release
+    // would otherwise take every later Ctrl+Z for a drag to let go of.
+    if (pointersDown.current.size > 0 && (handleHeld() || zoomBoxRef.current !== null)) return cancelGesture();
     if (session.cancel_preview()) {
+      // The opacity slider keeps what it shows as a draft, kept when it
+      // is let go of: gone with the preview, or the key coming up kept it.
+      setOpacityDraft(null);
       refresh(session);
       return true;
     }
@@ -3203,8 +3251,13 @@ export function App() {
       setSelected(added.id as NodeId);
       setMultiSel([]);
       typeIntoNewText.current = true;
+      justDropped.current = { mark: session.history_mark(), at: performance.now() };
     }
   };
+  /** The block the Text tool put down a moment ago, for a pinch begun
+   * with the same finger to take back: the finger had moved far enough
+   * to be the tool's before the second one landed. */
+  const justDropped = useRef<{ mark: number; at: number } | null>(null);
 
   /** A shape put in the middle of the view at a size it can be seen at,
    * picked — so a rectangle, an ellipse, a line or a text block can be
@@ -3372,6 +3425,14 @@ export function App() {
       if (aWindowIsUp()) {
         // The keys sheet is a window too, and has no Escape of its own.
         if (e.key === "Escape" && showKeys) setShowKeys(false);
+        // Select all over a window is the browser's, which painted the
+        // whole of the app blue: kept to the field the caret is in.
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          e.key.toLowerCase() === "a" &&
+          !isTextEntry(e.target)
+        )
+          e.preventDefault();
         return;
       }
       // F10 goes to the menu bar, as it does in every desktop program:
@@ -3432,7 +3493,8 @@ export function App() {
       // key that takes one back is the same key. Guarding these the way
       // the rest are guarded handed the field's own undo the page's
       // work, which the text-run block noticed at once.
-      const fired = chords.byChord[chordFromEvent(e)];
+      const pressedNow = chordFromEvent(e);
+      const fired = typing && typesAlone(pressedNow) ? undefined : chords.byChord[pressedNow];
       if (fired === "undo" && tool === "Pen" && penPoints.length > 0 && !typing) {
         // Halfway through a path, undo takes back the last anchor put
         // down, as every pen does — not the step before the path began,
@@ -4171,6 +4233,18 @@ export function App() {
     // never reached the tool, so there is nothing to take back.
     dropHeldPress();
     cancelGesture();
+    // One that had reached it and dropped a text block, with nothing
+    // done since, takes the block back: a pinch is not a wish for text.
+    const dropped = justDropped.current;
+    justDropped.current = null;
+    if (session && dropped && performance.now() - dropped.at < 1000 && session.history_mark() === dropped.mark) {
+      typeIntoNewText.current = false;
+      setInlineText(null);
+      session.cancel_preview();
+      session.take_back();
+      setSelected(null);
+      refresh(session);
+    }
     marqueeRef.current = null;
     setMarquee(null);
     paintingRef.current = null;
@@ -4706,7 +4780,7 @@ export function App() {
         try {
           session.as_path(hit);
         } catch (err) {
-          alert(`Node: ${err}`);
+          alert(`Node: ${said(err)}`);
           return;
         }
         setSelected(hit);
@@ -4828,7 +4902,7 @@ export function App() {
         );
         session.paint_source(cloneFrom[0] - x, cloneFrom[1] - y, healing);
       } catch (err) {
-        alert(`Clone: ${err}`);
+        alert(`Clone: ${said(err)}`);
         return;
       }
       paintingRef.current = { width: pressed(e), at: performance.now() };
@@ -4874,7 +4948,7 @@ export function App() {
             return;
           }
         } catch (err) {
-          alert(`Mask: ${err}`);
+          alert(`Mask: ${said(err)}`);
           return;
         }
         if (!hadMask) strokeMade.current = true;
@@ -4901,7 +4975,7 @@ export function App() {
         );
         if (from) session.paint_extend(x, y, paintSize / 2);
       } catch (err) {
-        alert(`Paint: ${err}`);
+        alert(`Paint: ${said(err)}`);
         return;
       }
       strokeEnd.current = [x, y];
@@ -4934,13 +5008,17 @@ export function App() {
           ? "subtract"
           : "replace";
       try {
+        const before = session.history_mark();
         session.pick_similar(x, y, wandTolerance, wandTouching, how);
-        if (selectionFeather > 0 && session.feather_selection(selectionFeather)) session.merge_last();
+        // Folded into the picking only when the picking was a step: the
+        // same region picked again is none, and the softness is its own.
+        const picked = session.history_mark() !== before;
+        if (selectionFeather > 0 && session.feather_selection(selectionFeather) && picked) session.merge_last();
         refresh(session);
       } catch (err) {
         // A click off the page has nothing to spread through: quiet, as
         // a marquee dragged there is.
-        if (!String(err).includes("not on the page")) alert(`Select: ${err}`);
+        if (!String(err).includes("not on the page")) alert(`Select: ${said(err)}`);
       }
       return;
     }
@@ -5145,7 +5223,7 @@ export function App() {
           setMultiSel(copies.length > 1 ? copies : []);
           refresh(session);
         } catch (err) {
-          alert(`Duplicate: ${err}`);
+          alert(`Duplicate: ${said(err)}`);
         }
       }
       drag.target = target;
@@ -5220,7 +5298,7 @@ export function App() {
     try {
       session.resize_canvas(cw, ch, -cx, -cy);
     } catch (err) {
-      alert(`Crop: ${err}`);
+      alert(`Crop: ${said(err)}`);
       return;
     }
     setDocumentSize(cw, ch);
@@ -5698,6 +5776,14 @@ export function App() {
       if (moves.length > 0) {
         drag.moved = true;
         preview(moves.length === 1 ? moves[0] : { Batch: moves });
+      } else if (drag.moved) {
+        // Back where it began: said as where it began. Sending nothing
+        // left the sample before standing, and a drag brought back to
+        // its press ended a pointer's step away from where it started.
+        const back: Command[] = (drag.moving ?? []).map(({ id, t0 }) => ({
+          SetTransform: { id, transform: t0 },
+        }));
+        if (back.length > 0) preview(back.length === 1 ? back[0] : { Batch: back });
       }
     }
   };
@@ -5712,7 +5798,7 @@ export function App() {
     try {
       styleClip.current = session.copy_style(selected);
     } catch (err) {
-      alert(`Copy style: ${err}`);
+      alert(`Copy style: ${said(err)}`);
     }
   };
 
@@ -5728,7 +5814,7 @@ export function App() {
     try {
       session.keep_style(name ?? `Style ${n}`, selected);
     } catch (err) {
-      alert(`Keep style: ${err}`);
+      alert(`Keep style: ${said(err)}`);
       return;
     }
     refresh(session);
@@ -5739,7 +5825,7 @@ export function App() {
     try {
       session.apply_style(name, new Float64Array(selectionSet));
     } catch (err) {
-      alert(`Style: ${err}`);
+      alert(`Style: ${said(err)}`);
       return;
     }
     refresh(session);
@@ -5749,7 +5835,7 @@ export function App() {
     try {
       session.forget_style(name);
     } catch (err) {
-      alert(`Forget style: ${err}`);
+      alert(`Forget style: ${said(err)}`);
       return;
     }
     refresh(session);
@@ -5762,7 +5848,7 @@ export function App() {
     try {
       session.paste_style(styleClip.current, new Float64Array(ids));
     } catch (err) {
-      alert(`Paste style: ${err}`);
+      alert(`Paste style: ${said(err)}`);
       return;
     }
     refresh(session);
@@ -5823,7 +5909,7 @@ export function App() {
           refresh(session);
         }
       } catch (err) {
-        alert(`Knife: ${err}`);
+        alert(`Knife: ${said(err)}`);
       }
       return;
     }
@@ -5909,6 +5995,7 @@ export function App() {
         return;
       }
       try {
+        const before = session.history_mark();
         session.pick_region(
           REGION_KIND[drag.tool],
           shape.x,
@@ -5920,8 +6007,10 @@ export function App() {
         );
         // The softness carries from one region to the next, the way a
         // brush size does, rather than having to be set again each time.
-        // One step with the picking, not a second one to undo apart.
-        if (selectionFeather > 0 && session.feather_selection(selectionFeather)) session.merge_last();
+        // One step with the picking, not a second one to undo apart —
+        // when the picking was a step at all.
+        const picked = session.history_mark() !== before;
+        if (selectionFeather > 0 && session.feather_selection(selectionFeather) && picked) session.merge_last();
         refresh(session);
       } catch (err) {
         // A lasso drawn as a line, or too small to hold anything, picks
@@ -5929,7 +6018,7 @@ export function App() {
         if (String(err).includes("nothing was picked out")) {
           if (how === "replace" && session.pick_none()) refresh(session);
         } else {
-          alert(`Select: ${err}`);
+          alert(`Select: ${said(err)}`);
         }
       }
       return;
@@ -6058,7 +6147,7 @@ export function App() {
         refresh(session);
         setTool("Move");
       } catch (err) {
-        alert(`Frame: ${err}`);
+        alert(`Frame: ${said(err)}`);
       }
       return;
     }
@@ -6493,7 +6582,7 @@ export function App() {
       if (gesture) preview(cmd);
       else run(cmd);
     } catch (err) {
-      alert(`Frame: ${err}`);
+      alert(`Frame: ${said(err)}`);
     }
   };
 
@@ -6786,7 +6875,7 @@ export function App() {
         setTool("Paint");
         refresh(session);
       } catch (err) {
-        alert(`Adjust: ${err}`);
+        alert(`Adjust: ${said(err)}`);
       }
       return;
     }
@@ -6815,7 +6904,7 @@ export function App() {
         setMultiSel([]);
         refresh(session);
       } catch (err) {
-        alert(`Adjust: ${err}`);
+        alert(`Adjust: ${said(err)}`);
       }
       return;
     }
@@ -6833,7 +6922,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Adjust: ${err}`);
+      alert(`Adjust: ${said(err)}`);
     }
   };
 
@@ -6893,7 +6982,7 @@ export function App() {
       );
       refresh(session);
     } catch (err) {
-      alert(`Replace: ${err}`);
+      alert(`Replace: ${said(err)}`);
       return 0;
     }
     return total;
@@ -6916,7 +7005,7 @@ export function App() {
       }
       refresh(session);
     } catch (err) {
-      alert(`Straighten: ${err}`);
+      alert(`Straighten: ${said(err)}`);
     }
   };
 
@@ -6951,7 +7040,7 @@ export function App() {
       refresh(session);
       fitView();
     } catch (err) {
-      alert(`Turn: ${err}`);
+      alert(`Turn: ${said(err)}`);
     }
   };
 
@@ -6963,7 +7052,7 @@ export function App() {
       session.mirror_canvas(acrossX);
       refresh(session);
     } catch (err) {
-      alert(`Mirror: ${err}`);
+      alert(`Mirror: ${said(err)}`);
     }
   };
 
@@ -6978,7 +7067,7 @@ export function App() {
       refresh(session);
       fitView();
     } catch (err) {
-      alert(`Canvas size: ${err}`);
+      alert(`Canvas size: ${said(err)}`);
     }
   };
 
@@ -7193,7 +7282,7 @@ export function App() {
       session.reparent(id, parent, index);
       refresh(session);
     } catch (err) {
-      alert(`Move: ${err}`);
+      alert(`Move: ${said(err)}`);
     }
   };
 
@@ -7336,7 +7425,7 @@ export function App() {
       inlineText.fresh !== undefined && session.history_mark() === inlineText.fresh;
     if (fresh && (!keep || inlineText.value.trim() === "")) {
       session.cancel_preview();
-      session.undo();
+      session.take_back();
       if (selected === inlineText.id) setSelected(null);
       refresh(session);
     } else if (keep) {
@@ -7401,7 +7490,7 @@ export function App() {
         session.remove_anchor(anchor.id, anchor.idx);
         refresh(session);
       } catch (err) {
-        alert(`Remove anchor: ${err}`);
+        alert(`Remove anchor: ${said(err)}`);
       }
       return;
     }
@@ -7420,7 +7509,7 @@ export function App() {
     try {
       session.delete_layers(new Float64Array(ids));
     } catch (err) {
-      alert(`Delete: ${err}`);
+      alert(`Delete: ${said(err)}`);
       return;
     }
     refresh(session);
@@ -7433,7 +7522,7 @@ export function App() {
     try {
       session.copy_nodes(new Float64Array(selectionSet));
     } catch (err) {
-      alert(`Copy: ${err}`);
+      alert(`Copy: ${said(err)}`);
       return;
     }
     // And take the system clipboard with it. A picture copied in another
@@ -7454,7 +7543,15 @@ export function App() {
 
   const pasteClipboard = () => {
     if (!session) return;
-    const ids = Array.from(session.paste()) as NodeId[];
+    let ids: NodeId[];
+    try {
+      ids = Array.from(session.paste()) as NodeId[];
+    } catch (err) {
+      // A live copy whose original was not copied with it, say: refused
+      // in words, where it used to fail with nothing on the page.
+      alert(`Paste: ${said(err)}`);
+      return;
+    }
     if (ids.length === 0) return;
     // Everything pasted is picked, which is what makes pasting a set of
     // layers and dragging them somewhere one gesture rather than three.
@@ -7479,8 +7576,9 @@ export function App() {
       // grouping, since they differ by one modifier. A chord is one
       // string now, so the two cannot be confused and the order of the
       // rows does not matter.
-      const fired = chords.byChord[chordFromEvent(e)];
-      if (fired && (!typing || firesWhileTyping(fired))) {
+      const pressedNow = chordFromEvent(e);
+      const fired = chords.byChord[pressedNow];
+      if (fired && (!typing || (firesWhileTyping(fired) && !typesAlone(pressedNow)))) {
         // Everything but paste, which asks for the event's own
         // clipboard first and has to let it through.
         if (fired !== "paste") e.preventDefault();
@@ -7635,7 +7733,7 @@ export function App() {
       session.align_nodes_to(new Float64Array(movableSelection), mode, to, key);
       refresh(session);
     } catch (err) {
-      alert(`Align: ${err}`);
+      alert(`Align: ${said(err)}`);
     }
   };
 
@@ -7681,7 +7779,7 @@ export function App() {
       session.flip_nodes(new Float64Array(movableSelection), horizontal);
       refresh(session);
     } catch (err) {
-      alert(`Flip: ${err}`);
+      alert(`Flip: ${said(err)}`);
     }
   };
 
@@ -7694,7 +7792,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Combine: ${err}`);
+      alert(`Combine: ${said(err)}`);
     }
   };
 
@@ -7714,7 +7812,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Split at anchor: ${err}`);
+      alert(`Split at anchor: ${said(err)}`);
     }
   };
 
@@ -7731,7 +7829,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Join: ${err}`);
+      alert(`Join: ${said(err)}`);
     }
   };
 
@@ -7760,7 +7858,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Repeat: ${err}`);
+      alert(`Repeat: ${said(err)}`);
     }
   };
 
@@ -7783,7 +7881,7 @@ export function App() {
       if (only >= 0) pickedAnchorRef.current = null;
       refresh(session);
     } catch (err) {
-      alert(`Round the corners: ${err}`);
+      alert(`Round the corners: ${said(err)}`);
     }
   };
 
@@ -7805,7 +7903,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Blend: ${err}`);
+      alert(`Blend: ${said(err)}`);
     }
   };
 
@@ -7821,7 +7919,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Stroke to shape: ${err}`);
+      alert(`Stroke to shape: ${said(err)}`);
     }
   };
 
@@ -7849,7 +7947,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Offset path: ${err}`);
+      alert(`Offset path: ${said(err)}`);
     }
   };
 
@@ -7878,7 +7976,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Trace the picture: ${err}`);
+      alert(`Trace the picture: ${said(err)}`);
     }
   };
 
@@ -7898,7 +7996,7 @@ export function App() {
       session.simplify_path(selected, tolerance);
       refresh(session);
     } catch (err) {
-      alert(`Simplify path: ${err}`);
+      alert(`Simplify path: ${said(err)}`);
     }
   };
 
@@ -7913,7 +8011,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Text to shapes: ${err}`);
+      alert(`Text to shapes: ${said(err)}`);
     }
   };
 
@@ -7928,7 +8026,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Merge: ${err}`);
+      alert(`Merge: ${said(err)}`);
     }
   };
 
@@ -7996,7 +8094,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Group: ${err}`);
+      alert(`Group: ${said(err)}`);
     }
   };
 
@@ -8029,7 +8127,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Copy: ${err}`);
+      alert(`Copy: ${said(err)}`);
     }
   };
 
@@ -8041,7 +8139,7 @@ export function App() {
       setMultiSel([]);
       refresh(session);
     } catch (err) {
-      alert(`Ungroup: ${err}`);
+      alert(`Ungroup: ${said(err)}`);
     }
   };
 
@@ -8070,7 +8168,7 @@ export function App() {
       try {
         session.remove_anchor(selected, idx);
       } catch (err) {
-        alert(`Remove anchor: ${err}`);
+        alert(`Remove anchor: ${said(err)}`);
         return;
       }
       refresh(session);
@@ -8587,6 +8685,8 @@ export function App() {
 
   const onCurveHandleUp = () => {
     handleDragRef.current = null;
+    // Let go of, or Ctrl+Z after it would take it for a drag still held.
+    curveDragRef.current = null;
     if (session?.commit_preview()) refresh(session);
   };
 
@@ -9006,6 +9106,10 @@ export function App() {
     }
     const from = field === "w" ? w : h;
     if (from <= 0 || value <= 0 || !selLocal) return;
+    // A tenth of a pixel at the least: shrunk to a millionth, a layer's
+    // transform had no precision left to grow back with, and typing its
+    // width again came to half of it, or to nothing ever after.
+    value = Math.max(value, 0.1);
     // A frame is given the size rather than scaled into it: what its
     // width means is how many pixels it exports, so typing one has to
     // change that number and leave its contents the size they are.
@@ -9065,7 +9169,7 @@ export function App() {
       setMultiSel(copies.slice(1));
       refresh(session);
     } catch (err) {
-      alert(`Duplicate: ${err}`);
+      alert(`Duplicate: ${said(err)}`);
     }
   };
 
@@ -9183,7 +9287,7 @@ export function App() {
     try {
       session.apply_as(JSON.stringify(masked), `Mask ${below.name} with ${selectedLayer?.name ?? "the shape"}`);
     } catch (err) {
-      alert(`Mask: ${err}`);
+      alert(`Mask: ${said(err)}`);
     }
     refresh(session);
     setSelected(below.id);
@@ -9240,7 +9344,7 @@ export function App() {
     try {
       points = session.auto_levels(selected);
     } catch (err) {
-      alert(`Auto levels: ${err}`);
+      alert(`Auto levels: ${said(err)}`);
       return;
     }
     if (points.length !== 2) return;
@@ -9270,7 +9374,7 @@ export function App() {
     try {
       ends = session.auto_color(selected);
     } catch (err) {
-      alert(`Auto colour: ${err}`);
+      alert(`Auto colour: ${said(err)}`);
       return;
     }
     if (ends.length !== 6) return;
@@ -9316,7 +9420,7 @@ export function App() {
     try {
       read = session.neutral_balance(selected, x, y);
     } catch (err) {
-      alert(`White balance: ${err}`);
+      alert(`White balance: ${said(err)}`);
       return;
     }
     if (read.length !== 2) return; // nothing there to balance
@@ -9457,7 +9561,7 @@ export function App() {
     try {
       return await writeFiles(what, files, docPath);
     } catch (err) {
-      alert(`${what} failed: ${err}`);
+      alert(`${what} failed: ${said(err)}`);
       return false;
     }
   };
@@ -9496,7 +9600,7 @@ export function App() {
       setSavedAt(at);
       remember(target);
     } catch (err) {
-      alert(`Save failed: ${err}`);
+      alert(`Save failed: ${said(err)}`);
     } finally {
       saving.current = false;
     }
@@ -9625,7 +9729,7 @@ export function App() {
         new ClipboardItem({ "image/png": blob }),
       ]);
     } catch (err) {
-      alert(`Copy as image: ${err}`);
+      alert(`Copy as image: ${said(err)}`);
     }
   };
 
@@ -9684,7 +9788,7 @@ export function App() {
     try {
       bytes = await readPath(path);
     } catch (err) {
-      alert(`Could not open ${baseName(path)}: ${err}`);
+      alert(`Could not open ${baseName(path)}: ${said(err)}`);
       forget(path);
       return;
     }
@@ -9704,8 +9808,17 @@ export function App() {
    * The place waits for the new session to be the one in hand. It has
    * no file to save back to, so Save asks where, as a .chitra. */
   const pendingOpen = useRef<File | null>(null);
+  /** The document an Open of another program's file replaced, kept until
+   * the file is read, to go back to if it cannot be. */
+  const openedOver = useRef<{
+    session: WasmSession;
+    name: string;
+    path: string | null;
+    savedAt: number;
+  } | null>(null);
   const openForeign = (file: File) => {
     pendingOpen.current = file;
+    openedOver.current = session ? { session, name: docName, path: docPath, savedAt } : null;
     newDocument(false);
     setDocName(file.name.replace(/\.[a-z0-9]+$/i, "") || "untitled");
   };
@@ -9725,7 +9838,7 @@ export function App() {
       ]);
       if (path) await openPath(path);
     } catch (err) {
-      alert(`Open failed: ${err}`);
+      alert(`Open failed: ${said(err)}`);
     }
   };
 
@@ -9809,9 +9922,15 @@ export function App() {
    * Photoshop file as its layers, a PDF as a page drawn at a resolution
    * asked for, a camera's raw file developed, anything else as pixels. */
   const placeImageFile = useCallback(
-    (file: File) => {
+    (
+      file: File,
+      /** An Open, not a Place: what to do when the file cannot be read,
+       * which is put back the document it was opened over. */
+      undoOpen?: () => void,
+    ) => {
       if (!session) return;
       const name = file.name || "Pasted image";
+      const verb = undoOpen ? "open" : "place";
       placing.current = placing.current.then(() => file.arrayBuffer()).then(async (buf) => {
         const raw = new Uint8Array(buf);
         const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
@@ -9832,6 +9951,7 @@ export function App() {
             });
           } catch (err) {
             alert(`Could not open ${name}: ${said(err)}`);
+            undoOpen?.();
           } finally {
             setImporting(null);
           }
@@ -9864,11 +9984,15 @@ export function App() {
             setImportNotes(notes.length > 0 ? { name, notes } : null);
           }
         } catch (err) {
-          alert(kind === "picture" ? unreadable(name, raw, err) : `Could not place ${name}: ${said(err)}`);
+          alert(kind === "picture" ? unreadable(name, raw, err) : `Could not ${verb} ${name}: ${said(err)}`);
+          undoOpen?.();
         } finally {
           if (slow) setImporting(null);
         }
-      }).catch((err) => alert(`Could not read ${name}: ${said(err)}`));
+      }).catch((err) => {
+        alert(`Could not read ${name}: ${said(err)}`);
+        undoOpen?.();
+      });
     },
     [session, placed],
   );
@@ -9877,7 +10001,30 @@ export function App() {
     const file = pendingOpen.current;
     if (!file || !session) return;
     pendingOpen.current = null;
-    placeImageFile(file);
+    const before = openedOver.current;
+    openedOver.current = null;
+    placeImageFile(
+      file,
+      before
+        ? () => {
+            // A file that could not be read leaves the document it was
+            // opened over, rather than an empty page named after it.
+            const s = before.session;
+            setSession(s);
+            setDocumentSize(s.width, s.height);
+            setCmyk(s.cmyk);
+            setDocDpi(s.dpi);
+            setHasIcc(s.has_cmyk_profile);
+            setDocName(before.name);
+            setDocPath(before.path);
+            setSavedAt(before.savedAt);
+            setSelected(null);
+            setMultiSel([]);
+            refresh(s);
+            fitView();
+          }
+        : undefined,
+    );
   }, [session, placeImageFile]);
 
   /** A camera's raw file in the develop window: being placed (`layer`
@@ -9975,7 +10122,7 @@ export function App() {
         refresh(session);
       }
     } catch (err) {
-      alert(`Could not develop ${d.name}: ${err}`);
+      alert(`Could not develop ${d.name}: ${said(err)}`);
     } finally {
       session.raw_close();
       rawPacked.current = null;
@@ -9996,7 +10143,7 @@ export function App() {
           was,
         );
       } catch (err) {
-        alert(`Could not develop ${next.name}: ${err}`);
+        alert(`Could not develop ${next.name}: ${said(err)}`);
       } finally {
         session.raw_close();
         rawDone.current += 1;
@@ -10043,7 +10190,7 @@ export function App() {
         layer: layer.id,
       });
     } catch (err) {
-      alert(`${err}`);
+      alert(`${said(err)}`);
     } finally {
       setImporting(null);
     }
@@ -10077,7 +10224,7 @@ export function App() {
         else session.stage_redevelop(t.id, settings);
       }
     } catch (err) {
-      alert(`Could not develop every picture: ${err}`);
+      alert(`Could not develop every picture: ${said(err)}`);
     } finally {
       // What was developed before anything failed still goes in, as one step.
       try {
@@ -10353,7 +10500,7 @@ export function App() {
       try {
         WasmSession.register_font(name, new Uint8Array(buf));
       } catch (err) {
-        alert(`Could not load font: ${err}`);
+        alert(`Could not load font: ${said(err)}`);
         return;
       }
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
@@ -10383,7 +10530,7 @@ export function App() {
       try {
         kind = JSON.parse(session.color_lookup_kind(text, file.name.replace(/\.cube$/i, "")));
       } catch (err) {
-        alert(`Could not read ${file.name}: ${err}`);
+        alert(`Could not read ${file.name}: ${said(err)}`);
         return;
       }
       if (lookupFor.current === "replace") setKind(kind, false);
@@ -10399,9 +10546,13 @@ export function App() {
       try {
         session.set_cmyk_profile(new Uint8Array(buf));
         setHasIcc(true);
+        // Not a step in the history, but the file it is saved to changes
+        // with it — its TIFF and PDF come out in other inks — so it is
+        // work to save, and asked about before it is thrown away.
+        setSavedAt(-1);
         refresh(session);
       } catch (err) {
-        alert(`Could not use ICC profile: ${err}`);
+        alert(`Could not use ICC profile: ${said(err)}`);
         return;
       }
       // Said now rather than at every press of Proof: a profile that
@@ -10439,7 +10590,7 @@ export function App() {
         setHasScreenIcc(true);
         refresh(session);
       } catch (err) {
-        alert(`Could not use monitor profile: ${err}`);
+        alert(`Could not use monitor profile: ${said(err)}`);
       }
     });
   };
@@ -10876,7 +11027,7 @@ export function App() {
               fitView();
             }
           } catch (err) {
-            alert(`Trim: ${err}`);
+            alert(`Trim: ${said(err)}`);
           }
         }),
         SEP,
@@ -11692,7 +11843,7 @@ export function App() {
               refresh(session);
               fitView();
             } catch (err) {
-              alert(`Resize page: ${err}`);
+              alert(`Resize page: ${said(err)}`);
             }
           }}
         />
@@ -11964,7 +12115,7 @@ export function App() {
               setHasScreenIcc(true);
               refresh(session);
             } catch (err) {
-              alert(`Could not use monitor profile: ${err}`);
+              alert(`Could not use monitor profile: ${said(err)}`);
             }
           }}
           onClearScreenIcc={clearScreenProfile}
@@ -12292,7 +12443,7 @@ export function App() {
                 try {
                   if (session?.grow_selection(growBy)) refresh(session);
                 } catch (err) {
-                  alert(`Select: ${err}`);
+                  alert(`Select: ${said(err)}`);
                 }
               }}
             />
@@ -13979,7 +14130,7 @@ export function App() {
                   // rename is not a wish to see it, so that is taken back.
                   const shown = compShownBy.current;
                   if (session && shown && shown.name === c.name && Date.now() - shown.at < 800) {
-                    session.undo();
+                    session.take_back();
                     refresh(session);
                   }
                   compShownBy.current = null;
@@ -14413,7 +14564,7 @@ export function App() {
                             else session.override_child(selected, i);
                             refresh(session);
                           } catch (err) {
-                            alert(`Copy: ${err}`);
+                            alert(`Copy: ${said(err)}`);
                           }
                         }}
                         aria-label={
@@ -14498,11 +14649,19 @@ export function App() {
                           if (asGiven(e.currentTarget)) return;
                           // An emptied box is not nought: it was read as
                           // one, and moved the layer to the page's edge.
-                          const text = e.currentTarget.value;
+                          const el = e.currentTarget;
+                          const text = el.value;
                           const v = Number(text);
                           if (text.trim() !== "" && Number.isFinite(v))
                             setGeometry(field, v / perPixel(units, docDpi));
-                          else e.currentTarget.value = String(inUnits(value, units, docDpi));
+                          // A number the layer would not take (nought, less,
+                          // or what it already is) leaves the field: it
+                          // stays the same element, so it is put back to
+                          // what the layer says. One that was taken is a
+                          // new field by then.
+                          requestAnimationFrame(() => {
+                            if (el.isConnected) el.value = el.defaultValue;
+                          });
                         }}
                         aria-label={
                           field === "w" || field === "h"
@@ -14541,10 +14700,15 @@ export function App() {
                       onKeyDown={fieldKeys}
                       onBlur={(e) => {
                         if (asGiven(e.currentTarget)) return;
-                        const text = e.currentTarget.value;
+                        const el = e.currentTarget;
+                        const text = el.value;
                         const v = Number(text);
                         if (text.trim() !== "" && Number.isFinite(v)) setAngle(v);
-                        else e.currentTarget.value = String(Math.round(selAngle() * 10) / 10);
+                        // Held to what it can be, or refused: the field
+                        // says what the layer now is.
+                        requestAnimationFrame(() => {
+                          if (el.isConnected) el.value = el.defaultValue;
+                        });
                       }}
                       aria-label="Angle"
                       title="Degrees clockwise"
@@ -14563,10 +14727,15 @@ export function App() {
                       onKeyDown={fieldKeys}
                       onBlur={(e) => {
                         if (asGiven(e.currentTarget)) return;
-                        const text = e.currentTarget.value;
+                        const el = e.currentTarget;
+                        const text = el.value;
                         const v = Number(text);
                         if (text.trim() !== "" && Number.isFinite(v)) setSkew(v);
-                        else e.currentTarget.value = String(Math.round(selSkew() * 10) / 10);
+                        // Held to what it can be, or refused: the field
+                        // says what the layer now is.
+                        requestAnimationFrame(() => {
+                          if (el.isConnected) el.value = el.defaultValue;
+                        });
                       }}
                       aria-label="Skew"
                       title="Degrees the sides lean, from -85 to 85"
@@ -14708,7 +14877,7 @@ export function App() {
                       session.text_along(selectedLayer.id, shape);
                       refresh(session);
                     } catch (err) {
-                      alert(`Text on path: ${err}`);
+                      alert(`Text on path: ${said(err)}`);
                     }
                   }}
                 />
@@ -15913,7 +16082,7 @@ function RawDevelopDialog({
     try {
       setS({ ...RAW_DEFAULTS, ...(JSON.parse(session.raw_auto(JSON.stringify(s))) as Partial<RawSettings>) });
     } catch (err) {
-      alert(`${err}`);
+      alert(`${said(err)}`);
     }
   };
   const percent = (f: number) => (f >= 0.001 ? `${(f * 100).toFixed(f < 0.1 ? 1 : 0)}%` : f > 0 ? "<0.1%" : "none");
@@ -16467,7 +16636,12 @@ function PdfDialog({
   const go = () => ok && onPlace(page - 1, dpi);
   const enter = (e: React.KeyboardEvent) => {
     e.stopPropagation();
-    if (e.key === "Enter") go();
+    if (e.key === "Enter") {
+      // Kept from the menu row the focus goes back to as the
+      // window closes, which the key would otherwise press.
+      e.preventDefault();
+      go();
+    }
   };
   return (
     <div className="modal-scrim" onPointerDown={onCancel}>
@@ -16560,7 +16734,12 @@ function StrokeDialog({
             value={width}
             onValue={setWidth}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && width > 0) onStroke(width, side);
+              if (e.key === "Enter" && width > 0) {
+                // Kept from the menu row the focus goes back to as the
+                // window closes, which the key would otherwise press.
+                e.preventDefault();
+                onStroke(width, side);
+              }
             }}
             aria-label="Stroke width"
           />
@@ -16850,7 +17029,12 @@ function FeatherDialog({
             value={Math.round(radius)}
             onValue={set}
             onKeyDown={(e) => {
-              if (e.key === "Enter") onApply();
+              if (e.key === "Enter") {
+                // Kept from the menu row the focus goes back to as the
+                // window closes, which the key would otherwise press.
+                e.preventDefault();
+                onApply();
+              }
             }}
             aria-label="Feather radius"
           />
@@ -16939,7 +17123,12 @@ function StraightenDialog({
             value={degrees}
             onValue={set}
             onKeyDown={(e) => {
-              if (e.key === "Enter") onApply();
+              if (e.key === "Enter") {
+                // Kept from the menu row the focus goes back to as the
+                // window closes, which the key would otherwise press.
+                e.preventDefault();
+                onApply();
+              }
             }}
             aria-label="Straighten degrees"
           />
@@ -17037,7 +17226,12 @@ function ScalePageDialog({
         value={value}
         onValue={set}
         onKeyDown={(e) => {
-          if (e.key === "Enter") apply();
+          if (e.key === "Enter") {
+            // Kept from the menu row the focus goes back to as the
+            // window closes, which the key would otherwise press.
+            e.preventDefault();
+            apply();
+          }
         }}
         aria-label={label}
       />
@@ -17106,7 +17300,12 @@ function CanvasSizeDialog({
   // Which point of the old page stays put, as a fraction along each side.
   const [anchor, setAnchor] = useState<[number, number]>([0.5, 0.5]);
   const px = (v: number) => Math.max(1, Math.round(v / per));
+  // A page is at least a pixel each way: nought or less, typed and sent
+  // with Enter before the field could hold it to that, made a one-pixel
+  // page in one step.
+  const fits = Number.isFinite(w) && Number.isFinite(h) && w / per >= 0.5 && h / per >= 0.5;
   const apply = () => {
+    if (!fits) return;
     const [nw, nh] = [px(w), px(h)];
     // The anchor point of the old page has to land on the same point of
     // the new one, and every top-level layer carries that shift.
@@ -17141,7 +17340,12 @@ function CanvasSizeDialog({
         value={value}
         onValue={set}
         onKeyDown={(e) => {
-          if (e.key === "Enter") apply();
+          if (e.key === "Enter") {
+            // Kept from the menu row the focus goes back to as the
+            // window closes, which the key would otherwise press.
+            e.preventDefault();
+            apply();
+          }
         }}
         aria-label={label}
       />
@@ -17196,6 +17400,7 @@ function CanvasSizeDialog({
           </button>
           <button
             className="mask-button primary"
+            disabled={!fits}
             onClick={apply}
             aria-label="Resize the page"
           >

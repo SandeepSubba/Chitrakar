@@ -12011,9 +12011,27 @@ pub fn own_space(doc: &Document, id: NodeId) -> Result<Transform, DocError> {
 }
 
 /// The frame under a document point: the topmost artboard whose own box
-/// covers it, searched the way a pick is. `None` off every frame.
+/// covers it, searched the way a pick is — and only when the frame is
+/// what shows there. A layer above it covering the point (a photograph
+/// laid over the page, locked or not) is what the point is on, and what
+/// is drawn there goes on the page over it: put into the frame, it was
+/// drawn under the photograph, where nobody could see it. `None` off
+/// every frame, or where something above one covers it.
 pub fn frame_at(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
-    frame_in(doc, doc.root(), x, y, Transform::default())
+    Ok(
+        match frame_in(doc, doc.root(), x, y, Transform::default())? {
+            Under::Frame(frame) => Some(frame),
+            Under::Covered | Under::Open => None,
+        },
+    )
+}
+
+/// What a point is on, walking down from the top: a frame, something
+/// that is not one, or nothing yet.
+enum Under {
+    Frame(NodeId),
+    Covered,
+    Open,
 }
 
 fn frame_in(
@@ -12022,31 +12040,67 @@ fn frame_in(
     x: f32,
     y: f32,
     parent: Transform,
-) -> Result<Option<NodeId>, DocError> {
+) -> Result<Under, DocError> {
     for &child in doc.children_of(group)?.iter().rev() {
         let node = doc.node(child)?;
-        if !node.visible || node.locked {
+        if !node.visible {
             continue;
         }
         let t = parent.compose(node.transform);
         match &node.kind {
             NodeKind::Artboard { width, height, .. } => {
+                if node.locked {
+                    continue;
+                }
                 if let Some((lx, ly)) = to_local(t, x, y) {
                     if lx >= 0.0 && ly >= 0.0 && lx < *width && ly < *height {
-                        // A frame inside a frame is the one that counts.
-                        return Ok(Some(frame_in(doc, child, x, y, t)?.unwrap_or(child)));
+                        // A frame inside a frame is the one that counts,
+                        // unless something of this one's covers it — then
+                        // what is drawn goes on top, in this one.
+                        return Ok(match frame_in(doc, child, x, y, t)? {
+                            Under::Frame(inner) => Under::Frame(inner),
+                            Under::Covered | Under::Open => Under::Frame(child),
+                        });
                     }
                 }
             }
-            NodeKind::Group => {
-                if let Some(hit) = frame_in(doc, child, x, y, t)? {
-                    return Ok(Some(hit));
+            NodeKind::Group => match frame_in(doc, child, x, y, t)? {
+                Under::Open => {}
+                found => return Ok(found),
+            },
+            _ => {
+                if covers(doc, child, parent, x, y)? {
+                    return Ok(Under::Covered);
                 }
             }
-            _ => {}
         }
     }
-    Ok(None)
+    Ok(Under::Open)
+}
+
+/// Whether a layer that is not a frame or a group is there at a point,
+/// the way a pick finds it — a locked one too, which a pick passes
+/// through but which still hides what is under it.
+fn covers(
+    doc: &Document,
+    child: NodeId,
+    parent: Transform,
+    x: f32,
+    y: f32,
+) -> Result<bool, DocError> {
+    if hit_child(doc, child, x, y, parent)?.is_some() {
+        return Ok(true);
+    }
+    let node = doc.node(child)?;
+    if !node.locked || matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_)) {
+        return Ok(false);
+    }
+    let inside = match node_visual_bounds(doc, child)? {
+        Bounds::Rect(x0, y0, x1, y1) => x >= x0 && y >= y0 && x < x1 && y < y1,
+        Bounds::Everything => true,
+        Bounds::None => false,
+    };
+    Ok(inside && shows_at(doc, child, parent, x, y)?)
 }
 
 /// A frame rendered on its own, upright, at the size it shows on the

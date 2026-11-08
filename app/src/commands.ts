@@ -75,7 +75,20 @@ export function claimable(chord: string): boolean {
   const parts = chord.split("+");
   const key = parts.pop()!;
   if (parts.includes("mod") || parts.includes("alt")) return true;
+  // Space alone is the hand: held, it pans, and a command given it took
+  // the pan away (and showed as a key cap with nothing on it).
+  if (key === " ") return false;
   return !/^[a-z0-9[\]]$/.test(key);
+}
+
+/** Whether a chord is a character typed: no Ctrl, ⌘ or Alt with it. Such
+ * a chord is the command's only away from a field — in a text box a
+ * minus given to Duplicate duplicated the layer and the minus was lost,
+ * and one given to Undo undid the typing under way. */
+export function typesAlone(chord: string): boolean {
+  const parts = chord.split("+");
+  parts.pop();
+  return !parts.includes("mod") && !parts.includes("alt");
 }
 
 const isCommandId = (s: unknown): s is CommandId =>

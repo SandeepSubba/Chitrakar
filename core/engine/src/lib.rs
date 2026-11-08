@@ -336,6 +336,22 @@ enum Slot {
 /// inverse restores neither the size nor the layers — the same is true of
 /// a second mirror or a second turn, and every one of them has to be
 /// undone in its own right.
+/// What a copy of a layer is called: "Rect copy", and a copy of that
+/// "Rect copy 2", "Rect copy 3" — not "Rect copy copy copy", which six
+/// presses of Duplicate made, and which ran on over many lines of the
+/// history.
+fn copy_name(name: &str) -> String {
+    if name.ends_with(" copy") {
+        return format!("{name} 2");
+    }
+    if let Some((stem, n)) = name.rsplit_once(" copy ") {
+        if let Ok(n) = n.parse::<u32>() {
+            return format!("{stem} copy {}", n.saturating_add(1));
+        }
+    }
+    format!("{name} copy")
+}
+
 fn slots_of(cmd: &Command) -> Option<Vec<Slot>> {
     let field = |id: &NodeId, what| Some(vec![Slot::Field(*id, what)]);
     match cmd {
@@ -1464,6 +1480,11 @@ impl Session {
     fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
         self.commit_preview(); // a stray preview must not leak into this edit
         let label = label.unwrap_or_else(|| self.describe(&cmd));
+        // A value set to what it already is — a shape filled with its own
+        // colour, a canvas given its own size — is no step.
+        if slots_of(&cmd).is_some() {
+            return self.apply_labeled_if_changed(cmd, label).map(|_| ());
+        }
         let inverse = self.apply_internal(cmd)?;
         let serial = self.next_serial();
         self.undo.push(HistoryEntry {
@@ -1554,13 +1575,13 @@ impl Session {
     /// it is: tried, and its own way back compared with it. When it
     /// would change something, it is taken back again.
     ///
-    /// Only asked of one command that restates a value (`slots_of` names
-    /// it), whose way back is the value it found: the same value is the
-    /// same command. A command that is its own way back — turning the
-    /// page over — says the same thing whatever it changes, and a batch
-    /// is taken at its word.
+    /// Only asked of commands that restate a value (`slots_of` names
+    /// them, a batch of them too), whose way back is the value each
+    /// found: the same value is the same command. A command that is its
+    /// own way back — turning the page over — says the same thing
+    /// whatever it changes, and is taken at its word.
     fn changes_nothing(&mut self, undoing: &Command) -> bool {
-        if matches!(undoing, Command::Batch(_)) || slots_of(undoing).is_none() {
+        if slots_of(undoing).is_none() {
             return false;
         }
         let Ok(said) = serde_json::to_string(undoing) else {
@@ -1569,7 +1590,14 @@ impl Session {
         let Ok(back) = self.apply_internal(undoing.clone()) else {
             return false;
         };
-        if serde_json::to_string(&back).is_ok_and(|now| now == said) {
+        // A batch's way back is its own ways back in the other order.
+        let now = match &back {
+            Command::Batch(back) => {
+                serde_json::to_string(&Command::Batch(back.iter().rev().cloned().collect()))
+            }
+            other => serde_json::to_string(other),
+        };
+        if now.is_ok_and(|now| now == said) {
             return true;
         }
         // It changed something: put the gesture's end back.
@@ -1629,6 +1657,20 @@ impl Session {
                 Ok(true)
             }
         }
+    }
+
+    /// Undo the newest step and forget it, rather than keeping it to be
+    /// redone: for a step that was the start of something let go of —
+    /// the copy an alt-drag began by making, a stroke's layer, a text
+    /// block nothing was written into. Undone the plain way, each stood
+    /// in the redo list, and redoing brought back a copy lying on its
+    /// original, an empty layer or a block reading "Text".
+    pub fn take_back(&mut self) -> Result<bool, EngineError> {
+        if !self.undo()? {
+            return Ok(false);
+        }
+        self.redo.pop();
+        Ok(true)
     }
 
     pub fn redo(&mut self) -> Result<bool, EngineError> {
@@ -3729,7 +3771,7 @@ impl Session {
             NodeKind::Instance { of: original, .. } => original,
             _ => of,
         };
-        let name = format!("{} copy", self.doc.node(target)?.name);
+        let name = copy_name(&self.doc.node(target)?.name);
         let parent = self.doc.parent_of(of).unwrap_or_else(|| self.doc.root());
         let index = self
             .doc
@@ -5451,7 +5493,7 @@ impl Session {
     ) -> Result<NodeId, EngineError> {
         let mut node = self.doc.node(src)?.clone();
         if style != CopyStyle::Exact {
-            node.name = format!("{} copy", node.name);
+            node.name = copy_name(&node.name);
         }
         // The same rule the clipboard goes by: a copy of a layer that is
         // being copied alongside it points at the one being made, and
@@ -9611,8 +9653,14 @@ impl Session {
             ));
         };
         let surface = self.render()?;
-        chitrakar_codecs::export_cmyk_tiff(&surface.pixels, surface.width, surface.height, icc)
-            .map_err(|e| EngineError::BadCommand(e.to_string()))
+        chitrakar_codecs::export_cmyk_tiff(
+            &surface.pixels,
+            surface.width,
+            surface.height,
+            icc,
+            self.doc.meta.dpi,
+        )
+        .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
     /// Export a one-page PDF: live vectors and images where PDF can carry
@@ -10820,6 +10868,11 @@ impl Session {
         dx: f32,
         dy: f32,
     ) -> Result<(), EngineError> {
+        // The page as it is, where it is: no step, and nothing changed.
+        if width == self.doc.meta.width && height == self.doc.meta.height && dx == 0.0 && dy == 0.0
+        {
+            return Ok(());
+        }
         self.apply(Command::ResizeCanvas {
             width,
             height,
@@ -10997,6 +11050,10 @@ impl Session {
         // need. One that only goes the first way was taken, and every
         // TIFF and PDF made with it failed afterwards, long after the
         // profile was the thing to blame.
+        // Not a press profile at all is said as that, first.
+        chitrakar_color::cms::CmykCms::new(&icc).map_err(|e| {
+            EngineError::BadCommand(format!("this is not a CMYK press profile ({e})"))
+        })?;
         chitrakar_color::cms::RgbToCmyk::new(&icc)
             .and_then(|out| out.separate(&[0.5, 0.5, 0.5]))
             .map_err(|e| {
@@ -22734,6 +22791,68 @@ mod tests {
         let err = session.set_cmyk_profile(icc).unwrap_err().to_string();
         assert!(err.contains("not separate"), "{err}");
         assert!(session.document().cmyk_profile_bytes().is_none());
+    }
+
+    /// What is drawn over a frame goes into it only where the frame is
+    /// what shows: a picture laid over the page, locked or not, covers
+    /// it, and a shape put into the frame there was drawn under the
+    /// picture where nobody could see it.
+    #[test]
+    fn a_frame_under_a_picture_takes_nothing_drawn_over_it() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let frame = session
+            .add_artboard("Frame", 200.0, 100.0, 180.0, 180.0, None)
+            .unwrap();
+        assert_eq!(
+            session.frame_at(300.0, 200.0),
+            Some(frame),
+            "bare, it takes it"
+        );
+        let photo = add_rect(&mut session, "photo", 400.0, 300.0);
+        assert_eq!(session.frame_at(300.0, 200.0), None, "covered, it does not");
+        session
+            .apply(Command::SetLocked {
+                id: photo,
+                locked: true,
+            })
+            .unwrap();
+        assert_eq!(
+            session.frame_at(300.0, 200.0),
+            None,
+            "nor when the cover is locked"
+        );
+        session
+            .apply(Command::SetVisible {
+                id: photo,
+                visible: false,
+            })
+            .unwrap();
+        assert_eq!(
+            session.frame_at(300.0, 200.0),
+            Some(frame),
+            "hidden, it is not there"
+        );
+    }
+
+    #[test]
+    fn a_copy_of_a_copy_is_numbered() {
+        assert_eq!(copy_name("Rect 1"), "Rect 1 copy");
+        assert_eq!(copy_name("Rect 1 copy"), "Rect 1 copy 2");
+        assert_eq!(copy_name("Rect 1 copy 2"), "Rect 1 copy 3");
+        assert_eq!(copy_name("Notes copy of"), "Notes copy of copy");
+    }
+
+    /// A step taken back is gone: not undone into the redo list, where
+    /// redoing it brought back what was let go of.
+    #[test]
+    fn a_step_taken_back_cannot_be_redone() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        add_rect(&mut session, "a", 20.0, 20.0);
+        let a = add_rect(&mut session, "b", 10.0, 10.0);
+        assert!(session.take_back().unwrap());
+        assert!(session.document().node(a).is_err(), "gone");
+        assert!(!session.redo().unwrap(), "and not to be redone");
+        assert!(session.undo().unwrap(), "the step before stands");
     }
 
     /// What changes nothing is no step: a drag that came back where it

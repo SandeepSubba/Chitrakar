@@ -17,7 +17,7 @@ await build({
   outfile: tmp,
   logLevel: "silent",
 });
-const { COMMANDS, boundChords, claimable, giveChord, restoreChord } = await import("file://" + tmp);
+const { COMMANDS, boundChords, claimable, giveChord, restoreChord, typesAlone } = await import("file://" + tmp);
 unlinkSync(tmp);
 
 let ran = 0;
@@ -30,6 +30,9 @@ const check = (cond, msg) => {
 // What may be given: a letter alone is a tool's, with shift a tool
 // family's, a bracket alone the brush's; with ctrl or alt anything is.
 check(!claimable("k"), "a letter alone is a tool's");
+check(!claimable(" "), "Space alone is the hand's");
+check(claimable("-") && typesAlone("-") && typesAlone("shift+/"), "a sign alone may be taken, and is a character typed");
+check(!typesAlone("mod+-") && !typesAlone("alt+shift+x"), "with Ctrl or Alt it is not");
 check(!claimable("shift+k"), "shift and a letter walk a tool family");
 check(!claimable("]"), "a bracket alone sizes the brush");
 check(claimable("mod+k") && claimable("alt+k") && claimable("mod+alt+shift+7"), "with ctrl or alt, anything");

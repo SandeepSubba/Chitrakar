@@ -221,6 +221,31 @@ body {
   }
 }
 
+/* Touch-sized buttons fill the row sooner too: at 910–970 wide on a
+   touch screen the zoom field ran off the window's edge, and a mobile
+   browser widened its whole layout to fit it. */
+@media (pointer: coarse) and (max-width: 1000px) {
+  .topbar-tools .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+@media (pointer: coarse) and (max-width: 1100px) {
+  :root[data-scale="large"] .topbar-tools .chrome-group[aria-label="Selection"],
+  :root[data-scale="larger"] .topbar-tools .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+
+/* The narrowest phones at a larger interface size: the before-and-after
+   button gives way (View has it too), or the panel's button was pushed
+   off the edge. */
+@media (max-width: 380px) {
+  :root[data-scale="large"] .topbar .chrome-group[aria-label="Before"],
+  :root[data-scale="larger"] .topbar .chrome-group[aria-label="Before"] {
+    display: none;
+  }
+}
+
 /* A larger interface (Preferences › Appearance) fills the rows sooner,
    so it gives the same things up at a wider window, in proportion. */
 @media (max-width: 860px) {

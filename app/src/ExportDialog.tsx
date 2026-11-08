@@ -38,7 +38,7 @@ import { enterMeansGo } from "./dialogKeys";
 
 /** As far as the engine scales a page going out (`render_scaled`). */
 const MOST_SCALE = 16;
-import type { Outgoing } from "./files";
+import { fileSafe, type Outgoing } from "./files";
 
 /** What each format is called, what it writes, and what it can do.
  *
@@ -519,10 +519,11 @@ export function ExportDialog({
 
   // Named for its size where a size was asked for — `-2048` — rather
   // than for the scale that came to, which is a fraction nobody chose.
+  // Shown as it will be written: a region's slash or colon made safe.
   const nameAt = (s: number, slice: string | null = null, at: number | null = null) =>
-    `${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
+    fileSafe(`${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
       longEdge > 0 && !set ? `-${edgeOf(at)}` : s !== 1 || set ? `@${s}x` : ""
-    }.${spec.ext}`;
+    }.${spec.ext}`);
   const more = many.length > 1 ? `, and ${many.length - 1} more` : "";
   const name = set
     ? `${nameAt(1, many[0] ?? null)}, @2x, @3x${more}`

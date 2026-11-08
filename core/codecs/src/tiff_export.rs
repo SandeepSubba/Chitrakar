@@ -32,6 +32,7 @@ pub fn export_cmyk_tiff(
     width: u32,
     height: u32,
     icc: &[u8],
+    dpi: f32,
 ) -> Result<Vec<u8>, TiffError> {
     let sep = chitrakar_color::cms::RgbToCmyk::new(icc).map_err(TiffError::Color)?;
 
@@ -53,6 +54,17 @@ pub fn export_cmyk_tiff(
         image
             .encoder()
             .write_tag(Tag::Unknown(TAG_ICC_PROFILE), icc)?;
+        // The page's resolution, so a layout program places the file at
+        // the size the PDF of the same page is: without it, a reader
+        // takes one pixel an inch, or its own guess.
+        let per_inch = (dpi.clamp(1.0, 2400.0) * 100.0).round() as u32;
+        image.resolution(
+            tiff::tags::ResolutionUnit::Inch,
+            tiff::encoder::Rational {
+                n: per_inch,
+                d: 100,
+            },
+        );
         image.write_data(&cmyk)?;
     }
     Ok(out.into_inner())
@@ -84,7 +96,7 @@ mod tests {
             },
             LinearRgba::TRANSPARENT,
         ];
-        let bytes = export_cmyk_tiff(&pixels, 2, 1, &icc).unwrap();
+        let bytes = export_cmyk_tiff(&pixels, 2, 1, &icc, 300.0).unwrap();
 
         assert!(
             bytes.starts_with(b"II") || bytes.starts_with(b"MM"),
@@ -103,6 +115,15 @@ mod tests {
         let mut dec = tiff::decoder::Decoder::new(Cursor::new(&bytes)).unwrap();
         let (w, h) = dec.dimensions().unwrap();
         assert_eq!((w, h), (2, 1));
+        // At the page's resolution, in inches, so it places at the size
+        // the PDF of the same page does.
+        let tiff::decoder::ifd::Value::Rational(n, d) = dec.get_tag(Tag::XResolution).unwrap()
+        else {
+            panic!("a resolution is a ratio");
+        };
+        let x = n as f64 / d as f64;
+        let unit = dec.get_tag_u32(Tag::ResolutionUnit).unwrap();
+        assert!((x - 300.0).abs() < 1e-6 && unit == 2, "{x} per unit {unit}");
         let tiff::decoder::DecodingResult::U8(data) = dec.read_image().unwrap() else {
             panic!("expected 8-bit samples");
         };
@@ -121,7 +142,7 @@ mod tests {
     #[test]
     fn non_cmyk_profile_is_refused() {
         let icc = chitrakar_color::cms::display_p3_profile_bytes();
-        let err = export_cmyk_tiff(&[LinearRgba::TRANSPARENT], 1, 1, &icc);
+        let err = export_cmyk_tiff(&[LinearRgba::TRANSPARENT], 1, 1, &icc, 72.0);
         assert!(matches!(err, Err(TiffError::Color(_))));
     }
 }

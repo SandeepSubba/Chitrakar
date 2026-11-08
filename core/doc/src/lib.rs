@@ -689,9 +689,9 @@ impl Document {
             .map(|m| &**m)
             .chain(self.regions.iter().map(|r| &r.mask));
         for mask in masks {
-            if let MaskKind::Raster { resource_id, .. } = &mask.kind {
-                used.pictures.insert(resource_id.clone());
-            }
+            mask.each_resource(&mut |id| {
+                used.pictures.insert(id.to_string());
+            });
         }
         used
     }

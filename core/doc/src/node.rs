@@ -2190,7 +2190,27 @@ impl Filter {
     }
 }
 
+/// The resources the regions some strokes were confined to are drawn
+/// from (`PaintStroke::clip`).
+fn strokes_resources(strokes: &[PaintStroke], f: &mut impl FnMut(&str)) {
+    for stroke in strokes {
+        if let Some(clip) = &stroke.clip {
+            clip.each_resource(f);
+        }
+    }
+}
+
 impl Mask {
+    /// Every resource the mask is drawn from: a picture mask's picture,
+    /// and the picture any brushed stroke of it was confined to.
+    pub fn each_resource(&self, f: &mut impl FnMut(&str)) {
+        match &self.kind {
+            MaskKind::Raster { resource_id, .. } => f(resource_id),
+            MaskKind::Painted { strokes } => strokes_resources(strokes, f),
+            MaskKind::Vector { .. } | MaskKind::Gradient { .. } => {}
+        }
+    }
+
     /// Every colour written inside the mask.
     ///
     /// A mask is read for coverage and never for colour, so none of these
@@ -2825,19 +2845,21 @@ impl Node {
                 | Filter::Noise { .. }
                 | Filter::Vignette { .. } => {}
             },
+            // A stroke painted inside a region carries the region, and a
+            // region read off a picture (a matte, a subject, a PSD's mask)
+            // is that picture: left out, the file kept the strokes and
+            // lost what confined them, and they drew nowhere.
+            NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+                strokes_resources(strokes, f)
+            }
             NodeKind::Group
             | NodeKind::Instance { .. }
-            | NodeKind::Paint { .. }
-            | NodeKind::Clone { .. }
             | NodeKind::Vector { .. }
             | NodeKind::Text(_)
             | NodeKind::Artboard { .. } => {}
         }
         if let Some(mask) = &self.mask {
-            match &mask.kind {
-                MaskKind::Raster { resource_id, .. } => f(resource_id),
-                MaskKind::Vector { .. } | MaskKind::Painted { .. } | MaskKind::Gradient { .. } => {}
-            }
+            mask.each_resource(f);
         }
     }
 

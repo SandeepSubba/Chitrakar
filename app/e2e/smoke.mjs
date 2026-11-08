@@ -21496,6 +21496,126 @@ assert(
   await ctx.close();
 }
 
+// 9cz. The seventh audit, of whole workflows. A drag brought back to its
+// press stayed a pointer's step away from where it began; Escape on the
+// rotation knob let go of the preview and the drag carried on; a shape
+// drawn over a frame went into it under a picture laid over the page,
+// where nobody could see it; and a file that could not be opened threw
+// away the document it was opened over.
+{
+  await newDocument(800, 600, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 800) * b.width, b.y + (y / 600) * b.height];
+  const a = async (x, y) => (await canvasPixel(x, y))[3];
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(200, 200), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  // Where its left edge is along a row, wherever the page's size and
+  // the snapping put it.
+  const leftEdge = async () => {
+    for (let x = 80; x < 130; x++) if ((await a(x, 150)) > 128) return x;
+    return -1;
+  };
+  const edgeBefore = await leftEdge();
+  // Out and back to the very pixel it was pressed on: where it began,
+  // and no step — one undo takes the rectangle, not a move.
+  await page.mouse.move(...at(150, 150));
+  await page.mouse.down();
+  await page.mouse.move(...at(190, 170), { steps: 4 });
+  await page.mouse.move(...at(150, 150), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const edgeAfter = await leftEdge();
+  assert(edgeBefore > 0 && edgeAfter === edgeBefore, `a drag back to its press ends where it began (${edgeBefore} then ${edgeAfter})`);
+  // The knob turned and let go of with Escape: not turned, and no step.
+  const knob = await page.locator(".rot-handle").boundingBox();
+  await page.mouse.move(knob.x + knob.width / 2, knob.y + knob.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(knob.x + 80, knob.y + 60, { steps: 5 });
+  await page.keyboard.press("Escape");
+  await page.mouse.move(knob.x + 90, knob.y + 80, { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  assert((await leftEdge()) === edgeBefore && (await a(edgeBefore + 2, 102 + (edgeBefore - 100))) === 255, "Escape on the knob lets go of the turn, pointer moves after it and all");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await a(150, 150)) === 0, "neither made a step: one undo takes the rectangle");
+  await page.keyboard.press("Control+Shift+z");
+  await page.waitForTimeout(250);
+  // Escape in a number field puts back what it said: typed and let go
+  // of, it was taken as a move.
+  const xField = page.locator('input[aria-label="X position"]');
+  const xWas = await xField.inputValue();
+  await xField.click();
+  await xField.fill("123");
+  await page.keyboard.press("Escape");
+  await page.mouse.click(...at(700, 560));
+  await page.waitForTimeout(250);
+  assert((await leftEdge()) === edgeBefore, `Escape in X takes back what was typed (was ${xWas})`);
+  // A copy of a copy is numbered, not "copy copy".
+  await page.mouse.click(...at(150, 150));
+  await page.keyboard.press("Control+j");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+j");
+  await page.waitForTimeout(250);
+  const names = (await page.locator(".panel ul li .layer-name").allTextContents()).map((n) => n.trim());
+  assert(names.some((n) => n.endsWith(" copy 2")) && !names.some((n) => n.includes("copy copy")), `copies of copies are numbered (${names})`);
+  await page.keyboard.press("Control+z");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+
+  // A frame, a picture laid over the whole page, and an ellipse drawn
+  // over both: the ellipse is on the page, over the picture.
+  await pickTool("Frame");
+  await page.mouse.move(...at(400, 200));
+  await page.mouse.down();
+  await page.mouse.move(...at(760, 560), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const cover = await page.evaluate(() => {
+    const c = document.createElement("canvas");
+    c.width = 800;
+    c.height = 600;
+    const g = c.getContext("2d");
+    g.fillStyle = "#ff00ff";
+    g.fillRect(0, 0, 800, 600);
+    return c.toDataURL("image/png").split(",")[1];
+  });
+  await page.setInputFiles('input[accept^="image/*,"]', {
+    name: "cover.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(cover, "base64"),
+  });
+  await page.waitForTimeout(400);
+  await pickTool("Ellipse");
+  await page.mouse.move(...at(520, 320));
+  await page.mouse.down();
+  await page.mouse.move(...at(640, 440), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const drawn = await canvasPixel(580, 380);
+  assert(!(drawn[0] > 240 && drawn[1] < 15 && drawn[2] > 240), `a shape drawn over a frame a picture covers shows (${drawn})`);
+
+  // A file that cannot be read, opened over this: the document stays.
+  const rowsBefore = await page.locator(".panel ul li .layer-name").count();
+  lastDialog = "";
+  await page.locator('input[accept^=".chitra,"]').setInputFiles({
+    name: "broken.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("not a picture at all, only words"),
+  });
+  await page.waitForTimeout(800);
+  assert(lastDialog.length > 0, "the file that cannot be read is said");
+  assert(
+    (await page.locator(".panel ul li .layer-name").count()) === rowsBefore,
+    `and the document it was opened over is still there (${await page.locator(".panel ul li .layer-name").count()} of ${rowsBefore} rows)`,
+  );
+}
+
 // 9cv. Two tabs each keep a draft of their own: both wrote one draft,
 // and only the last one's work came back after a crash. A context of its
 // own, so this storage is not the suite's.

@@ -119,12 +119,22 @@ export type Outgoing = { name: string; type: string; make: () => Uint8Array };
  * characters go, and so do the dots and spaces Windows drops off the
  * end. Never empty. */
 export function fileSafe(name: string): string {
-  const cleaned = name
+  let cleaned = name
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .replace(/[\\/:*?"<>|]/g, "-")
     .replace(/[. ]+$/, "")
     .trim();
+  // Most systems refuse a name past 255 bytes: a long region name is
+  // cut, keeping what it ends with (`@2x.png`).
+  const MOST = 120;
+  if ([...cleaned].length > MOST) {
+    const dot = cleaned.lastIndexOf(".");
+    const end = dot > 0 && cleaned.length - dot <= 16 ? cleaned.slice(dot) : "";
+    const tail = cleaned.slice(0, cleaned.length - end.length).match(/@\d+(\.\d+)?x$/)?.[0] ?? "";
+    const stem = [...cleaned.slice(0, cleaned.length - end.length - tail.length)];
+    cleaned = stem.slice(0, MOST - [...tail].length - [...end].length).join("").trim() + tail + end;
+  }
   return cleaned || "untitled";
 }
 
