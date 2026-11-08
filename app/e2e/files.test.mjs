@@ -18,7 +18,7 @@ const src = readFileSync(join(here, "..", "src", "files.ts"), "utf8").replace(
 const js = (await transform(src, { loader: "ts", format: "esm" })).code;
 const tmp = join(here, "out", "files.generated.mjs");
 writeFileSync(tmp, js);
-const { baseName, folderName, replacing } = await import("file://" + tmp);
+const { baseName, folderName, replacing, fileSafe, distinctNames } = await import("file://" + tmp);
 unlinkSync(tmp);
 
 let ran = 0;
@@ -48,6 +48,23 @@ names("content://some.provider/files/pic.png", "pic.png", "");
 names("content://some.provider/files/100%25%ZZ", "100%25%ZZ", "");
 // A file: address — an iPhone's, kept for its grant — is a path, encoded.
 check(baseName("file:///tmp/a.png") === "a.png", "a file: address is a path");
+
+// A region, comp or frame's name is a file's name, so it is made one
+// every system takes: no folders out of a slash, no colon for Windows
+// to refuse, no trailing dot it would drop.
+check(
+  fileSafe("untitled-icon/small: v2@1x.png") === "untitled-icon-small- v2@1x.png",
+  `a slash and a colon are not kept (${fileSafe("untitled-icon/small: v2@1x.png")})`,
+);
+check(fileSafe("a\u000bb.png") === "ab.png", "control characters go");
+check(fileSafe("Hero. ") === "Hero", "nor do the dots and spaces Windows drops");
+check(fileSafe("///") === "---" && fileSafe("") === "untitled", "and it is never empty");
+// Files written together never land on one another, case or no case.
+const distinct = distinctNames(["Hero.png", "hero.png", "Hero.png", "Other.png"]);
+check(
+  JSON.stringify(distinct) === JSON.stringify(["Hero.png", "hero 2.png", "Hero 3.png", "Other.png"]),
+  `two frames of one name are two files (${distinct})`,
+);
 names("file:///private/var/mobile/Holiday%20snaps/sea%20view.png", "sea view.png", "Holiday snaps");
 // The question before writing over files names them the same way.
 check(

@@ -24,10 +24,13 @@ without reading anything else.*
   The editor itself is broad and well tested, but four audits in a row
   each found twenty or more bugs, and a release wants a round that finds
   nothing serious. What stands between this branch and a 1.0, in order:
-  1. *Audits until they come back quiet.* Rounds 1–4 are in (below,
-     under the audits); a fifth on files nobody wrote carefully is
-     running, and then large documents and speed, the desktop shell,
-     and the phone layout. ⬜
+  1. *Audits until they come back quiet.* Six rounds are in (below,
+     under the audits): the editor, the panel and paths, selections and
+     colour, the keyboard, phones and other programs' files, and undo,
+     saving and what each export keeps. The sixth found the engine's
+     undo exact over hundreds of random runs; what it found was around
+     the edges. A seventh, over everything again, is what says whether
+     they have come back quiet. ⬜
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -10927,10 +10930,9 @@ without reading anything else.*
   outline's `filled` grid), the SVG writes it clipped to the path or to
   a box with the path cut out (`side_cut`; the importer now reads an
   even-odd clip as one region, where it unioned every ring), the PDF
-  clips with `W*`, and the GPU hands such a layer to the processor —
-  drawing it there wants a stencil pass that keeps the doubled stroke's
-  union only where the fill's parity is odd (inside) or even (outside),
-  which is open GPU work; page 830 of the random pages is one.
+  clips with `W*`, and the GPU keeps the fill's parity and the doubled
+  stroke's union in two bits of its stencil and paints where they say
+  the side (`Draw::Sided`; it was handed to the processor at first).
   Turning a shape into a path keeps the side (`stroke_as_path`), and
   so do Combine and the knife.
   **A fourth audit: the keyboard (November 2026).** Put right:
@@ -11038,17 +11040,76 @@ without reading anything else.*
   and a CMYK JPEG's own profile was ignored — its inks are read again
   (plain CMYK, or Photoshop's YCCK) and taken through it, as a TIFF's
   are (`cmyk_jpeg`: the audit's sample gives 237, 28, 36 as its TIFF
-  twin does, where Chromium shows 236, 31, 37). Still left: a stroke
-  painted with a pattern comes in without it.
+  twin does, where Chromium shows 236, 31, 37). A stroke painted with
+  a pattern came in as nothing; it is the pattern's picture seen
+  through the stroke's outline (`stroke_rings`, as a pattern fill is
+  through its path).
   Memory running out (a dozen 48-megapixel pictures in one document)
   still stops the engine, which now reloads the page with the draft
   offered rather than leaving it blank; refusing beforehand wants the
-  allocator to say what is free. Median, surface blur and oil paint
-  hold their radius to 64 device pixels, so zoomed far in they look
-  softer than they export. The draft writer encodes a big picture on
-  the page's thread (a 3 s pause once after placing 100 megapixels),
+  allocator to say what is free (a picture's own pixels are asked for
+  rather than demanded now, so a picture too big for what is left is
+  refused in words). Median, surface blur and oil paint
+  held their radius to 64 device pixels, so zoomed far in they looked
+  softer than they export; past it they are worked on a copy reduced by
+  the whole factor that brings the radius within, and brought back up
+  (`at_reach`), and the GPU hands such a surface blur to the processor.
+  The draft writer encodes a big picture on
+  the page's thread (a 3 s pause once after placing 100 megapixels);
+  it now waits for the page to be idle first (`whenIdle`), so the pause
+  lands between things rather than in the middle of a zoom, but it is
+  still a pause — the same PNG serves Save, so moving it off the thread
+  wants the engine's threaded build to encode it,
   and a 100-megapixel picture opened into a fresh page is fitted to it
   without saying so.
+  **A sixth audit: undo and history, saving and opening, and what each
+  export keeps (November 2026).** The engine's undo held: about 230
+  seeded random runs of up to 130 commands, CMYK documents among them,
+  undone and redone whole, came back to the same document and the same
+  pixels, and saving and reopening and the crash draft were exact every
+  time. Put right around it: a layer edited inside a group wearing a
+  shadow left the old shadow on the screen (a change's repaint now
+  grows by every group's effects above it, `node_bounds`); Fill and
+  Stroke selection on a region that traces to nothing stopped the
+  engine (refused in words); a saved file kept every picture and raw
+  file ever placed — 75 MB for a page holding one rectangle after a raw
+  was developed twice and deleted — and now keeps what a layer, the
+  selection or a kept region points at (`Document::in_use`, the
+  manifest and the draft's parts alike; the stores keep the rest for
+  undo); Ctrl+Z held mid-drag undid the step before and lost it to the
+  drag's own, and now lets go of the drag, a slider's too; an
+  alt-drag let go of with Escape, or an alt-click, left its copy on the
+  original; typing into a new text block was two steps and Escape left
+  a block reading "Text" (one step now, and Escape takes it away); and
+  a drag back to its start, the page picked twice, a blend a layer
+  already had or a layer put back where it was each made a step and
+  marked the file changed (`changes_nothing`, `apply_labeled_if_changed`).
+  Still as they were, and small: undoing a page resize or crop with
+  fractional coordinates comes back a millionth off; the Node tool
+  turns a shape into a path on the press. The exports: a gradient stop
+  with no alpha lost its colour and faded through black on the page and
+  in every picture (`resolve_stop` keeps a trace of alpha, CPU and GPU
+  alike); a PDF drew a rectangle's or an ellipse's dashes with butt ends
+  — a dotted line as nothing — and square corners (it says the cap and
+  the join now); a line dotted with dashes of nothing was drawn solid
+  (the walk counts by the pattern's length); an SVG named its faces and
+  carried none, so a loaded face was lost and right-aligned text moved
+  on a machine without DejaVu (each face used goes inside as an
+  `@font-face`, cut to its glyphs with its character map,
+  `subset_ttf_for_web`); an SVG outline grew square (four boxes round a
+  circle now, which the importer reads back as one outline); a control
+  character — Word's line break — made an SVG no reader opened; the
+  watermark was cut away with a region's corner; a JPEG laid what was
+  clear on white in linear light, paler than the page shows it; a mask
+  hiding everything came back from a PSD showing everything; a press
+  profile that cannot separate was accepted and then failed every TIFF
+  and PDF (refused when set); and a region, comp or frame named with a
+  slash or a colon became a folder or a refused name, two frames of one
+  name one file (`fileSafe`, `distinctNames` in `files.ts`). Left as
+  they are: PSD bakes a layer's effects into its pixels, so a clipped
+  layer covers its base's shadow and a faded layer's shadow fades with
+  it; a bevel drawn at half size is a little wider; translucency mixes
+  in linear light on the page and in sRGB in SVG and PDF, by design.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

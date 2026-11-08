@@ -1198,6 +1198,13 @@ pub struct PlacedRun {
     /// on a page what the smear does in the raster. Zero when the face
     /// carries its own bold.
     pub thicken: f32,
+    /// The family the run asked for, as a page names it (the bundled
+    /// face's name when it asked for none), and whether bold and italic.
+    /// An exporter that names the face rather than drawing it says
+    /// these, and the face it was set in is what they stand for.
+    pub family: String,
+    pub bold: bool,
+    pub italic: bool,
     pub glyphs: Vec<PlacedGlyph>,
 }
 
@@ -1343,6 +1350,13 @@ pub fn placed(spec: &TextSpec) -> PlacedText {
                 0.0
             },
             thicken: smear(&styling, 1.0),
+            family: if styling.font.is_empty() {
+                DEFAULT_FONT.to_string()
+            } else {
+                styling.font.clone()
+            },
+            bold: styling.bold,
+            italic: styling.italic,
             glyphs,
         });
     }

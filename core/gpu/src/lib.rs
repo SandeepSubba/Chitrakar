@@ -171,6 +171,41 @@ fn stencil_state(
     }
 }
 
+/// A stencil state reading and writing only some of the stencil's bits,
+/// passing and failing differently: what a one-sided border needs, which
+/// keeps two answers in the stencil at once (`Draw::Sided`).
+fn masked_stencil(
+    compare: wgpu::CompareFunction,
+    pass_op: wgpu::StencilOperation,
+    fail_op: wgpu::StencilOperation,
+    read_mask: u32,
+    write_mask: u32,
+) -> wgpu::DepthStencilState {
+    let face = wgpu::StencilFaceState {
+        compare,
+        fail_op,
+        depth_fail_op: fail_op,
+        pass_op,
+    };
+    wgpu::DepthStencilState {
+        format: STENCIL_FORMAT,
+        depth_write_enabled: false,
+        depth_compare: wgpu::CompareFunction::Always,
+        stencil: wgpu::StencilState {
+            front: face,
+            back: face,
+            read_mask,
+            write_mask,
+        },
+        bias: Default::default(),
+    }
+}
+
+/// The stencil's bit a one-sided border keeps the fill's parity in, and
+/// the one it keeps its doubled stroke in.
+const INSIDE_BIT: u32 = 0x80;
+const BAND_BIT: u32 = 0x01;
+
 /// One thing to draw, in painter's order: a shape whose fragment finds
 /// its own coverage, or a path stencilled and then covered.
 enum Draw {
@@ -226,6 +261,17 @@ enum Draw {
     Stroke {
         union: std::ops::Range<u32>,
         cover: std::ops::Range<u32>,
+    },
+    /// A closed path's border lying to one side of its outline: the
+    /// stroke twice as wide, kept to that side of the fill. The fill's
+    /// parity goes into one bit of the stencil (`INSIDE_BIT`), the
+    /// doubled stroke's union into another (`BAND_BIT`), the cover paints
+    /// where the two say the side asked for, and the box is cleared.
+    Sided {
+        parity: std::ops::Range<u32>,
+        union: std::ops::Range<u32>,
+        cover: std::ops::Range<u32>,
+        inside: bool,
     },
     /// A text block: the quad over the block's box, and the coverage
     /// raster it reads.
@@ -386,6 +432,11 @@ pub struct GpuRenderer {
     /// Sets the stencil rather than flipping it, so overlapping pieces
     /// of one stroke union instead of cancelling.
     union: wgpu::RenderPipeline,
+    /// The four passes of a one-sided border (`Draw::Sided`).
+    sided_parity: wgpu::RenderPipeline,
+    sided_union: wgpu::RenderPipeline,
+    sided_cover: wgpu::RenderPipeline,
+    stencil_clear: wgpu::RenderPipeline,
     text: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     texture_layout: wgpu::BindGroupLayout,
@@ -1068,6 +1119,74 @@ impl GpuRenderer {
             multiview: None,
             cache: None,
         });
+        // A one-sided border's passes: three that write only the
+        // stencil, and the cover between them.
+        let stencil_only = |label: &'static str, state: wgpu::DepthStencilState| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_stencil"),
+                    compilation_options: Default::default(),
+                    buffers: std::slice::from_ref(&vertex_layout),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_stencil"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        write_mask: wgpu::ColorWrites::empty(),
+                        ..target.clone()
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(state),
+                multisample,
+                multiview: None,
+                cache: None,
+            })
+        };
+        use wgpu::{CompareFunction as Cmp, StencilOperation as Op};
+        let sided_parity = stencil_only(
+            "border side parity",
+            masked_stencil(Cmp::Always, Op::Invert, Op::Invert, 0xff, INSIDE_BIT),
+        );
+        let sided_union = stencil_only(
+            "border side band",
+            masked_stencil(Cmp::Always, Op::Replace, Op::Replace, 0xff, BAND_BIT),
+        );
+        let stencil_clear = stencil_only(
+            "stencil clear",
+            masked_stencil(Cmp::Always, Op::Zero, Op::Zero, 0xff, 0xff),
+        );
+        let sided_cover = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("border side cover"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_cover"),
+                compilation_options: Default::default(),
+                buffers: std::slice::from_ref(&vertex_layout),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_cover"),
+                compilation_options: Default::default(),
+                targets: &[Some(target.clone())],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(masked_stencil(
+                Cmp::Equal,
+                Op::Keep,
+                Op::Keep,
+                INSIDE_BIT | BAND_BIT,
+                0,
+            )),
+            multisample,
+            multiview: None,
+            cache: None,
+        });
         // The gradient pipelines differ from their flat counterparts only
         // in the fragment they run and the ramp they bind, so they borrow
         // everything else from them.
@@ -1369,6 +1488,10 @@ impl GpuRenderer {
             shape_gradient,
             cover_gradient,
             union,
+            sided_parity,
+            sided_union,
+            sided_cover,
+            stencil_clear,
             text,
             layout,
             texture_layout,
@@ -2514,6 +2637,30 @@ impl GpuRenderer {
                                 }
                                 None => pass.set_pipeline(&self.cover),
                             }
+                            pass.draw(cover.clone(), 0..1);
+                        }
+                        Draw::Sided {
+                            parity,
+                            union,
+                            cover,
+                            inside,
+                        } => {
+                            pass.set_pipeline(&self.sided_parity);
+                            pass.draw(parity.clone(), 0..1);
+                            pass.set_stencil_reference(BAND_BIT);
+                            pass.set_pipeline(&self.sided_union);
+                            pass.draw(union.clone(), 0..1);
+                            pass.set_stencil_reference(if *inside {
+                                INSIDE_BIT | BAND_BIT
+                            } else {
+                                BAND_BIT
+                            });
+                            pass.set_pipeline(&self.sided_cover);
+                            pass.draw(cover.clone(), 0..1);
+                            // Both bits put back to nought over the box,
+                            // for whatever is stencilled next.
+                            pass.set_stencil_reference(0);
+                            pass.set_pipeline(&self.stencil_clear);
                             pass.draw(cover.clone(), 0..1);
                         }
                         Draw::Stroke { union, cover } => {
@@ -6109,17 +6256,7 @@ fn vector(
     }
 
     // A closed path's band to one side of its outline is the stroke twice
-    // as wide kept to that side of the fill, a clip this backend does not
-    // draw: the processor's frame answers instead.
-    if let Some((_, s)) = ink {
-        if matches!(
-            shape,
-            VectorShape::Path { .. } | VectorShape::Polygon { .. }
-        ) && chitrakar_doc::stroke_align(shape, s) != chitrakar_doc::StrokeAlign::Centre
-        {
-            return None;
-        }
-    }
+    // as wide kept to that side of the fill (`sided_path`), below.
 
     // A path is stencilled and covered: parity gives the even-odd fill
     // the CPU draws, holes and crossings included; a stroke is the union
@@ -6130,7 +6267,20 @@ fn vector(
             fill_path(doc, id, shape, t, color, grad, ramp, axes, out);
         }
         if let Some((color, s)) = ink {
-            stroke_path(shape, t, color, s, out);
+            // A closed path's band to one side of its outline is the
+            // stroke twice as wide (`stroke_pieces`) kept to that side of
+            // the fill, which the stencil keeps both of.
+            match chitrakar_doc::stroke_align(shape, s) {
+                chitrakar_doc::StrokeAlign::Centre => stroke_path(shape, t, color, s, out),
+                side => sided_path(
+                    shape,
+                    t,
+                    color,
+                    s,
+                    side == chitrakar_doc::StrokeAlign::Inside,
+                    out,
+                ),
+            }
         }
         return Some(());
     }
@@ -6300,13 +6450,13 @@ fn fill_path(
 /// or mitred — and each piece is tessellated here. The stencil takes the
 /// union (a pixel is in the stroke if any piece covers it, however the
 /// pieces overlap), and one quad covers it.
-fn stroke_path(
+fn stroke_geometry(
     shape: &VectorShape,
     t: Transform,
     color: [f32; 4],
     stroke: &chitrakar_doc::Stroke,
     out: &mut Scene,
-) {
+) -> Option<(std::ops::Range<u32>, std::ops::Range<u32>)> {
     let scale = device_scale(t);
     let mut tris: Vec<Vertex> = Vec::new();
     let mut box_ = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
@@ -6375,7 +6525,7 @@ fn stroke_path(
         }
     }
     if tris.is_empty() {
-        return;
+        return None;
     }
     let union = out.push(tris);
     // A device-space box around the geometry, grown by a pixel: the
@@ -6395,7 +6545,57 @@ fn stroke_path(
         corner(x1, y1),
         corner(x0, y1),
     ]);
-    out.draws.push(Item::of(Draw::Stroke { union, cover }));
+    Some((union, cover))
+}
+
+/// A path's stroke, stencilled and covered (`stroke_geometry`).
+fn stroke_path(
+    shape: &VectorShape,
+    t: Transform,
+    color: [f32; 4],
+    stroke: &chitrakar_doc::Stroke,
+    out: &mut Scene,
+) {
+    if let Some((union, cover)) = stroke_geometry(shape, t, color, stroke, out) {
+        out.draws.push(Item::of(Draw::Stroke { union, cover }));
+    }
+}
+
+/// A closed path's border lying to one side of its outline: the fill's
+/// rings fanned for its parity, and the doubled stroke's pieces.
+fn sided_path(
+    shape: &VectorShape,
+    t: Transform,
+    color: [f32; 4],
+    stroke: &chitrakar_doc::Stroke,
+    inside: bool,
+    out: &mut Scene,
+) {
+    let mut fan = Vec::new();
+    for ring in chitrakar_render::shape_rings(shape) {
+        let ring: Vec<[f32; 2]> = ring.into_iter().map(|p| place(t, p)).collect();
+        if ring.len() < 3 {
+            continue;
+        }
+        for i in 1..ring.len() - 1 {
+            for p in [ring[0], ring[i], ring[i + 1]] {
+                fan.push(Vertex {
+                    doc: p,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    let Some((union, cover)) = stroke_geometry(shape, t, color, stroke, out) else {
+        return;
+    };
+    let parity = out.push(fan);
+    out.draws.push(Item::of(Draw::Sided {
+        parity,
+        union,
+        cover,
+        inside,
+    }));
 }
 
 /// A local-space point on the page.
@@ -6426,7 +6626,7 @@ fn bake(doc: &Document, g: &chitrakar_doc::Gradient) -> (Image, [f32; 4], f32) {
     for stop in g.stops() {
         stops.push((
             stop.offset,
-            chitrakar_render::resolve_color(doc, &stop.color),
+            chitrakar_render::resolve_stop(doc, &stop.color, 1.0),
         ));
     }
     stops.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -6862,6 +7062,12 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             let t = chitrakar_render::surface_threshold(*threshold);
             if r == 0 || t <= 0.0 {
                 return Some(Filtering::Nothing);
+            }
+            // Past the widest window the processor works it on a reduced
+            // copy, so zoomed in it looks as it exports; this pass would
+            // hold it to the window instead.
+            if (*radius * scale).round() > chitrakar_render::SURFACE_MOST as f32 {
+                return none!();
             }
             Filtering::Blocks {
                 across: [r as f32, t, 0.0, 2.0],
@@ -12463,6 +12669,67 @@ mod tests {
             });
         }
         Box::new(node)
+    }
+
+    /// A closed path's border lying inside or outside its outline — a
+    /// star, and a square with a hole through it — is drawn here as the
+    /// processor draws it: the stroke twice as wide kept to that side of
+    /// the fill, holes and all. It was handed back to the processor.
+    #[test]
+    fn a_closed_paths_border_lies_on_its_side_as_the_cpu_lays_it() {
+        let Some(gpu) = gpu_or_skip() else {
+            return;
+        };
+        let star = VectorShape::Polygon {
+            rx: 26.0,
+            ry: 24.0,
+            points: 5,
+            inner: 0.5,
+            corner: 0.0,
+        };
+        let holed = VectorShape::Path {
+            points: vec![[0.0, 0.0], [40.0, 0.0], [40.0, 40.0], [0.0, 40.0]],
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: vec![vec![[12.0, 12.0], [28.0, 12.0], [28.0, 28.0], [12.0, 28.0]]],
+        };
+        for side in [
+            chitrakar_doc::StrokeAlign::Inside,
+            chitrakar_doc::StrokeAlign::Outside,
+        ] {
+            let mut doc = Document::new(150, 80, ColorMode::Rgb);
+            for (i, shape) in [star.clone(), holed.clone()].into_iter().enumerate() {
+                let mut node = stroked("bordered", shape, 6.0, Vec::new());
+                if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                    *fill = Some(AuthoredColor::Srgb {
+                        r: 0.9,
+                        g: 0.8,
+                        b: 0.2,
+                        a: 1.0,
+                    });
+                    if let Some(s) = stroke {
+                        s.align = Some(side);
+                        s.join = chitrakar_doc::StrokeJoin::Miter;
+                    }
+                }
+                add(
+                    &mut doc,
+                    node,
+                    Transform::translation(14.0 + i as f32 * 76.0, 16.0),
+                );
+            }
+            assert!(GpuRenderer::can_render(&doc), "{side:?}: drawn here");
+            let mine = gpu.render(&doc).unwrap();
+            let reference = chitrakar_render::render(&doc).unwrap();
+            let (mean, worst) = difference(&mine, &reference);
+            let (in_mean, in_worst, over, spot) = interiors(&mine, &reference);
+            assert!(
+                mean < 0.004 && over == 0 && in_mean < 0.002,
+                "{side:?}: mean {mean:.5} (worst {worst:.3}), interiors {in_mean:.5} \
+                 (worst {in_worst:.3} at {spot:?}, {over} over)"
+            );
+        }
     }
 
     /// A stroke is an inner band on a rect or an ellipse — so stroking
@@ -20704,22 +20971,6 @@ mod tests {
     /// `Scene::placed`); the four pages, and the one that found a frame's
     /// cut left on that list after the frame (1115), are drawn as the CPU
     /// draws them, and so are the three shapes directly.
-    /// Whether a page has a closed path or polygon whose border lies to
-    /// one side of it, which this backend hands to the processor.
-    fn sided_path(doc: &Document) -> bool {
-        doc.nodes().any(|(_, n)| match &n.kind {
-            NodeKind::Vector {
-                shape: shape @ (VectorShape::Path { .. } | VectorShape::Polygon { .. }),
-                stroke: Some(s),
-                ..
-            } => {
-                s.width > 0.0
-                    && chitrakar_doc::stroke_align(shape, s) != chitrakar_doc::StrokeAlign::Centre
-            }
-            _ => false,
-        })
-    }
-
     #[test]
     fn a_coverage_under_a_masked_layer_wearing_an_effect_is_kept() {
         let Some(gpu) = gpu_or_skip() else {
@@ -20904,16 +21155,6 @@ mod tests {
         }
         for seed in [830, 1115, 2924, 2956, 3186, 4204] {
             let doc = chitrakar_doc::fixture::page(seed);
-            // A closed path with its border to one side is the processor's
-            // (`vector`), and page 830 has one now paths keep a side; it
-            // is asked of the processor, and only for that.
-            if sided_path(&doc) {
-                assert!(
-                    !GpuRenderer::can_render(&doc),
-                    "page {seed} is the processor's"
-                );
-                continue;
-            }
             assert!(GpuRenderer::can_render(&doc), "page {seed} is drawn");
             let mine = gpu.render(&doc).unwrap();
             let reference = chitrakar_render::render(&doc).unwrap();

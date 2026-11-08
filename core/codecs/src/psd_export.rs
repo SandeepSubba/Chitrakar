@@ -87,6 +87,11 @@ impl PsdOutMask {
             }
             (out.left, out.top, out.width, out.height) =
                 (x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32);
+        } else {
+            // Nothing let through: one black pixel, black all round. A
+            // mask of no size is a mask with no plane, which a reader —
+            // this one's own — takes for no mask, and shows everything.
+            (out.width, out.height, out.grey) = (1, 1, vec![0]);
         }
         out
     }
@@ -630,6 +635,28 @@ mod tests {
             &[1, 2, 3, 255],
             "and the flattened picture"
         );
+    }
+
+    /// A mask that hides everything still hides it: written with no
+    /// size it had no plane, and read back as no mask at all.
+    #[test]
+    fn a_mask_hiding_everything_comes_back_hiding_it() {
+        let mut layer = PsdOutLayer::trimmed("Hidden", 6, 4, &solid(6, 4, [0, 200, 0, 255]));
+        layer.mask = Some(PsdOutMask::from_coverage(6, 4, &[0.0; 24]));
+        let bytes = write_psd(
+            6,
+            4,
+            72.0,
+            &[PsdOutItem::Layer(layer)],
+            &solid(6, 4, [0; 4]),
+        )
+        .unwrap();
+        let f = read_psd(&bytes).unwrap();
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        let m = p.mask.as_ref().expect("the mask came back");
+        assert!(m.rgba.chunks(4).all(|px| px[0] == 0), "black throughout");
     }
 
     #[test]

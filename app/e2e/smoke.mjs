@@ -2326,8 +2326,41 @@ assert(
   await page.evaluate(() => document.activeElement?.classList.contains("inline-text") ?? false),
   "the new block is open for typing",
 );
+// Escape before anything is written lets the block go: it was never
+// wanted, and used to stay behind reading "Text".
 await page.keyboard.press("Escape");
 await page.waitForTimeout(200);
+assert(
+  (await page.locator(".panel ul li", { hasText: "Text" }).count()) === 0 &&
+    (await inkCount(740, 590, 1100, 710)) === 0,
+  "Escape on a block nothing was written into takes it away",
+);
+// What is typed into a new block is part of putting it down: one step,
+// so one undo takes the block, not the typing and then a "Text".
+await pickTool("Text");
+await page.mouse.click(box.x + 750 * sx, box.y + 600 * sy);
+await page.waitForTimeout(300);
+await page.keyboard.type("Hi");
+await page.keyboard.press("Control+Enter");
+await page.waitForTimeout(250);
+assert((await inkCount(740, 590, 1100, 710)) > 20, "typed, the block is on the page");
+await page.keyboard.press("Control+z");
+await page.waitForTimeout(250);
+assert(
+  (await page.locator(".panel ul li", { hasText: "Text" }).count()) === 0 &&
+    (await inkCount(740, 590, 1100, 710)) === 0,
+  "one undo takes the typed block away whole",
+);
+// Kept as it came (Ctrl+Enter), the block keeps its word.
+await pickTool("Text");
+await page.mouse.click(box.x + 750 * sx, box.y + 600 * sy);
+await page.waitForTimeout(300);
+await page.keyboard.press("Control+Enter");
+await page.waitForTimeout(200);
+assert(
+  (await page.locator(".panel ul li", { hasText: "Text" }).count()) === 1,
+  "kept without typing, the block stays",
+);
 const inkDefault = await inkCount(740, 590, 1100, 710);
 assert(inkDefault > 50, `glyph ink rendered (${inkDefault} px)`);
 
@@ -5568,6 +5601,45 @@ assert(
       (await canvasPixel(160, 320))[3] === 255 &&
       (await page.locator(".panel ul li .layer-name").allTextContents()).every((n) => !n.trim().endsWith("copy")),
     "one undo takes the copy and its drag back together",
+  );
+  const copies = async () =>
+    (await page.locator(".panel ul li .layer-name").allTextContents()).filter((n) =>
+      n.trim().endsWith("copy"),
+    ).length;
+  // Alt and a click that goes nowhere carries no copy anywhere, so none
+  // is left lying on the original.
+  await page.keyboard.down("Alt");
+  await page.mouse.click(...at(160, 320));
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(200);
+  assert((await copies()) === 0, `an alt-click leaves no copy (${await copies()})`);
+  // Nor does an alt-drag let go of with Escape.
+  await page.keyboard.down("Alt");
+  await page.mouse.move(...at(160, 320));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 320), { steps: 5 });
+  await page.keyboard.press("Escape");
+  await page.mouse.up();
+  await page.keyboard.up("Alt");
+  await page.waitForTimeout(200);
+  assert(
+    (await copies()) === 0 && (await canvasPixel(300, 320))[3] === 0 && (await canvasPixel(160, 320))[3] === 255,
+    "an alt-drag let go of with Escape takes its copy with it",
+  );
+  // Undo pressed mid-drag takes back the drag, not the step before it:
+  // the layer goes back where it was, and its colour change stays.
+  await page.mouse.move(...at(160, 320));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 320), { steps: 5 });
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  assert(
+    (await canvasPixel(160, 320))[3] === 255 &&
+      (await canvasPixel(300, 320))[3] === 0 &&
+      (await canvasPixel(160, 320))[2] < 150,
+    `undo mid-drag lets go of the drag and nothing else (${await canvasPixel(160, 320)})`,
   );
 
   await page.keyboard.press("Control+z");
@@ -13692,8 +13764,9 @@ assert(
   const isMagenta = (p) => p[0] > 240 && p[1] < 15 && p[2] > 240;
   const before = await canvasPixel(...middle);
   assert(isMagenta(before), `the picture is on the page (${before})`);
-  await page.waitForTimeout(2200); // the draft is written a breath after the last change
-  const kept = await page.evaluate(
+  // The draft is written a breath after the last change, and a
+  // picture's part when the page is next idle (two seconds at most).
+  const readKept = () => page.evaluate(
     () =>
       new Promise((resolve) => {
         const open = indexedDB.open("chitrakar", 1);
@@ -13710,6 +13783,11 @@ assert(
         };
       }),
   );
+  let kept = await readKept();
+  for (let i = 0; i < 40 && !String(kept.parts).includes("resources/"); i++) {
+    await page.waitForTimeout(250);
+    kept = await readKept();
+  }
   assert(
     kept.keys.length === 1 &&
       String(kept.keys[0]).startsWith("part:resources/") &&
@@ -14924,7 +15002,9 @@ assert(
   // font's face takes the rest of its line.
   await pickTool("Text");
   await page.mouse.click(box.x + 300, box.y + 200);
-  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  // Kept as it came: let go of with Escape, an unwritten block goes.
+  await page.keyboard.press("Control+Enter");
   await pickTool("Move");
   await page.locator(".panel ul.layer-list li[data-id]").first().click();
   await page.waitForTimeout(200);
@@ -20787,7 +20867,9 @@ assert(
   await pickTool("Text");
   await page.mouse.click(...at(150, 150));
   await page.waitForTimeout(300);
-  await page.keyboard.press("Escape");
+  // Written into and kept: let go of unwritten, a block is taken away.
+  await page.keyboard.type("In");
+  await page.keyboard.press("Control+Enter");
   await page.waitForTimeout(150);
   await pickTool("Pen");
   await page.mouse.click(...at(200, 300));

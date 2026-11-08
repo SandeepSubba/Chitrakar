@@ -564,6 +564,18 @@ async function partsListed(db: IDBDatabase, but: number): Promise<Set<string>> {
   return out;
 }
 
+/** The next moment the page has nothing else to do (or two seconds,
+ * whichever comes first: long enough for a gesture begun just now to go
+ * first, short enough that a draft is not left behind while the page
+ * stays busy; a turn of the loop where there is no idle callback, as in
+ * Safari). */
+function whenIdle(): Promise<void> {
+  return new Promise((done) => {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(() => done(), { timeout: 2_000 });
+    else setTimeout(done, 0);
+  });
+}
+
 /** Keep the draft: the parts not kept yet, then the skeleton with the
  * list of parts it needs in one step, then the parts no draft needs any
  * more — so whatever moment the tab is closed at, the skeleton kept has
@@ -582,6 +594,13 @@ async function putDraft(
   const kept = await draftPartsKept(db);
   for (const name of names) {
     if (kept.has(name)) continue;
+    // A picture's part is its PNG, made on this thread — seconds for a
+    // big photograph — so it waits for the page to be idle rather than
+    // landing in the middle of whatever comes next (it froze a zoom
+    // three seconds once, just after a hundred-megapixel picture was
+    // placed). Within two seconds whatever happens, so the net is there.
+    await whenIdle();
+    if (!stillLatest()) return;
     await draftWrite(db, [[PART + name, session.draft_part(name)]]);
     if (!stillLatest()) return;
   }
@@ -1009,6 +1028,9 @@ interface ToolDrag {
   /** The drag began by making copies (alt), so its move and the copying
    * are one step in the history. */
   duplicated?: boolean;
+  /** What was picked before the copies were made, picked again if the
+   * drag comes to nothing and the copies go. */
+  copiedFrom?: NodeId[];
   /** Shift was held at the press: for the brush, a click joins on to
    * where the last stroke ended. */
   shift?: boolean;
@@ -3051,9 +3073,24 @@ export function App() {
     setMultiSel([]);
   }, []);
 
+  /** Take back the copies an alt-drag began by making, and pick what
+   * they were copies of again. */
+  const dropCopies = useCallback(
+    (drag: ToolDrag) => {
+      if (!session || !drag.duplicated) return;
+      session.undo();
+      const from = drag.copiedFrom ?? [];
+      setSelected(from[0] ?? null);
+      setMultiSel(from.length > 1 ? from : []);
+      refresh(session);
+    },
+    [session, refresh],
+  );
+
   /** Let go of whatever is in flight, and say whether anything was. */
   const cancelGesture = useCallback((): boolean => {
     if (!session) return false;
+    const held = toolDragRef.current;
     const inFlight =
       toolDragRef.current !== null ||
       handleDragRef.current !== null ||
@@ -3075,6 +3112,8 @@ export function App() {
     setCropFrame(null);
     cropEditRef.current = null;
     const cancelled = session.cancel_preview();
+    // An alt-drag let go of takes its copies with it.
+    if (held?.duplicated) dropCopies(held);
     // A stroke let go of takes what it made for itself with it.
     if (paintingRef.current) {
       paintingRef.current = null;
@@ -3083,7 +3122,29 @@ export function App() {
       refresh(session);
     } else if (cancelled) refresh(session);
     return inFlight || cancelled;
-  }, [session, refresh]);
+  }, [session, refresh, dropCopies]);
+
+  /** Undo pressed with a drag still held takes back the drag, as Escape
+   * would, rather than the step before it — which used to vanish with
+   * the drag's preview still standing on top of the page. A slider held
+   * part-way is let go of the same way. */
+  const undoMidGesture = useCallback((): boolean => {
+    if (!session) return false;
+    const dragging =
+      toolDragRef.current !== null ||
+      handleDragRef.current !== null ||
+      gradToolRef.current !== null ||
+      knifeRef.current !== null ||
+      zoomBoxRef.current !== null ||
+      cropEditRef.current !== null ||
+      paintingRef.current !== null;
+    if (dragging) return cancelGesture();
+    if (session.cancel_preview()) {
+      refresh(session);
+      return true;
+    }
+    return false;
+  }, [session, refresh, cancelGesture]);
 
   /** Commit the pen path being drawn: closed shapes get the current fill,
    * open polylines get a stroke. Anchors normalize to a (0,0) origin with
@@ -3381,6 +3442,7 @@ export function App() {
         setPenHandles((hs) => hs.slice(0, -1));
       } else if (fired === "undo" || fired === "redo") {
         e.preventDefault();
+        if (undoMidGesture()) return;
         if (fired === "redo") redo();
         else undo();
       }
@@ -3498,6 +3560,7 @@ export function App() {
     undo,
     redo,
     cancelGesture,
+    undoMidGesture,
     finishPath,
     tool,
     penPoints,
@@ -5076,6 +5139,7 @@ export function App() {
             session.duplicate_nodes(new Float64Array(together), false),
           );
           drag.duplicated = true;
+          drag.copiedFrom = [target, ...together.filter((id) => id !== target)];
           target = copies[Math.max(0, together.indexOf(target))];
           together = copies;
           setMultiSel(copies.length > 1 ? copies : []);
@@ -5876,6 +5940,12 @@ export function App() {
       if (drag.moved && session.commit_preview()) {
         if (drag.duplicated) session.merge_last();
         refresh(session);
+      } else if (drag.duplicated) {
+        // Alt and a click, or a drag that came back where it began: no
+        // copy was carried anywhere, so none is left lying on the
+        // original.
+        session.cancel_preview();
+        dropCopies(drag);
       }
       return;
     }
@@ -7134,6 +7204,10 @@ export function App() {
   const [inlineText, setInlineText] = useState<{
     id: NodeId;
     value: string;
+    /** Where the history stood when the Text tool had just put this
+     * block down: the typing then joins the step that added it, and
+     * letting it go unwritten takes the block away again. */
+    fresh?: number;
   } | null>(null);
   const inlineRef = useRef<HTMLTextAreaElement>(null);
   // While text is typed on the canvas, the block stays in sight. An
@@ -7190,7 +7264,7 @@ export function App() {
       host?.removeEventListener("scroll", settle);
     };
   }, [editing]);
-  const beginInlineText = () => {
+  const beginInlineText = (fresh = false) => {
     if (
       !session ||
       !selectedLayer ||
@@ -7199,7 +7273,11 @@ export function App() {
       !("Text" in selectedKind)
     )
       return;
-    setInlineText({ id: selectedLayer.id, value: selectedKind.Text.text });
+    setInlineText({
+      id: selectedLayer.id,
+      value: selectedKind.Text.text,
+      fresh: fresh ? session.history_mark() : undefined,
+    });
     setTimeout(() => {
       inlineRef.current?.focus();
       inlineRef.current?.select();
@@ -7213,7 +7291,7 @@ export function App() {
     // Asked once, in the render after the block was added: if it is not
     // the picked layer then, nothing later is opened in its place.
     typeIntoNewText.current = false;
-    if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) beginInlineText();
+    if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) beginInlineText(true);
   });
   /** The on-canvas editor's selection as it was before the latest
    * keystroke, so the keystroke's edit is known exactly (`editOf`). */
@@ -7250,8 +7328,22 @@ export function App() {
     if (!inlineText) return;
     setInlineText(null);
     if (!session) return;
-    if (keep) {
-      endGesture();
+    // A block the Text tool has only just put down, with nothing else
+    // done since: what is typed into it is part of putting it down, one
+    // step, and a block let go of unwritten (Escape, or every letter
+    // taken out) was never wanted.
+    const fresh =
+      inlineText.fresh !== undefined && session.history_mark() === inlineText.fresh;
+    if (fresh && (!keep || inlineText.value.trim() === "")) {
+      session.cancel_preview();
+      session.undo();
+      if (selected === inlineText.id) setSelected(null);
+      refresh(session);
+    } else if (keep) {
+      if (session.commit_preview()) {
+        if (fresh) session.merge_last();
+        refresh(session);
+      }
     } else if (session.cancel_preview()) {
       refresh(session);
     }
@@ -9453,7 +9545,7 @@ export function App() {
     return 1;
   };
   const frameFile = (name: string, at: number) =>
-    `${fileName()} - ${name}${at > 1 ? `@${at}x` : ""}.png`;
+    `${fileName()} - ${name}${at !== 1 ? `@${at}x` : ""}.png`;
 
   /** The picked frame on its own, at its own size — one screen out of a
    * page of them.

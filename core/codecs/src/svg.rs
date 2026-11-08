@@ -41,8 +41,71 @@ pub fn export_svg(doc: &Document) -> Result<String, DocError> {
         let _ = write!(out, "  <defs>\n{defs}  </defs>\n");
     }
     out.push_str(&body);
+    // Last, where a style still applies to all of the page and the faces'
+    // long lines are out of the way of anybody reading the markup.
+    let faces = carried_faces(doc);
+    if !faces.is_empty() {
+        let _ = writeln!(out, "  <style>{}</style>", escape_xml(&faces));
+    }
     out.push_str("</svg>\n");
     Ok(out)
+}
+
+/// The faces the page's text is set in, carried inside it as
+/// `@font-face` rules under the names the text asks for: a face loaded
+/// into the editor is on no other machine, and the one it comes with
+/// is on few — set in another, a line ran to a different width and
+/// right-aligned text no longer lined up. Only the glyphs used travel,
+/// where the face can be cut down. A bold or an italic the face does
+/// not have is left for the reader to make, as the editor makes it.
+fn carried_faces(doc: &Document) -> String {
+    type Key = (String, bool, bool, String);
+    let mut faces: std::collections::BTreeMap<
+        Key,
+        (&'static [u8], std::collections::BTreeSet<u16>),
+    > = std::collections::BTreeMap::new();
+    for (_, node) in doc.nodes() {
+        let NodeKind::Text(spec) = &node.kind else {
+            continue;
+        };
+        for run in chitrakar_render::text::placed(spec).runs {
+            let key = (
+                run.family.clone(),
+                run.bold && run.thicken == 0.0,
+                run.italic && run.lean == 0.0,
+                run.face.name.clone(),
+            );
+            faces
+                .entry(key)
+                .or_insert_with(|| (run.face.bytes, Default::default()))
+                .1
+                .extend(run.glyphs.iter().map(|g| g.id));
+        }
+    }
+    let mut css = String::new();
+    for ((family, bold, italic, _), (bytes, glyphs)) in faces {
+        let cut = crate::subset::subset_ttf_for_web(bytes, &glyphs);
+        let bytes = cut.as_deref().unwrap_or(bytes);
+        let kind = if bytes.starts_with(b"OTTO") {
+            "otf"
+        } else {
+            "ttf"
+        };
+        let _ = write!(
+            css,
+            r#"@font-face{{font-family:"{}";{}{}src:url(data:font/{kind};base64,{}) format("{}")}}"#,
+            family.replace('\\', "\\\\").replace('"', "\\\""),
+            if bold { "font-weight:bold;" } else { "" },
+            if italic { "font-style:italic;" } else { "" },
+            base64(bytes),
+            if kind == "otf" {
+                "opentype"
+            } else {
+                "truetype"
+            },
+        );
+    }
+    css
 }
 
 fn write_children(
@@ -399,7 +462,7 @@ fn write_node(
                         let _ = writeln!(
                             out,
                             "{pad}<!-- copy of a clone layer '{}' has no SVG equivalent; omitted -->",
-                            escape_xml(&node.name)
+                            in_comment(&node.name)
                         );
                     }
                 }
@@ -1416,8 +1479,30 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
                 let edge = 0.5 * node.opacity.max(1e-3);
                 let _ = write!(
                     body,
-                    r#"<feComponentTransfer in="SourceAlpha" result="{name}i"><feFuncA type="linear" slope="1000" intercept="{}"/></feComponentTransfer><feMorphology in="{name}i" operator="dilate" radius="{width}" result="{name}g"/><feFlood {}/><feComposite in2="{name}g" operator="in" result="{name}"/>"#,
+                    r#"<feComponentTransfer in="SourceAlpha" result="{name}i"><feFuncA type="linear" slope="1000" intercept="{}"/></feComponentTransfer>"#,
                     0.5 - 1000.0 * edge,
+                );
+                // Grown by a circle, as the renderer grows it, where
+                // SVG's one dilation grows by a square: corners as far
+                // again as the band is wide, and diagonals thick. Four
+                // boxes at their angles round the circle, taken
+                // together, reach within two in a hundred of it along
+                // any edge.
+                let mut grown = Vec::new();
+                for (k, angle) in [11.25f32, 33.75, 56.25, 78.75].iter().enumerate() {
+                    let (s, c) = angle.to_radians().sin_cos();
+                    let _ = write!(
+                        body,
+                        r#"<feMorphology in="{name}i" operator="dilate" radius="{} {}" result="{name}g{k}"/>"#,
+                        width * c,
+                        width * s
+                    );
+                    grown.push(format!(r#"<feMergeNode in="{name}g{k}"/>"#));
+                }
+                let _ = write!(
+                    body,
+                    r#"<feMerge result="{name}g">{}</feMerge><feFlood {}/><feComposite in2="{name}g" operator="in" result="{name}"/>"#,
+                    grown.concat(),
                     tint(color, *opacity)
                 );
                 under.push(name);
@@ -2355,13 +2440,36 @@ fn layer_id(layer: NodeId, name: &str) -> String {
         ids.given.insert(layer, id.clone());
         id
     });
-    format!(r#" id="{}""#, escape_xml(&id).replace('"', "&quot;"))
+    format!(r#" id="{}""#, escape_xml(&id))
 }
 
+/// Text as XML can hold it, in content and in a quoted attribute alike.
+///
+/// The control characters XML 1.0 has no place for are not kept: a
+/// vertical tab — what Word puts for a line broken with Shift+Enter in
+/// what it copies as plain text — made the whole file one no reader
+/// would open. It and a form feed stand as the line break they are; the
+/// rest go.
 fn escape_xml(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\u{b}' | '\u{c}' => out.push('\n'),
+            '\t' | '\n' | '\r' => out.push(c),
+            c if (c as u32) < 0x20 || c == '\u{7f}' || c == '\u{fffe}' || c == '\u{ffff}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Text inside a comment, where two dashes would end it early.
+fn in_comment(s: &str) -> String {
+    escape_xml(s).replace("--", "- -")
 }
 
 #[cfg(test)]
@@ -2407,6 +2515,58 @@ mod tests {
         b: 0.0,
         a: 1.0,
     };
+
+    /// Text holding what XML has no room for — a vertical tab is how
+    /// Word copies a line broken with Shift+Enter — still makes a file
+    /// that reads, and a name with two dashes in it a comment that does.
+    #[test]
+    fn what_xml_cannot_hold_is_not_written_into_it() {
+        let mut doc = Document::new(100, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::text(
+                "a \"quote\" -- and \u{1}",
+                chitrakar_doc::TextSpec::new("one\u{b}two \u{1}\"x\" & <y>", 12.0, RED),
+            )),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        roxmltree::Document::parse(&svg).expect("the file is XML");
+        assert!(!svg.contains('\u{b}') && !svg.contains('\u{1}'));
+    }
+
+    /// The faces text is set in travel inside the file, cut to the
+    /// glyphs used, under the name the text asks for — so the page reads
+    /// the same on a machine that has never seen them.
+    #[test]
+    fn the_faces_text_is_set_in_go_with_it() {
+        let mut doc = Document::new(100, 60, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::text(
+                "t",
+                chitrakar_doc::TextSpec::new("Hello", 12.0, RED),
+            )),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        roxmltree::Document::parse(&svg).expect("the file is XML");
+        let at = svg.find("@font-face").expect("a face is carried");
+        assert!(svg[at..].contains(r#"font-family:&quot;DejaVu Sans&quot;"#));
+        let data = svg[at..].split("base64,").nth(1).unwrap();
+        let data = &data[..data.find(')').unwrap()];
+        assert!(
+            data.len() < 200_000,
+            "cut down to what is used: {} characters",
+            data.len()
+        );
+        let plain = export_svg(&Document::new(100, 60, ColorMode::Rgb)).unwrap();
+        assert!(!plain.contains("@font-face"), "and none without text");
+    }
 
     /// A picture with its corners moved goes out as the pixels it covers
     /// through them, the size of its quad and placed where the quad is:

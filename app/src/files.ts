@@ -113,6 +113,36 @@ export const writePath = (path: string, bytes: Uint8Array) =>
  * no encode. */
 export type Outgoing = { name: string; type: string; make: () => Uint8Array };
 
+/** A name every system will give a file: the characters a path or
+ * Windows will not take (a slash would make a folder of a region called
+ * "icon/small", a colon is refused outright) become "-", control
+ * characters go, and so do the dots and spaces Windows drops off the
+ * end. Never empty. */
+export function fileSafe(name: string): string {
+  const cleaned = name
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .replace(/[\\/:*?"<>|]/g, "-")
+    .replace(/[. ]+$/, "")
+    .trim();
+  return cleaned || "untitled";
+}
+
+/** Names made distinct, so files written together do not land on one
+ * another — two frames both called "Hero" — and in a way that holds
+ * where case does not count: a second "Hero.png" is "Hero 2.png". */
+export function distinctNames(names: string[]): string[] {
+  const taken = new Set<string>();
+  return names.map((name) => {
+    const dot = name.lastIndexOf(".");
+    const [stem, ext] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+    let out = name;
+    for (let n = 2; taken.has(out.toLowerCase()); n++) out = `${stem} ${n}${ext}`;
+    taken.add(out.toLowerCase());
+    return out;
+  });
+}
+
 /** Write files out, as the platform writes them: downloads in a
  * browser; in the shell a save panel for one file and a folder for
  * several, since a panel per file is not a thing anybody wants to
@@ -125,6 +155,10 @@ export async function writeFiles(
   near: string | null,
 ): Promise<boolean> {
   if (files.length === 0) return false;
+  // Named from what the person called a frame, a region or a comp, so
+  // made into names a file can have, and none of them twice.
+  const named = distinctNames(files.map((f) => fileSafe(f.name)));
+  files = files.map((f, i) => ({ ...f, name: named[i] }));
   if (!isTauri()) {
     for (const f of files) download(f.make(), f.name, f.type);
     return true;

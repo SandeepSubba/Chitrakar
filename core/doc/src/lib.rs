@@ -44,6 +44,42 @@ where
     out.collect_map(pairs)
 }
 
+std::thread_local! {
+    /// While a document is written out for keeping
+    /// ([`Document::leaving_out_unused`]), the pictures and kept files
+    /// anything in it still points at: the rest are left out.
+    static IN_USE: std::cell::RefCell<Option<InUse>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What a document's layers, selection and kept regions point at.
+#[derive(Debug, Default, Clone)]
+pub struct InUse {
+    pub pictures: std::collections::BTreeSet<String>,
+    pub originals: std::collections::BTreeSet<String>,
+}
+
+fn pictures_in_use<V, S>(map: &BTreeMap<String, V>, out: S) -> Result<S::Ok, S::Error>
+where
+    V: serde::Serialize,
+    S: serde::Serializer,
+{
+    IN_USE.with(|keep| match &*keep.borrow() {
+        Some(keep) => out.collect_map(map.iter().filter(|(id, _)| keep.pictures.contains(*id))),
+        None => out.collect_map(map),
+    })
+}
+
+fn originals_in_use<V, S>(map: &BTreeMap<String, V>, out: S) -> Result<S::Ok, S::Error>
+where
+    V: serde::Serialize,
+    S: serde::Serializer,
+{
+    IN_USE.with(|keep| match &*keep.borrow() {
+        Some(keep) => out.collect_map(map.iter().filter(|(id, _)| keep.originals.contains(*id))),
+        None => out.collect_map(map),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
@@ -172,7 +208,7 @@ pub struct Document {
     /// Ordered rather than hashed: the container writes one file per
     /// resource, in the order this hands them out, and a file written in
     /// a different order every run is a different file every run.
-    #[serde(default)]
+    #[serde(default, serialize_with = "pictures_in_use")]
     resources: BTreeMap<String, Resource>,
     /// CMYK press profile bytes (stored as profiles/cmyk.icc in the
     /// container) and the parsed transform. Authored CMYK values render
@@ -258,7 +294,11 @@ pub struct Document {
     /// settings ([`Developed`]). Content-addressed and immutable, like the
     /// resources; the bytes live beside the manifest in the container.
     /// Additive, and left out of the manifest when there are none.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "originals_in_use"
+    )]
     originals: BTreeMap<String, Original>,
 }
 
@@ -625,6 +665,46 @@ impl Document {
 
     pub fn resource(&self, id: &str) -> Option<&Resource> {
         self.resources.get(id)
+    }
+
+    /// The pictures and kept files something in the document points at:
+    /// a layer (its pixels, its mask, the raw file it was developed
+    /// from), the selection or a kept region. The stores keep everything
+    /// ever put in them, which undo needs; a file only needs these.
+    pub fn in_use(&self) -> InUse {
+        let mut used = InUse::default();
+        for (_, node) in self.nodes() {
+            node.each_resource(&mut |id| {
+                used.pictures.insert(id.to_string());
+            });
+            if let NodeKind::Raster(r) = &node.kind {
+                if let Some(developed) = &r.develop {
+                    used.originals.insert(developed.original.clone());
+                }
+            }
+        }
+        let masks = self
+            .selection
+            .iter()
+            .map(|m| &**m)
+            .chain(self.regions.iter().map(|r| &r.mask));
+        for mask in masks {
+            if let MaskKind::Raster { resource_id, .. } = &mask.kind {
+                used.pictures.insert(resource_id.clone());
+            }
+        }
+        used
+    }
+
+    /// Run `f` — a serialization of this document — with the pictures
+    /// and kept files nothing points at any more left out of what it
+    /// writes. A placed photograph deleted, or a raw developed again,
+    /// otherwise stayed in every file saved after it.
+    pub fn leaving_out_unused<R>(&self, f: impl FnOnce() -> R) -> R {
+        let previous = IN_USE.with(|keep| keep.replace(Some(self.in_use())));
+        let out = f();
+        IN_USE.with(|keep| *keep.borrow_mut() = previous);
+        out
     }
 
     pub fn resources(&self) -> impl Iterator<Item = (&String, &Resource)> {

@@ -1529,9 +1529,17 @@ impl Session {
         match self.preview_gesture.take() {
             Some(gesture) => {
                 let label = gesture.label.clone();
+                let undoing = gesture.undoing();
+                // A drag that came back where it began, a knob turned and
+                // snapped to the angle it had: nothing is different, and
+                // a step in the history saying otherwise — and the file
+                // marked as changed — is not true.
+                if self.changes_nothing(&undoing) {
+                    return false;
+                }
                 let serial = self.next_serial();
                 self.undo.push(HistoryEntry {
-                    inverse: gesture.undoing(),
+                    inverse: undoing,
                     label,
                     serial,
                 });
@@ -1540,6 +1548,33 @@ impl Session {
             }
             None => false,
         }
+    }
+
+    /// Whether putting `undoing` into effect would leave the document as
+    /// it is: tried, and its own way back compared with it. When it
+    /// would change something, it is taken back again.
+    ///
+    /// Only asked of one command that restates a value (`slots_of` names
+    /// it), whose way back is the value it found: the same value is the
+    /// same command. A command that is its own way back — turning the
+    /// page over — says the same thing whatever it changes, and a batch
+    /// is taken at its word.
+    fn changes_nothing(&mut self, undoing: &Command) -> bool {
+        if matches!(undoing, Command::Batch(_)) || slots_of(undoing).is_none() {
+            return false;
+        }
+        let Ok(said) = serde_json::to_string(undoing) else {
+            return false;
+        };
+        let Ok(back) = self.apply_internal(undoing.clone()) else {
+            return false;
+        };
+        if serde_json::to_string(&back).is_ok_and(|now| now == said) {
+            return true;
+        }
+        // It changed something: put the gesture's end back.
+        let _ = self.apply_internal(back);
+        false
     }
 
     /// Fold the newest step in the history into the one before it, under
@@ -3597,7 +3632,8 @@ impl Session {
         let label = format!("Move {}", self.doc.node(id)?.name);
         let move_it = Command::MoveNode { id, parent, index };
         if self.doc.parent_of(id) == Some(parent) {
-            return self.apply_labeled(move_it, Some(label));
+            // Put back where it is is no step.
+            return self.apply_labeled_if_changed(move_it, label).map(|_| ());
         }
         let was = chitrakar_render::ancestor_space(&self.doc, id);
         let now = chitrakar_render::own_space(&self.doc, parent)?;
@@ -6062,12 +6098,16 @@ impl Session {
     /// outline.
     fn pick_mask(&mut self, fresh: chitrakar_doc::Mask, how: &str) -> Result<(), EngineError> {
         if how == "replace" {
-            return self.apply_labeled(
-                Command::SetSelection {
-                    selection: Some(Box::new(fresh)),
-                },
-                Some("Select".into()),
-            );
+            // The same region picked again — Select › Whole page twice —
+            // is no step.
+            return self
+                .apply_labeled_if_changed(
+                    Command::SetSelection {
+                        selection: Some(Box::new(fresh)),
+                    },
+                    "Select".into(),
+                )
+                .map(|_| ());
         }
         let op = chitrakar_render::boolean::BoolOp::from_name(how)
             .ok_or_else(|| EngineError::BadCommand(format!("unknown way to pick: {how:?}")))?;
@@ -6436,10 +6476,9 @@ impl Session {
             Some(at) => regions[at] = kept,
             None => regions.push(kept),
         }
-        self.apply_labeled(
-            Command::SetRegions { regions },
-            Some(format!("Keep {name}")),
-        )
+        // Kept again under its name as it was is no step.
+        self.apply_labeled_if_changed(Command::SetRegions { regions }, format!("Keep {name}"))
+            .map(|_| ())
     }
 
     /// Pick out a region kept earlier, combining it with what is picked
@@ -7802,7 +7841,7 @@ impl Session {
         // comes out at the size the screen it is for wants.
         let scale = scale.clamp(MIN_EXPORT_SCALE, 16.0);
         let (bx, by) = (clip.x0 as f32, clip.y0 as f32);
-        let mut out = self.render_scaled(
+        let mut out = self.render_scaled_unmarked(
             scale,
             Some([
                 bx,
@@ -7844,6 +7883,12 @@ impl Session {
                 a: p.a * c,
             };
         }
+        // The mark goes on over the region's cut, not under it: laid in
+        // the box's corner first, it was cut away with the corner — all
+        // of it from an ellipse, the end of the word from a smaller one.
+        if let Some(mark) = &self.output_watermark {
+            mark.lay_on(&mut out)?;
+        }
         kind.encode(w, h, &out.to_srgb8())
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
@@ -7858,16 +7903,25 @@ impl Session {
         &self,
         region: &chitrakar_doc::Mask,
     ) -> Result<(VectorShape, [f32; 4]), EngineError> {
-        let rings = self.region_rings(region)?;
+        let rings: Vec<Vec<[f32; 2]>> = self
+            .region_rings(region)?
+            .into_iter()
+            .filter(|ring| ring.len() >= 3)
+            .collect();
+        // A region that traces to nothing — a gradient mask lying off the
+        // page, say — has no outline to fill or stroke. The test was of
+        // the box's corner being finite, which its starting value is, so
+        // an empty region went on to take its first ring and stopped the
+        // engine.
+        if rings.is_empty() {
+            return Err(EngineError::BadCommand("nothing is picked out".into()));
+        }
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for p in rings.iter().flatten() {
             x0 = x0.min(p[0]);
             y0 = y0.min(p[1]);
             x1 = x1.max(p[0]);
             y1 = y1.max(p[1]);
-        }
-        if !x0.is_finite() {
-            return Err(EngineError::BadCommand("nothing is picked out".into()));
         }
         let mut rings = rings.into_iter().map(|ring| {
             ring.into_iter()
@@ -8591,7 +8645,10 @@ impl Session {
             format!("{what} of {} layers", ids.len())
         };
         let cmds = ids.iter().map(|id| make(*id)).collect();
-        self.apply_labeled(Command::Batch(cmds), Some(label))
+        // A blend, an opacity, a lock given to layers that already have
+        // it is no step.
+        self.apply_labeled_if_changed(Command::Batch(cmds), label)
+            .map(|_| ())
     }
 
     /// Mirror layers about their shared box — left for right, or top for
@@ -9632,6 +9689,20 @@ impl Session {
         scale: f32,
         region: Option<[f32; 4]>,
     ) -> Result<Surface, EngineError> {
+        let mut surface = self.render_scaled_unmarked(scale, region)?;
+        if let Some(mark) = &self.output_watermark {
+            mark.lay_on(&mut surface)?;
+        }
+        Ok(surface)
+    }
+
+    /// [`Session::render_scaled`] without the watermark, for an export
+    /// that cuts what it draws before the mark goes on.
+    fn render_scaled_unmarked(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+    ) -> Result<Surface, EngineError> {
         let scale = scale.clamp(MIN_EXPORT_SCALE, 16.0);
         let [x, y, w, h] = region.unwrap_or([
             0.0,
@@ -9689,9 +9760,6 @@ impl Session {
             for (px, o) in surface.pixels.iter_mut().zip(original) {
                 *px = chitrakar_render::sharpened(o, *px, self.output_sharpen);
             }
-        }
-        if let Some(mark) = &self.output_watermark {
-            mark.lay_on(&mut surface)?;
         }
         Ok(surface)
     }
@@ -10924,6 +10992,18 @@ impl Session {
     /// Set the CMYK press profile authored CMYK colors render through.
     /// Not a command: like resources, it is document setup, not an edit.
     pub fn set_cmyk_profile(&mut self, icc: Vec<u8>) -> Result<(), EngineError> {
+        // A profile is read both ways: into the screen's colours, which
+        // drawing needs, and out into inks, which the press exports
+        // need. One that only goes the first way was taken, and every
+        // TIFF and PDF made with it failed afterwards, long after the
+        // profile was the thing to blame.
+        chitrakar_color::cms::RgbToCmyk::new(&icc)
+            .and_then(|out| out.separate(&[0.5, 0.5, 0.5]))
+            .map_err(|e| {
+                EngineError::BadCommand(format!(
+                    "this press profile can show its inks but not separate into them, so nothing could be printed with it ({e}); choose another"
+                ))
+            })?;
         self.doc
             .set_cmyk_profile(icc)
             .map_err(EngineError::BadCommand)?;
@@ -11393,6 +11473,36 @@ mod tests {
             ],
             &solid(8, 6, [0, 0, 0, 255]),
         )
+    }
+
+    /// A region that traces to nothing — a gradient lying off the page —
+    /// is refused by Fill and Stroke selection in words; it stopped the
+    /// engine on a "checked above" that was not.
+    #[test]
+    fn filling_a_region_that_traces_to_nothing_is_refused() {
+        let mut s = Session::new(100, 100, ColorMode::Rgb);
+        s.apply(Command::SetSelection {
+            selection: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Gradient {
+                    radial: false,
+                    from: [-400.0, 50.0],
+                    to: [-300.0, 50.0],
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        let ink = chitrakar_color::AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let filled = s.fill_selection(ink.clone());
+        assert!(filled.is_err(), "fill: {filled:?}");
+        let stroked = s.stroke_selection(ink, 2.0, "centre");
+        assert!(stroked.is_err(), "stroke: {stroked:?}");
     }
 
     #[test]
@@ -16331,6 +16441,51 @@ mod tests {
         session.undo().unwrap();
         assert_cache_matches_fresh(&mut session);
         session.redo().unwrap();
+        assert_cache_matches_fresh(&mut session);
+    }
+
+    /// A group's shadow is drawn from what is inside it, so moving a
+    /// layer in the group moves the shadow too. The repaint was cut from
+    /// the layer's own box, widened only by the layer's own effects, and
+    /// left the group's shadow where it had been.
+    #[test]
+    fn editing_inside_a_shadowed_group_repaints_the_shadow() {
+        let mut session = Session::new(96, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 12.0, 12.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(10.0, 10.0),
+            })
+            .unwrap();
+        let group = session.group_nodes(&[a], "g").unwrap();
+        session
+            .apply(Command::SetEffects {
+                id: group,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 30.0,
+                    dy: 20.0,
+                    blur: 2.0,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 1.0,
+                    spread: 0.0,
+                }],
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(14.0, 30.0),
+            })
+            .unwrap();
+        assert_cache_matches_fresh(&mut session);
+        session.undo().unwrap();
         assert_cache_matches_fresh(&mut session);
     }
 
@@ -22561,6 +22716,114 @@ mod tests {
             session.render_scaled(1.0, None).unwrap().pixels,
             plain.pixels
         );
+    }
+
+    /// A press profile that can be read into the screen's colours but not
+    /// written out into inks is refused when it is set, rather than
+    /// taken and then failing every TIFF and PDF made with it. Needs such
+    /// a profile (hayro's CGATS001Compat-v2-micro is one), named by
+    /// `CHITRAKAR_TEST_ONE_WAY_ICC`; profiles are not ours to commit.
+    #[test]
+    fn a_press_profile_that_cannot_separate_is_refused() {
+        let Ok(path) = std::env::var("CHITRAKAR_TEST_ONE_WAY_ICC") else {
+            eprintln!("skipped: set CHITRAKAR_TEST_ONE_WAY_ICC");
+            return;
+        };
+        let icc = std::fs::read(path).unwrap();
+        let mut session = Session::new(16, 16, ColorMode::Cmyk);
+        let err = session.set_cmyk_profile(icc).unwrap_err().to_string();
+        assert!(err.contains("not separate"), "{err}");
+        assert!(session.document().cmyk_profile_bytes().is_none());
+    }
+
+    /// What changes nothing is no step: a drag that came back where it
+    /// began, the page picked out twice, a blend given to a layer that
+    /// has it, a layer put back where it is. Each marked the file as
+    /// changed, with a step in the history to say so.
+    #[test]
+    fn what_changes_nothing_is_no_step() {
+        let mut session = Session::new(64, 64, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 20.0, 20.0);
+        let mark = session.history_mark();
+        let t0 = session.document().node(a).unwrap().transform;
+        session
+            .preview(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(9.0, 4.0),
+            })
+            .unwrap();
+        session
+            .preview(Command::SetTransform {
+                id: a,
+                transform: t0,
+            })
+            .unwrap();
+        assert!(!session.commit_preview(), "a drag back to the start");
+        assert_eq!(session.history_mark(), mark);
+        session.pick_all().unwrap();
+        let picked = session.history_mark();
+        assert_ne!(picked, mark);
+        session.pick_all().unwrap();
+        assert_eq!(session.history_mark(), picked, "the page picked twice");
+        session
+            .set_blend_of(&[a], chitrakar_doc::BlendMode::Normal)
+            .unwrap();
+        assert_eq!(session.history_mark(), picked, "a blend it already has");
+        let root = session.document().root();
+        session.reparent(a, root, 0).unwrap();
+        assert_eq!(session.history_mark(), picked, "put back where it is");
+        // And what does change is still a step, ending where it went.
+        session
+            .preview(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(9.0, 4.0),
+            })
+            .unwrap();
+        assert!(session.commit_preview());
+        assert_eq!(
+            session.document().node(a).unwrap().transform,
+            Transform::translation(9.0, 4.0)
+        );
+        session.undo().unwrap();
+        assert_eq!(session.document().node(a).unwrap().transform, t0);
+    }
+
+    /// A region exported wears the watermark over its cut: laid in the
+    /// box's corner first, an ellipse cut it away whole.
+    #[test]
+    fn a_watermark_goes_out_on_a_region_too() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        add_rect(&mut session, "ground", 400.0, 300.0);
+        session
+            .apply(Command::SetSelection {
+                selection: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse {
+                            rx: 100.0,
+                            ry: 80.0,
+                        },
+                        transform: Transform::translation(200.0, 150.0),
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        let plain = chitrakar_codecs::decode(&session.selection_png(1.0).unwrap()).unwrap();
+        session.set_output_watermark(Some(Watermark {
+            text: "© A. Photographer".into(),
+            size: 0.1,
+            ..Default::default()
+        }));
+        let marked = chitrakar_codecs::decode(&session.selection_png(1.0).unwrap()).unwrap();
+        assert_eq!((plain.width, plain.height), (marked.width, marked.height));
+        let differ = plain
+            .rgba8
+            .chunks(4)
+            .zip(marked.rgba8.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(differ > 100, "the mark is there: {differ} pixels");
     }
 
     /// A watermark at its edges: an export a few pixels across, words far

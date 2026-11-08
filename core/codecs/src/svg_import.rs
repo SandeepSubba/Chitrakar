@@ -1303,6 +1303,32 @@ impl Page {
                     grown = Some((m.radius_x().get() + m.radius_y().get()) / 2.0 * scale);
                     m.input()
                 }
+                // This exporter's outline: the one silhouette grown by
+                // boxes at angles round a circle and taken together, a
+                // box's corner on the circle — so the circle's radius is
+                // how far it was grown.
+                Kind::Merge(m) => {
+                    let mut from = None;
+                    let mut radius = 0.0f32;
+                    for input in m.inputs() {
+                        let Kind::Morphology(d) = named(input)?.kind() else {
+                            return None;
+                        };
+                        if d.operator() != usvg::filter::MorphologyOperator::Dilate {
+                            return None;
+                        }
+                        match from {
+                            None => from = Some(d.input()),
+                            Some(f) if f == d.input() => {}
+                            Some(_) => return None,
+                        }
+                        radius = radius.max(d.radius_x().get().hypot(d.radius_y().get()));
+                    }
+                    let t = self.at;
+                    let scale = (t.sx.hypot(t.ky)).max(t.kx.hypot(t.sy));
+                    grown = Some(radius * scale);
+                    from?
+                }
                 // A design tool knocks the shape out of its own shadow,
                 // which under an opaque shape is nothing at all.
                 Kind::Composite(c) if c.operator() == CompositeOperator::Out => c.input1(),
@@ -1757,7 +1783,9 @@ fn walk(
                         Some((f, usvg::Paint::Pattern(pattern))) => {
                             let alpha = f.opacity().get() * opacity;
                             let below = got.shapes.len();
-                            if let Some(mut pic) = pattern_picture(p, pattern, alpha, clip, below) {
+                            if let Some(mut pic) =
+                                pattern_picture(p, pattern, alpha, clip, below, None)
+                            {
                                 pic.within = within;
                                 pic.blend = place.blend;
                                 pic.effects = place.effects.clone();
@@ -1767,7 +1795,32 @@ fn walk(
                         }
                         _ => false,
                     };
-                    if patterned && p.stroke().is_none() {
+                    // And a stroke painted with one is the same picture
+                    // seen through the stroke's outline, above the fill: it
+                    // came in as nothing at all.
+                    let pattern_stroke = match p.stroke().map(|s| (s, s.paint())) {
+                        Some((s, usvg::Paint::Pattern(pattern))) if !place.text => {
+                            let alpha = s.opacity().get() * opacity;
+                            let below =
+                                got.shapes.len() + usize::from(p.fill().is_some() && !patterned);
+                            if let Some(mut pic) = stroke_rings(p, s).and_then(|rings| {
+                                pattern_picture(p, pattern, alpha, clip, below, Some(rings))
+                            }) {
+                                pic.within = within;
+                                pic.blend = place.blend;
+                                pic.effects = place.effects.clone();
+                                got.pics.push(pic);
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+                    // Nothing left for a shape to carry: the fill and the
+                    // stroke are both pictures, or one is and the other
+                    // is not there.
+                    let fill_left = p.fill().is_some() && !patterned;
+                    let stroke_left = p.stroke().is_some() && !pattern_stroke;
+                    if (patterned || pattern_stroke) && !fill_left && !stroke_left {
                         continue;
                     }
                     let said = if place.text {
@@ -2132,14 +2185,19 @@ fn pattern_picture(
     opacity: f32,
     clip: Option<&Vec<Vec<[f32; 2]>>>,
     below: usize,
+    // What the pattern shows through, in the page's space: the path's
+    // fill unless said (a stroke's outline, for a pattern stroke).
+    through: Option<Vec<Vec<[f32; 2]>>>,
 ) -> Option<ImportedImage> {
     let abs = path.abs_transform();
-    let rings = as_even_odd(path, rings_of(path));
-    let mut outline: Vec<Vec<[f32; 2]>> = rings
-        .iter()
-        .map(Ring::flattened)
-        .filter(|r| r.len() >= 3)
-        .collect();
+    let mut outline: Vec<Vec<[f32; 2]>> = match through {
+        Some(rings) => rings.into_iter().filter(|r| r.len() >= 3).collect(),
+        None => as_even_odd(path, rings_of(path))
+            .iter()
+            .map(Ring::flattened)
+            .filter(|r| r.len() >= 3)
+            .collect(),
+    };
     if outline.is_empty() {
         return None;
     }
@@ -2865,6 +2923,86 @@ fn shapes_painted(path: &usvg::Path, t: usvg::Transform, opacity: f32) -> Vec<No
     out
 }
 
+/// The outline a path's stroke covers, in the page's space.
+fn stroke_rings(path: &usvg::Path, s: &usvg::Stroke) -> Option<Vec<Vec<[f32; 2]>>> {
+    let abs = path.abs_transform();
+    let mut rings = rings_in(path, abs);
+    if rings.is_empty() {
+        return None;
+    }
+    let main = rings.remove(0);
+    let shape = VectorShape::Path {
+        points: main.points,
+        closed: main.closed,
+        smooth: false,
+        handles: main.handles,
+        subpaths: rings.iter().map(Ring::flattened).collect(),
+    };
+    let (sx, sy) = abs.get_scale();
+    let black = AuthoredColor::Srgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    let pen = pen_of(s, black, (sx.abs() + sy.abs()) / 2.0)?;
+    chitrakar_render::stroke_outline(&shape, &pen)
+}
+
+/// A file's stroke as the engine's: its pen, dashes, ends and corners,
+/// in the colour given, the width and dashes scaled by `scale`.
+fn pen_of(s: &usvg::Stroke, color: AuthoredColor, scale: f32) -> Option<Stroke> {
+    Some(Stroke {
+        color,
+        width: s.width().get() * scale,
+        widths: Vec::new(),
+        // A broken line came in solid, which is a plain loss: the
+        // engine has had dashes of its own all along and the
+        // importer was writing an empty pattern over the file's.
+        // They mean the same thing — lengths along the outline,
+        // on and off in turn and repeating — and they are in the
+        // same units as the width, so they take the same scale.
+        //
+        // An odd-length pattern needs no special handling: SVG
+        // repeats it to make the runs alternate, and a pattern
+        // walked round and round does that by itself.
+        dash: s
+            .dasharray()
+            .map(|d| d.iter().map(|v| v * scale).collect())
+            .unwrap_or_default(),
+        // Where the pattern starts along the line, in the same
+        // units. It used to have no field to land in and came in
+        // as nought, so every dashed line whose file shifted its
+        // pattern came in with its dashes where the gaps were.
+        dash_offset: s.dashoffset() * scale,
+        // What the file says, not what this engine happens to
+        // default to: SVG's own default is a flat end and a
+        // mitred corner, and a line imported round when it was
+        // drawn flat is a line that came in wrong.
+        cap: match s.linecap() {
+            usvg::LineCap::Butt => chitrakar_doc::StrokeCap::Butt,
+            usvg::LineCap::Round => chitrakar_doc::StrokeCap::Round,
+            usvg::LineCap::Square => chitrakar_doc::StrokeCap::Square,
+        },
+        join: match s.linejoin() {
+            usvg::LineJoin::Round => chitrakar_doc::StrokeJoin::Round,
+            usvg::LineJoin::Bevel => chitrakar_doc::StrokeJoin::Bevel,
+            // A miter that clips is a miter as far as this
+            // engine is concerned; it has one limit, not two.
+            usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => chitrakar_doc::StrokeJoin::Miter,
+        },
+        // A file's own markers are shapes of its choosing, drawn
+        // from a definition this engine has no room for; they
+        // come in as the paths they are, alongside the line.
+        start_marker: Default::default(),
+        end_marker: Default::default(),
+        // SVG has no notion of which side of the outline a
+        // stroke lies on: it always straddles it. So a file
+        // says "centred" by saying nothing.
+        align: Some(chitrakar_doc::StrokeAlign::Centre),
+    })
+}
+
 fn shape_of(
     path: &usvg::Path,
     mut rings: Vec<Ring>,
@@ -2918,57 +3056,7 @@ fn shape_of(
             // is the file's as written.
             let (sx, sy) = t.get_scale();
             let scale = (sx.abs() + sy.abs()) / 2.0;
-            Some(Stroke {
-                color: solid_of(s.paint(), s.opacity().get() * opacity)?,
-                width: s.width().get() * scale,
-                widths: Vec::new(),
-                // A broken line came in solid, which is a plain loss: the
-                // engine has had dashes of its own all along and the
-                // importer was writing an empty pattern over the file's.
-                // They mean the same thing — lengths along the outline,
-                // on and off in turn and repeating — and they are in the
-                // same units as the width, so they take the same scale.
-                //
-                // An odd-length pattern needs no special handling: SVG
-                // repeats it to make the runs alternate, and a pattern
-                // walked round and round does that by itself.
-                dash: s
-                    .dasharray()
-                    .map(|d| d.iter().map(|v| v * scale).collect())
-                    .unwrap_or_default(),
-                // Where the pattern starts along the line, in the same
-                // units. It used to have no field to land in and came in
-                // as nought, so every dashed line whose file shifted its
-                // pattern came in with its dashes where the gaps were.
-                dash_offset: s.dashoffset() * scale,
-                // What the file says, not what this engine happens to
-                // default to: SVG's own default is a flat end and a
-                // mitred corner, and a line imported round when it was
-                // drawn flat is a line that came in wrong.
-                cap: match s.linecap() {
-                    usvg::LineCap::Butt => chitrakar_doc::StrokeCap::Butt,
-                    usvg::LineCap::Round => chitrakar_doc::StrokeCap::Round,
-                    usvg::LineCap::Square => chitrakar_doc::StrokeCap::Square,
-                },
-                join: match s.linejoin() {
-                    usvg::LineJoin::Round => chitrakar_doc::StrokeJoin::Round,
-                    usvg::LineJoin::Bevel => chitrakar_doc::StrokeJoin::Bevel,
-                    // A miter that clips is a miter as far as this
-                    // engine is concerned; it has one limit, not two.
-                    usvg::LineJoin::Miter | usvg::LineJoin::MiterClip => {
-                        chitrakar_doc::StrokeJoin::Miter
-                    }
-                },
-                // A file's own markers are shapes of its choosing, drawn
-                // from a definition this engine has no room for; they
-                // come in as the paths they are, alongside the line.
-                start_marker: Default::default(),
-                end_marker: Default::default(),
-                // SVG has no notion of which side of the outline a
-                // stroke lies on: it always straddles it. So a file
-                // says "centred" by saying nothing.
-                align: Some(chitrakar_doc::StrokeAlign::Centre),
-            })
+            pen_of(s, solid_of(s.paint(), s.opacity().get() * opacity)?, scale)
         });
     }
     Some(node)
@@ -4030,6 +4118,31 @@ mod tests {
             region(br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><mask id="m"><rect width="5" height="5" fill="white"/></mask></defs><g transform="translate(10 10)" mask="url(#m)"><rect width="20" height="20" fill="red"/></g></svg>"#),
             square(10.0, 10.0),
             "and a mask the same"
+        );
+    }
+
+    /// A stroke painted with a pattern comes in as the pattern seen
+    /// through the stroke's outline — it came in as nothing — and the
+    /// fill under it stays the shape it was.
+    #[test]
+    fn a_pattern_stroke_comes_in_as_its_pattern() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="60" viewBox="0 0 80 60"><defs><pattern id="p" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="4" height="4" fill="#ff0000"/></pattern></defs><rect x="10" y="10" width="60" height="40" fill="#0000ff" stroke="url(#p)" stroke-width="6"/></svg>"##;
+        let doc = brought_in(svg, 80, 60);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        let edge = ours.get(10, 30).to_srgb8();
+        assert!(
+            edge[0] > 200 && edge[2] < 60,
+            "the stroke is the pattern's red: {edge:?}"
+        );
+        let inside = ours.get(40, 30).to_srgb8();
+        assert!(
+            inside[2] > 200 && inside[0] < 60,
+            "and the fill is still blue: {inside:?}"
+        );
+        assert!(
+            ours.get(3, 30).a < 0.05,
+            "and nothing past the pen: {:?}",
+            ours.get(3, 30)
         );
     }
 

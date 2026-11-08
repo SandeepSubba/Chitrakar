@@ -50,6 +50,18 @@ fn checksum(data: &[u8]) -> u32 {
 /// of), or `None` when the file is not a `glyf` font this can read — an
 /// OpenType CFF face, say — in which case the whole file should travel.
 pub fn subset_ttf(font: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+    subset(font, glyphs, false)
+}
+
+/// [`subset_ttf`] for a page that names its characters rather than its
+/// glyphs: the character map comes along, and the naming and metrics
+/// tables a browser will not load a face without, with the glyphs'
+/// names (`post` of version 3) left behind.
+pub fn subset_ttf_for_web(font: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
+    subset(font, glyphs, true)
+}
+
+fn subset(font: &[u8], glyphs: &BTreeSet<u16>, web: bool) -> Option<Vec<u8>> {
     let tables = tables(font)?;
     let table = |tag: &[u8; 4]| tables.iter().find(|(t, _)| t == tag).map(|(_, d)| *d);
     let head = table(b"head")?;
@@ -134,6 +146,15 @@ pub fn subset_ttf(font: &[u8], glyphs: &BTreeSet<u16>) -> Option<Vec<u8>> {
             out_tables.push((*tag, data.to_vec()));
         }
     }
+    if web {
+        for tag in [b"cmap", b"name", b"OS/2"] {
+            out_tables.push((*tag, table(tag)?.to_vec()));
+        }
+        let post = table(b"post")?;
+        let mut short = post.get(..32)?.to_vec();
+        short[..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
+        out_tables.push((*b"post", short));
+    }
     out_tables.sort_by_key(|(tag, _)| *tag);
 
     // The directory, then the tables, each padded to four bytes.
@@ -174,6 +195,32 @@ mod tests {
     use ab_glyph::Font;
 
     const SANS: &[u8] = include_bytes!("../../render/assets/DejaVuSans.ttf");
+
+    /// For a page that names characters, the character map travels and
+    /// still finds the glyphs, and the tables a browser asks of a face
+    /// are there.
+    #[test]
+    fn a_subset_for_a_page_keeps_its_characters() {
+        let full = ab_glyph::FontRef::try_from_slice(SANS).unwrap();
+        let used: BTreeSet<u16> = "Hé".chars().map(|c| full.glyph_id(c).0).collect();
+        let web = subset_ttf_for_web(SANS, &used).expect("a glyf font subsets");
+        let small = ab_glyph::FontRef::try_from_slice(&web).expect("the subset parses");
+        for c in ['H', 'é'] {
+            assert_eq!(
+                small.glyph_id(c),
+                full.glyph_id(c),
+                "{c} is found by its character"
+            );
+        }
+        let tags: Vec<[u8; 4]> = tables(&web).unwrap().into_iter().map(|(t, _)| t).collect();
+        for tag in [b"cmap", b"name", b"OS/2", b"post", b"head", b"glyf"] {
+            assert!(tags.contains(tag), "{}", String::from_utf8_lossy(tag));
+        }
+        let mut sorted = tags.clone();
+        sorted.sort();
+        assert_eq!(tags, sorted, "in order, as a reader checks");
+        assert!(web.len() * 4 < SANS.len(), "{} bytes", web.len());
+    }
 
     #[test]
     fn a_subset_keeps_the_used_glyphs_as_they_were_and_nothing_else() {

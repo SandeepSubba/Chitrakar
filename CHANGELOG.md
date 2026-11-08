@@ -62,10 +62,13 @@ Nothing has been released yet. This is what the first release holds.
 - Opens and places PNG, JPEG, WebP, GIF, BMP, HEIC and AVIF (where the
   system decodes them), TIFF (bits, CMYK, ICC), PSD with layers, SVG,
   PDF and PDF-compatible Illustrator files, and raw files.
-- Exports PNG, JPEG (with the camera's EXIF, never GPS), WebP, SVG,
-  CMYK TIFF, PDF (live vectors and text, bleed and crop marks), and a
-  layered PSD — the whole page, what is picked, frames, or every kept
-  region; sized at @1x/@2x/@3x or to a long edge.
+- Exports PNG, JPEG (with the camera's EXIF, never GPS), WebP, SVG
+  (carrying the faces its text is set in), CMYK TIFF, PDF (live vectors
+  and text, bleed and crop marks), and a layered PSD — the whole page,
+  what is picked, frames, or every kept region; sized at @1x/@2x/@3x or
+  to a long edge.
+- A saved document keeps only the pictures and raw files it still
+  uses.
 
 ### Everywhere
 

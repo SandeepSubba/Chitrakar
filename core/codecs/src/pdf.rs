@@ -1599,11 +1599,30 @@ impl Page {
                             // antialiased, and the two do not add up: a
                             // seam all the way round.
                             VectorShape::Rect { .. } | VectorShape::Ellipse { .. } => {
-                                let off = match chitrakar_doc::stroke_align(shape, stroke) {
+                                let align = chitrakar_doc::stroke_align(shape, stroke);
+                                let off = match align {
                                     chitrakar_doc::StrokeAlign::Inside => stroke.width / 2.0,
                                     chitrakar_doc::StrokeAlign::Centre => 0.0,
                                     chitrakar_doc::StrokeAlign::Outside => -stroke.width / 2.0,
                                 };
+                                // Dashes end the way the renderer ends
+                                // them — a dotted line is round ends on
+                                // dashes of nothing, which PDF's own
+                                // butt ends leave as nothing at all —
+                                // and the band turns a corner rounded,
+                                // as the renderer reads it off its
+                                // distance from the edge, except inside,
+                                // where its outer corner is the rect's.
+                                let cap = match stroke.cap {
+                                    chitrakar_doc::StrokeCap::Butt => 0,
+                                    chitrakar_doc::StrokeCap::Round => 1,
+                                    chitrakar_doc::StrokeCap::Square => 2,
+                                };
+                                let join = match align {
+                                    chitrakar_doc::StrokeAlign::Inside => 0,
+                                    _ => 1,
+                                };
+                                let _ = writeln!(self.content, "{cap} J {join} j");
                                 let w = num(stroke.width);
                                 if off == 0.0 {
                                     let _ = writeln!(self.content, "{w} w\n{path}S");

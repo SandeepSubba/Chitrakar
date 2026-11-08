@@ -154,13 +154,15 @@ pub fn save_chitra_skeleton(doc: &Document, fonts: &[FontFile]) -> Result<Vec<u8
 /// each file one was made from. Only those `kept` holds a PNG for, or
 /// this document still holds, stay in `kept`.
 pub fn draft_parts(doc: &Document, kept: &mut WrittenPictures) -> Vec<String> {
-    kept.by_id.retain(|id, _| doc.resource(id).is_some());
+    let used = doc.in_use();
+    kept.by_id
+        .retain(|id, _| doc.resource(id).is_some() && used.pictures.contains(id));
     doc.resources()
-        .filter(|(_, r)| !r.rgba8.is_empty())
+        .filter(|(id, r)| !r.rgba8.is_empty() && used.pictures.contains(*id))
         .map(|(id, _)| format!("resources/{id}.png"))
         .chain(
             doc.originals()
-                .filter(|(_, o)| !o.bytes.is_empty())
+                .filter(|(id, o)| !o.bytes.is_empty() && used.originals.contains(*id))
                 .map(|(id, _)| format!("{ORIGINALS}{id}")),
         )
         .collect()
@@ -266,10 +268,13 @@ fn write_chitra(
     // Every picture's PNG first — made, or taken from `kept` — so the
     // file's size is known before it is written: grown as it went, a
     // document of photographs was copied whole each time it doubled.
+    // Only what something in the document points at: the stores keep
+    // every picture ever placed, for undo, and a file has no undo.
+    let used = doc.in_use();
     let mut written = std::collections::HashMap::new();
     let mut pictures = Vec::new();
     for (id, res) in doc.resources().filter(|_| whole) {
-        if res.rgba8.is_empty() {
+        if res.rgba8.is_empty() || !used.pictures.contains(id) {
             continue; // metadata-only entry (bytes were never restored)
         }
         let png = picture_png(kept, id, res)?;
@@ -278,9 +283,9 @@ fn write_chitra(
     }
     let originals: Vec<_> = doc
         .originals()
-        .filter(|(_, o)| whole && !o.bytes.is_empty())
+        .filter(|(id, o)| whole && !o.bytes.is_empty() && used.originals.contains(*id))
         .collect();
-    let json = serde_json::to_string_pretty(&manifest)?;
+    let json = doc.leaving_out_unused(|| serde_json::to_string_pretty(&manifest))?;
     let size = json.len()
         + fonts.iter().map(|(_, b)| b.len()).sum::<usize>()
         + pictures.iter().map(|(_, png)| png.len()).sum::<usize>()
@@ -436,6 +441,68 @@ mod tests {
     use chitrakar_color::ColorMode;
     use chitrakar_doc::{Command, Node, VectorShape};
 
+    /// Put a layer on the page showing `picture` — developed from
+    /// `original` when there is one — since a file keeps only the
+    /// pictures something points at.
+    fn showing(doc: &mut Document, picture: &str, original: Option<&str>) {
+        let root = doc.root();
+        let index = doc.children_of(root).unwrap().len();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(Node::raster(
+                "picture",
+                chitrakar_doc::RasterRef {
+                    resource_id: picture.into(),
+                    width: 2,
+                    height: 2,
+                    corners: None,
+                    develop: original.map(|o| chitrakar_doc::Developed {
+                        original: o.into(),
+                        settings: Default::default(),
+                    }),
+                },
+            )),
+        })
+        .unwrap();
+    }
+
+    /// The stores keep every picture and raw file ever put in them, which
+    /// undo needs; a file keeps only those a layer still shows. A
+    /// photograph placed and deleted, or a raw developed again, stayed
+    /// in every file saved after it — 75 MB for a page holding one
+    /// rectangle.
+    #[test]
+    fn a_file_keeps_only_the_pictures_something_shows() {
+        let mut doc = Document::new(16, 16, ColorMode::Rgb);
+        let gone = doc.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
+        let kept_raw = doc.add_original("kept.dng", b"the raw still shown".to_vec());
+        let _gone_raw = doc.add_original("gone.dng", b"a raw developed again".to_vec());
+        let shown = doc.add_resource(2, 2, [0, 0, 255, 255].repeat(4));
+        let _older = doc.add_resource(2, 2, [0, 255, 0, 255].repeat(4));
+        showing(&mut doc, &shown, Some(&kept_raw));
+        let mut kept = WrittenPictures::default();
+        let bytes = save_chitra_keeping(&doc, &[], &mut kept).unwrap();
+        let back = load_chitra(&bytes).unwrap();
+        let pictures: Vec<&String> = back.resources().map(|(id, _)| id).collect();
+        assert_eq!(pictures, vec![&shown], "only the picture shown");
+        let originals: Vec<&String> = back.originals().map(|(id, _)| id).collect();
+        assert_eq!(originals, vec![&kept_raw], "only the raw it came from");
+        assert_eq!(kept.len(), 1);
+        assert!(!bytes.windows(gone.len()).any(|w| w == gone.as_bytes()));
+        assert_eq!(
+            draft_parts(&doc, &mut kept),
+            vec![
+                format!("resources/{shown}.png"),
+                format!("originals/{kept_raw}")
+            ],
+            "nor does a draft"
+        );
+        // The document itself still holds them: undo may want them back.
+        assert_eq!(doc.resources().count(), 3);
+        assert_eq!(doc.originals().count(), 2);
+    }
+
     /// A draft is a skeleton and its parts: the skeleton holds neither the
     /// pictures nor the originals, and opened with its parts put back it
     /// is the document a whole save would have opened as.
@@ -444,6 +511,7 @@ mod tests {
         let mut doc = Document::new(16, 16, ColorMode::Rgb);
         let red = doc.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
         let raw = doc.add_original("photo.dng", b"a camera's raw file".to_vec());
+        showing(&mut doc, &red, Some(&raw));
         let mut kept = WrittenPictures::default();
         let skeleton = save_chitra_skeleton(&doc, &[]).unwrap();
         let whole = save_chitra(&doc).unwrap();
@@ -508,6 +576,8 @@ mod tests {
         let mut doc = Document::new(16, 16, ColorMode::Rgb);
         let red = doc.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
         let blue = doc.add_resource(2, 2, [0, 0, 255, 255].repeat(4));
+        showing(&mut doc, &red, None);
+        showing(&mut doc, &blue, None);
         let mut kept = WrittenPictures::default();
         let first = save_chitra_keeping(&doc, &[], &mut kept).unwrap();
         assert_eq!(kept.len(), 2);
@@ -527,6 +597,7 @@ mod tests {
 
         let mut other = Document::new(16, 16, ColorMode::Rgb);
         other.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
+        showing(&mut other, &red, None);
         save_chitra_keeping(&other, &[], &mut kept).unwrap();
         assert_eq!(kept.len(), 1, "only the pictures still held");
         assert!(!kept.by_id.contains_key(&blue));
@@ -3031,6 +3102,7 @@ mod tests {
             70, 80, 90, 200, /**/ 0, 0, 0, 0,
         ];
         let id = doc.add_resource(2, 2, rgba8.clone());
+        showing(&mut doc, &id, None);
 
         let bytes = save_chitra(&doc).unwrap();
         let restored = load_chitra(&bytes).unwrap();

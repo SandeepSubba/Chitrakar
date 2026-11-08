@@ -585,12 +585,45 @@ pub fn node_visual_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError
 
 fn node_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bounds, DocError> {
     let local = bounds_in_parent_space_inner(doc, id, effects)?;
+    // A group's effects are drawn from everything inside it, so a change
+    // to a child reaches as far as its groups' shadows and glows do.
+    // Carried out a group at a time, each grown in the space its effects
+    // are written in.
+    if effects && ancestors_have_effects(doc, id) {
+        let mut acc = local;
+        let mut cur = doc.parent_of(id);
+        while let Some(p) = cur {
+            let group = doc.node(p)?;
+            if let Bounds::Rect(x0, y0, x1, y1) = acc {
+                let pad = Effect::reach_of(&group.effects);
+                acc = match transformed_local_bounds(group.transform, (x0, y0, x1, y1)) {
+                    Bounds::Rect(x0, y0, x1, y1) => {
+                        Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+                    }
+                    other => other,
+                };
+            }
+            cur = doc.parent_of(p);
+        }
+        return Ok(acc);
+    }
     Ok(match local {
         Bounds::Rect(x0, y0, x1, y1) => {
             transformed_local_bounds(ancestor_space(doc, id), (x0, y0, x1, y1))
         }
         other => other,
     })
+}
+
+fn ancestors_have_effects(doc: &Document, id: NodeId) -> bool {
+    let mut cur = doc.parent_of(id);
+    while let Some(p) = cur {
+        if doc.node(p).is_ok_and(|n| !n.effects.is_empty()) {
+            return true;
+        }
+        cur = doc.parent_of(p);
+    }
+    false
 }
 
 /// Bounds in the space the node's transform is written against — its
@@ -987,11 +1020,11 @@ fn node_reach(doc: &Document, id: NodeId, node: &chitrakar_doc::Node) -> u32 {
         }
         // The window reaches its radius each way.
         NodeKind::Filter(Filter::Median { radius }) => {
-            (median_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32).saturating_add(1)
+            wide_reach(*radius, max_scale(ancestor_space(doc, *id))).saturating_add(1)
         }
         // A row's reach, then a column's of that: as far each way.
         NodeKind::Filter(Filter::SurfaceBlur { radius, .. }) => {
-            (surface_radius(*radius, max_scale(ancestor_space(doc, *id))) as u32).saturating_add(1)
+            wide_reach(*radius, max_scale(ancestor_space(doc, *id))).saturating_add(1)
         }
         // Half the smear each way, and the most any pixel has is a
         // corner's: its distance from the centre, at most the page's
@@ -1034,7 +1067,7 @@ fn node_reach(doc: &Document, id: NodeId, node: &chitrakar_doc::Node) -> u32 {
         // A square's far corner, the radius away each way.
         NodeKind::Filter(Filter::OilPaint { radius }) => {
             let scale = max_scale(ancestor_space(doc, *id));
-            (oil_radius(*radius, scale) as u32)
+            wide_reach(*radius, scale)
                 .saturating_mul(2)
                 .saturating_add(2)
         }
@@ -5701,10 +5734,11 @@ pub fn dashed_rings(
     // for — the line is drawn solid. Out past where an `f32` can count,
     // a step along it did not move it at all, and the walk did end
     // never.
-    let finest = pattern
-        .iter()
-        .map(|d| d.max(1e-4))
-        .fold(f32::INFINITY, f32::min) as f64;
+    // Counted by the pattern's own length, not by its least entry: a
+    // dotted line is dashes of nothing and gaps between, and read by
+    // its nothing every one of them was too fine to walk and drawn
+    // solid.
+    let per_dash = pattern.iter().map(|d| d.max(1e-4)).sum::<f32>() as f64 / pattern.len() as f64;
     let length: f64 = rings
         .iter()
         .map(|(points, closed)| {
@@ -5718,7 +5752,7 @@ pub fn dashed_rings(
                 .sum::<f64>()
         })
         .sum();
-    if !(length.is_finite() && length / finest <= MOST_DASHES) {
+    if !(length.is_finite() && length / per_dash <= MOST_DASHES) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -7450,7 +7484,7 @@ impl Paint {
         let mut stops: Vec<(f32, LinearRgba)> = g
             .stops()
             .iter()
-            .map(|s| (s.offset, scale_alpha(resolve_color(doc, &s.color), opacity)))
+            .map(|s| (s.offset, resolve_stop(doc, &s.color, opacity)))
             .collect();
         if stops.is_empty() {
             return None;
@@ -7578,6 +7612,28 @@ pub fn gradient_rgba8(doc: &Document, g: &Gradient, w: u32, h: u32) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The least alpha a gradient stop is held at (`resolve_stop`): far
+/// below what eight bits or half a float shows.
+const STOP_TRACE: f32 = 1e-6;
+
+/// A gradient stop as the ramp reads it: premultiplied, with its alpha
+/// never quite nothing. A stop's colour is read back out of it by
+/// dividing by the alpha (`mix_shown`), and a stop with none had no
+/// colour left to give — red fading to a clear red mixed through black,
+/// a muddy band on the page and in every picture exported, where SVG,
+/// PDF and every browser fade red.
+///
+/// Public because the GPU backend bakes its ramp from the same stops.
+pub fn resolve_stop(doc: &Document, color: &AuthoredColor, opacity: f32) -> LinearRgba {
+    let alpha = (color.alpha() * opacity).clamp(STOP_TRACE, 1.0);
+    let mut solid = color.flat().clone();
+    match &mut solid {
+        AuthoredColor::Srgb { a, .. } | AuthoredColor::Cmyk { a, .. } => *a = 1.0,
+        AuthoredColor::Named { .. } => {}
+    }
+    scale_alpha(resolve_color(doc, &solid), alpha)
 }
 
 /// Colour at `t` along a sorted ramp, clamped past either end.
@@ -10211,13 +10267,13 @@ fn apply_filter(
             }
         }
         Filter::Median { radius } => {
-            let r = median_radius(*radius, scale);
-            if r == 0 {
+            let want = *radius * scale;
+            if median_radius(*radius, scale) == 0 {
                 return;
             }
             let original = blur::snapshot(dst, clip);
             let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
-            let middles = median::median(&original, w, h, r);
+            let middles = at_reach(&original, w, h, want, 64, median::median);
             mix_snapshot(dst, clip, &original, |o, _, x, y| {
                 let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
                 lerp(o, middles[at], opacity * coverage_at(doc, mask, x, y))
@@ -10231,7 +10287,14 @@ fn apply_filter(
             }
             let original = blur::snapshot(dst, clip);
             let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
-            let smooth = bilateral::surface_blur(&original, w, h, r, t);
+            let smooth = at_reach(
+                &original,
+                w,
+                h,
+                *radius * scale,
+                SURFACE_MOST,
+                |p, w, h, r| bilateral::surface_blur(p, w, h, r, t),
+            );
             mix_snapshot(dst, clip, &original, |o, _, x, y| {
                 let at = (y - clip.y0) as usize * w + (x - clip.x0) as usize;
                 lerp(o, smooth[at], opacity * coverage_at(doc, mask, x, y))
@@ -10449,7 +10512,7 @@ fn apply_filter(
             }
             let original = blur::snapshot(dst, clip);
             let (w, h) = ((clip.x1 - clip.x0) as usize, (clip.y1 - clip.y0) as usize);
-            let painted = oil_painted(&original, w, h, r);
+            let painted = at_reach(&original, w, h, *radius * scale, 64, oil_painted);
             mix_snapshot(dst, clip, &original, |o, _, x, y| {
                 let weight = opacity * coverage_at(doc, mask, x, y);
                 if weight <= 0.0 {
@@ -10650,6 +10713,92 @@ fn pinch_source_by(
     // where a power a pixel was most of what a pinch cost.
     let k = power.of(r / reach) * reach / r;
     [mid[0] + dx * k, mid[1] + dy * k]
+}
+
+/// How far, in device pixels, a windowed filter of `radius` reads at a
+/// view of `scale` — the radius itself, not held to the window's most:
+/// past that the filter is worked on a reduced copy (`at_reach`) and
+/// reads as far as the radius says. Held to a reach no window needs.
+fn wide_reach(radius: f32, scale: f32) -> u32 {
+    let r = radius * scale;
+    if r.is_finite() {
+        r.round().clamp(0.0, 8192.0) as u32
+    } else {
+        0
+    }
+}
+
+/// A windowed filter — a median, a surface blur, an oil paint — over a
+/// `w`×`h` snapshot at a radius of `want` device pixels, which may be past
+/// the `most` its window takes. Within it, the filter as it is; past it,
+/// the snapshot is reduced by the whole factor that brings the radius
+/// within, filtered there and brought back up. Zoomed far in, the window
+/// used to be held to `most` while the page asked for more: a median of
+/// twenty at 800% read a fifth of what it does at 100%, and the specks it
+/// takes away in an export stayed on screen.
+fn at_reach(
+    original: &[LinearRgba],
+    w: usize,
+    h: usize,
+    want: f32,
+    most: usize,
+    filter: impl Fn(&[LinearRgba], usize, usize, usize) -> Vec<LinearRgba>,
+) -> Vec<LinearRgba> {
+    let want = if want.is_finite() { want.max(0.0) } else { 0.0 };
+    let k = (want / most as f32).ceil().max(1.0) as usize;
+    if k <= 1 || w == 0 || h == 0 {
+        return filter(original, w, h, (want.round() as usize).min(most));
+    }
+    // Reduced by k: each pixel the average of a k-square.
+    let (sw, sh) = (w.div_ceil(k), h.div_ceil(k));
+    let mut small = vec![LinearRgba::TRANSPARENT; sw * sh];
+    for sy in 0..sh {
+        for sx in 0..sw {
+            let (mut acc, mut n) = ([0.0f32; 4], 0.0f32);
+            for y in sy * k..((sy + 1) * k).min(h) {
+                for x in sx * k..((sx + 1) * k).min(w) {
+                    let p = original[y * w + x];
+                    acc = [acc[0] + p.r, acc[1] + p.g, acc[2] + p.b, acc[3] + p.a];
+                    n += 1.0;
+                }
+            }
+            small[sy * sw + sx] = LinearRgba {
+                r: acc[0] / n,
+                g: acc[1] / n,
+                b: acc[2] / n,
+                a: acc[3] / n,
+            };
+        }
+    }
+    let r = ((want / k as f32).round() as usize).min(most);
+    let done = filter(&small, sw, sh, r);
+    // Back up, each pixel read between the four reduced ones round it.
+    let at = |x: usize, y: usize| done[y.min(sh - 1) * sw + x.min(sw - 1)];
+    let mut out = vec![LinearRgba::TRANSPARENT; w * h];
+    for y in 0..h {
+        let fy = ((y as f32 + 0.5) / k as f32 - 0.5).max(0.0);
+        let (y0, ty) = (fy.floor() as usize, fy.fract());
+        for x in 0..w {
+            let fx = ((x as f32 + 0.5) / k as f32 - 0.5).max(0.0);
+            let (x0, tx) = (fx.floor() as usize, fx.fract());
+            let (a, b, c, d) = (
+                at(x0, y0),
+                at(x0 + 1, y0),
+                at(x0, y0 + 1),
+                at(x0 + 1, y0 + 1),
+            );
+            let mix = |p: f32, q: f32, r: f32, s: f32| {
+                (p * (1.0 - tx) + q * tx) * (1.0 - ty) + (r * (1.0 - tx) + s * tx) * ty
+            };
+            out[y * w + x] = LinearRgba {
+                r: mix(a.r, b.r, c.r, d.r),
+                g: mix(a.g, b.g, c.g, d.g),
+                b: mix(a.b, b.b, c.b, d.b),
+                a: mix(a.a, b.a, c.a, d.a),
+            };
+        }
+    }
+    out
 }
 
 /// An oil paint's square, in device pixels past the pixel: the radius
@@ -14348,6 +14497,132 @@ fn hit_child(
 
 #[cfg(test)]
 mod tests {
+
+    /// A stop with no alpha keeps its colour: red to a clear red fades
+    /// red, as SVG, PDF and every browser fade it, where it used to mix
+    /// through black — a muddy band on the page and in every picture.
+    #[test]
+    fn a_clear_gradient_stop_keeps_its_colour() {
+        let doc = Document::new(4, 4, ColorMode::Rgb);
+        let red = |a: f32| AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a,
+        };
+        let stops = [
+            (0.0, resolve_stop(&doc, &red(1.0), 1.0)),
+            (1.0, resolve_stop(&doc, &red(0.0), 1.0)),
+        ];
+        for t in [0.25f32, 0.5, 0.75, 1.0] {
+            let c = ramp_color(&stops, t);
+            assert!((c.a - (1.0 - t)).abs() < 1e-3, "alpha fades: {c:?} at {t}");
+            assert!(
+                c.a < 1e-3 || (c.r / c.a - 1.0).abs() < 1e-3,
+                "and stays red: {c:?} at {t}"
+            );
+            assert!(c.g.abs() < 1e-6 && c.b.abs() < 1e-6);
+        }
+        assert!(
+            ramp_color(&stops, 1.0).a < 1e-5,
+            "the clear end shows nothing"
+        );
+    }
+
+    /// A dotted line is dashes of nothing with gaps between: walked dash
+    /// by dash, not drawn solid for its dashes being too fine to count.
+    #[test]
+    fn a_dotted_line_is_dots() {
+        let line = VectorShape::Path {
+            points: vec![[0.0, 0.0], [400.0, 0.0]],
+            closed: false,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let dots = dashed_rings(&line, &[0.0, 25.0], 0.0, 0.0);
+        assert_eq!(dots.len(), 16, "a dot every 25 along 400, from its start");
+    }
+
+    /// A median wider than its window at the zoom takes away, zoomed in,
+    /// what it takes away at 100%: a bar twelve pixels tall under a median
+    /// of twenty is gone in an export, and at 800% — where twenty is 160
+    /// screen pixels and the window was held to 64 — it stayed.
+    #[test]
+    fn a_wide_median_zoomed_in_looks_as_it_exports() {
+        let mut doc = Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        let grey = |v: f32| AuthoredColor::Srgb {
+            r: v,
+            g: v,
+            b: v,
+            a: 1.0,
+        };
+        for (i, (h, y, v)) in [(64.0f32, 0.0f32, 1.0f32), (12.0, 26.0, 0.2)]
+            .iter()
+            .enumerate()
+        {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: filled_rect("band", 64.0, *h, grey(*v)),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[i];
+            doc.apply(Command::SetTransform {
+                id,
+                transform: Transform::translation(0.0, *y),
+            })
+            .unwrap();
+        }
+        for (i, filter) in [
+            Filter::Median { radius: 20.0 },
+            Filter::OilPaint { radius: 20.0 },
+            Filter::SurfaceBlur {
+                radius: 20.0,
+                threshold: 1.0,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut doc = doc.clone();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(Node::filter("work", filter)),
+            })
+            .unwrap();
+            let whole = render(&doc).unwrap();
+            let at_one = whole.get(32, 32);
+            // The whole page at eight times, as a window would show it.
+            let mut near = Surface::new(512, 512);
+            let view = Transform {
+                a: 8.0,
+                d: 8.0,
+
+                ..Transform::default()
+            };
+            render_region_at(
+                &doc,
+                &mut near,
+                ClipRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 512,
+                    y1: 512,
+                },
+                view,
+            )
+            .unwrap();
+            let zoomed = near.get(256, 256);
+            let d = (at_one.r - zoomed.r).abs().max((at_one.g - zoomed.g).abs());
+            assert!(
+                d < 0.08,
+                "filter {i}: at 100% {at_one:?}, at 800% {zoomed:?}"
+            );
+        }
+    }
 
     /// The index a long stroke's pieces are filed in answers exactly what
     /// asking every piece does, on strokes of every kind and points all

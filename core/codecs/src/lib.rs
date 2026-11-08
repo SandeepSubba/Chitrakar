@@ -277,7 +277,15 @@ fn eight_bit<D: image::ImageDecoder>(
     if read != pixels * channels {
         return Ok(Err(decoder));
     }
-    let mut out = vec![0u8; pixels * 4];
+    // Asked for, not demanded: memory a page cannot give is a refusal in
+    // words, where a plain allocation that fails stops the engine.
+    let mut out = Vec::new();
+    out.try_reserve_exact(pixels * 4).map_err(|_| {
+        CodecError::Format(format!(
+            "there is not enough memory left for a picture of {width} × {height}; close another document or place a smaller one"
+        ))
+    })?;
+    out.resize(pixels * 4, 0);
     decoder.read_image(&mut out[..read])?;
     // Widened from the last pixel back, each one written at or past where
     // it was read from, so a pixel is only ever overwritten once read.
@@ -346,13 +354,15 @@ impl Raster {
     }
 }
 
-/// Encode as JPEG, compositing over white first.
+/// Encode as JPEG, laid on white first.
 ///
 /// JPEG has no alpha channel, so transparency has to become something:
-/// white, the same choice the print exports make for unprinted paper. The
-/// composite is over *linear* values, before sRGB encoding, because that is
-/// where "half covered" actually means half — blending the encoded bytes
-/// instead would darken every antialiased edge.
+/// white, the same choice the print exports make for unprinted paper —
+/// and laid on it the way the editor's page shows it, which is the way
+/// a PNG of the same page shows on anything white: the colour as it is
+/// shown, mixed with white by how much of it there is. Mixed in linear
+/// light instead, half a red was a pink half again as pale as the one
+/// on the screen.
 pub fn encode_jpeg(
     width: u32,
     height: u32,
@@ -361,10 +371,18 @@ pub fn encode_jpeg(
 ) -> Result<Vec<u8>, CodecError> {
     let mut rgb = Vec::with_capacity(pixels.len() * 3);
     for px in pixels {
-        let over_white = |v: f32| (v + (1.0 - px.a)).clamp(0.0, 1.0);
-        rgb.push((chitrakar_color::linear_to_srgb(over_white(px.r)) * 255.0).round() as u8);
-        rgb.push((chitrakar_color::linear_to_srgb(over_white(px.g)) * 255.0).round() as u8);
-        rgb.push((chitrakar_color::linear_to_srgb(over_white(px.b)) * 255.0).round() as u8);
+        let a = px.a.clamp(0.0, 1.0);
+        let over_white = |v: f32| {
+            let shown = if a > 0.0 {
+                chitrakar_color::linear_to_srgb((v / a).clamp(0.0, 1.0))
+            } else {
+                0.0
+            };
+            ((shown * a + (1.0 - a)) * 255.0).round().clamp(0.0, 255.0) as u8
+        };
+        rgb.push(over_white(px.r));
+        rgb.push(over_white(px.g));
+        rgb.push(over_white(px.b));
     }
     let mut out = std::io::Cursor::new(Vec::new());
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100)).encode(
@@ -439,6 +457,27 @@ pub(crate) fn blended_page(
 
 #[cfg(test)]
 mod tests {
+
+    /// Laid on white the way the page shows it: half a red is the pink a
+    /// screen shows, not the paler one linear light makes.
+    #[test]
+    fn a_jpeg_lays_what_is_clear_on_white_as_the_page_shows_it() {
+        use super::*;
+        let half_red = LinearRgba {
+            r: 0.5,
+            g: 0.0,
+            b: 0.0,
+            a: 0.5,
+        };
+        let jpeg = encode_jpeg(8, 8, &[half_red; 64], 100).unwrap();
+        let back = decode(&jpeg).unwrap();
+        let px = &back.rgba8[..3];
+        assert!(px[0] > 248, "{px:?}");
+        assert!(
+            (px[1] as i32 - 128).abs() <= 4 && (px[2] as i32 - 128).abs() <= 4,
+            "{px:?}"
+        );
+    }
 
     /// A JPEG of a few hundred bytes whose frame says it is 65500 pixels
     /// square: the four bytes a pixel were set aside before anything
@@ -709,9 +748,10 @@ mod tests {
             px(0)
         );
         // Half coverage over white: red stays high, the other channels lift
-        // toward white rather than staying at zero.
+        // half way to white as the page shows it — about 128, not the 188
+        // half of linear light comes to.
         assert!(
-            px(1)[1] > 150 && px(1)[2] > 150,
+            (100..=160).contains(&px(1)[1]) && (100..=160).contains(&px(1)[2]),
             "half-covered pixel blends toward white: {:?}",
             px(1)
         );
