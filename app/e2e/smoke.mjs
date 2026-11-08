@@ -21038,6 +21038,66 @@ assert(
   await pickTool("Move");
 }
 
+// 9cv. Two tabs each keep a draft of their own: both wrote one draft,
+// and only the last one's work came back after a crash. A context of its
+// own, so this storage is not the suite's.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const tab = async () => {
+    const p = await ctx.newPage();
+    p.on("dialog", (d) => d.accept());
+    await p.goto("http://localhost:8123/");
+    await p.waitForSelector("#engine-canvas");
+    await p.waitForTimeout(1600); // a slot is claimed as the page opens
+    return p;
+  };
+  const draw = async (p, tool, n) => {
+    const r = await p.locator("#engine-page").boundingBox();
+    const direct = p.locator(`.toolbar > button[aria-label="${tool}"], .tool-group > button[aria-label="${tool}"]`);
+    if (await direct.count()) await direct.first().click();
+    else {
+      await p.click('button[aria-label="More shapes"]');
+      await p.waitForTimeout(80);
+      await p.click(`.tool-flyout button[aria-label="${tool}"]`);
+    }
+    for (let i = 0; i < n; i++) {
+      await p.mouse.move(r.x + 20 + i * 60, r.y + 20);
+      await p.mouse.down();
+      await p.mouse.move(r.x + 60 + i * 60, r.y + 60, { steps: 4 });
+      await p.mouse.up();
+      await p.waitForTimeout(150);
+    }
+  };
+  const names = (p) => p.locator(".panel ul li .layer-name").allTextContents();
+  const a = await tab();
+  const b = await tab();
+  await draw(a, "Rect", 2);
+  await draw(b, "Ellipse", 3);
+  await a.waitForTimeout(2600);
+  await b.waitForTimeout(500);
+  await a.close();
+  await b.close();
+  const c = await tab();
+  await c.waitForTimeout(600);
+  assert(await c.isVisible(".recover"), "after both tabs are gone, a draft is offered");
+  await c.click(".recover >> text=Restore");
+  await c.waitForTimeout(800);
+  const first = await names(c);
+  await c.waitForTimeout(600);
+  assert(await c.isVisible(".recover"), `and with one restored, the other tab's is offered too (${first})`);
+  await c.click(".recover >> text=Restore");
+  await c.waitForTimeout(800);
+  const second = await names(c);
+  const kinds = [first, second].map((ns) => (ns.some((n) => n.startsWith("Rect")) ? "rects" : "ellipses")).sort();
+  assert(
+    kinds.join() === "ellipses,rects" &&
+      [first, second].some((ns) => ns.length === 2) &&
+      [first, second].some((ns) => ns.length === 3),
+    `each tab's work comes back whole: ${JSON.stringify([first, second])}`,
+  );
+  await ctx.close();
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

@@ -480,10 +480,84 @@ function draftPartsKept(db: IDBDatabase): Promise<Set<string>> {
     req.onerror = () => resolve(new Set());
   });
 }
+/** Each tab keeps a draft of its own, in a slot it holds a lock on for
+ * as long as it is open: two tabs wrote one draft over the other, and
+ * only the last one's work came back. Slot 0 is the keys a draft always
+ * had (`current`, `parts`, …), so a draft from before slots still opens;
+ * slot n's are the same keys with `#n`. A picture's part is shared by
+ * every slot that needs it, and goes when none does. */
+const DRAFT_SLOTS = 8;
+let draftSlot = 0;
+const slotKey = (slot: number, key: string) => (slot === 0 ? key : `${key}#${slot}`);
+type Locks = {
+  request: (name: string, opts: { ifAvailable: boolean }, cb: (lock: unknown) => Promise<void> | void) => Promise<unknown>;
+  query: () => Promise<{ held?: { name?: string }[] }>;
+};
+const webLocks = (): Locks | null =>
+  typeof navigator !== "undefined" && "locks" in navigator ? ((navigator as unknown as { locks: Locks }).locks ?? null) : null;
+/** Take a slot for this tab and hold it. Slot 0 is asked for a moment
+ * longer: the page a reload replaces lets its lock go a little after the
+ * new one starts, and the reloaded page is the same tab, whose draft is
+ * in slot 0. Without locks (an older browser), every tab is slot 0. */
+async function claimDraftSlot(): Promise<number> {
+  const locks = webLocks();
+  if (!locks) return 0;
+  const take = (n: number) =>
+    new Promise<boolean>((resolve) => {
+      locks
+        .request(`chitrakar-draft-${n}`, { ifAvailable: true }, (lock) => {
+          if (!lock) {
+            resolve(false);
+            return;
+          }
+          resolve(true);
+          // Held for the life of the tab.
+          return new Promise<void>(() => {});
+        })
+        .catch(() => resolve(false));
+    });
+  for (let tries = 0; tries < 6; tries++) {
+    if (await take(0)) return 0;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  for (let n = 1; n < DRAFT_SLOTS; n++) if (await take(n)) return n;
+  return 0;
+}
+/** The slots another open tab holds. */
+async function slotsHeld(): Promise<Set<number>> {
+  const locks = webLocks();
+  const out = new Set<number>();
+  if (!locks) return out;
+  try {
+    for (const l of (await locks.query()).held ?? []) {
+      const m = /^chitrakar-draft-(\d+)$/.exec(l.name ?? "");
+      if (m) out.add(Number(m[1]));
+    }
+  } catch {
+    // Nothing known: nothing is taken to be held.
+  }
+  return out;
+}
+/** Every part some slot's draft lists, other than `but`'s. */
+async function partsListed(db: IDBDatabase, but: number): Promise<Set<string>> {
+  const slots = [...Array(DRAFT_SLOTS).keys()].filter((n) => n !== but);
+  const lists = await draftRead<unknown>(db, slots.map((n) => slotKey(n, "parts")));
+  const out = new Set<string>();
+  for (const l of lists) {
+    if (typeof l !== "string") continue;
+    try {
+      for (const n of JSON.parse(l) as string[]) out.add(n);
+    } catch {
+      // A list that does not read keeps nothing.
+    }
+  }
+  return out;
+}
+
 /** Keep the draft: the parts not kept yet, then the skeleton with the
- * list of parts it needs in one step, then the parts it no longer does
- * — so whatever moment the tab is closed at, the skeleton kept has its
- * parts. `stillLatest` says whether a later draft has begun, which
+ * list of parts it needs in one step, then the parts no draft needs any
+ * more — so whatever moment the tab is closed at, the skeleton kept has
+ * its parts. `stillLatest` says whether a later draft has begun, which
  * writes its own skeleton: this one's would be older. */
 async function putDraft(
   session: WasmSession,
@@ -503,20 +577,30 @@ async function putDraft(
   }
   if (!stillLatest()) return;
   await draftWrite(db, [
-    ["current", session.save_skeleton()],
-    ["parts", JSON.stringify(names)],
+    [slotKey(draftSlot, "current"), session.save_skeleton()],
+    [slotKey(draftSlot, "parts"), JSON.stringify(names)],
   ]);
-  const wanted = new Set([...names, ...spare]);
+  const wanted = new Set([...names, ...spare, ...(await partsListed(db, draftSlot))]);
   const stale = [...kept].filter((n) => !wanted.has(n)).map((n) => PART + n);
   if (stale.length) await draftWrite(db, [], stale);
 }
 /** The draft kept, and the names of the parts it needs (none for a draft
- * kept whole). */
-type Draft = { bytes: Uint8Array; parts: string[] };
-async function getDraft(): Promise<Draft | null> {
+ * kept whole), with what was kept beside it, and the slot it is in. */
+type Draft = {
+  bytes: Uint8Array;
+  parts: string[];
+  slot: number;
+  name: string | null;
+  path: string | null;
+  saved: boolean;
+};
+async function getDraft(slot: number): Promise<Draft | null> {
   const db = await draftDb();
   if (!db) return null;
-  const [bytes, parts] = await draftRead<unknown>(db, ["current", "parts"]);
+  const [bytes, parts, name, path, saved] = await draftRead<unknown>(
+    db,
+    ["current", "parts", "name", "path", "saved"].map((k) => slotKey(slot, k)),
+  );
   if (!(bytes instanceof Uint8Array) || bytes.length === 0) return null;
   let names: string[] = [];
   try {
@@ -524,7 +608,28 @@ async function getDraft(): Promise<Draft | null> {
   } catch {
     names = [];
   }
-  return { bytes, parts: names };
+  return {
+    bytes,
+    parts: names,
+    slot,
+    name: typeof name === "string" ? name : null,
+    path: typeof path === "string" && path ? path : null,
+    // A draft kept before this was written down is taken as unsaved: a
+    // question too many is cheaper than work lost twice.
+    saved: saved === "yes",
+  };
+}
+/** The first draft no open tab is keeping: this tab's own slot first
+ * (the draft its last page left), then any a closed tab left. */
+async function offeredDraft(skip: Set<number> = new Set()): Promise<Draft | null> {
+  const held = await slotsHeld();
+  const order = [draftSlot, ...[...Array(DRAFT_SLOTS).keys()].filter((n) => n !== draftSlot)];
+  for (const n of order) {
+    if (skip.has(n) || (n !== draftSlot && held.has(n))) continue;
+    const d = await getDraft(n);
+    if (d) return d;
+  }
+  return null;
 }
 /** A draft's parts, by name: those still there. */
 async function getDraftParts(names: string[]): Promise<Map<string, Uint8Array>> {
@@ -548,26 +653,21 @@ async function putDraftNote(key: DraftNote, value: string): Promise<void> {
   if (!db) return;
   db.transaction(DRAFT_STORE, "readwrite")
     .objectStore(DRAFT_STORE)
-    .put(value, key);
+    .put(value, slotKey(draftSlot, key));
 }
-async function getDraftNote(key: DraftNote): Promise<string | null> {
-  const db = await draftDb();
-  if (!db) return null;
-  return new Promise((resolve) => {
-    const req = db
-      .transaction(DRAFT_STORE)
-      .objectStore(DRAFT_STORE)
-      .get(key);
-    req.onsuccess = () =>
-      resolve(typeof req.result === "string" ? req.result : null);
-    req.onerror = () => resolve(null);
-  });
-}
-async function clearDraft(): Promise<void> {
+/** Let a slot's draft go: its records, and — unless the parts are being
+ * taken over (a draft restored into this tab, whose next draft writes
+ * the ones it needs) — the parts no other slot lists. */
+async function clearDraft(slot: number = draftSlot, keepParts = false): Promise<void> {
   const db = await draftDb();
   if (!db) return;
-  const parts = [...(await draftPartsKept(db))].map((n) => PART + n);
-  await draftWrite(db, [], ["current", "parts", "name", "path", "saved", ...parts]).catch(() => {});
+  const keys = ["current", "parts", "name", "path", "saved"].map((k) => slotKey(slot, k));
+  let parts: string[] = [];
+  if (!keepParts) {
+    const others = await partsListed(db, slot);
+    parts = [...(await draftPartsKept(db))].filter((n) => !others.has(n)).map((n) => PART + n);
+  }
+  await draftWrite(db, [], [...keys, ...parts]).catch(() => {});
 }
 
 /** Each text box's selection as it was before its latest edit, so the
@@ -1949,30 +2049,34 @@ export function App() {
    * browser never learns a path, so there this stays null and every
    * save is a download. */
   const [docPath, setDocPath] = useState<string | null>(null);
-  const draftName = useRef<string | null>(null);
-  const draftPath = useRef<string | null>(null);
-  const draftSaved = useRef(false);
   /** Which draft is being kept: one begun later makes an earlier one
    * stop rather than write an older skeleton over it. */
   const draftRun = useRef(0);
+  /** This tab's draft slot, once it holds one: nothing is written before. */
+  const slotReady = useRef<Promise<number> | null>(null);
+  /** Slots whose drafts were offered and answered this visit. */
+  const answered = useRef(new Set<number>());
   useEffect(() => {
+    slotReady.current = claimDraftSlot().then((n) => (draftSlot = n));
     // Not offered where it would not have been kept.
     if (!prefs.keepDraft) return;
-    getDraft().then(
-      (draft) => draft && setRecoverable(draft),
-    );
-    getDraftNote("name").then((name) => (draftName.current = name));
-    getDraftNote("path").then((path) => (draftPath.current = path || null));
-    // A draft kept before this was written down is taken as unsaved: a
-    // question too many is cheaper than work lost twice.
-    getDraftNote("saved").then((saved) => (draftSaved.current = saved === "yes"));
+    void slotReady.current.then(() => offeredDraft()).then((draft) => draft && setRecoverable(draft));
   }, []);
+  /** A draft answered, Restore or Discard: the next one a closed tab
+   * left, if there is one, is offered after it. */
+  const offerNextDraft = (done: number) => {
+    answered.current.add(done);
+    // This tab's own slot is offered only as the page opens, for what its
+    // last page left: after that it holds this tab's own work.
+    answered.current.add(draftSlot);
+    void offeredDraft(answered.current).then((d) => setRecoverable(d));
+  };
   useEffect(() => {
     // Turned off in Preferences: nothing is kept, and whatever was kept
     // before goes — a setting that stops writing but leaves the last
     // draft behind is not the setting it says it is.
     if (!prefs.keepDraft) {
-      clearDraft();
+      void slotReady.current?.then(() => clearDraft());
       return;
     }
     // Nothing to keep until something is done: the empty document every
@@ -1983,7 +2087,8 @@ export function App() {
     if (!session || saveTick === 0) return;
     const t = setTimeout(() => {
       const mine = ++draftRun.current;
-      putDraft(session, () => draftRun.current === mine, recoverableRef.current?.parts ?? [])
+      (slotReady.current ?? Promise.resolve(0))
+        .then(() => putDraft(session, () => draftRun.current === mine, recoverableRef.current?.parts ?? []))
         .then(() => {
           putDraftNote("name", docName);
           putDraftNote("path", docPath ?? "");
@@ -10345,13 +10450,18 @@ export function App() {
               const draft = recoverable;
               const parts = await getDraftParts(draft.parts);
               setRecoverable(null);
-              if (!openDocumentBytes(draft.bytes, draftName.current ?? undefined, parts)) return;
+              if (!openDocumentBytes(draft.bytes, draft.name ?? undefined, parts)) return;
               // Back with the file it had, so Save writes there again;
               // and, unless that file already held it, as work still to
               // save — it is a draft because it was not written down,
               // and coming back must not make it look as if it had been.
-              setDocPath(draftPath.current);
-              if (!draftSaved.current) setSavedAt(-1);
+              setDocPath(draft.path);
+              if (!draft.saved) setSavedAt(-1);
+              // A closed tab's draft is this tab's now, kept in its slot
+              // from the next change; the old slot lets it go, leaving
+              // the pictures for this tab's draft to take over.
+              if (draft.slot !== draftSlot) void clearDraft(draft.slot, true);
+              offerNextDraft(draft.slot);
             }}
           >
             Restore
@@ -10359,8 +10469,11 @@ export function App() {
           <button
             type="button"
             onClick={() => {
+              const slot = recoverable.slot;
               setRecoverable(null);
-              clearDraft();
+              // The pictures are left for the next draft written to
+              // sort out: one this tab is about to write may share them.
+              void clearDraft(slot, true).then(() => offerNextDraft(slot));
             }}
           >
             Discard

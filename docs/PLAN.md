@@ -10823,8 +10823,12 @@ without reading anything else.*
     replacing "a" with "a", and naming the face a block is already in
     were steps.
   Smoke 9cu drives the panel, view and path fixes; the engine tests and
-  `runs.test.mjs` the rest. Left as found: two tabs share one draft,
-  the last to write keeping it; and "Make a path" and Combine move a
+  `runs.test.mjs` the rest. Two tabs shared one draft, the last to
+  write keeping it: each tab now holds a slot of its own with a Web
+  Lock (`claimDraftSlot`; slot 0 is the old keys, so a draft from
+  before still opens), a new visit offers the drafts no open tab holds
+  one after another, and a picture's part goes only when no slot lists
+  it (smoke 9cv). Left as found: "Make a path" and Combine move a
   rect's or an ellipse's inside border to straddle the edge, since a
   path has no side to its stroke — closed paths honouring Border side
   in all five renderers is the fix, and a piece of work of its own.

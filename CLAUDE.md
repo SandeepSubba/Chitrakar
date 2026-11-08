@@ -171,6 +171,10 @@ breath after each edit; each picture's PNG and each original is a
 `part:<name>` record written once; `parts` lists what `current` needs, and
 `restore_part` puts them back on Restore (smoke 10). A picture's PNG is
 made once per session (`WrittenPictures`) for drafts and Save alike.
+Each tab keeps its own draft in a slot it holds a Web Lock on
+(`claimDraftSlot`: slot 0 is those plain keys, slot n the same with
+`#n`); a visit offers, one after another, the drafts no open tab holds,
+and a part goes only when no slot's `parts` lists it (smoke 9cv).
 
 In a browser the built page is an installable app:
 `app/public/manifest.webmanifest` (share target, file handlers) and a
