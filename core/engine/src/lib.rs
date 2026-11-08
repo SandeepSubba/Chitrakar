@@ -176,6 +176,27 @@ pub(crate) fn rebox_gradient(
     }
 }
 
+/// A shape's stroke as the path it becomes keeps it: the side it lies on
+/// said outright (a rect's and an ellipse's lies inside unless told, a
+/// path's across), and, where a rect's band reaches past its edge, round
+/// at the corners — the band is a distance from the edge, which a path
+/// draws with round joins.
+pub(crate) fn stroke_as_path(
+    was: &chitrakar_doc::VectorShape,
+    stroke: &chitrakar_doc::Stroke,
+) -> chitrakar_doc::Stroke {
+    use chitrakar_doc::{StrokeAlign, StrokeJoin, VectorShape};
+    let mut s = stroke.clone();
+    if matches!(was, VectorShape::Rect { .. } | VectorShape::Ellipse { .. }) {
+        let side = chitrakar_doc::stroke_align(was, stroke);
+        s.align = Some(side);
+        if side != StrokeAlign::Inside {
+            s.join = StrokeJoin::Round;
+        }
+    }
+    s
+}
+
 /// A gradient `t` of the way from one to another: point by point and
 /// stop by stop where they are the same kind with as many stops, else
 /// the nearer of the two.
@@ -2579,6 +2600,7 @@ impl Session {
             }
             (g, _) => g,
         };
+        let stroke = stroke.map(|s| stroke_as_path(&bottom_shape, &s));
         node.kind = NodeKind::Vector {
             shape: chitrakar_doc::VectorShape::Path {
                 points,
@@ -2917,7 +2939,7 @@ impl Session {
                         fill: fill.clone(),
                         stroke: stroke.as_ref().map(|s| chitrakar_doc::Stroke {
                             widths: Vec::new(),
-                            ..s.clone()
+                            ..stroke_as_path(shape, s)
                         }),
                         // Laid in the piece's own box, as the whole shape's
                         // gradient lay in its box: copied as it was, each
@@ -4574,6 +4596,11 @@ impl Session {
         let (fill, mut stroke, gradient) = (fill.clone(), stroke.clone(), gradient.clone());
         if let (Some(widths), Some(stroke)) = (widths, stroke.as_mut()) {
             stroke.widths = widths;
+        }
+        if let (chitrakar_doc::NodeKind::Vector { shape: was, .. }, Some(s)) =
+            (&node.kind, stroke.as_mut())
+        {
+            *s = stroke_as_path(was, s);
         }
         let t = node.transform;
         let chitrakar_doc::VectorShape::Path {
@@ -10613,6 +10640,30 @@ impl Session {
     /// each; empty when everything came.
     pub fn import_notes(&self) -> &[String] {
         &self.import_notes
+    }
+
+    /// The layers whose pictures the document names but does not have —
+    /// a `.chitra` whose PNG was missing or the wrong size opened with a
+    /// blank layer and said nothing, and saving it wrote the loss down.
+    /// Asked once a document is open and its parts are back.
+    pub fn missing_pictures(&self) -> Vec<String> {
+        let doc = &self.doc;
+        let mut names: Vec<String> = doc
+            .nodes()
+            .filter_map(|(_, n)| match &n.kind {
+                NodeKind::Raster(r)
+                    if doc
+                        .resource(&r.resource_id)
+                        .is_none_or(|res| res.rgba8.is_empty()) =>
+                {
+                    Some(n.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Make a font available to every text block that names it, for the
@@ -20308,6 +20359,65 @@ mod tests {
         let again = s.make_instance(copy).unwrap();
         let t = s.document().node(again).unwrap().transform;
         assert_eq!((t.e, t.f), (120.0, 0.0), "on the copy it was made from");
+    }
+
+    /// A rect's border inside or outside its edge stays where it was when
+    /// the rect is made a path, or combined: a closed path keeps the side
+    /// its border lies on.
+    #[test]
+    fn a_border_keeps_its_side_when_the_shape_becomes_a_path() {
+        for side in [
+            chitrakar_doc::StrokeAlign::Inside,
+            chitrakar_doc::StrokeAlign::Outside,
+        ] {
+            let mut s = Session::new(120, 100, ColorMode::Rgb);
+            let rect = add_rect(&mut s, "r", 60.0, 40.0);
+            let mut kind = s.document().node(rect).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    width: 10.0,
+                    widths: Vec::new(),
+                    cap: Default::default(),
+                    join: chitrakar_doc::StrokeJoin::Miter,
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    align: Some(side),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                });
+            }
+            s.apply(Command::SetKind {
+                id: rect,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            s.apply(Command::SetTransform {
+                id: rect,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+            let before = s.render().unwrap();
+            s.as_path(rect).unwrap();
+            let after = s.render().unwrap();
+            // The band's own pixels, not its anti-aliased rim: every pixel
+            // either side of a full one that differs is a failure.
+            let mut off = 0;
+            for y in 0..100 {
+                for x in 0..120 {
+                    let (p, q) = (before.get(x, y), after.get(x, y));
+                    if (p.a - q.a).abs() > 0.5 {
+                        off += 1;
+                    }
+                }
+            }
+            assert_eq!(off, 0, "{side:?}: {off} pixels changed side");
+        }
     }
 
     /// A paste lands where it was copied from, except over its own

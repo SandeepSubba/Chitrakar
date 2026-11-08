@@ -20,6 +20,43 @@ two non-negotiable principles:
 without reading anything else.*
 
 - **Branch:** `claude/multiplatform-photo-vector-editor-enghs5`.
+- **Release readiness (asked November 2026: not ready for a 1.0 yet).**
+  The editor itself is broad and well tested, but four audits in a row
+  each found twenty or more bugs, and a release wants a round that finds
+  nothing serious. What stands between this branch and a 1.0, in order:
+  1. *Audits until they come back quiet.* Rounds 1–4 are in (below,
+     under the audits); a fifth on files nobody wrote carefully is
+     running, and then large documents and speed, the desktop shell,
+     and the phone layout. ⬜
+  2. *The release pipeline has never run.* `release.yml` is on this
+     branch only — GitHub registers a workflow from the default branch —
+     so no installer has ever been built by it, and CI never builds on
+     Windows at all. It should take its toolchain from
+     `rust-toolchain.toml` as CI does, and CI should build the app and
+     the shell on Windows. Both done (`release.yml` installs the pinned
+     toolchain and adds the Mac targets; CI's `shell-windows` builds the
+     app and checks the shell on Windows) ✅ — the installers themselves
+     are built the first time the workflow runs from `main`.
+  3. *Signing, which needs the owner's accounts:* an Apple Developer ID
+     and notarisation for the .dmg, a Windows code-signing certificate
+     (or the installers warn on every machine), an Android upload key in
+     place of the throwaway one CI makes, and — if the shell should
+     update itself — a Tauri updater key pair. None of these can be made
+     here; each is a secret added to the repository's settings. ⬜
+  4. *Drawing needs the pointer:* nothing can be made from the keyboard
+     alone (the keyboard audit's last item). Layer › Add puts a
+     rectangle, an ellipse, a line or a text block in the middle of the
+     view, picked, to be sized from the fields (smoke 9cx) ✅.
+  5. *Devices:* the phone and tablet shells compile and the APK builds
+     in CI, but nobody has used them on a real device; the WebGPU-in-
+     webview spike is open for iOS and Android. ⬜
+  6. *Release notes and the version:* `CHANGELOG.md` holds what the
+     first release has, and `node tools/release/set-version.mjs 1.0.0`
+     writes a version into every file that says one (package.json and
+     its lock, tauri.conf.json, both Cargo.toml) ✅. The number is the
+     owner's to pick; everything says 0.1.0 until then.
+  7. *Merging:* this branch is PR #1 against `main`, which is the
+     owner's to merge; the release workflow only exists once it is. ⬜
 - **Working today:** a real editor. Draw rects (square or round-cornered),
   ellipses, regular polygons and stars of three sides to a couple of
   dozen, straight
@@ -10880,10 +10917,132 @@ without reading anything else.*
   Lock (`claimDraftSlot`; slot 0 is the old keys, so a draft from
   before still opens), a new visit offers the drafts no open tab holds
   one after another, and a picture's part goes only when no slot lists
-  it (smoke 9cv). Left as found: "Make a path" and Combine move a
-  rect's or an ellipse's inside border to straddle the edge, since a
-  path has no side to its stroke — closed paths honouring Border side
-  in all five renderers is the fix, and a piece of work of its own.
+  it (smoke 9cv).
+  **Closed paths keep a border's side.** "Make a path" and Combine
+  moved a rect's or an ellipse's inside border to straddle the edge,
+  since a path had no side to its stroke. A closed path or polygon now
+  honours Border side (inside, across, outside) in every renderer: the
+  band to one side is the stroke twice as wide kept to that side of the
+  fill (`stroke_pieces` and `stroke_covers` in core/render, the
+  outline's `filled` grid), the SVG writes it clipped to the path or to
+  a box with the path cut out (`side_cut`; the importer now reads an
+  even-odd clip as one region, where it unioned every ring), the PDF
+  clips with `W*`, and the GPU hands such a layer to the processor —
+  drawing it there wants a stencil pass that keeps the doubled stroke's
+  union only where the fill's parity is odd (inside) or even (outside),
+  which is open GPU work; page 830 of the random pages is one.
+  Turning a shape into a path keeps the side (`stroke_as_path`), and
+  so do Combine and the knife.
+  **A fourth audit: the keyboard (November 2026).** Put right:
+  - *Windows*: a layer chord or Delete pressed at the export window,
+    Preferences or a menu reached the picked layer behind it, where the
+    window's undo could not take it back — the layer keys now stand
+    down while a window, a menu or a panel over the canvas is up
+    (`WINDOWS`). No window took the focus, kept Tab inside or gave the
+    focus back: `windowFocus.ts` watches the page for them and does all
+    three for every one (and marks the modal ones `aria-modal`).
+  - *Menus* had no keys: F10 reaches the bar, Up and Down walk a menu,
+    Home, End and a letter jump, Right and Left open and close a menu
+    inside one or go across the bar, Escape closes and leaves the focus
+    on the menu's label (`menuKeys.ts`, the bar's, the submenus' and the
+    canvas's menu alike). Escape that closed a menu, the canvas's menu,
+    Feather or Straighten also let go of the picked layer.
+  - *Fields*: tabbing through X, Y, W, H, the angle, the lean or the
+    zoom without typing moved the layer by the rounding of what they
+    show; an untouched field is not an edit now. Enter stays in the
+    field. A chord with the caret in a field was dead (Ctrl+S reached
+    the browser's own "save page"); Ctrl and ⌘ chords go on, and the
+    file chords fire while typing.
+  - *Pickers*: an arrow in "+ Adjust" or "Add effect" added a layer or
+    an effect a press (`ActionSelect`: the keys browse, Enter adds).
+    Space on a rail button reached with the keyboard did nothing — it
+    pans only where the focus is not shown. Delete on a chip forgets
+    it (a colour, style, comp, brush, kept region, export setup or
+    develop preset) and F2 renames a comp, which had only modified
+    clicks; renaming a layer leaves the focus on its row.
+  - *What is said*: the eye and the lock were named for the opposite
+    of their pressed state; the rail's tool in hand, the picked row,
+    the history step and a followed style are said now; opacity and
+    temperature say their value as shown; the rulers are images named
+    for themselves; the muted text and an active chip's words reach
+    4.5:1 in the dark theme; the preferences' preview is hidden from
+    what reads the page.
+  Nothing could be drawn from the keyboard either: Layer › Add puts a
+  rectangle, an ellipse, a line or a text block in the middle of the
+  view (`addInView`). Smoke 9cx. Left as found: "Blend shapes…" with one
+  shape picked still says so in an alert, as every refusal in the menus
+  does.
+  **A fifth audit: phones and tablets, and files nobody wrote
+  carefully (November 2026).** Put right:
+  - *Phones*: the tools behind a shared slot (the shapes, the ways to
+    select, the tools put away) could not be reached at all on a phone —
+    the row opened above the rail and the rail, scrolling sideways, cut
+    it away; it is pinned to the window now (`pinFlyout`). Lifting the
+    finger off a long press chose the row that came to be under it —
+    "Cut", the menu having been pulled up by a size it was assumed to
+    have — so the layer asked about was deleted; the menu opens beside
+    the finger, is kept in the window by its real size, and ignores that
+    finger's click. A finger's press on a tool that acts at once (text,
+    the wand, fill, the eyedropper, the node tool, the paint and clone
+    tools) waits a moment for a second finger (`heldPress`,
+    `TOUCH_SETTLE_MS`): a pinch left a "Text" layer, a two-finger undo
+    undid that stray step instead of the last edit, and the paint tools
+    lost what redo held. A palm before the pen made the pen's stroke fail
+    ("not a paint layer"); a palm on a handle resized the layer
+    (`handleRefuses`); the pen's first pressure was ignored, so a stroke
+    began at full width; once a pen had been used no long press opened
+    the menu (a Pencil has no button); text typed on the canvas went
+    under the rail when the keyboard came up; Rename… with the panel put
+    away did nothing; the drawer and the shift/alt/ctrl keys sat under a
+    notch on a phone on its side; Preferences › Tools cut off its keys
+    at 320 wide; a window opened on a touch screen put the caret in a
+    field, bringing the keyboard up unasked, and Escape in Keys' search
+    did not close Preferences. Smoke 9cy.
+  - *Files*: a few hundred bytes of JPEG saying it was 65500 square, a
+    1-bit PNG really 30000 square, or a PSD with a huge layer, page or
+    mask box set aside more memory than there is, and the engine
+    stopped for good — the page went blank with the work in it. A
+    picture is held to 150 megapixels and a PSD's page, layers and
+    masks to a page's 100, asked of the file's own header first
+    (`MAX_PICTURE_PIXELS`, `fits`; boxes in 64 bits, which a layer from
+    one end of an i32 to the other wrapped). An SVG nested past 128 deep
+    is refused before it is read (`nested_deeper_than`). And if the
+    engine stops anyway, the page says so and opens again with the
+    crash-recovery draft offered (`engineGuard.ts`). Strokes of many
+    points tested every piece at every sample — a 3000-point line took
+    minutes — and are asked through a grid of their pieces now
+    (`PieceIndex`). SVG text in any named face (Arial, "sans-serif")
+    was dropped; it is set in the bundled one. Several PDFs dropped
+    together asked about only the last; they wait their turn. A file
+    with no extension or type dropped did nothing; it is read by its
+    bytes, and one the editor cannot read is said. A `.chitra` missing
+    a picture opened with a blank layer and said nothing
+    (`missing_pictures`). A zero-width page was "more than can be
+    drawn", the PDF window's size was a pixel over, and refusals came
+    as "Error: invalid command:" and a decoder's own words (`said`).
+  - *Large documents*: a layer wearing an effect, or a feathered mask,
+    was worked out whole wherever it was — off the window, off the page
+    — before being found to draw nothing there: a thousand shadows cost
+    seconds a frame zoomed in, a thousand feathered masks half a minute
+    (`misses`, asked in `draw_effected` and `render_child` before any of
+    it is drawn). The Export window held every format to 16,384 a side
+    where the engine takes 30,000 (WebP alone stops at 16,383); a new
+    document was held to 8192 square while Canvas size made 30,000 ×
+    3,000, and both now say the engine's own limits, which a refused
+    size states. Layers nested eight deep lost their names to the
+    indent; the list scrolls under a row dragged to its edge.
+  Left as found, for the next round: a nested SVG image placed at its
+  own origin, a gradient or pattern stroke in an SVG brought in flat or
+  not at all, and a CMYK JPEG's own profile (a TIFF's is honoured).
+  Memory running out (a dozen 48-megapixel pictures in one document)
+  still stops the engine, which now reloads the page with the draft
+  offered rather than leaving it blank; refusing beforehand wants the
+  allocator to say what is free. Median, surface blur and oil paint
+  hold their radius to 64 device pixels, so zoomed far in they look
+  softer than they export. The draft writer encodes a big picture on
+  the page's thread (a 3 s pause once after placing 100 megapixels),
+  and a 100-megapixel picture opened into a fresh page is fitted to it
+  without saying so.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

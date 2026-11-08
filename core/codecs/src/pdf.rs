@@ -1541,6 +1541,20 @@ impl Page {
                     .and_then(|s| crate::strokes::tapered_outlines(shape, s));
                 if let (Some(outlines), Some(s)) = (&tapered, stroke) {
                     self.content.push_str("q\n");
+                    // A varying band to one side is the doubled band's
+                    // outline, clipped as the even stroke's is below.
+                    match chitrakar_doc::stroke_align(shape, s) {
+                        chitrakar_doc::StrokeAlign::Centre => {}
+                        chitrakar_doc::StrokeAlign::Inside => {
+                            let _ = writeln!(self.content, "{path}W* n");
+                        }
+                        chitrakar_doc::StrokeAlign::Outside => {
+                            let _ = writeln!(
+                                self.content,
+                                "-1000000 -1000000 2000000 2000000 re\n{path}W* n"
+                            );
+                        }
+                    }
                     let a = opacity * s.color.alpha();
                     if let Some(gs) = self.gstate(a, a, blend) {
                         let _ = writeln!(self.content, "/{gs} gs");
@@ -1620,12 +1634,37 @@ impl Page {
                                     chitrakar_doc::StrokeJoin::Round => 1,
                                     chitrakar_doc::StrokeJoin::Bevel => 2,
                                 };
-                                let _ = writeln!(
-                                    self.content,
-                                    "{cap} J {join} j {} M {} w\n{path}S",
-                                    num(chitrakar_doc::MITER_LIMIT),
-                                    num(stroke.width)
-                                );
+                                // A band to one side of a closed path: the
+                                // line twice as wide, clipped to the path
+                                // for one inside and to all but the path
+                                // for one outside, as the renderer draws
+                                // it. (A clip's edge meets the fill's at
+                                // the outline, which the one-sided moves a
+                                // rect and an ellipse get cannot do here.)
+                                match chitrakar_doc::stroke_align(shape, stroke) {
+                                    chitrakar_doc::StrokeAlign::Centre => {
+                                        let _ = writeln!(
+                                            self.content,
+                                            "{cap} J {join} j {} M {} w\n{path}S",
+                                            num(chitrakar_doc::MITER_LIMIT),
+                                            num(stroke.width)
+                                        );
+                                    }
+                                    side => {
+                                        let around = if side == chitrakar_doc::StrokeAlign::Outside
+                                        {
+                                            "-1000000 -1000000 2000000 2000000 re\n"
+                                        } else {
+                                            ""
+                                        };
+                                        let _ = writeln!(
+                                            self.content,
+                                            "q\n{around}{path}W* n\n{cap} J {join} j {} M {} w\n{path}S\nQ",
+                                            num(chitrakar_doc::MITER_LIMIT),
+                                            num(stroke.width * 2.0)
+                                        );
+                                    }
+                                }
                                 // PDF has no markers, so what a line
                                 // carries at its ends is drawn: filled
                                 // outlines in the line's own colour,

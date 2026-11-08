@@ -121,6 +121,30 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: shells/tauri/src-tauri
 
+  shell-windows:
+    # The release builds Windows installers, and nothing else in CI ever
+    # built on Windows: the wasm scripts' quoting and paths, the shell's
+    # own code behind cfg(windows). The UI and the shell, checked.
+    name: Tauri shell (check, Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: shells/tauri/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: shells/tauri/src-tauri
+
   shell-android:
     # The shell compiled for a phone: what a desktop build never asks of
     # it — the dialog plugin's mobile half, the files handed over by

@@ -502,7 +502,9 @@ export function PreferencesDialog({
                   <span className="hint">the menus, panels and windows; not the page</span>
                 </label>
                 {/* What the choices look like together, live. */}
-                <div className="prefs-preview" aria-label="Preview" role="group">
+                {/* A picture of controls, not controls: hidden from what
+                    reads the page, which listed a second "Done". */}
+                <div className="prefs-preview" aria-hidden="true">
                   <button type="button" className="mask-button primary" tabIndex={-1}>
                     Done
                   </button>
@@ -607,7 +609,8 @@ export function PreferencesDialog({
                       aria-label="Find a command"
                       value={rowQuery}
                       onChange={(e) => setRowQuery(e.target.value)}
-                      onKeyDown={(e) => e.stopPropagation()}
+                      // Its letters are its own; Escape still closes the window.
+                      onKeyDown={(e) => e.key !== "Escape" && e.stopPropagation()}
                     />
                     {menuRows
                       .filter((r) => {

@@ -5362,7 +5362,7 @@ assert(
     (await page.locator(".sel-outline").count()) >= 1 && (await page.locator(".handle").count()) === 0,
     "picked from the panel it shows its outline but no handles",
   );
-  await page.click('button[aria-label="Unlock layer"]');
+  await page.click('button[aria-label="Lock layer"][aria-pressed="true"]');
   await page.waitForTimeout(150);
   await page.keyboard.press("Escape");
   await page.mouse.click(...at(200, 175));
@@ -13548,7 +13548,8 @@ assert(
 
 // 9af. A document larger than can be made: the dialog used to clamp the
 // number inside the field as it was typed, so asking for 30000 got you
-// 8192 with nothing said — and, since every keystroke was clamped, no
+// 8192 with nothing said (a page is held to 30000 a side and 100
+// megapixels now; past the pixels, both sides come down) — and, since every keystroke was clamped, no
 // way to type a big number at all. It now keeps what was asked for and
 // says what it is going to do instead.
 {
@@ -13559,7 +13560,7 @@ assert(
   assert((await note.count()) === 0, "an ordinary size is remarked on by nothing");
 
   await page.locator('input[aria-label="Width"]').fill("30000");
-  await page.locator('input[aria-label="Height"]').fill("100");
+  await page.locator('input[aria-label="Height"]').fill("5000");
   await page.waitForTimeout(150);
   assert(
     await page.locator('input[aria-label="Width"]').inputValue() === "30000",
@@ -13567,8 +13568,11 @@ assert(
   );
   assert((await note.count()) === 1, "and the dialog says something about it");
   const said = await note.innerText();
+  // Past a hundred megapixels both sides come down together.
+  const down = Math.sqrt(100_000_000 / (30000 * 5000));
+  const [mw, mh] = [Math.floor(30000 * down), Math.floor(5000 * down)];
   assert(
-    said.includes("8192") && said.includes("8192 \u00d7 100"),
+    said.includes("100 megapixels") && said.includes(`${mw} \u00d7 ${mh}`),
     `saying what will be made instead (${said})`,
   );
   // The millimetre reading under the resolution describes the document
@@ -13576,7 +13580,7 @@ assert(
   const mm = await dialog.locator(".print-size").innerText();
   const wide = Number(mm.split("\u00d7")[0].replace(/[^0-9.]/g, ""));
   assert(
-    Math.abs(wide - (8192 / 72) * 25.4) < 2,
+    Math.abs(wide - (mw / 72) * 25.4) < 2,
     `the size in millimetres is the clamped one (${mm})`,
   );
 
@@ -13584,7 +13588,7 @@ assert(
   await page.waitForTimeout(700);
   const chip = await page.locator(".doc-chip").innerText();
   assert(
-    chip.includes("8192\u00d7100"),
+    chip.includes(`${mw}\u00d7${mh}`),
     `and that is the document made (${chip})`,
   );
 }
@@ -18126,7 +18130,7 @@ assert(
   await page.waitForTimeout(120);
   const subs = await page.locator(".menu-pop:not(.sub) .menu-item.has-sub .menu-item-label").allTextContents();
   assert(
-    subs.join(",") === "Arrange,Align,Transform,Mask,Styles,Combine shapes,Path,Convert",
+    subs.join(",") === "Arrange,Align,Transform,Mask,Styles,Combine shapes,Path,Add,Convert",
     `the Layer menu keeps its families behind a row each (${subs.join(",")})`,
   );
   const layerRows = await page.locator(".menu-pop:not(.sub) > .menu-item .menu-item-label").allTextContents();
@@ -18639,7 +18643,8 @@ assert(
   }
   assert(
     (await page.locator('button[aria-label="Erase"]').count()) === 0 &&
-      (await page.locator('button[aria-label="Heal"][aria-pressed]').count()) === 0,
+      // The rail's own Heal says it is pressed now; the switch was not on the rail.
+      (await page.locator('button[aria-label="Heal"][aria-pressed]:not(.tool)').count()) === 0,
     "and the switches they replaced are gone",
   );
   const inHand = () =>
@@ -20949,7 +20954,7 @@ assert(
   await xBox.press("Enter");
   await page.waitForTimeout(200);
   assert((await steps()) === before, "a typed X does not move a locked layer");
-  await page.locator(".panel ul li").first().locator('button[aria-label="Unlock layer"]').click();
+  await page.locator(".panel ul li").first().locator('button[aria-label="Lock layer"][aria-pressed="true"]').click();
   await page.waitForTimeout(150);
 
   // A rename to the name it has is no step.
@@ -21118,6 +21123,295 @@ assert(
   await page.waitForTimeout(150);
   assert(Number(await brushBox.inputValue()) > before, `] widens the Brush (${before} to ${await brushBox.inputValue()})`);
   await pickTool("Move");
+}
+
+// 9cx. The fourth audit, of the keyboard: a layer chord pressed at the
+// export window reached the layer behind it; no window took the focus or
+// kept Tab inside; the menus had no keys; Escape that closed a menu also
+// let go of the layer; tabbing through X, Y, W and H edited the layer;
+// arrows in "+ Adjust" added a layer a press; chords were dead with the
+// caret in a field; Space on a rail button did nothing; and a chip had
+// no key to forget it by.
+{
+  await newDocument(400, 300, "rgb");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(60, 60));
+  await page.mouse.down();
+  await page.mouse.move(...at(160, 140), { steps: 5 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  await pickTool("Move");
+  await page.mouse.click(...at(100, 100));
+  await page.waitForTimeout(200);
+  const layerCount = () => page.locator(".panel ul li .layer-name").count();
+  // Steps taken and not undone: an undone one stays listed, greyed.
+  const steps = () => page.locator(".history li:not(.history-start):not(.future) button").count();
+  const focusIn = (sel) => page.evaluate((s) => !!document.activeElement?.closest(s), sel);
+  const layers0 = await layerCount();
+  assert(
+    (await page.locator('.toolbar button[aria-label="Move"]').getAttribute("aria-pressed")) === "true",
+    "the rail says which tool is in hand",
+  );
+
+  // The export window takes the focus, keeps Tab, and the layer chords
+  // behind it are its own.
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForTimeout(400);
+  assert(await focusIn('[role="dialog"]'), "the export window takes the focus");
+  assert(
+    (await page.locator('[role="dialog"][aria-modal="true"]').count()) === 1,
+    "and is said to be modal",
+  );
+  for (let i = 0; i < 40; i++) await page.keyboard.press("Tab");
+  assert(await focusIn('[role="dialog"]'), "forty Tabs later the focus is still in it");
+  for (const chord of ["Control+j", "Control+g", "Delete"]) await page.keyboard.press(chord);
+  await page.waitForTimeout(200);
+  assert((await layerCount()) === layers0, "Ctrl+J, Ctrl+G and Delete at the window leave the layers alone");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(250);
+  assert((await page.locator('[role="dialog"]').count()) === 0, "Escape closes it");
+  assert((await page.locator(".sel-outline").count()) >= 1, "and the layer is still picked");
+
+  // F10 reaches the bar; the arrows walk a menu and leave the layer be.
+  const steps0 = await steps();
+  await page.keyboard.press("F10");
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(250);
+  assert(await focusIn('.menu-pop [role="menuitem"]'), "F10 then Down opens the first menu on a row");
+  const first = await page.evaluate(() => document.activeElement?.textContent);
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  const third = await page.evaluate(() => document.activeElement?.textContent);
+  assert(first !== third, "Down walks the rows");
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(250);
+  assert(
+    (await page.evaluate(() => document.activeElement?.closest(".menu")?.querySelector(".menu-label")?.textContent)) === "Edit",
+    "Right goes to the next menu",
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert((await page.locator(".menu-pop").count()) === 0, "Escape closes the menu");
+  assert(await focusIn(".menu-label"), "and leaves the focus on its label");
+  assert((await page.locator(".sel-outline").count()) >= 1, "with the layer still picked");
+  assert((await steps()) === steps0, `the arrows in a menu nudged nothing (${steps0} to ${await steps()})`);
+
+  // The canvas's menu takes the focus, and Escape keeps the layer.
+  await page.mouse.click(...at(100, 100), { button: "right" });
+  await page.waitForTimeout(250);
+  assert(await focusIn(".context-menu"), "the canvas's menu takes the focus on its first row");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  assert(
+    (await page.locator(".context-menu").count()) === 0 && (await page.locator(".sel-outline").count()) >= 1,
+    "Escape puts it away and keeps the layer picked",
+  );
+
+  // Tabbing through the fields is not an edit; Enter takes one and stays.
+  await page.locator('input[aria-label="X position"]').focus();
+  for (let i = 0; i < 4; i++) await page.keyboard.press("Tab");
+  await page.waitForTimeout(200);
+  assert((await steps()) === steps0, `tabbing through X, Y, W and H changed nothing (${await steps()} steps)`);
+  await page.locator('input[aria-label="X position"]').fill("120");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  assert((await steps()) === steps0 + 1, "Enter in X moves the layer, as one step");
+  assert(
+    (await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))) === "X position",
+    "and the caret stays in X",
+  );
+  // A chord with the caret in a field reaches the editor.
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+  assert((await steps()) === steps0, "Ctrl+Z in the field takes the move back");
+
+  // The arrows browse "+ Adjust"; Enter adds what they reached.
+  await page.locator('select[aria-label="Add adjustment layer"]').focus();
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(200);
+  assert((await layerCount()) === layers0, "three arrows in + Adjust add nothing");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(300);
+  assert((await layerCount()) === layers0 + 1, "Enter adds the one they reached");
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(250);
+
+  // Space presses a rail button reached with the keyboard.
+  await page.locator('input[aria-label="Zoom"]').focus();
+  let onPen = false;
+  for (let i = 0; i < 80 && !onPen; i++) {
+    await page.keyboard.press("Tab");
+    onPen = await page.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Pen");
+  }
+  assert(onPen, "Tab reaches the Pen on the rail");
+  await page.keyboard.press("Space");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator('.toolbar button[aria-label="Pen"]').getAttribute("aria-pressed")) === "true",
+    "and Space picks it",
+  );
+  await pickTool("Move");
+
+  // Delete on a comp's chip forgets it.
+  promptAnswer = "Kept";
+  await page.locator('[aria-label="Keep a layer comp"]').click();
+  await page.waitForTimeout(250);
+  const comps = page.locator(".comps .comp-chip");
+  assert((await comps.count()) === 1, "a comp kept");
+  await comps.first().focus();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(250);
+  assert((await comps.count()) === 0 && (await layerCount()) === layers0, "Delete on its chip forgets it, and no layer");
+  promptAnswer = "";
+
+  // A shape made from the menus, with no drag: Layer › Add › Rectangle
+  // puts one in the middle of the view, picked.
+  await page.click('.menu-label:text-is("Layer")');
+  await page.locator('.menu-pop:not(.sub) .menu-item.has-sub', { hasText: "Add" }).first().hover();
+  const add = page.locator('.menu-pop.sub[aria-label="Add"]');
+  await add.waitFor({ timeout: 2000 });
+  await add.locator(".menu-item", { hasText: "Ellipse" }).click();
+  await page.waitForTimeout(300);
+  assert((await layerCount()) === layers0 + 1, "Layer › Add › Ellipse adds an ellipse");
+  assert(
+    (await page.locator(".panel ul li.selected .layer-name").textContent())?.startsWith("Ellipse"),
+    "and picks it",
+  );
+  const mid = await canvasPixel(200, 150);
+  assert(mid[3] === 255, `in the middle of the view (${mid})`);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+}
+
+// 9cy. The fifth audit, on phones and tablets: the tools behind a
+// shared slot could not be reached on a phone (the row opened, cut away
+// by the rail); the finger lifting off a long press chose the menu row
+// that came to be under it ("Cut"); a pinch begun with the Text tool
+// left a text block; and a palm on the glass before the pen made the
+// pen's paint stroke fail.
+{
+  const ctx = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  await ctx.addInitScript(() => localStorage.setItem("chitrakar:prefs", JSON.stringify({ finger: "draw" })));
+  const ph = await ctx.newPage();
+  const phoneDialogs = [];
+  ph.on("dialog", (d) => {
+    phoneDialogs.push(d.message());
+    d.dismiss();
+  });
+  await ph.goto("http://localhost:8123/");
+  await ph.waitForSelector("#engine-canvas");
+  await ph.waitForTimeout(800);
+  await ph.evaluate(() => {
+    Element.prototype.setPointerCapture = () => {};
+    Element.prototype.releasePointerCapture = () => {};
+  });
+  const point = (type, id, kind, x, y, pressure = 0.5) =>
+    ph.evaluate(
+      ([type, id, kind, x, y, pressure]) => {
+        const el = document.elementFromPoint(x, y) ?? document.getElementById("engine-canvas");
+        el.dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+            pointerId: id,
+            pointerType: kind,
+            isPrimary: id === 1,
+            pressure: type === "pointerup" ? 0 : pressure,
+            buttons: type === "pointerup" ? 0 : 1,
+            clientX: x,
+            clientY: y,
+          }),
+        );
+        if (type === "pointerup" && kind === "touch") {
+          // The click a lifted finger makes, where it lifted.
+          document.elementFromPoint(x, y)?.dispatchEvent(new MouseEvent("click", { bubbles: true, clientX: x, clientY: y }));
+        }
+      },
+      [type, id, kind, x, y, pressure],
+    );
+  const rows = () => ph.locator(".panel ul li .layer-name").count();
+
+  // The shapes behind the corner are on screen, and a tap picks one.
+  await ph.click('button[aria-label="More shapes"]');
+  await ph.waitForTimeout(200);
+  const ellipse = ph.locator('.tool-flyout button[aria-label="Ellipse"]');
+  const reach = await ellipse.evaluate((b) => {
+    const r = b.getBoundingClientRect();
+    return document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)?.closest("button") === b;
+  });
+  assert(reach, "on a phone the shapes behind the corner are where a finger can reach them");
+  await ellipse.click();
+  await ph.waitForTimeout(150);
+  assert(
+    (await ph.locator('.toolbar .tool-group > button[aria-pressed="true"]').getAttribute("aria-label")) === "Ellipse",
+    "and a tap on one puts it in hand",
+  );
+
+  // A rect over most of the page, then a long press on it, lifted.
+  await ph.click('.toolbar button[aria-label="Ellipse"]');
+  const box = await ph.locator("#engine-page").boundingBox();
+  const at = (fx, fy) => [box.x + fx * box.width, box.y + fy * box.height];
+  await ph.mouse.move(...at(0.05, 0.05));
+  await ph.mouse.down();
+  await ph.mouse.move(...at(0.95, 0.95), { steps: 5 });
+  await ph.mouse.up();
+  await ph.waitForTimeout(250);
+  await ph.click('.toolbar button[aria-label="Move"]');
+  const before = await rows();
+  const [hx, hy] = at(0.5, 0.85);
+  await point("pointerdown", 7, "touch", hx, hy);
+  await ph.waitForTimeout(700);
+  await point("pointerup", 7, "touch", hx, hy);
+  await ph.waitForTimeout(250);
+  assert((await rows()) === before, "lifting the finger off a long press chooses nothing in the menu");
+  assert((await ph.locator(".context-menu").count()) === 1, "and the menu stays up to choose from");
+  await ph.keyboard.press("Escape");
+  await ph.waitForTimeout(150);
+
+  // A pinch begun with the Text tool leaves no text behind.
+  await ph.locator('.toolbar button[aria-label="Text"]').click();
+  await ph.waitForTimeout(100);
+  const [ax, ay] = at(0.3, 0.4);
+  const [bx, by] = at(0.7, 0.6);
+  await point("pointerdown", 1, "touch", ax, ay);
+  await ph.waitForTimeout(40);
+  await point("pointerdown", 2, "touch", bx, by);
+  for (let k = 1; k <= 4; k++) {
+    await point("pointermove", 1, "touch", ax - k * 8, ay - k * 8);
+    await point("pointermove", 2, "touch", bx + k * 8, by + k * 8);
+  }
+  await point("pointerup", 1, "touch", ax - 32, ay - 32);
+  await point("pointerup", 2, "touch", bx + 32, by + 32);
+  await ph.waitForTimeout(300);
+  assert((await rows()) === before, `a pinch with the Text tool adds no text (${await rows()} layers)`);
+
+  // A palm lands, then the pen paints: the stroke is the pen's.
+  await ph.keyboard.press("Escape");
+  await ph.locator('.toolbar button[aria-label="Paint"]').click().catch(async () => {
+    await ph.click('button[aria-label="More tools"]');
+    await ph.locator('.tool-flyout button[aria-label="Paint"]').click();
+  });
+  await ph.waitForTimeout(150);
+  const [qx, qy] = at(0.2, 0.2);
+  await point("pointerdown", 9, "touch", qx + 60, qy + 200);
+  await ph.waitForTimeout(30);
+  await point("pointerdown", 11, "pen", qx, qy, 0.6);
+  for (let k = 1; k <= 6; k++) await point("pointermove", 11, "pen", qx + k * 12, qy + k * 4, 0.6);
+  await point("pointerup", 11, "pen", qx + 72, qy + 24);
+  await point("pointerup", 9, "touch", qx + 60, qy + 200);
+  await ph.waitForTimeout(300);
+  assert(
+    !phoneDialogs.some((m) => /not a paint layer|Paint:/.test(m)),
+    `a palm before the pen does not break the pen's stroke (${phoneDialogs.join(" | ")})`,
+  );
+  await ctx.close();
 }
 
 // 9cv. Two tabs each keep a draft of their own: both wrote one draft,

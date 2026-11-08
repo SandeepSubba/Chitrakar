@@ -3,8 +3,10 @@
 A modern, multiplatform photo + vector editing app with fully non-destructive
 objects and layers, and real color management (RGB and CMYK, ICC-correct).
 
-**Targets:** Windows, macOS, Linux (shipping); iPadOS, iOS, Android (shells
-pending).
+**Targets:** Windows, macOS, Linux and the browser; iPadOS, iOS and Android
+shells compile and build in CI but have not yet been tried on devices. Not
+released yet — `docs/PLAN.md` §0 lists what stands before a 1.0, and
+[CHANGELOG.md](CHANGELOG.md) what it will hold.
 
 **Stack:** Rust engine (document model, a CPU renderer that compiles natively
 and to WASM, a wgpu backend growing beside it and checked against that
@@ -53,7 +55,10 @@ cd shells/tauri/src-tauri
 ```
 
 Tagging `v*` (or manually dispatching the "Release builds" workflow) builds
-installers for Windows, macOS (Intel + Apple Silicon), and Linux in CI.
+installers for Windows, macOS (Intel + Apple Silicon), and Linux in CI,
+as a draft release. The workflow runs once it is on the default branch,
+and the installers are unsigned until the signing secrets are added (see
+`docs/PLAN.md` §0, *Release readiness*).
 
 Repository layout: `core/` (Rust engine workspace) · `app/` (shared UI) ·
 `shells/tauri/` (desktop + mobile shells) · `docs/` (plan, ADRs).

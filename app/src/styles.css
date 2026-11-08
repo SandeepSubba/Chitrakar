@@ -11,7 +11,8 @@
   --panel: #2a2a30;
   --border: #3a3a42;
   --text: #e8e8ec;
-  --muted: #8a8a94;
+  /* 4.9:1 on the panel; #8a8a94 was 4.2, under what small text needs. */
+  --muted: #96969f;
   --accent: #6c8cff;
   /* What sits on the accent: a button's label. */
   --on-accent: #10101a;
@@ -595,7 +596,9 @@ body {
 .preset.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  /* The tint and the edge say which; the words stay the text's own
+     colour, since an accent on its own tint was 3.3:1. */
+  color: var(--text);
 }
 
 /* A short line of context inside a dialog: the size the page is now, or
@@ -2387,7 +2390,10 @@ body {
   background: var(--panel);
   border-right: 1px solid var(--border);
   box-shadow: 12px 0 32px var(--shadow);
-  padding: max(0.5rem, env(safe-area-inset-top)) 0.4rem max(0.5rem, env(safe-area-inset-bottom));
+  /* Clear of a notch on either side too: on its side, a phone's notch
+     is at the left or the right, and the menus' names lay under it. */
+  padding: max(0.5rem, env(safe-area-inset-top)) max(0.4rem, env(safe-area-inset-right))
+    max(0.5rem, env(safe-area-inset-bottom)) max(0.4rem, env(safe-area-inset-left));
 }
 
 .sheet-menu-label {
@@ -3639,7 +3645,9 @@ button.fold:hover {
 .prefs-tab.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  /* The tint and the edge say which; the words stay the text's own
+     colour, since an accent on its own tint was 3.3:1. */
+  color: var(--text);
 }
 
 .prefs-tab svg {
@@ -3791,7 +3799,10 @@ button.fold:hover {
 /* The tools, a section of the rail per box, two to a row. */
 .prefs-tools {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* Two columns that may each shrink below their words (minmax(0, …)):
+     on a 320-wide phone the right column's key buttons ran past the
+     window's edge, out of reach. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0.1rem 0.75rem;
   padding: 0.3rem 0.4rem;
   border: 1px solid var(--border);
@@ -3800,6 +3811,14 @@ button.fold:hover {
 
 .prefs-tools .prefs-tool {
   font-size: 0.78rem;
+  min-width: 0;
+}
+
+/* Too narrow for two: one column. */
+@media (max-width: 360px) {
+  .prefs-tools {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .prefs-tools .prefs-tool svg {
@@ -3928,8 +3947,9 @@ button.fold:hover {
    but a finger's size to press. */
 .held-keys {
   position: absolute;
-  left: 28px;
-  bottom: 12px;
+  /* Clear of the home bar and of a notch, a phone on its side. */
+  left: calc(28px + env(safe-area-inset-left));
+  bottom: calc(12px + env(safe-area-inset-bottom));
   z-index: 3;
   display: flex;
   gap: 6px;

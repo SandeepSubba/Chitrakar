@@ -82,6 +82,29 @@ impl SourceImage {
     }
 }
 
+/// The most pixels a picture may have, which is asked of a file's own
+/// word for its size before a byte of it is set aside. A few hundred
+/// bytes of JPEG can say they are 65500 pixels square, and a small 1-bit
+/// PNG really is 30000 square; set aside as four bytes a pixel, either
+/// was more memory than a page has, and the engine stopped for good —
+/// the editor's page went blank and the work was lost with it. A hundred
+/// and fifty megapixels is more than any camera makes (the largest are a
+/// hundred and two) and what the editor has been seen to hold.
+pub const MAX_PICTURE_PIXELS: u64 = 150_000_000;
+
+/// Refused, in words, when a picture says it is larger than can be held.
+pub fn fits(width: u32, height: u32) -> Result<(), CodecError> {
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_PICTURE_PIXELS {
+        return Err(CodecError::Format(format!(
+            "the picture is {width} × {height} — {} megapixels, more than the {} the editor can hold",
+            pixels.div_ceil(1_000_000),
+            MAX_PICTURE_PIXELS / 1_000_000
+        )));
+    }
+    Ok(())
+}
+
 /// Decode PNG or JPEG bytes (format sniffed from content). An embedded ICC
 /// profile is honored: pixels are normalized to sRGB at this edge, so the
 /// engine holds exactly one internal encoding.
@@ -91,6 +114,8 @@ pub fn decode(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     }
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
     let mut decoder = reader.into_decoder()?;
+    let (w, h) = image::ImageDecoder::dimensions(&decoder);
+    fits(w, h)?;
     let icc = image::ImageDecoder::icc_profile(&mut decoder)
         .ok()
         .flatten();
@@ -350,6 +375,44 @@ pub(crate) fn blended_page(
 #[cfg(test)]
 mod tests {
 
+    /// A JPEG of a few hundred bytes whose frame says it is 65500 pixels
+    /// square: the four bytes a pixel were set aside before anything
+    /// else was asked, which in a browser stopped the engine for good.
+    /// It is refused in words, from the header alone.
+    #[test]
+    fn a_picture_saying_it_is_vast_is_refused_before_anything_is_set_aside() {
+        use super::*;
+        let mut jpeg = vec![0xFF, 0xD8];
+        // A quantisation table of ones.
+        jpeg.extend([0xFF, 0xDB, 0x00, 0x43, 0x00]);
+        jpeg.extend([1u8; 64]);
+        // The frame: 8 bits, 65500 high, 65500 wide, one channel.
+        jpeg.extend([
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0xFF, 0xDC, 0xFF, 0xDC, 0x01, 0x01, 0x11, 0x00,
+        ]);
+        // A Huffman table each way: one code of length one, for zero.
+        for class in [0x00u8, 0x10] {
+            jpeg.extend([0xFF, 0xC4, 0x00, 0x14, class]);
+            jpeg.extend([1u8]);
+            jpeg.extend([0u8; 15]);
+            jpeg.push(0);
+        }
+        jpeg.extend([0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00]);
+        jpeg.extend([0u8; 300]);
+        jpeg.extend([0xFF, 0xD9]);
+        match decode(&jpeg) {
+            Err(e) => {
+                let said = e.to_string();
+                assert!(said.contains("65500 × 65500"), "said in words: {said}");
+            }
+            Ok(img) => panic!("a {}×{} picture was read", img.width, img.height),
+        }
+        assert!(
+            fits(12_000, 12_000).is_ok(),
+            "and a big photograph still fits"
+        );
+    }
+
     /// A phone's JPEG taken upright is stored on its side with an EXIF
     /// orientation saying so (6: a quarter turn clockwise to be seen),
     /// and comes in as it is seen: the left half on top. And 8, the
@@ -357,6 +420,7 @@ mod tests {
     #[test]
     fn a_jpeg_turned_on_its_side_comes_in_upright() {
         use super::*;
+
         let (w, h) = (32u32, 16u32);
         let mut px = Vec::new();
         for _ in 0..h {

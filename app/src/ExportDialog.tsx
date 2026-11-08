@@ -28,6 +28,7 @@
  * is unavailable is more useful than its absence.
  */
 
+import { chipKeys } from "./chipKeys";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
 import { watermarkJson, type ExportArea, type ExportFormat, type ExportSetup, type Prefs } from "./prefs";
@@ -293,12 +294,18 @@ export function ExportDialog({
     if (area === "selection" && !hasRegion && !selectionBounds()) {
       return "Nothing is picked.";
     }
-    // The engine's own limits (`canvas_fits`): asked for and refused
-    // here, before the export is pressed, rather than after it with a
-    // size the window never showed.
+    // The engine's own limits (`canvas_fits`: 30,000 a side, 100
+    // megapixels), and WebP's, which holds no more than 16,383 a side:
+    // asked for and refused here, before the export is pressed, rather
+    // than after it with a size the window never showed. It said 16,384
+    // for every format, so a 20,000-wide page could not be exported at
+    // all from here, though Quick export wrote it.
     const most = set ? 3 : 1;
-    if (outW * most > 16384 || outH * most > 16384 || outW * most * outH * most > 100_000_000) {
-      return `That comes to ${outW * most} × ${outH * most}, which is past what can be held at once (16,384 a side, 100 megapixels).`;
+    const side = format === "webp" ? 16383 : 30000;
+    if (outW * most > side || outH * most > side || outW * most * outH * most > 100_000_000) {
+      return `That comes to ${outW * most} × ${outH * most}, which is past what can be held at once (${side.toLocaleString("en")} a side${
+        format === "webp" ? " in a WebP" : ""
+      }, 100 megapixels).`;
     }
     return null;
   };
@@ -609,7 +616,12 @@ export function ExportDialog({
                 className={inHand ? "preset setup active" : "preset setup"}
                 aria-pressed={inHand}
                 aria-label={`Setup ${st.name}`}
-                title={`${st.name} — alt-click to forget it`}
+                title={`${st.name} — alt-click or Delete to forget it`}
+                onKeyDown={chipKeys(() =>
+                  setPrefs({
+                    exportSetups: prefs.exportSetups.filter((o) => o.name !== st.name),
+                  }),
+                )}
                 onClick={(e) => {
                   if (e.altKey) {
                     setPrefs({

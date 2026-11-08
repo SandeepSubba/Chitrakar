@@ -6108,6 +6108,19 @@ fn vector(
         }
     }
 
+    // A closed path's band to one side of its outline is the stroke twice
+    // as wide kept to that side of the fill, a clip this backend does not
+    // draw: the processor's frame answers instead.
+    if let Some((_, s)) = ink {
+        if matches!(
+            shape,
+            VectorShape::Path { .. } | VectorShape::Polygon { .. }
+        ) && chitrakar_doc::stroke_align(shape, s) != chitrakar_doc::StrokeAlign::Centre
+        {
+            return None;
+        }
+    }
+
     // A path is stencilled and covered: parity gives the even-odd fill
     // the CPU draws, holes and crossings included; a stroke is the union
     // of the round-capped segments the CPU tests against, which the
@@ -20691,6 +20704,22 @@ mod tests {
     /// `Scene::placed`); the four pages, and the one that found a frame's
     /// cut left on that list after the frame (1115), are drawn as the CPU
     /// draws them, and so are the three shapes directly.
+    /// Whether a page has a closed path or polygon whose border lies to
+    /// one side of it, which this backend hands to the processor.
+    fn sided_path(doc: &Document) -> bool {
+        doc.nodes().any(|(_, n)| match &n.kind {
+            NodeKind::Vector {
+                shape: shape @ (VectorShape::Path { .. } | VectorShape::Polygon { .. }),
+                stroke: Some(s),
+                ..
+            } => {
+                s.width > 0.0
+                    && chitrakar_doc::stroke_align(shape, s) != chitrakar_doc::StrokeAlign::Centre
+            }
+            _ => false,
+        })
+    }
+
     #[test]
     fn a_coverage_under_a_masked_layer_wearing_an_effect_is_kept() {
         let Some(gpu) = gpu_or_skip() else {
@@ -20875,6 +20904,16 @@ mod tests {
         }
         for seed in [830, 1115, 2924, 2956, 3186, 4204] {
             let doc = chitrakar_doc::fixture::page(seed);
+            // A closed path with its border to one side is the processor's
+            // (`vector`), and page 830 has one now paths keep a side; it
+            // is asked of the processor, and only for that.
+            if sided_path(&doc) {
+                assert!(
+                    !GpuRenderer::can_render(&doc),
+                    "page {seed} is the processor's"
+                );
+                continue;
+            }
             assert!(GpuRenderer::can_render(&doc), "page {seed} is drawn");
             let mine = gpu.render(&doc).unwrap();
             let reference = chitrakar_render::render(&doc).unwrap();

@@ -156,6 +156,14 @@ and `app/e2e/imports.test.mjs` over `src/imports.ts`; and
 `app/e2e/develop.test.mjs` over `src/develop.ts`, the develop window's
 temperature scale, histogram and clipping.
 
+The keyboard has three shared pieces in `app/src`: `windowFocus.ts`
+watches the page for windows (a dialog's scrim, the phone's drawer, the
+feather and straighten panels) and moves the focus in, keeps Tab inside
+a modal one and gives the focus back; `menuKeys.ts` is every menu's
+keys (bar, submenus, the canvas's menu); and `WINDOWS` in App.tsx is
+what makes the editor's own keys stand down. A drop-down whose options
+are actions is an `ActionSelect`, so its arrows browse rather than add.
+
 On a phone (under 640 wide or 500 tall) the menus are a drawer behind
 one Menus button and the bar is one row (smoke 11a); the suite's
 `menuItem` goes through the drawer whenever there is no menubar. On a

@@ -3030,6 +3030,15 @@ fn draw_effected(
             Bounds::Rect(x0, y0, x1, y1) => transformed_local_bounds(parent, (x0, y0, x1, y1)),
             other => other,
         };
+        // A layer whose effects cannot reach the region being drawn draws
+        // nothing in it, and is let go of before any of it is worked out.
+        // Zoomed in, the region is the window and most layers are off
+        // it — and every one wearing an effect was drawn onto a surface
+        // the size of the window with room round it, then found empty: a
+        // thousand shadows off screen cost seconds a frame.
+        if misses(extent, pad as f32, clip) {
+            return Ok(capture.map(|_| Cover::nothing()));
+        }
         // The layer runs past the page, and its effects reach: the
         // page is widened by their reach so the part past it is on the
         // surface the effects are grown from (see above). Once — the
@@ -3262,7 +3271,23 @@ fn render_child(
         // time would cost the strokes' length at every pixel.
         // A group is isolated on a surface of its own, in that surface's
         // coordinates, so its mask is worked out there instead of here.
-        let plane = if node.kind.holds_children() {
+        // Not for a layer the region does not reach: the plane is worked
+        // out over the whole region, and a feathered mask's is a blur of
+        // it, so a layer far off the window cost its mask's softening at
+        // every frame — a thousand feathered layers, half a minute.
+        let far = node.mask.is_some() && {
+            let soft = node
+                .mask
+                .as_ref()
+                .and_then(|m| feather_of(m, parent))
+                .map_or(0.0, |sigma| blur::plane_reach(sigma) as f32 + 1.0);
+            let extent = match bounds_in_parent_space(doc, child)? {
+                Bounds::Rect(x0, y0, x1, y1) => transformed_local_bounds(parent, (x0, y0, x1, y1)),
+                other => other,
+            };
+            misses(extent, soft, clip)
+        };
+        let plane = if node.kind.holds_children() || far {
             None
         } else {
             MaskRef::plane_over(
@@ -3990,6 +4015,7 @@ fn render_child(
                         // the PDF exporter, the GPU backend — passed the
                         // shape itself already.
                         let pieces = stroke_pieces(shape, stroke);
+                        let index = PieceIndex::of(&pieces);
                         paint_shape(
                             target,
                             doc,
@@ -4003,6 +4029,7 @@ fn render_child(
                                 align: stroke_align(shape, stroke),
                                 pad: stroke_pad(shape, stroke),
                                 pieces: &pieces,
+                                index: index.as_ref(),
                             }),
                             mask,
                         );
@@ -4399,6 +4426,21 @@ fn silhouette(
 
 /// A region reaching `pad` pixels further out on every side, kept inside
 /// the surface it indexes.
+/// Whether a layer's extent, grown by `pad` pixels, lies wholly outside
+/// `clip`: nothing it draws can land in the region.
+fn misses(extent: Bounds, pad: f32, clip: ClipRect) -> bool {
+    match extent {
+        Bounds::None => true,
+        Bounds::Everything => false,
+        Bounds::Rect(x0, y0, x1, y1) => {
+            x1 + pad <= clip.x0 as f32
+                || y1 + pad <= clip.y0 as f32
+                || x0 - pad >= clip.x1 as f32
+                || y0 - pad >= clip.y1 as f32
+        }
+    }
+}
+
 fn grow(clip: ClipRect, pad: u32, width: u32, height: u32) -> ClipRect {
     ClipRect {
         x0: clip.x0.saturating_sub(pad),
@@ -6217,6 +6259,21 @@ pub fn pieces_bounds(pieces: &[StrokePiece]) -> Option<[f32; 4]> {
 /// band lying inside a closed outline, which the signed distance to that
 /// outline states better than any number of pieces would.
 pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec<StrokePiece> {
+    // A closed path's band to one side of its outline is its stroke twice
+    // as wide, kept to that side of the fill where it is drawn
+    // (`stroke_covers`, `stroke_outline`, and each exporter's clip).
+    if matches!(
+        shape,
+        VectorShape::Path { .. } | VectorShape::Polygon { .. }
+    ) && stroke_align(shape, stroke) != StrokeAlign::Centre
+    {
+        let wide = chitrakar_doc::Stroke {
+            width: stroke.width * 2.0,
+            align: Some(StrokeAlign::Centre),
+            ..stroke.clone()
+        };
+        return stroke_pieces(shape, &wide);
+    }
     let mut out = Vec::new();
     // A stroke of no width, or less, lays nothing — and a negative one,
     // which a file can say, turned the band inside out and grew the ring
@@ -6306,6 +6363,20 @@ pub fn stroke_outline(
     let mut inside = grid.blank();
     for piece in &pieces {
         grid.lay(piece, &mut inside);
+    }
+    // A closed path's band to one side: the doubled stroke's cells on
+    // that side of the fill.
+    let side = stroke_align(shape, stroke);
+    if side != StrokeAlign::Centre
+        && matches!(
+            shape,
+            VectorShape::Path { .. } | VectorShape::Polygon { .. }
+        )
+    {
+        let fill = grid.filled(&shape_rings(shape));
+        for (cell, filled) in inside.iter_mut().zip(fill) {
+            *cell = *cell && (filled == (side == StrokeAlign::Inside));
+        }
     }
     grid.inside = inside;
     grid.rings()
@@ -7171,6 +7242,90 @@ struct StrokeGeom<'a> {
     /// Empty for the inner band of a rect or an ellipse; see
     /// [`stroke_pieces`].
     pieces: &'a [StrokePiece],
+    /// The pieces by where they lie, for a stroke of many: asked of every
+    /// sample, a line of three thousand points tested three thousand
+    /// pieces a sample, and a chart took minutes to draw.
+    index: Option<&'a PieceIndex>,
+}
+
+/// A stroke's pieces filed in a grid over their bounds, so a point asks
+/// only the pieces whose boxes hold its cell. Built once for a paint, and
+/// only for a stroke of more pieces than a scan of them all costs.
+pub struct PieceIndex {
+    x0: f32,
+    y0: f32,
+    cell: f32,
+    nx: usize,
+    ny: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl PieceIndex {
+    /// Worth building past this many pieces.
+    const FROM: usize = 48;
+
+    /// The index of `pieces`, or `None` when there are too few to need one.
+    pub fn of(pieces: &[StrokePiece]) -> Option<PieceIndex> {
+        if pieces.len() < Self::FROM {
+            return None;
+        }
+        let [x0, y0, x1, y1] = pieces_bounds(pieces)?;
+        let (w, h) = ((x1 - x0).max(1e-3), (y1 - y0).max(1e-3));
+        // About as many cells as pieces, held to a grid a page can carry.
+        let side = ((pieces.len() as f32).sqrt() * 2.0).clamp(4.0, 512.0);
+        let cell = (w.max(h) / side).max(1e-3);
+        let (nx, ny) = (
+            ((w / cell).ceil() as usize).max(1),
+            ((h / cell).ceil() as usize).max(1),
+        );
+        let mut cells = vec![Vec::new(); nx * ny];
+        for (i, p) in pieces.iter().enumerate() {
+            let [a, b, c, d] = p.bounds();
+            let cx0 = (((a - x0) / cell).floor().max(0.0) as usize).min(nx - 1);
+            let cy0 = (((b - y0) / cell).floor().max(0.0) as usize).min(ny - 1);
+            let cx1 = (((c - x0) / cell).floor().max(0.0) as usize).min(nx - 1);
+            let cy1 = (((d - y0) / cell).floor().max(0.0) as usize).min(ny - 1);
+            for cy in cy0..=cy1 {
+                for cx in cx0..=cx1 {
+                    cells[cy * nx + cx].push(i as u32);
+                }
+            }
+        }
+        Some(PieceIndex {
+            x0,
+            y0,
+            cell,
+            nx,
+            ny,
+            cells,
+        })
+    }
+
+    /// Whether any of `pieces` (the ones this was built from) holds the point.
+    pub fn covers(&self, pieces: &[StrokePiece], x: f32, y: f32) -> bool {
+        let (fx, fy) = ((x - self.x0) / self.cell, (y - self.y0) / self.cell);
+        if !(fx >= 0.0 && fy >= 0.0) {
+            return false;
+        }
+        let (cx, cy) = (fx as usize, fy as usize);
+        // The far edge belongs to the last cell.
+        let cx = if cx == self.nx && fx <= self.nx as f32 + 1e-3 {
+            cx - 1
+        } else {
+            cx
+        };
+        let cy = if cy == self.ny && fy <= self.ny as f32 + 1e-3 {
+            cy - 1
+        } else {
+            cy
+        };
+        if cx >= self.nx || cy >= self.ny {
+            return false;
+        }
+        self.cells[cy * self.nx + cx]
+            .iter()
+            .any(|&i| pieces[i as usize].covers(x, y))
+    }
 }
 
 /// Stroke coverage. A path's stroke — and any dashed stroke, whatever
@@ -7184,18 +7339,31 @@ fn stroke_covers(
     width: f32,
     align: StrokeAlign,
     pieces: &[StrokePiece],
+    index: Option<&PieceIndex>,
     x: f32,
     y: f32,
 ) -> bool {
-    if !pieces.is_empty()
-        || matches!(
-            shape,
-            VectorShape::Path { .. } | VectorShape::Polygon { .. }
-        )
-    {
+    let any = || match index {
+        Some(index) => index.covers(pieces, x, y),
+        None => pieces.iter().any(|p| p.covers(x, y)),
+    };
+    if matches!(
+        shape,
+        VectorShape::Path { .. } | VectorShape::Polygon { .. }
+    ) {
+        // A closed path's band to one side is the stroke twice as wide
+        // (`stroke_pieces`) on that side of its fill.
+        let hit = any();
+        return match align {
+            StrokeAlign::Centre => hit,
+            StrokeAlign::Inside => hit && shape_covers(shape, x, y),
+            StrokeAlign::Outside => hit && !shape_covers(shape, x, y),
+        };
+    }
+    if !pieces.is_empty() {
         // Dashes are already laid along the middle of the band they
         // break up, so they need no clipping to land in it.
-        return pieces.iter().any(|p| p.covers(x, y));
+        return any();
     }
     // A rect's and an ellipse's outline has a signed distance of its own,
     // so their bands need no clipping: the band is a range of distances.
@@ -7644,7 +7812,7 @@ fn pixel_coverage(
         let (x, y) = inv.at(sx, sy);
         match stroke {
             None => shape_covers(shape, x, y),
-            Some(s) => stroke_covers(shape, s.width, s.align, s.pieces, x, y),
+            Some(s) => stroke_covers(shape, s.width, s.align, s.pieces, s.index, x, y),
         }
     };
     let (fx, fy) = (px as f32, py as f32);
@@ -14115,6 +14283,7 @@ fn hit_child(
                             s.width,
                             stroke_align(shape, s),
                             &stroke_pieces(shape, &solid),
+                            None,
                             lx,
                             ly,
                         )
@@ -14179,6 +14348,84 @@ fn hit_child(
 
 #[cfg(test)]
 mod tests {
+
+    /// The index a long stroke's pieces are filed in answers exactly what
+    /// asking every piece does, on strokes of every kind and points all
+    /// over and around them — and a three-thousand-point line is quick.
+    #[test]
+    fn a_long_stroke_is_asked_through_its_index_and_answers_the_same() {
+        let mut seed = 7u64;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f32 / (1u64 << 31) as f32
+        };
+        for case in 0..6 {
+            let n = [60, 200, 900, 3000, 75, 400][case];
+            let points: Vec<[f32; 2]> = (0..n)
+                .map(|i| {
+                    if case % 2 == 0 {
+                        [i as f32 * 0.3, if i % 2 == 0 { 0.0 } else { 40.0 }]
+                    } else {
+                        [next() * 300.0, next() * 200.0]
+                    }
+                })
+                .collect();
+            let shape = VectorShape::Path {
+                handles: Vec::new(),
+                points,
+                closed: case == 4,
+                smooth: false,
+                subpaths: Vec::new(),
+            };
+            let stroke = chitrakar_doc::Stroke {
+                width: 1.0 + next() * 6.0,
+                join: [
+                    chitrakar_doc::StrokeJoin::Round,
+                    chitrakar_doc::StrokeJoin::Miter,
+                    chitrakar_doc::StrokeJoin::Bevel,
+                ][case % 3],
+                dash: if case == 5 {
+                    vec![4.0, 3.0]
+                } else {
+                    Vec::new()
+                },
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                widths: Vec::new(),
+                dash_offset: 0.0,
+                cap: chitrakar_doc::StrokeCap::Round,
+                align: None,
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::None,
+            };
+            let pieces = stroke_pieces(&shape, &stroke);
+            let index = PieceIndex::of(&pieces).expect("a stroke this long is indexed");
+            let [x0, y0, x1, y1] = pieces_bounds(&pieces).unwrap();
+            for _ in 0..4000 {
+                let (x, y) = (
+                    x0 - 5.0 + next() * (x1 - x0 + 10.0),
+                    y0 - 5.0 + next() * (y1 - y0 + 10.0),
+                );
+                assert_eq!(
+                    index.covers(&pieces, x, y),
+                    pieces.iter().any(|p| p.covers(x, y)),
+                    "case {case} at ({x}, {y})"
+                );
+            }
+            // And the far corner of the box, which is the last cell's.
+            assert_eq!(
+                index.covers(&pieces, x1, y1),
+                pieces.iter().any(|p| p.covers(x1, y1))
+            );
+        }
+        assert!(PieceIndex::of(&[]).is_none());
+    }
 
     /// Growing and shrinking a set of pixels by a true distance.
     ///
@@ -20556,7 +20803,7 @@ mod tests {
                         continue;
                     }
                     asked += 1;
-                    let painted = stroke_covers(shape, s.width, align, &pieces, x, y);
+                    let painted = stroke_covers(shape, s.width, align, &pieces, None, x, y);
                     covered += painted as usize;
                     if painted != inside(&rings, x, y) {
                         wrong += 1;
@@ -20659,7 +20906,7 @@ mod tests {
                         }
                     }
                     assert_eq!(
-                        stroke_covers(&shape, s.width, align, &pieces, x, y),
+                        stroke_covers(&shape, s.width, align, &pieces, None, x, y),
                         odd,
                         "case {case} at ({x}, {y}): {shape:?}"
                     );

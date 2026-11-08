@@ -16,7 +16,7 @@ await build({
   outfile: tmp,
   logLevel: "silent",
 });
-const { importKind, heifBrand, unreadable, PLACE_ACCEPT, RAW_EXTENSIONS } = await import("file://" + tmp);
+const { importKind, heifBrand, unreadable, said, PLACE_ACCEPT, RAW_EXTENSIONS } = await import("file://" + tmp);
 unlinkSync(tmp);
 
 let ran = 0;
@@ -68,6 +68,17 @@ check(heifBrand(bytes([0, 0, 0, 24], "ftypisom")) === null, "an MP4 is neither")
 const heic = unreadable("IMG_1.HEIC", bytes([0, 0, 0, 24], "ftypheic"), "x");
 check(heic.includes("JPEG") && heic.includes("Most Compatible"), `HEIC says how to get it in: ${heic}`);
 check(unreadable("a.png", bytes([0x89]), "broken").includes("broken"), "anything else says what went wrong");
+
+// An engine's refusal, said in words.
+check(said(new Error("invalid command: the picture is 9 × 9")) === "the picture is 9 × 9", "the wrapping comes off a sentence");
+check(said("Error: invalid command: io error: out of memory").includes("larger than"), "out of memory is said as size");
+check(
+  said("Error: invalid command: Format error decoding Png: CRC error: expected 0xabd4fb1c").includes("damaged"),
+  "a decoder's CRC is a damaged file",
+);
+check(said("manifest error: missing field `meta` at line 1 column 3091").includes("document inside"), "a manifest's field");
+check(said("SVG data parsing failed cause expected 'g' tag, not 'svg' at 1:152").includes("not well-formed"), "an SVG's XML");
+check(said("The image format Bmp is not supported").includes("could not be decoded"), "a format the engine leaves to the browser");
 
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));

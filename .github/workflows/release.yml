@@ -39,9 +39,15 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf \
             build-essential curl wget file libssl-dev
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown,aarch64-apple-darwin,x86_64-apple-darwin
+      # The toolchain, its components and the wasm targets come from
+      # rust-toolchain.toml, as in CI: a "stable" here built installers
+      # with another compiler than the one every test ran on, and without
+      # the WASI targets the raw reader needs or the rust-src the
+      # threaded engine rebuilds the standard library from.
+      - run: rustup toolchain install
+      - name: Add the Mac targets
+        if: matrix.platform == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
         with:

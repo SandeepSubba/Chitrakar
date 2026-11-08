@@ -834,6 +834,32 @@ fn write_node(
                         } else {
                             ""
                         };
+                        // Room round the outline for the band outside it
+                        // to be cut from: every anchor and handle, and
+                        // past them as far as a mitred corner of the
+                        // doubled stroke could reach.
+                        let around = {
+                            let reach = stroke.as_ref().map_or(0.0, |s| {
+                                let w =
+                                    s.width * 2.0 * s.widths.iter().fold(1.0f32, |m, f| m.max(*f));
+                                w * chitrakar_doc::MITER_LIMIT.max(1.0) + 1.0
+                            });
+                            let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                            let mut take = |x: f32, y: f32| {
+                                b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                            };
+                            for (i, p) in points.iter().enumerate() {
+                                take(p[0], p[1]);
+                                if let Some(h) = handles.get(i) {
+                                    take(p[0] + h[0], p[1] + h[1]);
+                                    take(p[0] + h[2], p[1] + h[3]);
+                                }
+                            }
+                            for p in subpaths.iter().flatten() {
+                                take(p[0], p[1]);
+                            }
+                            [b[0] - reach, b[1] - reach, b[2] + reach, b[3] + reach]
+                        };
                         match (&tapered, stroke) {
                             (Some(outlines), Some(s)) => {
                                 let _ = writeln!(out, "{pad}<g{common}>");
@@ -846,11 +872,46 @@ fn write_node(
                                 if a < 1.0 {
                                     let _ = write!(fill, r#" fill-opacity="{a}""#);
                                 }
+                                // A varying band to one side is the doubled
+                                // band's outline, cut by the path the same way.
+                                let cut = if inner.is_some() {
+                                    side_cut(&d, offset, around, child, defs)
+                                } else {
+                                    String::new()
+                                };
                                 let _ = writeln!(
                                     out,
-                                    r#"{pad}  <path d="{}"{fill}/>"#,
+                                    r#"{pad}  <path d="{}"{fill}{cut}/>"#,
                                     outlines_d(outlines)
                                 );
+                                let _ = writeln!(out, "{pad}</g>");
+                            }
+                            // A band to one side of a closed path: the stroke
+                            // twice as wide, cut by the path — clipped to it
+                            // for a band inside, masked out of it for one
+                            // outside — as the engine draws it.
+                            (None, Some(s)) if inner.is_some() => {
+                                let cut = side_cut(&d, offset, around, child, defs);
+                                let doubled = chitrakar_doc::Stroke {
+                                    width: s.width * 2.0,
+                                    ..s.clone()
+                                };
+                                let line = paint_attrs(
+                                    doc,
+                                    None,
+                                    Some(&doubled),
+                                    None,
+                                    child,
+                                    defs,
+                                    true,
+                                    fade,
+                                );
+                                let _ = writeln!(out, "{pad}<g{common}>");
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}  <path d="{d}"{paint}{rule}{smooth_note}/>"#
+                                );
+                                let _ = writeln!(out, r#"{pad}  <path d="{d}"{line}{cut}/>"#);
                                 let _ = writeln!(out, "{pad}</g>");
                             }
                             _ => {
@@ -1566,6 +1627,28 @@ fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
     format!(r#" mask="url(#{name})""#)
 }
 
+/// What cuts a closed path's doubled stroke down to the band lying on one
+/// side of it: a clip to the path for a band inside (`offset > 0`), and
+/// for one outside a clip to a box round it with the path cut out of it —
+/// even-odd, so what the box leaves is exactly what the path does not
+/// cover. A clip rather than a mask, because a clip is a region to every
+/// reader (ours brings it back as one, where a mask is pictures). Writes
+/// the definition and gives the attribute that uses it.
+fn side_cut(d: &str, offset: f32, around: [f32; 4], child: NodeId, defs: &mut String) -> String {
+    let name = format!("band{}", child.0);
+    let region = if offset > 0.0 {
+        d.to_string()
+    } else {
+        let [x0, y0, x1, y1] = around;
+        format!("M{x0},{y0} L{x1},{y0} L{x1},{y1} L{x0},{y1} Z {d}")
+    };
+    let _ = writeln!(
+        defs,
+        r#"<clipPath id="{name}"><path d="{region}" clip-rule="evenodd"/></clipPath>"#
+    );
+    format!(r#" clip-path="url(#{name})""#)
+}
+
 /// Underline and strike-through bands, in the text's own space, each in
 /// its stretch's colour.
 fn write_bands(doc: &Document, bands: &[([f32; 4], AuthoredColor)], pad: &str, out: &mut String) {
@@ -2244,13 +2327,14 @@ fn layer_id(layer: NodeId, name: &str) -> String {
         return String::new();
     }
     let ours = name.starts_with("chitrakar-")
-        || ["soft", "guide", "fx", "mask", "pattern", "marker", "clip"]
-            .iter()
-            .any(|p| {
-                name.strip_prefix(p).is_some_and(|rest| {
-                    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
-                })
-            });
+        || [
+            "soft", "guide", "fx", "mask", "pattern", "marker", "clip", "band",
+        ]
+        .iter()
+        .any(|p| {
+            name.strip_prefix(p)
+                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
+        });
     let base = if ours {
         format!("{name}_")
     } else {

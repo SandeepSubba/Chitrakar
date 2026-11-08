@@ -192,8 +192,17 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
     if !matches!(depth, 1 | 8 | 16 | 32) {
         return Err(bad(format!("{depth} bits a channel are not read")));
     }
-    if width == 0 || height == 0 || (width as u64 * height as u64) > 1 << 31 {
-        return Err(bad("a size the editor cannot hold"));
+    // The page a PSD opens as is a page like any other, held to what a
+    // page may be. A header said 20000 square and the reading set it
+    // aside, which stopped the engine for good.
+    if width == 0
+        || height == 0
+        || (width as u64 * height as u64) > chitrakar_doc::MAX_CANVAS_PIXELS
+    {
+        return Err(bad(format!(
+            "its page is {width} × {height}, more than the {} megapixels a page can be",
+            chitrakar_doc::MAX_CANVAS_PIXELS / 1_000_000
+        )));
     }
     let h = Header {
         big,
@@ -337,6 +346,8 @@ struct Record {
     mask: Option<(i32, i32, i32, i32, u8, bool)>,
     /// The second box, for channel -3, when the layer has a vector mask too.
     real_mask: Option<(i32, i32, i32, i32, u8, bool)>,
+    /// A mask whose box was too large to hold, and so was let go of.
+    mask_lost: bool,
     adjustment: bool,
     effects: bool,
     /// A shape or a fill: kept as a drawing, its pixels possibly not at all.
@@ -359,9 +370,12 @@ fn read_layers(
     let mut group_masks: Vec<Option<PsdMask>> = Vec::with_capacity(count);
     for rec in &records {
         let (w, hh) = (
-            (rec.right - rec.left).max(0) as usize,
-            (rec.bottom - rec.top).max(0) as usize,
+            (rec.right as i64 - rec.left as i64).max(0) as usize,
+            (rec.bottom as i64 - rec.top as i64).max(0) as usize,
         );
+        if rec.mask_lost {
+            lost.push(format!("the mask of \"{}\" (too large to hold)", rec.name));
+        }
         let mut planes: Vec<(i16, Vec<f32>)> = Vec::new();
         for &(id, len) in &rec.channels {
             let mut ch = r.sub(len)?;
@@ -371,9 +385,10 @@ fn read_layers(
                 _ => None,
             };
             let (cw, chh) = match (id, boxed) {
-                (-2 | -3, Some((t, l, b, rr, _, _))) => {
-                    ((rr - l).max(0) as usize, (b - t).max(0) as usize)
-                }
+                (-2 | -3, Some((t, l, b, rr, _, _))) => (
+                    (rr as i64 - l as i64).max(0) as usize,
+                    (b as i64 - t as i64).max(0) as usize,
+                ),
                 (-2 | -3, None) => (0, 0),
                 _ => (w, hh),
             };
@@ -528,8 +543,13 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     let left = r.i32()?;
     let bottom = r.i32()?;
     let right = r.i32()?;
-    if bottom < top || right < left || (right - left) as u64 * (bottom - top) as u64 > 1 << 31 {
-        return Err(bad("a layer of impossible size"));
+    // Worked in 64 bits: a box from one end of an i32 to the other
+    // wrapped, and passed.
+    if bottom < top
+        || right < left
+        || area(top, left, bottom, right) > chitrakar_doc::MAX_CANVAS_PIXELS
+    {
+        return Err(bad("a layer larger than a page can be"));
     }
     let n = r.u16()? as usize;
     let mut channels = Vec::with_capacity(n);
@@ -578,6 +598,21 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     } else {
         None
     };
+    // A mask's box is drawn over the union of itself and the layer's: a
+    // box a billion pixels out made that union the size of a country,
+    // and set it aside. One that cannot be held is let go of, and said.
+    let holdable = |m: &Option<(i32, i32, i32, i32, u8, bool)>| match m {
+        Some((t, l, b, rr, _, _)) => {
+            *b >= *t
+                && *rr >= *l
+                && area(top.min(*t), left.min(*l), bottom.max(*b), right.max(*rr))
+                    <= chitrakar_doc::MAX_CANVAS_PIXELS
+        }
+        None => true,
+    };
+    let mask_lost = !holdable(&mask) || !holdable(&real_mask);
+    let mask = mask.filter(|_| !mask_lost);
+    let real_mask = real_mask.filter(|_| !mask_lost);
     // Blending ranges: not carried.
     let n = extra.u32()? as usize;
     extra.take(n)?;
@@ -653,10 +688,16 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
         section,
         mask,
         real_mask,
+        mask_lost,
         adjustment,
         effects,
         drawn,
     })
+}
+
+/// How many pixels a box holds, in 64 bits so no edge can wrap.
+fn area(top: i32, left: i32, bottom: i32, right: i32) -> u64 {
+    ((right as i64 - left as i64).max(0) as u64) * ((bottom as i64 - top as i64).max(0) as u64)
 }
 
 /// Photoshop's blend mode, where the editor has its equal.

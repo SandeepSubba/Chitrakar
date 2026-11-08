@@ -1697,6 +1697,11 @@ impl WasmSession {
         serde_json::to_string(self.inner.import_notes()).unwrap_or_else(|_| "[]".into())
     }
 
+    /// The names of the layers whose pictures the document lacks, as JSON.
+    pub fn missing_pictures(&self) -> String {
+        serde_json::to_string(&self.inner.missing_pictures()).unwrap_or_else(|_| "[]".into())
+    }
+
     /// A Photoshop file with layers; what came across differently is
     /// then `export_notes`.
     pub fn export_psd(&mut self) -> Result<Vec<u8>, JsError> {

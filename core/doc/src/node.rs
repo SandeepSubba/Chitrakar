@@ -2052,13 +2052,17 @@ pub fn stroke_align(shape: &VectorShape, stroke: &Stroke) -> StrokeAlign {
         VectorShape::Rect { .. } | VectorShape::Ellipse { .. } => {
             stroke.align.unwrap_or(StrokeAlign::Inside)
         }
-        // A path is stroked down the middle of its line, which is what a
-        // line means and what an open one can only mean. Putting a band
-        // to one side of a closed path asks for its outline offset, and
-        // an offset outline is a guess where a distance is not.
-        // A polygon is the closed path through its corners, stroked as
-        // that path is.
-        VectorShape::Path { .. } | VectorShape::Polygon { .. } => StrokeAlign::Centre,
+        // An open path is stroked down the middle of its line, which is
+        // all a line can mean. A closed one — and a polygon, the closed
+        // path through its corners — has an inside, and a band to one
+        // side of its outline is the stroke twice as wide kept to the
+        // inside or the outside of its fill, which is exact without an
+        // offset outline to guess at. Down the middle unless asked, as
+        // every path drawn before there was a choice was.
+        VectorShape::Path { closed: true, .. } | VectorShape::Polygon { .. } => {
+            stroke.align.unwrap_or(StrokeAlign::Centre)
+        }
+        VectorShape::Path { .. } => StrokeAlign::Centre,
     }
 }
 

@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon, IconName } from "./icons";
 import {
   findEntry,
@@ -63,6 +63,7 @@ import {
   PLACE_ACCEPT,
   PLACE_EXTENSIONS,
   RAW_EXTENSIONS,
+  said,
   unreadable,
 } from "./imports";
 import {
@@ -91,6 +92,10 @@ import {
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
+import { focusFirstRow, menuKeyDown } from "./menuKeys";
+import { ActionSelect } from "./ActionSelect";
+import { chipKeys } from "./chipKeys";
+import { guardSession } from "./engineGuard";
 import {
   addLensFiles,
   forgetLensFile,
@@ -692,18 +697,27 @@ function proofingTrouble(err: unknown): string {
 }
 
 /** A tool's flyout, pinned to the window beside the button it opened
- * from: the rail scrolls when the window is too short for it, and a
- * flyout placed inside a scrolling rail would be cut off at its edge.
- * Only while the rail runs down the side; along the bottom, on a phone,
- * the stylesheet places it above. */
+ * from: the rail scrolls when it is longer than the window, and a flyout
+ * placed inside a scrolling rail is cut off at its edge. Down the side,
+ * beside the button; along the bottom, on a phone, above it — where the
+ * stylesheet's own placing was cut away whole, since a rail that scrolls
+ * sideways clips up and down too, and nothing behind the corner could
+ * be reached. */
 function pinFlyout(el: HTMLDivElement | null) {
   const from = el?.parentElement;
   const rail = el?.closest(".toolbar");
-  if (!el || !from || !rail || getComputedStyle(rail).flexDirection !== "column") return;
+  if (!el || !from || !rail) return;
   const at = from.getBoundingClientRect();
   el.style.position = "fixed";
-  el.style.left = `${Math.round(at.right + 6)}px`;
-  el.style.top = `${Math.round(at.top)}px`;
+  if (getComputedStyle(rail).flexDirection === "column") {
+    el.style.left = `${Math.round(at.right + 6)}px`;
+    el.style.top = `${Math.round(at.top)}px`;
+    return;
+  }
+  const wide = el.getBoundingClientRect().width;
+  el.style.top = "auto";
+  el.style.bottom = `${Math.round(window.innerHeight - at.top + 6)}px`;
+  el.style.left = `${Math.round(Math.max(8, Math.min(at.left, window.innerWidth - wide - 8)))}px`;
 }
 
 /** Whether a window (a dialog, the develop window) was up over the editor
@@ -719,13 +733,49 @@ if (typeof window !== "undefined") {
   window.addEventListener(
     "keydown",
     () => {
-      windowUpForKey = document.querySelector(".modal-scrim") !== null;
+      windowUpForKey = document.querySelector(WINDOWS) !== null;
     },
     true,
   );
 }
+/** What counts as a window for the keys: a dialog's scrim, a panel laid
+ * over the canvas (feather, straighten), and an open menu or the
+ * canvas's menu — Escape that puts one of those away is not also a
+ * deselect, and a layer chord pressed at one does not reach the
+ * document behind it. */
+const WINDOWS = ".modal-scrim, .sheet-scrim, .straighten-panel, .menu-pop";
 function aWindowIsUp(): boolean {
-  return windowUpForKey || document.querySelector(".modal-scrim") !== null;
+  return windowUpForKey || document.querySelector(WINDOWS) !== null;
+}
+
+/** The keys of a field in the panel or the bar. Its own keys stay its
+ * own — a letter is typed, not a tool, and an arrow moves the caret —
+ * but a chord with Ctrl or ⌘ goes on to the editor: undo, save, export
+ * with the caret in a box were dead, and Ctrl+S reached the browser's
+ * own "save page". Enter takes what was typed (the field's blur does)
+ * and stays in the field — which is drawn afresh from the document, so
+ * the focus is put back on the new one by its name. */
+function fieldKeys(e: React.KeyboardEvent<HTMLInputElement>): void {
+  if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+  if (e.key !== "Enter") return;
+  const el = e.currentTarget;
+  const name = el.getAttribute("aria-label");
+  el.blur();
+  if (!name) return;
+  requestAnimationFrame(() => {
+    const again = [...document.querySelectorAll<HTMLInputElement>("input")].find(
+      (i) => i.getAttribute("aria-label") === name,
+    );
+    again?.focus({ preventScroll: true });
+    again?.select();
+  });
+}
+
+/** Whether a field's text is what it was given: tabbing through a field
+ * without typing in it is not an edit, and taking the shown (rounded)
+ * number as one moved the layer by the rounding. */
+function asGiven(el: HTMLInputElement): boolean {
+  return el.value === el.defaultValue;
 }
 
 function isTextEntry(target: EventTarget | null): boolean {
@@ -1248,11 +1298,19 @@ const SHEET_STEP = 60;
 /** How long a finger is held on a layer's row before the row lifts to be
  * reordered; before that, moving scrolls the list. */
 const ROW_LIFT_MS = 350;
-
-/** Roughly how much room the right-click menu takes, which is what keeps
- * it inside the window. Wide enough for its longest line and tall enough
- * for the most items it ever shows. */
-const CONTEXT_MENU: [number, number] = [250, 380];
+/** How long a finger's press on a tool that acts at once waits for a
+ * second finger (a pinch, a two-finger tap) before it reaches the tool,
+ * and how far it may move meanwhile. Fingers meant together land within
+ * a few hundredths of a second of each other. */
+const TOUCH_SETTLE_MS = 120;
+const TOUCH_SLOP = 6;
+/** How wide a press makes a stroke, as a part of the brush's width: a
+ * pen's own pressure, from a quarter up; anything else full width. */
+function pressed(e: { pointerType: string; pressure: number }): number {
+  return e.pointerType === "pen" && e.pressure > 0 ? 0.25 + e.pressure * 0.75 : 1;
+}
+/** The tools whose press does something at once, and so waits for it. */
+const ACTS_ON_PRESS: readonly string[] = ["Text", "Wand", "Fill", "Eyedropper", "Node", "Paint", "Eraser", "Clone", "Heal"];
 
 /** What `snapAxis` answers when nothing is being snapped to. */
 const NO_SNAP = { delta: 0, guide: null as number | null };
@@ -2514,7 +2572,7 @@ export function App() {
 
   const newDocument = useCallback(
     (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72) => {
-      const s = new WasmSession(width, height, useCmyk);
+      const s = guardSession(new WasmSession(width, height, useCmyk));
       fitSession(s, width, height);
       s.set_dpi(dpi);
       setDocDpi(dpi);
@@ -3035,6 +3093,130 @@ export function App() {
    * as the shape tools put what is drawn inside a frame — or on the page.
    * Text, pen paths and brush strokes stayed on the page wherever they
    * were drawn, and were left behind when the frame was moved. */
+  /** A text block dropped at a point of the page, picked and open for
+   * typing — what the Text tool's press does, and the Layer menu's
+   * "Add text" in the middle of the view. */
+  const dropText = (x: number, y: number) => {
+    if (!session) return;
+    shapeCount.current += 1;
+    const place = placeAmong([[x, y]]);
+    const [tx, ty] = place.points[0];
+    const before = new Set(layers.map((l) => l.id));
+    run({
+      AddNode: {
+        parent: place.parent,
+        index: place.index,
+        node: nodePayload(
+          `Text ${shapeCount.current}`,
+          {
+            Text: {
+              text: "Text",
+              size: 48,
+              fill: currentInk(),
+              align: "Left",
+              line_height: 1,
+              letter_spacing: 0,
+              paragraph_spacing: 0,
+              width: 0,
+              font: "",
+              italic: false,
+              bold: false,
+              underline: false,
+              strike: false,
+              along: null,
+              along_offset: 0,
+              runs: [],
+            },
+          },
+          tx,
+          ty,
+        ),
+      },
+    });
+    setTool("Move");
+    // And typing begins: the block is picked and opens for editing with
+    // its word picked, so what is typed next replaces it — rather than
+    // each letter taking up a tool (H the hand, e the ellipse…).
+    const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+    if (added) {
+      setSelected(added.id as NodeId);
+      setMultiSel([]);
+      typeIntoNewText.current = true;
+    }
+  };
+
+  /** A shape put in the middle of the view at a size it can be seen at,
+   * picked — so a rectangle, an ellipse, a line or a text block can be
+   * made from the menus, and from the keyboard, where every other way of
+   * making one is a drag. */
+  const addInView = (kind: "Rect" | "Ellipse" | "Line" | "Text") => {
+    if (!session || !canvasRef.current) return;
+    const r = canvasRef.current.getBoundingClientRect();
+    const [cx, cy] = docPoint({ clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+    if (kind === "Text") {
+      dropText(cx, cy);
+      return;
+    }
+    const seen = Math.min(r.width, r.height) / view.zoom;
+    const side = Math.max(MIN_SIZE, Math.round(Math.min(seen, docSize[0], docSize[1]) / 4));
+    const [x0, y0] = [cx - side / 2, cy - side / 2];
+    const place = placeAmong([
+      [x0, y0],
+      [x0 + side, y0 + side],
+    ]);
+    const [[lx, ly], [fx, fy]] = place.points;
+    const [w, h] = [Math.abs(fx - lx), Math.abs(fy - ly)];
+    const ink = currentInk();
+    const shape =
+      kind === "Rect"
+        ? { Rect: { width: w, height: h, radius: 0 } }
+        : kind === "Ellipse"
+          ? { Ellipse: { rx: w / 2, ry: h / 2 } }
+          : {
+              Path: {
+                points: [
+                  [0, h / 2],
+                  [w, h / 2],
+                ] as [number, number][],
+                closed: false,
+                smooth: false,
+                handles: [],
+                subpaths: [],
+              },
+            };
+    const paint =
+      kind === "Line"
+        ? {
+            fill: null,
+            stroke: {
+              color: ink,
+              width: 4,
+              widths: [],
+              dash: [],
+              cap: "Round" as const,
+              join: "Round" as const,
+              start_marker: "None" as const,
+              end_marker: "None" as const,
+              align: null,
+            },
+          }
+        : { fill: ink, stroke: null };
+    shapeCount.current += 1;
+    const before = new Set(layers.map((l) => l.id));
+    run({
+      AddNode: {
+        parent: place.parent,
+        index: place.index,
+        node: nodePayload(`${kind} ${shapeCount.current}`, { Vector: { shape, ...paint, gradient: null } }, lx, ly),
+      },
+    });
+    const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+    if (added) {
+      setSelected(added.id as NodeId);
+      setMultiSel([]);
+    }
+  };
+
   const placeAmong = (pts: [number, number][]) => {
     const onPage = { parent: session?.root_id ?? 0, index: topLevelCount(layers), points: pts };
     if (!session || pts.length === 0) return onPage;
@@ -3129,6 +3311,16 @@ export function App() {
       if (aWindowIsUp()) {
         // The keys sheet is a window too, and has no Escape of its own.
         if (e.key === "Escape" && showKeys) setShowKeys(false);
+        return;
+      }
+      // F10 goes to the menu bar, as it does in every desktop program:
+      // its first menu, or the button the menus are behind on a phone.
+      if (e.key === "F10" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const bar = document.querySelector<HTMLElement>(".menubar .menu-label, .menu-sheet-toggle");
+        if (bar) {
+          e.preventDefault();
+          bar.focus();
+        }
         return;
       }
       // A single letter is a tool switch, but only when it isn't being typed
@@ -3278,7 +3470,15 @@ export function App() {
       if (e.key === "Enter" && !(e.target instanceof HTMLInputElement)) {
         finishPath(false); // pen tool: finish as an open (stroked) path
       }
-      if (e.code === "Space" && !(e.target instanceof HTMLInputElement)) {
+      // Space held is the hand — except on a control reached with the
+      // keyboard, where it presses the button or opens the list as it
+      // does everywhere. A button only clicked keeps the focus without
+      // showing it (no :focus-visible), and Space there still pans, so
+      // picking a tool and then holding Space to look around works.
+      const pressing =
+        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement) &&
+        e.target.matches(":focus-visible");
+      if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !pressing && !typing) {
         spaceRef.current = true;
         e.preventDefault();
       }
@@ -3681,6 +3881,15 @@ export function App() {
   /** A finger held still on the canvas, waiting to become a long press —
    * a touch screen's right-click. */
   const longRef = useRef<{ id: number; x: number; y: number; timer: number } | null>(null);
+  const startLong = (e: React.PointerEvent) => {
+    clearLong();
+    longRef.current = {
+      id: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      timer: window.setTimeout(pressedLong, LONG_PRESS_MS),
+    };
+  };
   const clearLong = () => {
     if (longRef.current) clearTimeout(longRef.current.timer);
     longRef.current = null;
@@ -3718,10 +3927,7 @@ export function App() {
     }
     // Kept inside the window: a menu opened near the right edge or the
     // bottom would otherwise hang off it with no way to scroll to it.
-    setContextAt([
-      Math.max(8, Math.min(clientX, window.innerWidth - CONTEXT_MENU[0])),
-      Math.max(8, Math.min(clientY, window.innerHeight - CONTEXT_MENU[1])),
-    ]);
+    setContextAt([clientX, clientY]);
   };
 
   /** A finger held still long enough: whatever it had begun is let go
@@ -3734,6 +3940,7 @@ export function App() {
     if (!at) return;
     clearLong();
     abandonGesture();
+    panDragRef.current = null;
     tapsRef.current.spoil(at.id);
     touchesRef.current.delete(at.id);
     ignoredRef.current.add(at.id);
@@ -3741,12 +3948,55 @@ export function App() {
     // press has turned into a question. Where there is no vibration
     // (Safari) there is no tick.
     navigator.vibrate?.(12);
-    openContextAt(at.x, at.y);
+    // The finger is still down on the glass, and the click its lift
+    // makes would land on whatever row came to be under it — "Cut", the
+    // menu being pulled up to fit: the layer was deleted by the press
+    // that only asked about it. So the menu opens beside the finger, and
+    // ignores clicks until a moment after that finger lifts.
+    contextHeldBy.current = at.id;
+    const lifted = (e: PointerEvent) => {
+      if (e.pointerId !== at.id) return;
+      window.removeEventListener("pointerup", lifted, true);
+      window.removeEventListener("pointercancel", lifted, true);
+      window.setTimeout(() => {
+        if (contextHeldBy.current === at.id) contextHeldBy.current = null;
+      }, 350);
+    };
+    window.addEventListener("pointerup", lifted, true);
+    window.addEventListener("pointercancel", lifted, true);
+    openContextAt(at.x + 24, at.y - 12);
   };
+  /** The finger that held the canvas's menu open, until just after it
+   * lifts: clicks on the menu meanwhile are that finger's, not a choice. */
+  const contextHeldBy = useRef<number | null>(null);
 
   // A click anywhere else, or Escape, puts the menu away — the same two
   // ways the menus in the bar close.
   const contextRef = useRef<HTMLDivElement>(null);
+  const contextOpen = contextAt !== null;
+  // Kept inside the window by its own size, once it is drawn: it was
+  // moved up by a size it was assumed to have (380 tall), so a menu of
+  // three rows opened near the bottom far above the finger.
+  useLayoutEffect(() => {
+    const el = contextRef.current;
+    if (!el || !contextAt) return;
+    const r = el.getBoundingClientRect();
+    const x = Math.max(8, Math.min(contextAt[0], window.innerWidth - r.width - 8));
+    const y = Math.max(8, Math.min(contextAt[1], window.innerHeight - r.height - 8));
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+  }, [contextAt]);
+  useEffect(() => {
+    if (!contextOpen) return;
+    // The menu takes the focus on its first row, as one opened from the
+    // keyboard (Shift+F10 on a row) has to, and gives it back after.
+    const back = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    focusFirstRow(() => contextRef.current);
+    return () => {
+      const lost = document.activeElement === null || document.activeElement === document.body;
+      if (lost && back?.isConnected) back.focus({ preventScroll: true });
+    };
+  }, [contextOpen]);
   useEffect(() => {
     if (!contextAt) return;
     // A press inside the menu is the item being chosen: taking the menu
@@ -3854,6 +4104,9 @@ export function App() {
   }, [tool]);
 
   const abandonGesture = () => {
+    // A finger's press still being held back is let go of with it: it
+    // never reached the tool, so there is nothing to take back.
+    dropHeldPress();
     cancelGesture();
     marqueeRef.current = null;
     setMarquee(null);
@@ -3890,6 +4143,24 @@ export function App() {
     return false;
   };
 
+  /** Asked first by every handle on the canvas — corners, the knob, an
+   * anchor, a mask's or a gradient's handle: a palm on one is ignored as
+   * it is on the page, and a finger on one is counted, so a second
+   * finger makes it a pinch rather than a resize. A palm drifting over a
+   * corner resized the layer. True when the press is not the handle's. */
+  const handleRefuses = (e: React.PointerEvent): boolean => {
+    if (rejectPalm(e)) {
+      e.stopPropagation();
+      return true;
+    }
+    trackTouch(e);
+    if (pinchRef.current) {
+      e.stopPropagation();
+      return true;
+    }
+    return false;
+  };
+
   /** A pointer lifted or taken back by the system: forget it. */
   const pointerGone = (e: React.PointerEvent) => {
     pensRef.current.delete(e.pointerId);
@@ -3901,6 +4172,11 @@ export function App() {
     if (rejectPalm(e)) return;
     trackTouch(e);
     if (!isPanTrigger(e)) return;
+    // Once a pen has been used a finger moves the page, and the canvas
+    // never hears it — so the long press that opens the menu went with
+    // it, for the rest of the visit. A finger held still on the page
+    // still asks for it.
+    if (e.pointerType === "touch" && touchesRef.current.size === 1) startLong(e);
     panDragRef.current = {
       pointerX: e.clientX,
       pointerY: e.clientY,
@@ -4186,6 +4462,35 @@ export function App() {
     }
   };
 
+  /** A finger's press on a tool that acts the moment it is pressed —
+   * drops text, fills, picks a colour, makes a paint layer — held back
+   * a moment, until the finger moves or lifts or the moment passes. No
+   * two fingers land at once: the first one's press used to run the
+   * tool before the second made it a pinch or a tap, and taking it back
+   * could not (a pinch left a "Text" layer; a two-finger undo undid that
+   * stray step instead of the last edit; the paint tools threw away what
+   * redo held). A second finger, a pen or a long press drops it. */
+  const heldPress = useRef<{ e: React.PointerEvent; timer: number } | null>(null);
+  const replaying = useRef(false);
+  const dropHeldPress = () => {
+    if (heldPress.current) window.clearTimeout(heldPress.current.timer);
+    heldPress.current = null;
+  };
+  const releaseHeldPress = () => {
+    const held = heldPress.current;
+    if (!held) return;
+    dropHeldPress();
+    if (pinchRef.current || ignoredRef.current.has(held.e.pointerId)) return;
+    replaying.current = true;
+    try {
+      onCanvasPointerDown(held.e);
+    } catch (err) {
+      // A capture asked for after the finger lifted.
+      console.warn("held press:", err);
+    } finally {
+      replaying.current = false;
+    }
+  };
   const onCanvasPointerDown = (e: React.PointerEvent) => {
     if (rejectPalm(e)) {
       e.stopPropagation();
@@ -4207,14 +4512,20 @@ export function App() {
     // A finger alone on the page, held still, is asking for the menu a
     // mouse's right button opens. Not while painting, where a finger held
     // in one place is putting down paint, and is meant to.
-    if (e.pointerType === "touch" && touchesRef.current.size === 1 && !painting && !cloning && tool !== "Pen") {
-      clearLong();
-      longRef.current = {
-        id: e.pointerId,
-        x: e.clientX,
-        y: e.clientY,
-        timer: window.setTimeout(pressedLong, LONG_PRESS_MS),
-      };
+    // A pen held still asks the same: a Pencil has no button to ask with.
+    const alone = e.pointerType === "pen" || (e.pointerType === "touch" && touchesRef.current.size === 1);
+    if (alone && !replaying.current && !painting && !cloning && tool !== "Pen" && tool !== "Brush") {
+      startLong(e);
+    }
+    if (
+      e.pointerType === "touch" &&
+      !replaying.current &&
+      touchesRef.current.size === 1 &&
+      ACTS_ON_PRESS.includes(tool)
+    ) {
+      dropHeldPress();
+      heldPress.current = { e, timer: window.setTimeout(releaseHeldPress, TOUCH_SETTLE_MS) };
+      return;
     }
     const [x, y] = docPoint(e);
     // Asked which pixel is grey, the next click on the page answers it
@@ -4446,7 +4757,7 @@ export function App() {
           layer,
           x,
           y,
-          paintSize / 2,
+          (paintSize / 2) * pressed(e),
           JSON.stringify(currentInk()),
           paintSoftness,
           false,
@@ -4457,7 +4768,7 @@ export function App() {
         alert(`Clone: ${err}`);
         return;
       }
-      paintingRef.current = { width: 1, at: performance.now() };
+      paintingRef.current = { width: pressed(e), at: performance.now() };
       lastPaint.current = [x, y];
       (e.target as Element).setPointerCapture?.(e.pointerId);
       refresh(session);
@@ -4519,7 +4830,7 @@ export function App() {
           layer,
           start[0],
           start[1],
-          paintSize / 2,
+          (paintSize / 2) * pressed(e),
           JSON.stringify(currentInk()),
           paintSoftness,
           erasing,
@@ -4539,58 +4850,14 @@ export function App() {
         refresh(session);
         return;
       }
-      paintingRef.current = { width: 1, at: performance.now() };
+      paintingRef.current = { width: pressed(e), at: performance.now() };
       lastPaint.current = [x, y];
       (e.target as Element).setPointerCapture?.(e.pointerId);
       refresh(session);
       return;
     }
     if (tool === "Text") {
-      shapeCount.current += 1;
-      const place = placeAmong([[x, y]]);
-      const [tx, ty] = place.points[0];
-      const before = new Set(layers.map((l) => l.id));
-      run({
-        AddNode: {
-          parent: place.parent,
-          index: place.index,
-          node: nodePayload(
-            `Text ${shapeCount.current}`,
-            {
-              Text: {
-                text: "Text",
-                size: 48,
-                fill: currentInk(),
-                align: "Left",
-                line_height: 1,
-                letter_spacing: 0,
-                paragraph_spacing: 0,
-                width: 0,
-                font: "",
-                italic: false,
-                bold: false,
-                underline: false,
-                strike: false,
-                along: null,
-                along_offset: 0,
-                runs: [],
-              },
-            },
-            tx,
-            ty,
-          ),
-        },
-      });
-      setTool("Move");
-      // And typing begins: the block is picked and opens for editing with
-      // its word picked, so what is typed next replaces it — rather than
-      // each letter taking up a tool (H the hand, e the ellipse…).
-      const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
-      if (added) {
-        setSelected(added.id as NodeId);
-        setMultiSel([]);
-        typeIntoNewText.current = true;
-      }
+      dropText(x, y);
       return;
     }
     if (tool === "Wand") {
@@ -4726,7 +4993,9 @@ export function App() {
       lastY: y,
       moved: false,
       stroke: tool === "Brush" ? [[x, y]] : undefined,
-      widths: tool === "Brush" ? [1] : undefined,
+      // A pen's first width is its first pressure: the stroke started at
+      // full width whatever the pen said and eased down to it.
+      widths: tool === "Brush" ? [pressed(e)] : undefined,
       shift: e.shiftKey,
       lastAt: performance.now(),
     };
@@ -5017,6 +5286,12 @@ export function App() {
   const onCanvasPointerMove = (e: React.PointerEvent) => {
     if (ignoredRef.current.has(e.pointerId)) return;
     if (pinchRef.current) return; // two fingers are the view's, not a tool's
+    // A held press goes to the tool once the finger has moved off it.
+    const held = heldPress.current;
+    if (held && held.e.pointerId === e.pointerId) {
+      if (Math.hypot(e.clientX - held.e.clientX, e.clientY - held.e.clientY) < TOUCH_SLOP) return;
+      releaseHeldPress();
+    }
     {
       const at = docPoint(e);
       lastPointer.current = at;
@@ -5433,6 +5708,8 @@ export function App() {
   // shift adds to what is picked out, alt takes from it.
   const onCanvasPointerUp = (e?: React.PointerEvent) => {
     if (e && ignoredRef.current.has(e.pointerId)) return;
+    // A tap: the press it began with reaches the tool first.
+    if (e && heldPress.current?.e.pointerId === e.pointerId) releaseHeldPress();
     if (e?.pointerType === "touch") clearLong();
     if (pinchRef.current) return;
     if (penDragRef.current) {
@@ -5842,6 +6119,7 @@ export function App() {
     t0: Transform;
   } | null>(null);
   const startWarp = (e: React.PointerEvent, index: number) => {
+    if (handleRefuses(e)) return;
     if (!session || selected === null || !selCorners) return;
     e.stopPropagation();
     warpDragRef.current = {
@@ -5878,6 +6156,7 @@ export function App() {
 
   // Resize handles: drag scales the node, anchored at the opposite corner.
   const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
+    if (handleRefuses(e)) return;
     if (!session || selected === null || !selLocal) return;
     e.stopPropagation();
     // A picture's corner held with Ctrl moves on its own: the picture is
@@ -6695,9 +6974,14 @@ export function App() {
       }, ROW_LIFT_MS);
     }
     layerDragRef.current = drag;
+    /** The list's own scroll while the row is held at its edge, and where
+     * the pointer was last. */
+    let edge: number | null = null;
+    let lastY: number | null = null;
     // Let go of, or taken by the browser for a scroll: either way over.
     const onCancel = () => {
       clearTimeout(drag.timer);
+      if (edge !== null) window.clearInterval(edge);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
@@ -6715,7 +6999,23 @@ export function App() {
       if (!drag.active) {
         if (Math.abs(ev.clientY - drag.startY) < 4) return;
         drag.active = true;
+        // Held at the list's top or bottom edge, the list scrolls under
+        // the row — a long list had no way to the rows past its end but
+        // a wheel turned mid-drag.
+        edge = window.setInterval(() => {
+          const list = layerListRef.current;
+          if (!list || lastY === null) return;
+          const r = list.getBoundingClientRect();
+          const zone = 28;
+          const by =
+            lastY < r.top + zone ? -Math.ceil((r.top + zone - lastY) / 3) : lastY > r.bottom - zone ? Math.ceil((lastY - r.bottom + zone) / 3) : 0;
+          if (by !== 0) {
+            list.scrollTop += by;
+            onMove({ clientY: lastY } as PointerEvent);
+          }
+        }, 40);
       }
+      lastY = ev.clientY;
       let over: NodeId | null = null;
       let where: "above" | "below" | "into" = "above";
       for (const row of layerListRef.current?.querySelectorAll<HTMLLIElement>(
@@ -6740,6 +7040,7 @@ export function App() {
     };
     const onUp = () => {
       clearTimeout(drag.timer);
+      if (edge !== null) window.clearInterval(edge);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
@@ -6835,6 +7136,60 @@ export function App() {
     value: string;
   } | null>(null);
   const inlineRef = useRef<HTMLTextAreaElement>(null);
+  // While text is typed on the canvas, the block stays in sight. An
+  // on-screen keyboard coming up shrinks the window under it, and the
+  // view did not move: the block went under the tool rail. The browser
+  // then scrolled the canvas's host itself (it hides its overflow but
+  // can still be scrolled to a focused field), which shifted the whole
+  // canvas off where the view says it is. So the host is held at the
+  // top, and the view is moved instead, enough to show the block above
+  // whatever now covers the bottom of the canvas.
+  const editing = inlineText !== null;
+  useEffect(() => {
+    if (!editing) return;
+    const host = hostRef.current;
+    const keepInSight = () => {
+      if (host && (host.scrollTop !== 0 || host.scrollLeft !== 0)) {
+        host.scrollTop = 0;
+        host.scrollLeft = 0;
+      }
+      const box = inlineRef.current?.getBoundingClientRect();
+      const room = host?.getBoundingClientRect();
+      if (!box || !room) return;
+      const seen = window.visualViewport;
+      let bottom = Math.min(room.bottom, seen ? seen.offsetTop + seen.height : window.innerHeight);
+      // On a phone the rail lies along the bottom, over the canvas.
+      const rail = document.querySelector(".toolbar");
+      const railBox = rail?.getBoundingClientRect();
+      if (
+        rail &&
+        railBox &&
+        getComputedStyle(rail).flexDirection === "row" &&
+        railBox.top > room.top &&
+        railBox.top < bottom
+      )
+        bottom = railBox.top;
+      const top = room.top;
+      const margin = 12;
+      const by =
+        box.bottom > bottom - margin
+          ? bottom - margin - box.bottom
+          : box.top < top + margin
+            ? top + margin - box.top
+            : 0;
+      if (by !== 0) setView((v) => ({ ...v, y: v.y + by }));
+    };
+    const settle = () => requestAnimationFrame(keepInSight);
+    window.visualViewport?.addEventListener("resize", settle);
+    window.addEventListener("resize", settle);
+    host?.addEventListener("scroll", settle);
+    settle();
+    return () => {
+      window.visualViewport?.removeEventListener("resize", settle);
+      window.removeEventListener("resize", settle);
+      host?.removeEventListener("scroll", settle);
+    };
+  }, [editing]);
   const beginInlineText = () => {
     if (
       !session ||
@@ -6908,6 +7263,13 @@ export function App() {
     if (inlineText && selected !== inlineText.id) closeInlineText(true);
   }, [selected]);
 
+  /** The name field is on the layer's row, so the panel is brought out
+   * for it: from the menus on a phone, with the panel put away, Rename…
+   * made a field nobody could see or type into. */
+  const startRename = (l: { id: NodeId; name: string }) => {
+    setPanelOpen(true);
+    setRenaming({ id: l.id, value: l.name });
+  };
   const commitRename = () => {
     const was = renaming ? layers.find((l) => l.id === renaming.id)?.name : undefined;
     if (renaming && renaming.value.trim() && renaming.value.trim() !== was) {
@@ -7014,6 +7376,10 @@ export function App() {
   // when it runs, and TypeScript does not flag that inside a callback.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A window's keys are its own: a layer chord or Delete pressed at
+      // the export window or a menu once reached the picked layer
+      // behind it, where the window's own undo could not take it back.
+      if (aWindowIsUp()) return;
       const typing = isTextEntry(e.target);
       // One table, one lookup. These were a dozen nested tests on
       // modifiers and letters, which is also why the more specific
@@ -7600,6 +7966,7 @@ export function App() {
   } | null>(null);
 
   const onAnchorPointerDown = (e: React.PointerEvent, idx: number) => {
+    if (handleRefuses(e)) return;
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
@@ -7762,6 +8129,7 @@ export function App() {
   } | null>(null);
 
   const onRotatePointerDown = (e: React.PointerEvent) => {
+    if (handleRefuses(e)) return;
     if (!session || selected === null || !selBounds || selBounds.length !== 4)
       return;
     e.stopPropagation();
@@ -7932,6 +8300,7 @@ export function App() {
     e: React.PointerEvent,
     part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number,
   ) => {
+    if (handleRefuses(e)) return;
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
@@ -8037,6 +8406,7 @@ export function App() {
   };
 
   const onMaskHandleDown = (e: React.PointerEvent, corner: Handle | "move") => {
+    if (handleRefuses(e)) return;
     if (!session || selected === null || !selectedMask) return;
     const box = maskBox(selectedMask);
     if (!box) return;
@@ -9174,7 +9544,7 @@ export function App() {
     parts?: Map<string, Uint8Array>,
   ): boolean => {
     try {
-      const s = WasmSession.open(bytes);
+      const s = guardSession(WasmSession.open(bytes));
       // A draft's pictures and originals, kept beside it, put back before
       // anything is drawn.
       for (const [part, b] of parts ?? []) s.restore_part(part, b);
@@ -9194,11 +9564,22 @@ export function App() {
       // Bytes come with no path; one opened by path is given it back by
       // the caller.
       setDocPath(null);
+      // A picture the file names and does not hold is said, rather than
+      // opening as a blank layer that saving then writes down for good.
+      const missing = JSON.parse(s.missing_pictures()) as string[];
+      setImportNotes(
+        missing.length > 0
+          ? {
+              name: name ?? "This document",
+              notes: missing.map((layer) => `the picture of “${layer}”, which the file names but does not hold`),
+            }
+          : null,
+      );
       refresh(s);
       fitView();
       return true;
     } catch (err) {
-      alert(`Could not open document: ${err}`);
+      alert(`Could not open the document: ${said(err)}`);
       return false;
     }
   };
@@ -9349,9 +9730,16 @@ export function App() {
           try {
             const pdf = await pdfReader();
             const sizes = JSON.parse(pdf.page_sizes(raw)) as [number, number][];
-            setPdfAsk({ name, bytes: raw, sizes });
+            setImporting(null);
+            // The files after it wait for its answer: two PDFs dropped
+            // together each ask in turn, where the second's question
+            // used to replace the first's and the first was lost.
+            await new Promise<void>((answered) => {
+              pdfAnswered.current = answered;
+              setPdfAsk({ name, bytes: raw, sizes });
+            });
           } catch (err) {
-            alert(`Could not open ${name}: ${err}`);
+            alert(`Could not open ${name}: ${said(err)}`);
           } finally {
             setImporting(null);
           }
@@ -9384,11 +9772,11 @@ export function App() {
             setImportNotes(notes.length > 0 ? { name, notes } : null);
           }
         } catch (err) {
-          alert(kind === "picture" ? unreadable(name, raw, err) : `Could not place ${name}: ${err}`);
+          alert(kind === "picture" ? unreadable(name, raw, err) : `Could not place ${name}: ${said(err)}`);
         } finally {
           if (slow) setImporting(null);
         }
-      }).catch((err) => alert(`Could not read ${name}: ${err}`));
+      }).catch((err) => alert(`Could not read ${name}: ${said(err)}`));
     },
     [session, placed],
   );
@@ -9610,11 +9998,22 @@ export function App() {
     }
   };
 
+  /** The PDF waiting for its page and resolution has been answered — or
+   * put away — and the files dropped after it may come in. */
+  const pdfAnswered = useRef<(() => void) | null>(null);
+  const answerPdf = () => {
+    const go = pdfAnswered.current;
+    pdfAnswered.current = null;
+    go?.();
+  };
   /** The page asked for, drawn at the resolution asked for. */
   const placePdf = async (page: number, dpi: number) => {
     const ask = pdfAsk;
     setPdfAsk(null);
-    if (!session || !ask) return;
+    if (!session || !ask) {
+      answerPdf();
+      return;
+    }
     setImporting(`Reading ${ask.name}…`);
     await nextPaint();
     try {
@@ -9625,9 +10024,10 @@ export function App() {
       const label = ask.sizes.length > 1 ? `${ask.name} — page ${page + 1}` : ask.name;
       placed(session.place_rgba(drawn.width, drawn.height, drawn.rgba, label), was);
     } catch (err) {
-      alert(`Could not place ${ask.name}: ${err}`);
+      alert(`Could not place ${ask.name}: ${said(err)}`);
     } finally {
       setImporting(null);
+      answerPdf();
     }
   };
 
@@ -9659,10 +10059,31 @@ export function App() {
         .then((buf) => openDocumentBytes(new Uint8Array(buf), doc.name));
       return;
     }
-    for (const file of files) {
-      const kind = importKind(file.name, undefined, file.type);
-      if (kind && kind !== "document") placeImageFile(file);
-    }
+    // A file whose name says nothing — no extension, no type, as a share
+    // or a download often leaves it — is asked by its first bytes, as
+    // File › Open asks; one the editor cannot read is said, where it
+    // used to be dropped without a word.
+    void (async () => {
+      const unread: string[] = [];
+      for (const file of files) {
+        let kind = importKind(file.name, undefined, file.type);
+        if (!kind) {
+          const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+          kind = importKind(file.name, head, file.type);
+        }
+        if (kind === "document") {
+          if (mayDiscard()) openDocumentBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+          return;
+        }
+        if (kind) placeImageFile(file);
+        else unread.push(file.name || "a file");
+      }
+      if (unread.length > 0) {
+        alert(
+          `${unread.length === 1 ? `${unread[0]} is not` : `${unread.join(", ")} are not`} a picture, a drawing or a document the editor can read.`,
+        );
+      }
+    })();
   };
 
   /** Files dropped on the desktop shell's window. The shell takes a drop
@@ -9684,7 +10105,7 @@ export function App() {
         const bytes = await readPath(path);
         placeImageFile(new File([bytes as BlobPart], baseName(path), { type }));
       } catch (err) {
-        alert(`Could not place ${baseName(path)}: ${err}`);
+        alert(`Could not place ${baseName(path)}: ${said(err)}`);
       }
     }
   };
@@ -10278,6 +10699,12 @@ export function App() {
           item("offset-path", "shapes", "Offset path…", offsetPath),
           item("simplify-path", "node", "Simplify path…", simplifyPath),
         ]),
+        sub("add-shape", "rect", "Add", [
+          item("add-rect", "rect", "Rectangle", () => addInView("Rect")),
+          item("add-ellipse", "ellipse", "Ellipse", () => addInView("Ellipse")),
+          item("add-line", "line", "Line", () => addInView("Line")),
+          item("add-text", "text", "Text", () => addInView("Text")),
+        ]),
         item("repeat", "duplicate", "Repeat…", repeatSelection),
         item("blend-shapes", "shapes", "Blend shapes…", blendSelection),
         sub("convert", "shapes", "Convert", [
@@ -10318,7 +10745,7 @@ export function App() {
           () => setVisibleAll(!(selectedLayer?.visible ?? true)),
         ),
         item("rename", "text", "Rename…", () => {
-          if (selectedLayer) setRenaming({ id: selectedLayer.id, value: selectedLayer.name });
+          if (selectedLayer) startRename(selectedLayer);
         }),
       ],
     },
@@ -10641,7 +11068,7 @@ export function App() {
           value={docName}
           onChange={(e) => setDocName(e.target.value)}
           onKeyDown={(e) => {
-            e.stopPropagation();
+            if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
             if (e.key === "Enter") e.currentTarget.blur();
           }}
           spellCheck={false}
@@ -10941,11 +11368,9 @@ export function App() {
             // re-reads rather than leaving a stale draft in the field.
             key={Math.round(view.zoom * 1000)}
             defaultValue={Math.round(view.zoom * 100)}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Enter") e.currentTarget.blur();
-            }}
+            onKeyDown={fieldKeys}
             onBlur={(e) => {
+              if (asGiven(e.currentTarget)) return;
               const v = Number(e.currentTarget.value);
               if (e.currentTarget.value.trim() !== "" && Number.isFinite(v) && v > 0) zoomTo(v / 100);
               // What is not a zoom is not kept in the box.
@@ -11055,8 +11480,15 @@ export function App() {
           className="menu-pop context-menu"
           ref={contextRef}
           role="menu"
+          aria-label="Layer"
           style={{ left: contextAt[0], top: contextAt[1] }}
+          onClickCapture={(e) => {
+            if (contextHeldBy.current === null) return;
+            e.preventDefault();
+            e.stopPropagation();
+          }}
           onClick={() => setContextAt(null)}
+          onKeyDown={(e) => menuKeyDown(e.nativeEvent, e.currentTarget, () => setContextAt(null))}
         >
           {selectionSet.length > 0 ? (
             <>
@@ -11128,7 +11560,7 @@ export function App() {
               {selectionSet.length === 1 && selectedLayer && (
                 <MenuItem
                   icon="text"
-                  onClick={() => setRenaming({ id: selectedLayer.id, value: selectedLayer.name })}
+                  onClick={() => startRename(selectedLayer)}
                 >
                   Rename…
                 </MenuItem>
@@ -11372,7 +11804,10 @@ export function App() {
         <PdfDialog
           name={pdfAsk.name}
           sizes={pdfAsk.sizes}
-          onCancel={() => setPdfAsk(null)}
+          onCancel={() => {
+            setPdfAsk(null);
+            answerPdf();
+          }}
           onPlace={placePdf}
         />
       )}
@@ -11506,6 +11941,7 @@ export function App() {
                           ? "tool active"
                           : "tool"
                       }
+                      aria-pressed={SELECT_TOOLS.includes(tool as never) && shown(tool)}
                       onClick={() => {
                         setTool(selectSlot);
                         setPenPoints([]);
@@ -11535,6 +11971,7 @@ export function App() {
                           <button
                             key={s}
                             className={s === tool ? "tool active" : "tool"}
+                            aria-pressed={s === tool}
                             onClick={() => {
                               setSelectTool(s);
                               setTool(s);
@@ -11560,6 +11997,7 @@ export function App() {
                           ? "tool active"
                           : "tool"
                       }
+                      aria-pressed={SHAPE_TOOLS.includes(tool as never) && shown(tool)}
                       onClick={() => {
                         setTool(shapeSlot);
                         setPenPoints([]);
@@ -11584,6 +12022,7 @@ export function App() {
                           <button
                             key={s}
                             className={s === tool ? "tool active" : "tool"}
+                            aria-pressed={s === tool}
                             onClick={() => {
                               setShapeTool(s);
                               setTool(s);
@@ -11603,6 +12042,7 @@ export function App() {
                   <button
                     key={t}
                     className={t === tool ? "tool active" : "tool"}
+                            aria-pressed={t === tool}
                     onClick={() => {
                       setTool(t);
                       setPenPoints([]);
@@ -11640,6 +12080,7 @@ export function App() {
                       <button
                         key={s}
                         className={s === tool ? "tool active" : "tool"}
+                            aria-pressed={s === tool}
                         onClick={() => {
                           setTool(s);
                           setPenPoints([]);
@@ -11686,8 +12127,9 @@ export function App() {
                 <button
                   key={i}
                   className="kept"
-                  title={`${name} — shift adds it, alt takes it away, ctrl-click forgets it`}
+                  title={`${name} — shift adds it, alt takes it away, ctrl-click (or Delete) forgets it`}
                   aria-label={`Kept region ${name}`}
+                  onKeyDown={chipKeys(() => forgetRegion(i))}
                   onClick={(e) => {
                     if (e.ctrlKey || e.metaKey) {
                       forgetRegion(i);
@@ -11922,9 +12364,10 @@ export function App() {
                 key={i}
                 className="swatch"
                 style={{ background: colorToHex(sw.color) }}
-                title={`${sw.name} (${colorToHex(sw.color)}) — shift-click to make it mean the colour in hand, alt-click to take it out`}
+                title={`${sw.name} (${colorToHex(sw.color)}) — shift-click to make it mean the colour in hand, alt-click (or Delete) to take it out`}
                 aria-label={`Colour ${sw.name}, ${colorToHex(sw.color)}`}
                 aria-pressed={linkedSwatch === sw.name}
+                onKeyDown={chipKeys(() => setPalette(swatches.filter((_, j) => j !== i)))}
                 onClick={(e) => {
                   if (e.altKey) {
                     setPalette(swatches.filter((_, j) => j !== i));
@@ -12027,8 +12470,10 @@ export function App() {
                           st.look.text.italic ? " italic" : ""
                         }`
                       : ""
-                  }; shift-click to keep the picked layer's look under this name, alt-click to forget it`}
+                  }; shift-click to keep the picked layer's look under this name, alt-click (or Delete) to forget it`}
                   aria-label={`Style ${st.name}`}
+                  aria-pressed={selectedLayer?.style === st.name}
+                  onKeyDown={chipKeys(() => forgetStyle(st.name))}
                   onClick={(e) => {
                     if (e.altKey) forgetStyle(st.name);
                     else if (e.shiftKey) keepStyle(st.name);
@@ -12146,9 +12591,12 @@ export function App() {
                     <button
                       key={br.name}
                       className={inHand ? "swatch brush-chip active" : "swatch brush-chip"}
-                      title={`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click to forget it`}
+                      title={`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click (or Delete) to forget it`}
                       aria-label={`Brush ${br.name}`}
                       aria-pressed={inHand}
+                      onKeyDown={chipKeys(() =>
+                        setPrefs({ brushes: prefs.brushes.filter((o) => o.name !== br.name) }),
+                      )}
                       onClick={(e) => {
                         if (e.altKey) {
                           setPrefs({ brushes: prefs.brushes.filter((o) => o.name !== br.name) });
@@ -12233,10 +12681,12 @@ export function App() {
             const ruler = (vertical: boolean) => (
               <div
                 className={vertical ? "ruler ruler-left" : "ruler ruler-top"}
+                role="img"
                 aria-label={vertical ? "Vertical ruler" : "Horizontal ruler"}
                 onPointerDown={(e) => startGuideDrag(vertical, null, e)}
               >
-                <svg>
+                {/* Its numbers are the ruler's picture, not its name. */}
+                <svg aria-hidden="true">
                   {ticks(vertical).map((v) => {
                     const at =
                       (vertical ? view.y : view.x) + v * unitPx * view.zoom;
@@ -13305,10 +13755,9 @@ export function App() {
           />
           <div className="panel-head">
             <h2>Layers</h2>
-            <select
+            <ActionSelect
               className="add-adjustment"
-              value=""
-              onChange={(e) => addAdjustment(e.target.value)}
+              onPick={addAdjustment}
               title="Add adjustment layer"
               aria-label="Add adjustment layer"
             >
@@ -13337,7 +13786,7 @@ export function App() {
                     <option value="only:lookup">Colour lookup…</option>
                   </optgroup>
                 )}
-            </select>
+            </ActionSelect>
             <div className="panel-head-actions">
               <button
                 onClick={() => reorderSelected(1)}
@@ -13423,7 +13872,15 @@ export function App() {
                 className={`comp-chip${c.showing ? " active" : ""}`}
                 aria-pressed={c.showing}
                 aria-label={`Comp ${c.name}`}
-                title={`${c.name} — shift-click keeps the page as it is now under this name, double-click renames, ctrl-click forgets`}
+                title={`${c.name} — shift-click keeps the page as it is now under this name, double-click (or F2) renames, ctrl-click (or Delete) forgets`}
+                onKeyDown={chipKeys(
+                  () => {
+                    if (!session) return;
+                    session.forget_comp(c.name);
+                    refresh(session);
+                  },
+                  () => renameComp(c.name),
+                )}
                 onClick={(e) => onComp(c.name, e)}
                 onDoubleClick={() => {
                   // The double-click's first press showed the comp; a
@@ -13457,7 +13914,7 @@ export function App() {
               value={layerQuery}
               onChange={(e) => setLayerQuery(e.target.value)}
               onKeyDown={(e) => {
-                e.stopPropagation();
+                if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
                 if (e.key === "Escape") {
                   setLayerQuery("");
                   setLayerKind("");
@@ -13503,9 +13960,17 @@ export function App() {
                 ]
                   .filter(Boolean)
                   .join(" ")}
-                style={{ paddingLeft: `${l.depth * 14 + 2}px` }}
+                // Indented by depth, and less deep past the sixth: at 14
+                // a level a layer eight deep had no room left for its name
+                // in the panel, and a picked one was a blank bar.
+                style={{
+                  paddingLeft: `${Math.min(l.depth * 14, 84 + Math.max(0, l.depth - 6) * 3, 110) + 2}px`,
+                }}
+                title={l.depth > 6 ? `${l.name} (${l.depth} deep)` : undefined}
                 tabIndex={0}
-                aria-selected={l.id === selected || multiSel.includes(l.id)}
+                // A row with no role has no "selected" to say, so a
+                // picked row is said to be the current one.
+                aria-current={l.id === selected || multiSel.includes(l.id) ? "true" : undefined}
                 // Tab reaches a row; Enter picks it (with Ctrl or Shift,
                 // adds it) and F2 renames it. Not Space nor the arrows: a
                 // row keeps the caret after a click, and Space held pans
@@ -13542,10 +14007,7 @@ export function App() {
                     setSelected(l.id);
                     setMultiSel([]);
                   }
-                  setContextAt([
-                    Math.max(8, Math.min(e.clientX, window.innerWidth - CONTEXT_MENU[0])),
-                    Math.max(8, Math.min(e.clientY, window.innerHeight - CONTEXT_MENU[1])),
-                  ]);
+                  setContextAt([e.clientX, e.clientY]);
                 }}
                 onClick={(e) => {
                   if (Date.now() - layerDragDone.current < 300) return;
@@ -13613,6 +14075,10 @@ export function App() {
                     }
                     run({ SetVisible: { id: l.id, visible: !l.visible } });
                   }}
+                  // Named for what it is and pressed for whether it is
+                  // on, so the name and the state never disagree: it was
+                  // "Hide layer", pressed, while the layer was shown.
+                  aria-label="Show layer"
                   aria-pressed={l.visible}
                   title={
                     solo === l.id
@@ -13630,7 +14096,7 @@ export function App() {
                   }}
                   aria-pressed={l.locked}
                   title={l.locked ? "Unlock layer" : "Lock layer"}
-                  aria-label={l.locked ? "Unlock layer" : "Lock layer"}
+                  aria-label="Lock layer"
                 >
                   <Icon name={l.locked ? "lock" : "unlock"} size={14} />
                 </button>
@@ -13668,8 +14134,16 @@ export function App() {
                     onBlur={commitRename}
                     onKeyDown={(e) => {
                       e.stopPropagation();
+                      if (e.key !== "Enter" && e.key !== "Escape") return;
                       if (e.key === "Enter") commitRename();
-                      if (e.key === "Escape") setRenaming(null);
+                      else setRenaming(null);
+                      // Back on the row the name was typed for, rather
+                      // than on the page's body.
+                      requestAnimationFrame(() =>
+                        document
+                          .querySelector<HTMLElement>(`.layer-list li[data-id="${l.id}"]`)
+                          ?.focus({ preventScroll: true }),
+                      );
                     }}
                     aria-label="Layer name"
                   />
@@ -13927,11 +14401,9 @@ export function App() {
                         // read in the chosen units.
                         key={`${field}${units}${Math.round(value * 100)}`}
                         defaultValue={inUnits(value, units, docDpi)}
-                        onKeyDown={(e) => {
-                          e.stopPropagation();
-                          if (e.key === "Enter") e.currentTarget.blur();
-                        }}
+                        onKeyDown={fieldKeys}
                         onBlur={(e) => {
+                          if (asGiven(e.currentTarget)) return;
                           // An emptied box is not nought: it was read as
                           // one, and moved the layer to the page's edge.
                           const text = e.currentTarget.value;
@@ -13974,11 +14446,9 @@ export function App() {
                       step="0.1"
                       key={`r${Math.round(selAngle() * 10)}`}
                       defaultValue={Math.round(selAngle() * 10) / 10}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") e.currentTarget.blur();
-                      }}
+                      onKeyDown={fieldKeys}
                       onBlur={(e) => {
+                        if (asGiven(e.currentTarget)) return;
                         const text = e.currentTarget.value;
                         const v = Number(text);
                         if (text.trim() !== "" && Number.isFinite(v)) setAngle(v);
@@ -13998,11 +14468,9 @@ export function App() {
                       step="0.1"
                       key={`k${Math.round(selSkew() * 10)}`}
                       defaultValue={Math.round(selSkew() * 10) / 10}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") e.currentTarget.blur();
-                      }}
+                      onKeyDown={fieldKeys}
                       onBlur={(e) => {
+                        if (asGiven(e.currentTarget)) return;
                         const text = e.currentTarget.value;
                         const v = Number(text);
                         if (text.trim() !== "" && Number.isFinite(v)) setSkew(v);
@@ -14069,6 +14537,7 @@ export function App() {
                   onKeyUp={commitOpacity}
                   onBlur={commitOpacity}
                   aria-label="Layer opacity"
+                  aria-valuetext={`${Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%`}
                 />
               </label>
               <label>
@@ -14245,12 +14714,10 @@ export function App() {
                 })}
                 <label className="row">
                   Add effect
-                  <select
-                    value=""
-                    onChange={(e) => {
-                      const kind = e.target.value as EffectKind;
+                  <ActionSelect
+                    onPick={(value) => {
+                      const kind = value as EffectKind;
                       if (!kind) return;
-                      e.target.value = "";
                       const ink = (hex: string) =>
                         cmyk ? hexToCmykColor(hex) : hexColor(hex);
                       setEffects([
@@ -14271,7 +14738,7 @@ export function App() {
                         {name}
                       </option>
                     ))}
-                  </select>
+                  </ActionSelect>
                 </label>
               </div>
               <h3 className="props-head">Mask</h3>
@@ -14391,6 +14858,7 @@ export function App() {
                 <li className="history-start">
                   <button
                     className={history.past.length === 0 ? "current" : undefined}
+                    aria-current={history.past.length === 0 ? "step" : undefined}
                     onClick={() => jumpHistory(-history.past.length)}
                     disabled={history.past.length === 0}
                   >
@@ -14403,6 +14871,7 @@ export function App() {
                       className={
                         i === history.past.length - 1 ? "current" : undefined
                       }
+                      aria-current={i === history.past.length - 1 ? "step" : undefined}
                       onClick={() => jumpHistory(i + 1 - history.past.length)}
                     >
                       {label}
@@ -14411,7 +14880,12 @@ export function App() {
                 ))}
                 {history.future.map((label, i) => (
                   <li key={`f${i}`} className="future">
-                    <button onClick={() => jumpHistory(i + 1)}>{label}</button>
+                    <button
+                      onClick={() => jumpHistory(i + 1)}
+                      aria-label={`${label} (undone)`}
+                    >
+                      {label}
+                    </button>
                   </li>
                 ))}
               </ol>
@@ -14565,6 +15039,7 @@ const keyHelp = (
         "Say what that entry now means — everything that reached for it follows",
       ],
       ["Alt-click a swatch", "Take that colour out of the palette"],
+      ["Delete on a chip", "Forget it — a colour, style, comp, brush, region or setup (F2 renames a comp)"],
       ["Delete", "Delete the picked layers"],
       // Named only where they arrive: a browser keeps these two and
       // never passes them on, so in a tab this sheet would be promising
@@ -14693,11 +15168,12 @@ function KeysDialog({
   );
 }
 
-/** The largest side a new document can have. The renderer works in
- * premultiplied f32, so a square of this is already 1 GB of canvas; past
- * it the browser's allocator is the one saying no, and it says it far
- * less clearly than we can. */
-const MAX_SIDE = 8192;
+/** The largest page there can be — the engine's own (`canvas_fits`):
+ * 30,000 pixels a side and a hundred megapixels. A new document was
+ * held to 8192 square while Canvas size made pages of 30,000 × 3,000,
+ * so the one limit said two things. */
+const MAX_SIDE = 30000;
+const MAX_PIXELS = 100_000_000;
 
 /** New-document dialog: presets for the sizes people actually start from,
  * and the two fields underneath for everything else. Colour mode is chosen
@@ -14727,9 +15203,13 @@ function NewDocDialog({
   // you 8192 with nothing said and no way to type past the limit at
   // all. Now the field keeps what was asked for and the dialog says
   // what it is going to do about it.
-  const madeW = Math.min(w, MAX_SIDE);
-  const madeH = Math.min(h, MAX_SIDE);
-  const clamped = w > MAX_SIDE || h > MAX_SIDE;
+  const sideW = Math.min(w, MAX_SIDE);
+  const sideH = Math.min(h, MAX_SIDE);
+  // Past the pixels a page may have, both sides come down together.
+  const down = Math.min(1, Math.sqrt(MAX_PIXELS / Math.max(1, sideW * sideH)));
+  const madeW = Math.max(1, Math.floor(sideW * down));
+  const madeH = Math.max(1, Math.floor(sideH * down));
+  const clamped = madeW !== w || madeH !== h;
   const create = useCallback(
     () => onCreate(madeW, madeH, mode === "cmyk", dpi),
     [madeW, madeH, mode, dpi, onCreate],
@@ -14784,8 +15264,8 @@ function NewDocDialog({
         {size("Height", h, setH)}
         {clamped && (
           <p className="modal-note" role="status">
-            The largest document is {MAX_SIDE} × {MAX_SIDE} pixels — this one
-            will be made {madeW} × {madeH}.
+            A page can be up to {MAX_SIDE.toLocaleString("en")} pixels a side and{" "}
+            {MAX_PIXELS / 1_000_000} megapixels — this one will be made {madeW} × {madeH}.
           </p>
         )}
         <label className="row">
@@ -15419,7 +15899,8 @@ function RawDevelopDialog({
                     className={inHand ? "preset setup active" : "preset setup"}
                     aria-pressed={inHand}
                     aria-label={`Preset ${p.name}`}
-                    title={`${p.name} — alt-click to forget it`}
+                    title={`${p.name} — alt-click or Delete to forget it`}
+                    onKeyDown={chipKeys(() => onPresets(presets.filter((o) => o.name !== p.name)))}
                     onClick={(e) => {
                       if (e.altKey) onPresets(presets.filter((o) => o.name !== p.name));
                       else setS({ ...RAW_DEFAULTS, ...p.settings });
@@ -15529,6 +16010,7 @@ function RawDevelopDialog({
                   setS((o) => ({ ...o, white: [k, white[1]] }));
                 }}
                 aria-label="Temperature"
+                aria-valuetext={`${Math.round(white[0])} K`}
               />
             </label>
             <label>
@@ -15886,7 +16368,9 @@ function PdfDialog({
   const [w, h] = sizes[Math.min(sizes.length, Math.max(1, page)) - 1] ?? [0, 0];
   // The renderer goes no further than 16384 pixels on a side.
   const k = Math.min(dpi / 72, 16384 / Math.max(w, h, 1));
-  const [pw, ph] = [Math.round(w * k), Math.round(h * k)];
+  // Whole pixels as the reader makes them, which drops the part of a
+  // pixel left over: rounded, it said 417 and gave 416.
+  const [pw, ph] = [Math.max(1, Math.floor(w * k)), Math.max(1, Math.floor(h * k))];
   const ok = page >= 1 && page <= sizes.length && dpi > 0;
   const go = () => ok && onPlace(page - 1, dpi);
   const enter = (e: React.KeyboardEvent) => {
@@ -16653,6 +17137,24 @@ function MenuButton({
   children: React.ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const labelRef = useRef<HTMLButtonElement>(null);
+  const pop = () => ref.current?.querySelector(":scope > [role=menu]");
+  /** Whether the open menu has been walked with the keys. */
+  const keyed = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    // Opened from the keyboard, the menu takes the focus on its first
+    // row, so the arrows walk it rather than nudging the layer behind.
+    if (labelRef.current?.matches(":focus-visible")) focusFirstRow(pop);
+    keyed.current = false;
+    return () => {
+      // A row chosen from the keyboard leaves the focus on the menu's
+      // label, where it came from, rather than on the page's body.
+      const lost = document.activeElement === null || document.activeElement === document.body;
+      if (keyed.current && lost) labelRef.current?.focus({ preventScroll: true });
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -16668,19 +17170,63 @@ function MenuButton({
     };
   }, [open, onClose]);
 
+  /** The neighbouring menu in the bar, round the ends: opened if this
+   * one is, its label focused either way. */
+  const across = (by: -1 | 1, opening: boolean) => {
+    const menus = [...(ref.current?.parentElement?.querySelectorAll<HTMLElement>(":scope > .menu") ?? [])];
+    const next = menus[(menus.indexOf(ref.current!) + by + menus.length) % menus.length];
+    const nextLabel = next?.querySelector<HTMLButtonElement>(".menu-label");
+    if (!next || !nextLabel) return;
+    nextLabel.focus({ preventScroll: true });
+    if (opening) {
+      nextLabel.click();
+      focusFirstRow(() => next.querySelector(":scope > [role=menu]"));
+    }
+  };
+
   return (
     <div className="menu" ref={ref}>
       <button
+        ref={labelRef}
         className={open ? "menu-label open" : "menu-label"}
         onClick={onOpen}
         onPointerEnter={onHover}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!open) onOpen();
+            focusFirstRow(pop);
+          } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+            e.preventDefault();
+            e.stopPropagation();
+            across(e.key === "ArrowLeft" ? -1 : 1, open);
+          }
+        }}
         aria-haspopup="menu"
         aria-expanded={open}
       >
         {label}
       </button>
       {open && (
-        <div className="menu-pop" role="menu" onClick={onClose}>
+        <div
+          className="menu-pop"
+          role="menu"
+          aria-label={label}
+          onClick={onClose}
+          onKeyDown={(e) => {
+            keyed.current = true;
+            menuKeyDown(
+              e.nativeEvent,
+              e.currentTarget,
+              () => {
+                onClose();
+                labelRef.current?.focus({ preventScroll: true });
+              },
+              (by) => across(by, true),
+            );
+          }}
+        >
           {children}
         </div>
       )}
@@ -16939,6 +17485,7 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
           role="menu"
           aria-label={entry.label}
           style={{ left: at[0], top: at[1] }}
+          onKeyDown={(e) => menuKeyDown(e.nativeEvent, e.currentTarget, () => setOpen(false))}
         >
           <MenuRows entries={entry.entries} />
         </div>
@@ -19018,17 +19565,17 @@ function KindProps({
             0.5,
             (o) => patch({ stroke: { ...v.stroke!, dash_offset: o } }),
           )}
-        {/* Which side of the edge the border lies on. A rect's and an
-            ellipse's outline has a distance of its own, so a band to
-            either side of it is exact; a path is stroked down the middle
-            of its line, which is what a line means — and a polygon or a
-            star is the path through its corners, stroked as that path
-            is, so it has no side to choose either. */}
-        {v.stroke && ("Rect" in v.shape || "Ellipse" in v.shape) && (
+        {/* Which side of the edge the border lies on: any shape with an
+            inside — a rect, an ellipse, a polygon or a star, a closed
+            path. An open path is a line, stroked down its middle. A
+            rect's and an ellipse's border lies inside unless told; a
+            path's, which was a line before there was a choice, across. */}
+        {v.stroke &&
+          ("Rect" in v.shape || "Ellipse" in v.shape || "Polygon" in v.shape || ("Path" in v.shape && v.shape.Path.closed)) && (
           <label className="row">
             Border
             <select
-              value={v.stroke.align ?? "Inside"}
+              value={v.stroke.align ?? ("Rect" in v.shape || "Ellipse" in v.shape ? "Inside" : "Centre")}
               onChange={(e) =>
                 onEdit(
                   patch({

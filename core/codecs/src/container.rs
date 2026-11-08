@@ -29,13 +29,23 @@ pub enum ContainerError {
     Manifest(#[from] serde_json::Error),
     #[error("unsupported format version {found} (this build reads up to {supported})")]
     UnsupportedVersion { found: u32, supported: u32 },
-    #[error("that file says its page is {width}x{height}, which is more than can be drawn")]
+    #[error("{}", bad_canvas(*width, *height))]
     BadCanvas { width: u32, height: u32 },
     /// The layers a file names and what it says each group holds are two
     /// separate lists, and they can disagree in ways no document this
     /// editor makes ever does.
     #[error("that file's layers do not make sense together: {0}")]
     BadStructure(chitrakar_doc::DocError),
+}
+
+/// What is wrong with a page a file says it has: none at all, or more
+/// than can be drawn. A page with no width was said to be too large.
+fn bad_canvas(width: u32, height: u32) -> String {
+    if width == 0 || height == 0 {
+        format!("that file says its page is {width} × {height}, which is no page at all")
+    } else {
+        format!("that file says its page is {width} × {height}, which is more than can be drawn")
+    }
 }
 
 #[derive(Serialize, Deserialize)]

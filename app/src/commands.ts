@@ -15,20 +15,22 @@
 
 /** Everything that can be rebound. */
 export const COMMANDS = [
-  { id: "new", label: "New document", group: "File", chord: "mod+n" },
-  { id: "open", label: "Open…", group: "File", chord: "mod+o" },
-  { id: "save", label: "Save", group: "File", chord: "mod+s" },
+  { id: "new", label: "New document", group: "File", chord: "mod+n", typing: true },
+  { id: "open", label: "Open…", group: "File", chord: "mod+o", typing: true },
+  { id: "save", label: "Save", group: "File", chord: "mod+s", typing: true },
   // Only in the desktop shell, where a document has somewhere to be.
-  { id: "save-as", label: "Save as…", group: "File", chord: "mod+shift+s" },
-  { id: "export", label: "Quick export as PNG", group: "File", chord: "mod+e" },
-  { id: "export-window", label: "Export…", group: "File", chord: "mod+shift+e" },
-  { id: "preferences", label: "Preferences", group: "File", chord: "mod+," },
+  { id: "save-as", label: "Save as…", group: "File", chord: "mod+shift+s", typing: true },
+  { id: "export", label: "Quick export as PNG", group: "File", chord: "mod+e", typing: true },
+  { id: "export-window", label: "Export…", group: "File", chord: "mod+shift+e", typing: true },
+  { id: "preferences", label: "Preferences", group: "File", chord: "mod+,", typing: true },
   { id: "undo", label: "Undo", group: "Edit", chord: "mod+z" },
   { id: "redo", label: "Redo", group: "Edit", chord: "mod+shift+z" },
   { id: "cut", label: "Cut", group: "Edit", chord: "mod+x" },
   { id: "copy", label: "Copy", group: "Edit", chord: "mod+c" },
   { id: "paste", label: "Paste", group: "Edit", chord: "mod+v" },
-  // The one that fires while a field has the caret, as it always has.
+  // Fires while a field has the caret, as it always has. So do the
+  // file chords above, which mean nothing to a field: Ctrl+S typed
+  // into the zoom box reached the browser's own "save page".
   // Ctrl+J, as Photoshop and Affinity have it: Ctrl+D is Deselect.
   { id: "duplicate", label: "Duplicate", group: "Edit", chord: "mod+j", typing: true },
   { id: "copy-style", label: "Copy style", group: "Edit", chord: "mod+alt+c" },

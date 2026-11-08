@@ -71,7 +71,11 @@ pub enum DocError {
     CannotRemoveRoot,
     #[error("cannot move {0:?} into its own subtree")]
     MoveIntoOwnSubtree(NodeId),
-    #[error("a document cannot be {0}x{1}")]
+    #[error(
+        "a page cannot be {0} × {1}: it can be up to {side} a side and {mp} megapixels",
+        side = MAX_CANVAS_SIDE,
+        mp = MAX_CANVAS_PIXELS / 1_000_000
+    )]
     BadCanvasSize(u32, u32),
     #[error("that would make a copy of itself")]
     InstanceCycle,

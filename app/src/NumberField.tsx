@@ -102,7 +102,9 @@ export function NumberField({ value, onValue, min, max, integer, blankAs, show, 
           dropping.current = true;
           e.currentTarget.blur();
         }
-        e.stopPropagation();
+        // Its own keys stay its own, but a chord goes on to the editor:
+        // undo or save with the caret here did nothing.
+        if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
       }}
     />
   );

@@ -243,6 +243,66 @@ pub struct ImportedImage {
     pub clip: Option<chitrakar_doc::Mask>,
 }
 
+/// How deep an SVG's elements may nest.
+const MAX_NESTING: usize = 128;
+
+/// Whether an SVG's elements nest more than `most` deep, read off its
+/// tags without parsing it: comments, CDATA, declarations and
+/// processing instructions are passed over, and a tag that closes itself
+/// does not nest. Quoted attribute values are skipped whole, so a `>`
+/// inside one does not end the tag.
+fn nested_deeper_than(data: &[u8], most: usize) -> bool {
+    let find = |from: usize, what: &[u8]| {
+        data[from.min(data.len())..]
+            .windows(what.len())
+            .position(|w| w == what)
+            .map(|at| from + at + what.len())
+    };
+    let (mut i, mut depth) = (0usize, 0usize);
+    while i < data.len() {
+        if data[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let rest = &data[i..];
+        if rest.starts_with(b"<!--") {
+            i = find(i + 4, b"-->").unwrap_or(data.len());
+        } else if rest.starts_with(b"<![CDATA[") {
+            i = find(i + 9, b"]]>").unwrap_or(data.len());
+        } else if rest.starts_with(b"<?") {
+            i = find(i + 2, b"?>").unwrap_or(data.len());
+        } else if rest.starts_with(b"<!") {
+            i = find(i + 2, b">").unwrap_or(data.len());
+        } else if rest.starts_with(b"</") {
+            depth = depth.saturating_sub(1);
+            i = find(i + 2, b">").unwrap_or(data.len());
+        } else {
+            // An opening tag: to its end, past quoted values.
+            let mut j = i + 1;
+            let mut quote = None;
+            while j < data.len() {
+                let c = data[j];
+                match quote {
+                    Some(q) if c == q => quote = None,
+                    Some(_) => {}
+                    None if c == b'"' || c == b'\'' => quote = Some(c),
+                    None if c == b'>' => break,
+                    None => {}
+                }
+                j += 1;
+            }
+            if j > i + 1 && data.get(j - 1) != Some(&b'/') {
+                depth += 1;
+                if depth > most {
+                    return true;
+                }
+            }
+            i = j + 1;
+        }
+    }
+    false
+}
+
 /// Bring an SVG in as shape layers.
 pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     // A compressed file is opened here rather than by the reader, so that
@@ -255,12 +315,32 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     } else {
         data
     };
+    // Read by recursion, here and in the reader underneath: a few
+    // thousand nested groups ran the engine's stack out, which stopped it
+    // for good and blanked the editor. No drawing nests this deep.
+    if nested_deeper_than(data, MAX_NESTING) {
+        return Err(format!(
+            "the SVG nests its elements more than {MAX_NESTING} deep, more than the editor reads"
+        ));
+    }
     if let Some(why) = past_reason(data) {
         return Err(why);
     }
     let mut opt = usvg::Options::default();
-    opt.fontdb_mut().load_font_data(FACE.to_vec());
-    // Text in a face the file cannot supply is set in the bundled one.
+    {
+        let fonts = opt.fontdb_mut();
+        fonts.load_font_data(FACE.to_vec());
+        // Text in a face the file cannot supply is set in the bundled one
+        // — whatever it asks for. Only text naming no face was: a family
+        // named (Arial, "sans-serif") fell back to the generic serif,
+        // which named a face nobody had, and the text was dropped (a file
+        // of nothing but text was refused as holding nothing to draw).
+        fonts.set_serif_family("DejaVu Sans");
+        fonts.set_sans_serif_family("DejaVu Sans");
+        fonts.set_cursive_family("DejaVu Sans");
+        fonts.set_fantasy_family("DejaVu Sans");
+        fonts.set_monospace_family("DejaVu Sans");
+    }
     opt.font_family = "DejaVu Sans".to_string();
     let tree = usvg::Tree::from_data(data, &opt).map_err(|e| e.to_string())?;
     let mut got = Gathered::default();
@@ -466,21 +546,21 @@ fn mask_region(m: &usvg::Mask, at: usvg::Transform) -> Option<Vec<Vec<[f32; 2]>>
     if !region_only(m.root(), m.kind()) {
         return None;
     }
-    let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+    let mut rings: Vec<Vec<Vec<[f32; 2]>>> = Vec::new();
     collect_clip(m.root(), &mut rings);
     // Nothing drawn in it lets nothing through.
     if rings.is_empty() {
         return Some(Vec::new());
     }
-    let mut acc = vec![rings.remove(0)];
+    let mut acc = rings.remove(0);
     for next in rings {
         match chitrakar_render::boolean::combine_or_nudge(
             &acc,
-            std::slice::from_ref(&next),
+            &next,
             chitrakar_render::boolean::BoolOp::Union,
         ) {
             Some(joined) => acc = joined,
-            None => acc.push(next),
+            None => acc.extend(next),
         }
     }
     // A mask has a region of its own outside which it lets nothing
@@ -594,7 +674,7 @@ fn clip_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
 /// *contents*, where usvg never puts it, so a clip path cut by another
 /// let through everything the first one did.
 fn clip_region(cp: &usvg::ClipPath, at: usvg::Transform) -> Option<Vec<Vec<[f32; 2]>>> {
-    let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+    let mut rings: Vec<Vec<Vec<[f32; 2]>>> = Vec::new();
     collect_clip(cp.root(), &mut rings);
     // A clip path with no outlines in it shows nothing.
     if rings.is_empty() {
@@ -602,15 +682,15 @@ fn clip_region(cp: &usvg::ClipPath, at: usvg::Transform) -> Option<Vec<Vec<[f32;
     }
     // The outlines of a clip path show where *any* of them covers, which
     // is their union — not the even-odd of one compound shape.
-    let mut acc = vec![rings.remove(0)];
+    let mut acc = rings.remove(0);
     for next in rings {
         match chitrakar_render::boolean::combine_or_nudge(
             &acc,
-            std::slice::from_ref(&next),
+            &next,
             chitrakar_render::boolean::BoolOp::Union,
         ) {
             Some(joined) => acc = joined,
-            None => acc.push(next),
+            None => acc.extend(next),
         }
     }
     // The clip path's own `transform` goes inside the group's placement.
@@ -622,16 +702,29 @@ fn clip_region(cp: &usvg::ClipPath, at: usvg::Transform) -> Option<Vec<Vec<[f32;
     Some(acc)
 }
 
-fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<[f32; 2]>>) {
+/// The regions a clip path's or a mask's outlines cover, one to an
+/// outline — except that a path whose rule is even-odd is one region of
+/// all its rings, a ring inside another cutting it, as a reader fills
+/// it. Every ring used to be a region of its own and the lot unioned,
+/// so a box with a shape cut out of it (the band an outside border is
+/// cut from) covered the shape as well.
+fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<Vec<[f32; 2]>>>) {
     for child in group.children() {
         match child {
             usvg::Node::Group(g) => collect_clip(g, out),
             usvg::Node::Path(p) => {
-                for ring in rings_of(p) {
-                    let flat = ring.flattened();
-                    if flat.len() >= 3 {
-                        out.push(flat);
-                    }
+                let rings: Vec<Vec<[f32; 2]>> = rings_of(p)
+                    .into_iter()
+                    .map(|ring| ring.flattened())
+                    .filter(|flat| flat.len() >= 3)
+                    .collect();
+                let even_odd = p
+                    .fill()
+                    .is_some_and(|f| f.rule() == usvg::FillRule::EvenOdd);
+                if even_odd && rings.len() > 1 {
+                    out.push(rings);
+                } else {
+                    out.extend(rings.into_iter().map(|ring| vec![ring]));
                 }
             }
             // A clip path holds outlines; usvg has already dropped
@@ -3859,6 +3952,87 @@ mod tests {
             region(br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><defs><mask id="m"><rect width="5" height="5" fill="white"/></mask></defs><g transform="translate(10 10)" mask="url(#m)"><rect width="20" height="20" fill="red"/></g></svg>"#),
             square(10.0, 10.0),
             "and a mask the same"
+        );
+    }
+
+    /// Groups nested past what the reader can recurse through are refused
+    /// in words; a deep but reasonable drawing still reads. A thousand
+    /// nested groups ran the engine's stack out in a browser.
+    #[test]
+    fn an_svg_nested_past_reading_is_refused() {
+        let nest = |n: usize| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><!-- <g> --><![CDATA[<g>]]>{}<rect width="4" height="4" fill="red" data-x="a>b"/>{}</svg>"#,
+                "<g>".repeat(n),
+                "</g>".repeat(n)
+            )
+        };
+        let deep = import_svg(nest(1000).as_bytes()).err().unwrap_or_default();
+        assert!(deep.contains("nests"), "refused in words: {deep}");
+        assert!(
+            import_svg(nest(50).as_bytes()).is_ok(),
+            "50 deep still reads"
+        );
+        assert!(
+            !nested_deeper_than(nest(127).as_bytes(), MAX_NESTING),
+            "the limit is not past it"
+        );
+        assert!(
+            nested_deeper_than(nest(128).as_bytes(), MAX_NESTING),
+            "and one more is"
+        );
+    }
+
+    /// Text naming a face the editor does not have — Arial, a list, a
+    /// generic family — is set in the bundled one. It was dropped, and a
+    /// file of nothing but text was refused as holding nothing to draw.
+    #[test]
+    fn text_in_a_face_nobody_has_is_set_in_the_bundled_one() {
+        for family in [
+            "Arial",
+            "Helvetica, Arial, sans-serif",
+            "serif",
+            "monospace",
+            "NoSuchFace",
+        ] {
+            let svg = format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><text x="10" y="40" font-size="30" font-family="{family}">Hello</text></svg>"#
+            );
+            let got = import_svg(svg.as_bytes());
+            assert!(
+                got.as_ref().is_ok_and(|g| !g.shapes.is_empty()),
+                "{family}: {:?}",
+                got.err()
+            );
+        }
+    }
+
+    /// A clip path drawn even-odd cuts its inner ring out: a box with a
+    /// square taken out of it lets nothing through the square. Every
+    /// ring was its own region, unioned, so the square showed — and an
+    /// outside border exported and brought back lay over its own fill.
+    #[test]
+    fn an_even_odd_clip_cuts_its_inner_ring_out() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40"><defs><clipPath id="c"><path d="M0,0 L40,0 L40,40 L0,40 Z M10,10 L30,10 L30,30 L10,30 Z" clip-rule="evenodd"/></clipPath></defs><rect width="40" height="40" fill="#ff0000" clip-path="url(#c)"/></svg>"##;
+        let doc = brought_in(svg, 40, 40);
+        let ours = chitrakar_render::render(&doc).unwrap();
+        assert!(
+            ours.get(5, 5).a > 0.95,
+            "the box shows: {:?}",
+            ours.get(5, 5)
+        );
+        assert!(
+            ours.get(20, 20).a < 0.05,
+            "and the hole does not: {:?}",
+            ours.get(20, 20)
+        );
+        // Nonzero, the same two rings wound the same way are the box.
+        let nonzero = svg.replace(r#" clip-rule="evenodd""#, "");
+        let ours = chitrakar_render::render(&brought_in(&nonzero, 40, 40)).unwrap();
+        assert!(
+            ours.get(20, 20).a > 0.95,
+            "nonzero fills it: {:?}",
+            ours.get(20, 20)
         );
     }
 

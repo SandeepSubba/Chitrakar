@@ -100,6 +100,32 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
   return null;
 }
 
+/** What an engine's refusal says, in words a person reads: without the
+ * "Error: invalid command:" every refusal came wrapped in, and with a
+ * decoder's own words (a CRC in hex, a serde field and column, "out of
+ * memory") said as what they mean for the file. A sentence the engine
+ * already wrote for a person comes through as it was. */
+export function said(err: unknown): string {
+  const text = String((err as { message?: unknown } | null)?.message ?? err)
+    .trim()
+    .replace(/^(?:Error|RuntimeError|JsError):\s*/i, "")
+    .replace(/^invalid command:\s*/i, "")
+    .replace(/^(?:Error|io error):\s*/i, "");
+  const plain: [RegExp, string][] = [
+    [/out of memory|memory limit exceeded|capacity overflow|allocation/i, "it is larger than the editor can hold in memory"],
+    [
+      /crc error|format error decoding|unexpected ?eof|unexpected end|failed to fill whole buffer|invalid (?:png|jpeg|signature)|corrupt/i,
+      "the file is damaged or cut short",
+    ],
+    [/manifest error|missing field|invalid type: .* expected/i, "the document inside the file is damaged, or from a version that wrote it differently"],
+    [/svg data parsing failed|xml|unexpected .* tag|expected '.*' tag/i, "the SVG is not well-formed (an unclosed or mismatched tag)"],
+    [/invalid zip|zip archive|could not find central directory/i, "the file is damaged: it is not a whole .chitra"],
+    [/image format \w+ is not supported/i, "the picture could not be decoded here (it may be damaged)"],
+  ];
+  for (const [re, says] of plain) if (re.test(text)) return says;
+  return text;
+}
+
 /** The sentence to say when a picture could not be read, rather than a
  * decoder's error: for HEIC, which only a system with its own decoder
  * can read, how to get it in anyway. */
@@ -114,5 +140,5 @@ export function unreadable(name: string, bytes: Uint8Array, err: unknown): strin
   if (heifBrand(bytes) === "avif") {
     return `${name} is an AVIF picture, which this browser cannot decode. Open it in a current Chrome, Firefox or Safari, or save it as PNG first.`;
   }
-  return `Could not place ${name}: ${err}`;
+  return `Could not place ${name}: ${said(err)}`;
 }
