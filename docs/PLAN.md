@@ -35,8 +35,11 @@ without reading anything else.*
      combined over regions made of boxes — and Alt-measure, fixed. The
      eleventh found the same corner again, closed by falling back on the
      page's pixels; the twelfth found that fallback's own costs, and it
-     now traces back into outlines and checks every traced answer. None
-     has lost work since the seventh. ⬜ until a pass finds nothing.
+     now traces back into outlines and checks every traced answer. The
+     thirteenth found two holes in that check, both fixed: a small
+     wrong trace on a large page, and specks along a curve where a
+     region met its own inside-out. None has lost work since the
+     seventh. ⬜ until a pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11249,6 +11252,18 @@ without reading anything else.*
   `trace_pixels`), keeping the selection's feather once. The answer is a
   region of outlines like any other: no picture kept, no seam, nothing
   re-traced on every edit.
+  **A thirteenth audit, of the check the twelfth added (November
+  2026).** Two holes, both in selections. The check's points were
+  spread over the whole of both regions, so on a large page a small
+  wrong trace (an ellipse touching the page's edge, inside out, unioned
+  with itself) fell between them and was kept; now each region's own
+  rings are sampled as well, under a budget set by how many edges there
+  are. And reading the pixels, a pixel exactly half covered — common
+  along a curve — counted as inside both a region and its inside-out,
+  so keeping their overlap left specks all along the curve where it
+  should leave nothing; a half-covered pixel is now the first region's
+  and not the second's. Both in
+  `regions_past_the_page_and_on_nudged_edges_combine`.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

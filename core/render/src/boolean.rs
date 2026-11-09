@@ -336,30 +336,77 @@ pub fn agrees(a: &[Ring], b: &[Ring], result: &[Ring], op: BoolOp) -> bool {
         }
         (odd, near)
     };
-    for j in 0..SAMPLES {
-        for i in 0..SAMPLES {
-            let p = [
-                x0 + (i as f32 + 0.5) / SAMPLES as f32 * (x1 - x0),
-                y0 + (j as f32 + 0.5) / SAMPLES as f32 * (y1 - y0),
-            ];
-            let (in_a, near_a) = read(p, a);
-            let (in_b, near_b) = read(p, b);
-            let (in_r, near_r) = read(p, result);
-            if near_a || near_b || near_r {
-                continue;
-            }
-            let want = match op {
-                BoolOp::Union => in_a || in_b,
-                BoolOp::Intersect => in_a && in_b,
-                BoolOp::Subtract => in_a && !in_b,
-                BoolOp::Exclude => in_a != in_b,
-            };
-            if want != in_r {
-                return false;
+    // A grid across them all, and one across each ring's own box: a
+    // trace gone wrong round a small ellipse on a large page — the box of
+    // an inside-out region being the page — fell between the points of
+    // the first alone. Within a budget, for outlines of a great many
+    // corners (a wand's), whose every point costs a pass over them all.
+    let mut boxes = vec![[x0, y0, x1, y1]];
+    let edges: usize = a
+        .iter()
+        .chain(b)
+        .chain(result)
+        .map(|r| r.len())
+        .sum::<usize>()
+        .max(1);
+    let budget = (40_000_000 / edges).max(SAMPLES * SAMPLES);
+    let mut spent = SAMPLES * SAMPLES;
+    const RING: usize = 12;
+    for ring in a.iter().chain(b) {
+        if spent + RING * RING > budget {
+            break;
+        }
+        let (mut rx0, mut ry0, mut rx1, mut ry1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for p in ring {
+            rx0 = rx0.min(p[0]);
+            ry0 = ry0.min(p[1]);
+            rx1 = rx1.max(p[0]);
+            ry1 = ry1.max(p[1]);
+        }
+        if rx0 < rx1 && ry0 < ry1 {
+            boxes.push([rx0, ry0, rx1, ry1]);
+            spent += RING * RING;
+        }
+    }
+    for (k, [bx0, by0, bx1, by1]) in boxes.into_iter().enumerate() {
+        let n = if k == 0 { SAMPLES } else { RING };
+        for j in 0..n {
+            for i in 0..n {
+                let p = [
+                    bx0 + (i as f32 + 0.5) / n as f32 * (bx1 - bx0),
+                    by0 + (j as f32 + 0.5) / n as f32 * (by1 - by0),
+                ];
+                if !agrees_at(p, a, b, result, op, &read) {
+                    return false;
+                }
             }
         }
     }
     true
+}
+
+/// One point of `agrees`: true where it is too near an edge to say.
+fn agrees_at(
+    p: [f32; 2],
+    a: &[Ring],
+    b: &[Ring],
+    result: &[Ring],
+    op: BoolOp,
+    read: &impl Fn([f32; 2], &[Ring]) -> (bool, bool),
+) -> bool {
+    let (in_a, near_a) = read(p, a);
+    let (in_b, near_b) = read(p, b);
+    let (in_r, near_r) = read(p, result);
+    if near_a || near_b || near_r {
+        return true;
+    }
+    let want = match op {
+        BoolOp::Union => in_a || in_b,
+        BoolOp::Intersect => in_a && in_b,
+        BoolOp::Subtract => in_a && !in_b,
+        BoolOp::Exclude => in_a != in_b,
+    };
+    want == in_r
 }
 
 /// Combine two sets of rings. Returns the result as rings, or `None` when

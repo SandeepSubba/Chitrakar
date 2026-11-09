@@ -6238,7 +6238,12 @@ impl Session {
             let (pa, pb) = (plane(&sa), plane(&sb));
             let at = (y0 as usize) * (w as usize);
             for (i, (x, y)) in pa.iter().zip(&pb).enumerate() {
-                let (x, y) = (*x >= 0.5, *y >= 0.5);
+                // A pixel exactly half covered — common along a curve, read
+                // from sixteen samples — is the first region's and not the
+                // second's: read the same way for both, a region and its
+                // inside-out both had it, and keeping the overlap of the
+                // two left specks all along the curve.
+                let (x, y) = (*x >= 0.5, *y > 0.5);
                 inside[at + i] = match op {
                     BoolOp::Union => x || y,
                     BoolOp::Intersect => x && y,
@@ -23069,6 +23074,44 @@ mod tests {
                 Some(chitrakar_doc::MaskKind::Vector { .. })
             ),
             "and the region is outlines, not a page-sized picture"
+        );
+        // A small ellipse against the right edge of a large page: a wrong
+        // trace that small fell between the checks spread over the page.
+        let mut big = Session::new(2000, 1500, ColorMode::Rgb);
+        let small = |s: &mut Session, how: &str| {
+            s.pick_region(
+                VectorShape::Ellipse { rx: 25.0, ry: 25.0 },
+                Transform::translation(1950.0, 500.0),
+                how,
+            )
+        };
+        small(&mut big, "replace").unwrap();
+        big.keep_selection("small").unwrap();
+        for (how, middle, far) in [
+            ("union", true, true),
+            ("subtract", false, true),
+            ("intersect", false, false),
+        ] {
+            small(&mut big, "replace").unwrap();
+            big.pick_inverse().unwrap();
+            big.pick_kept(0, how).unwrap();
+            assert_eq!(
+                (
+                    big.selection_covers(1975.0, 525.0),
+                    big.selection_covers(100.0, 100.0)
+                ),
+                (middle, far),
+                "small, {how}"
+            );
+        }
+        // Keeping the overlap of an ellipse and its inside-out leaves
+        // nothing at all, not specks along the curve.
+        ellipse(&mut session, "replace").unwrap();
+        session.pick_inverse().unwrap();
+        session.pick_kept(touching, "intersect").unwrap();
+        assert!(
+            session.document().selection().is_none(),
+            "nothing left, not specks"
         );
         // Only touching an edge an earlier combine nudged: nothing left.
         pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
