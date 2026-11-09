@@ -291,6 +291,77 @@ pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>>
     Some(rings.into_iter().filter(thick).collect())
 }
 
+/// Whether `result` is `a` and `b` combined by `op`, at points on a grid
+/// across them that lie clear of every edge (even-odd). A trace that
+/// went wrong — rings judged inside out where one touches another — is
+/// caught here, for the caller to answer some other way.
+pub fn agrees(a: &[Ring], b: &[Ring], result: &[Ring], op: BoolOp) -> bool {
+    const SAMPLES: usize = 32;
+    const CLEAR: f32 = 0.75;
+    let points = a.iter().chain(b).flatten();
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for p in points {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    if !(x0 < x1 && y0 < y1) {
+        return true;
+    }
+    // Inside (even-odd), and whether within `CLEAR` of an edge.
+    let read = |p: [f32; 2], rings: &[Ring]| -> (bool, bool) {
+        let (mut odd, mut near) = (false, false);
+        for ring in rings {
+            let n = ring.len();
+            for i in 0..n {
+                let (s, e) = (ring[i], ring[(i + 1) % n]);
+                if (s[1] > p[1]) != (e[1] > p[1])
+                    && p[0] < s[0] + (p[1] - s[1]) / (e[1] - s[1]) * (e[0] - s[0])
+                {
+                    odd = !odd;
+                }
+                if !near {
+                    let (dx, dy) = (e[0] - s[0], e[1] - s[1]);
+                    let len2 = dx * dx + dy * dy;
+                    let t = if len2 > 0.0 {
+                        (((p[0] - s[0]) * dx + (p[1] - s[1]) * dy) / len2).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let (cx, cy) = (s[0] + t * dx - p[0], s[1] + t * dy - p[1]);
+                    near = cx * cx + cy * cy <= CLEAR * CLEAR;
+                }
+            }
+        }
+        (odd, near)
+    };
+    for j in 0..SAMPLES {
+        for i in 0..SAMPLES {
+            let p = [
+                x0 + (i as f32 + 0.5) / SAMPLES as f32 * (x1 - x0),
+                y0 + (j as f32 + 0.5) / SAMPLES as f32 * (y1 - y0),
+            ];
+            let (in_a, near_a) = read(p, a);
+            let (in_b, near_b) = read(p, b);
+            let (in_r, near_r) = read(p, result);
+            if near_a || near_b || near_r {
+                continue;
+            }
+            let want = match op {
+                BoolOp::Union => in_a || in_b,
+                BoolOp::Intersect => in_a && in_b,
+                BoolOp::Subtract => in_a && !in_b,
+                BoolOp::Exclude => in_a != in_b,
+            };
+            if want != in_r {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Combine two sets of rings. Returns the result as rings, or `None` when
 /// the outlines are degenerate enough that no closed result can be traced —
 /// shapes that only touch, or share an edge exactly.

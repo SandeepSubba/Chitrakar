@@ -33,10 +33,10 @@ without reading anything else.*
      found every fix holding and six small things (two the eighth's
      own), all fixed. The tenth found three, all in one corner — boxes
      combined over regions made of boxes — and Alt-measure, fixed. The
-     eleventh found the same corner again, and it is closed by falling
-     back on the page's pixels rather than by one more special case. The
-     rounds have gone from twenty-odd bugs to two, none losing work since
-     the seventh. ⬜ until a pass finds nothing.
+     eleventh found the same corner again, closed by falling back on the
+     page's pixels; the twelfth found that fallback's own costs, and it
+     now traces back into outlines and checks every traced answer. None
+     has lost work since the seventh. ⬜ until a pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11233,6 +11233,22 @@ without reading anything else.*
   frames above the highest picked one; a name cut short does not end on
   a dot. The sweep — a poster and a photograph made, exported, saved and
   opened again — threw nothing and came back identical.
+  **A twelfth audit, of the pixels the eleventh fell back on (November
+  2026).** The page-sized picture masks were right where the outlines
+  failed, but carried their own troubles: the feather baked into the
+  pixels and laid on again, half-covered seams where two soft edges
+  met, a page-sized picture kept for good per combine (a hundred
+  megapixels gave out at the eighth), and every edit afterwards
+  re-tracing the page for its ants. And an ellipse touching the page's
+  edge, turned inside out, was still traced into the wrong region by the
+  outlines themselves. Now: every traced combine is checked against
+  what the two regions say at points across them clear of their edges
+  (`boolean::agrees`), and where the outlines cannot be traced, or were
+  traced wrong, the two regions are read sharp, combined a band of rows
+  at a time, and traced back into outlines (`combined_by_pixels`,
+  `trace_pixels`), keeping the selection's feather once. The answer is a
+  region of outlines like any other: no picture kept, no seam, nothing
+  re-traced on every edit.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

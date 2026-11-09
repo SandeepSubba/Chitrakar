@@ -6178,15 +6178,17 @@ impl Session {
             chitrakar_render::boolean::BoolOp::Intersect => "Keep the overlap",
             _ => "Add to selection",
         };
-        let Some(combined) = chitrakar_render::boolean::combine_or_nudge(&want, &have, op) else {
-            // Outlines that cannot be traced together — edges lying along
-            // edges an earlier combine nudged, a region turned inside out
-            // past the page's edge — said that the regions could not be
-            // combined, or, worse, were answered by a guess. The page's
-            // pixels always can be: each region's coverage, combined one
-            // pixel at a time, is the region, kept as a picture of itself.
-            let selection = self.combined_by_pixels(&current, &fresh, op).map(Box::new);
-            return self.apply_labeled(Command::SetSelection { selection }, Some(label.into()));
+        // Traced, and the trace checked against what the two regions say
+        // at points across them, away from every edge: a region turned
+        // inside out past the page's edge, an ellipse touching it, edges
+        // along edges an earlier combine nudged — each was once said to be
+        // uncombinable, or answered with the wrong region.
+        let traced = chitrakar_render::boolean::combine_or_nudge(&want, &have, op)
+            .filter(|rings| chitrakar_render::boolean::agrees(&want, &have, rings, op));
+        let combined = match traced {
+            Some(rings) => rings,
+            // The page's pixels always can be combined, and traced back.
+            None => self.combined_by_pixels(&current, &fresh, op),
         };
         // The softness of what was already picked carries through: the
         // second box says where, not how sharply. Keeping the overlap of
@@ -6198,58 +6200,55 @@ impl Session {
         self.apply_labeled(Command::SetSelection { selection }, Some(label.into()))
     }
 
-    /// Two regions combined a pixel at a time over the page, as a picture
-    /// mask: what `pick_mask` falls back on when their outlines cannot be
-    /// traced together. `None` when nothing is left.
+    /// Two regions combined a pixel at a time over the page, and traced
+    /// back into outlines: what `pick_mask` falls back on when their own
+    /// outlines cannot be traced together, or were traced into something
+    /// that is not their combination. Each region is read sharp — its
+    /// softness goes back on as the selection's feather, once — and a
+    /// band of rows at a time, so a large page is never held whole as
+    /// coverage. Empty when nothing is left.
     fn combined_by_pixels(
-        &mut self,
+        &self,
         a: &chitrakar_doc::Mask,
         b: &chitrakar_doc::Mask,
         op: chitrakar_render::boolean::BoolOp,
-    ) -> Option<chitrakar_doc::Mask> {
+    ) -> Vec<Vec<[f32; 2]>> {
         use chitrakar_render::boolean::BoolOp;
         let (w, h) = (self.doc.meta.width, self.doc.meta.height);
-        let clip = chitrakar_render::ClipRect {
-            x0: 0,
-            y0: 0,
-            x1: w,
-            y1: h,
+        let sharp = |m: &chitrakar_doc::Mask| {
+            let mut m = m.clone();
+            m.feather = 0.0;
+            m
         };
-        let plane = |m: &chitrakar_doc::Mask| {
-            chitrakar_render::mask_plane_over(&self.doc, m, Transform::default(), clip, (w, h))
-        };
-        let (pa, pb) = (plane(a), plane(b));
-        let mut any = false;
-        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-        for (x, y) in pa.iter().zip(&pb) {
-            let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
-            let v = match op {
-                BoolOp::Union => x.max(y),
-                BoolOp::Intersect => x.min(y),
-                BoolOp::Subtract => x * (1.0 - y),
-                BoolOp::Exclude => x + y - 2.0 * x * y,
+        let (sa, sb) = (sharp(a), sharp(b));
+        let mut inside = vec![false; (w as usize) * (h as usize)];
+        const BAND: u32 = 256;
+        let mut y0 = 0;
+        while y0 < h {
+            let y1 = (y0 + BAND).min(h);
+            let clip = chitrakar_render::ClipRect {
+                x0: 0,
+                y0,
+                x1: w,
+                y1,
             };
-            any |= v >= 0.5 / 255.0;
-            // Coverage is read as linear luminance, so the grey carries it
-            // encoded, as a picture mask's does.
-            let g = (chitrakar_color::linear_to_srgb(v) * 255.0).round() as u8;
-            rgba.extend_from_slice(&[g, g, g, 255]);
+            let plane = |m: &chitrakar_doc::Mask| {
+                chitrakar_render::mask_plane_over(&self.doc, m, Transform::default(), clip, (w, h))
+            };
+            let (pa, pb) = (plane(&sa), plane(&sb));
+            let at = (y0 as usize) * (w as usize);
+            for (i, (x, y)) in pa.iter().zip(&pb).enumerate() {
+                let (x, y) = (*x >= 0.5, *y >= 0.5);
+                inside[at + i] = match op {
+                    BoolOp::Union => x || y,
+                    BoolOp::Intersect => x && y,
+                    BoolOp::Subtract => x && !y,
+                    BoolOp::Exclude => x != y,
+                };
+            }
+            y0 = y1;
         }
-        if !any {
-            return None;
-        }
-        let resource_id = self.doc.add_resource(w, h, rgba);
-        Some(chitrakar_doc::Mask {
-            kind: chitrakar_doc::MaskKind::Raster {
-                resource_id,
-                width: w,
-                height: h,
-                transform: Transform::default(),
-            },
-            invert: false,
-            // Each region's softness is in its coverage already.
-            feather: 0.0,
-        })
+        chitrakar_render::trace_pixels(&inside, w, h)
     }
 
     /// A region's outlines in page coordinates.
@@ -23023,6 +23022,53 @@ mod tests {
         assert!(
             !session.selection_covers(350.0, 200.0),
             "kept where both are: nothing of the box"
+        );
+        // An ellipse touching the page's right edge, turned inside out and
+        // combined with itself kept: once said the wrong region all three
+        // ways (the hole stayed, the page came back whole, the ellipse
+        // itself was kept).
+        let ellipse = |s: &mut Session, how: &str| {
+            s.pick_region(
+                VectorShape::Ellipse { rx: 50.0, ry: 50.0 },
+                Transform::translation(300.0, 100.0),
+                how,
+            )
+        };
+        ellipse(&mut session, "replace").unwrap();
+        assert!(session.selection_covers(350.0, 150.0) && !session.selection_covers(50.0, 50.0));
+        session.keep_selection("touching").unwrap();
+        let touching = session.document().regions().len() - 1;
+        for (how, middle, far) in [
+            ("union", true, true),
+            ("subtract", false, true),
+            ("intersect", false, false),
+        ] {
+            ellipse(&mut session, "replace").unwrap();
+            session.pick_inverse().unwrap();
+            session.pick_kept(touching, how).unwrap();
+            assert_eq!(
+                (
+                    session.selection_covers(350.0, 150.0),
+                    session.selection_covers(50.0, 50.0)
+                ),
+                (middle, far),
+                "{how}"
+            );
+        }
+        // Softened, combined from the pixels: the softness is the
+        // region's once, not baked in and laid on again.
+        pick(&mut session, 300.0, 50.0, 130.0, 200.0, "replace").unwrap();
+        session.feather_selection(10.0).unwrap();
+        session.pick_inverse().unwrap();
+        pick(&mut session, 350.0, 100.0, 100.0, 50.0, "union").unwrap();
+        let feather = session.document().selection().map(|m| m.feather);
+        assert_eq!(feather, Some(10.0), "the feather carried, not doubled");
+        assert!(
+            matches!(
+                session.document().selection().map(|m| &m.kind),
+                Some(chitrakar_doc::MaskKind::Vector { .. })
+            ),
+            "and the region is outlines, not a page-sized picture"
         );
         // Only touching an edge an earlier combine nudged: nothing left.
         pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
