@@ -38,8 +38,12 @@ without reading anything else.*
      now traces back into outlines and checks every traced answer. The
      thirteenth found two holes in that check, both fixed: a small
      wrong trace on a large page, and specks along a curve where a
-     region met its own inside-out. None has lost work since the
-     seventh. ⬜ until a pass finds nothing.
+     region met its own inside-out. The fourteenth, a randomized check
+     of thousands of combines (boxes, ellipses and self-crossing lassos,
+     inside out or not, on pages up to 2000×1500, every answer read
+     against the shapes), found no wrong region and one freeze, fixed:
+     a region traced back from pixels took minutes to read. None has
+     lost work since the seventh. ⬜ until a pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11264,6 +11268,22 @@ without reading anything else.*
   should leave nothing; a half-covered pixel is now the first region's
   and not the second's. Both in
   `regions_past_the_page_and_on_nudged_edges_combine`.
+  **A fourteenth audit, randomized (November 2026).** Thousands of
+  selection combines drawn at random — boxes, ellipses and lassos that
+  cross themselves, often snapped so edges meet edges, sometimes turned
+  inside out, past the page, on pages of 300×200 to 2000×1500 — each
+  read back against what the shapes themselves say at points clear of
+  every edge. Broken on purpose (subtract read as intersect) it caught
+  nineteen; as written, it found no wrong region. It did find a freeze:
+  a region traced back from the page's pixels has thousands of edges,
+  and a mask was read a pixel at a time, every sample over every edge,
+  so combining with such a region again — or drawing anything through
+  it — took minutes on a large page. A hard path mask of many edges is
+  now read row by row (`path_plane`): the same samples and the same
+  even-odd test as one pixel at a time, so every pixel comes out the
+  same to the bit, with each row's crossings found once
+  (`a_path_mask_read_by_rows_is_read_as_by_pixels`, which also holds
+  four megapixels under eight thousand edges to seconds).
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

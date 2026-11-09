@@ -7891,6 +7891,131 @@ fn pixel_coverage(
     hits as f32 / (n * n) as f32
 }
 
+/// How many edges a path mask has before [`path_plane`] reads it.
+const PATH_PLANE_EDGES: usize = 64;
+
+/// A path mask's hard coverage over `clip`, row by row: the same samples
+/// [`pixel_coverage`] takes, and the same even-odd test, so every pixel
+/// comes out as it would one at a time.
+///
+/// One at a time, every sample of every pixel runs over every edge. A
+/// selection traced back from the page's pixels has thousands, and
+/// reading one over a large page took minutes. Here each row of samples
+/// finds its crossings once and every sample along it looks itself up
+/// among them.
+///
+/// `None` where it does not apply: a shape that is not a path, one of
+/// few edges (cheap either way), or a map that turns the path, under
+/// which a row of samples is not a row of the path.
+fn path_plane(shape: &VectorShape, inv: Inverse, clip: ClipRect) -> Option<Vec<f32>> {
+    let VectorShape::Path {
+        points, subpaths, ..
+    } = shape
+    else {
+        return None;
+    };
+    if inv.b != 0.0 || inv.c != 0.0 {
+        return None;
+    }
+    let rings: Vec<&[[f32; 2]]> = std::iter::once(points.as_slice())
+        .chain(subpaths.iter().map(|r| r.as_slice()))
+        .filter(|r| r.len() >= 3)
+        .collect();
+    let edges: Vec<([f32; 2], [f32; 2])> = rings
+        .iter()
+        .flat_map(|r| (0..r.len()).map(move |i| (r[i], r[(i + 1) % r.len()])))
+        .collect();
+    if edges.len() < PATH_PLANE_EDGES {
+        return None;
+    }
+    // The edges a row of samples at local `y` crosses, where they cross,
+    // in order — written as `shape_covers` works each one out.
+    let crossings = |y: f32, live: &[usize], out: &mut Vec<f32>| {
+        out.clear();
+        for &k in live {
+            let (a, b) = edges[k];
+            if (a[1] > y) != (b[1] > y) {
+                let t = (y - a[1]) / (b[1] - a[1]);
+                let x = a[0] + t * (b[0] - a[0]);
+                if !x.is_nan() {
+                    out.push(x);
+                }
+            }
+        }
+        out.sort_unstable_by(f32::total_cmp);
+    };
+    // Inside where an odd number of crossings lie strictly beyond `x`.
+    let inside = |row: &[f32], x: f32| (row.len() - row.partition_point(|c| *c <= x)) % 2 == 1;
+    // Edges by where they start down the page, in the path's own space;
+    // a map that flips it reads the rows bottom up.
+    let lo = |k: usize| edges[k].0[1].min(edges[k].1[1]);
+    let hi = |k: usize| edges[k].0[1].max(edges[k].1[1]);
+    let mut order: Vec<usize> = (0..edges.len()).collect();
+    order.sort_unstable_by(|&p, &q| lo(p).total_cmp(&lo(q)));
+    let (w, h) = (
+        clip.x1.saturating_sub(clip.x0) as usize,
+        clip.y1.saturating_sub(clip.y0) as usize,
+    );
+    let mut out = Vec::with_capacity(w * h);
+    let mut rows: [Vec<f32>; 7] = Default::default();
+    let mut live: Vec<usize> = Vec::new();
+    const N: u32 = 4;
+    for py in clip.y0..clip.y1 {
+        let fy = py as f32;
+        // The rows a pixel's samples sit on: its top and bottom corners,
+        // its middle, and the four rows of the finer box.
+        let ys = [
+            fy,
+            fy + 1.0,
+            fy + 0.5,
+            fy + 0.5 / N as f32,
+            fy + 1.5 / N as f32,
+            fy + 2.5 / N as f32,
+            fy + 3.5 / N as f32,
+        ];
+        let local = |sy: f32| inv.at(0.0, sy).1;
+        let (top, bottom) = (local(fy), local(fy + 1.0));
+        let (y_lo, y_hi) = (top.min(bottom), top.max(bottom));
+        // The edges that can cross any of them.
+        live.clear();
+        for &k in &order {
+            if lo(k) > y_hi {
+                break;
+            }
+            if hi(k) > y_lo {
+                live.push(k);
+            }
+        }
+        for (row, &sy) in rows.iter_mut().zip(&ys) {
+            crossings(local(sy), &live, row);
+        }
+        let row_of = |j: usize| &rows[3 + j];
+        for px in clip.x0..clip.x1 {
+            let fx = px as f32;
+            let lx = |sx: f32, sy: f32| inv.at(sx, sy).0;
+            let mid = inside(&rows[2], lx(fx + 0.5, fy + 0.5));
+            let uniform = [(0.0, 0usize), (1.0, 0), (0.0, 1), (1.0, 1)]
+                .into_iter()
+                .all(|(dx, r)| inside(&rows[r], lx(fx + dx, ys[r])) == mid);
+            if uniform {
+                out.push(if mid { 1.0 } else { 0.0 });
+                continue;
+            }
+            let mut hits = 0;
+            for j in 0..N as usize {
+                for i in 0..N {
+                    let sx = fx + (i as f32 + 0.5) / N as f32;
+                    if inside(row_of(j), lx(sx, ys[3 + j])) {
+                        hits += 1;
+                    }
+                }
+            }
+            out.push(hits as f32 / (N * N) as f32);
+        }
+    }
+    Some(out)
+}
+
 /// Fill a polygon row by row instead of sampling it per pixel.
 ///
 /// The crossings of the polygon with a scanline are O(anchors) to compute
@@ -9410,7 +9535,14 @@ impl<'a> MaskRef<'a> {
                 None => paint_plane(doc, strokes, parent, clip, surface),
             });
         }
-        let sigma = feather_of(m, parent)?;
+        let Some(sigma) = feather_of(m, parent) else {
+            // A hard path of many edges is read row by row, ahead.
+            let (MaskKind::Vector { shape, .. }, true) = (&m.kind, m.feather <= 0.0) else {
+                return None;
+            };
+            let inv = MaskRef::new(Some(m), parent).inv?;
+            return path_plane(shape, inv, clip).map(|cover| MaskPlane { clip, cover });
+        };
         // Worked out over more than is asked for, since the softening
         // pulls in coverage from outside the region being drawn: without
         // the margin the edge of a dirty rectangle would fade to nothing
@@ -9435,6 +9567,16 @@ impl<'a> MaskRef<'a> {
             ..m.clone()
         };
         let read = MaskRef::new(Some(&hard), parent);
+        if let (MaskKind::Vector { shape, .. }, Some(inv)) = (&hard.kind, read.inv) {
+            if let Some(cover) = path_plane(shape, inv, grown) {
+                let cover = if hard.invert {
+                    cover.into_iter().map(|c| 1.0 - c).collect()
+                } else {
+                    cover
+                };
+                return Some(softened(MaskPlane { clip: grown, cover }, sigma));
+            }
+        }
         let (w, h) = (
             grown.x1.saturating_sub(grown.x0),
             grown.y1.saturating_sub(grown.y0),
@@ -9505,9 +9647,17 @@ fn bare_coverage(m: MaskRef<'_>, x: u32, y: u32) -> f32 {
         return 1.0;
     };
     let c = match &mask.kind {
-        MaskKind::Vector { shape, .. } => match m.inv {
-            Some(inv) => pixel_coverage(shape, None, m.t, inv, x, y),
-            None => 0.0,
+        // A hard path's plane, from `path_plane`, before inverting; a
+        // softened mask's plane is something else.
+        MaskKind::Vector { shape, .. } => match (
+            m.plane
+                .filter(|_| mask.feather <= 0.0)
+                .and_then(|p| p.get(x, y)),
+            m.inv,
+        ) {
+            (Some(c), _) => c,
+            (None, Some(inv)) => pixel_coverage(shape, None, m.t, inv, x, y),
+            (None, None) => 0.0,
         },
         MaskKind::Painted { .. } => m.plane.map_or(1.0, |p| p.at(x, y)),
         MaskKind::Gradient { radial, from, to } => match m.inv {
@@ -9538,9 +9688,17 @@ fn coverage_at(doc: &Document, m: MaskRef<'_>, x: u32, y: u32) -> f32 {
     }
     let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
     let c = match &mask.kind {
-        MaskKind::Vector { shape, .. } => match m.inv {
-            Some(inv) => pixel_coverage(shape, None, m.t, inv, x, y),
-            None => 0.0,
+        // A hard path's plane, from `path_plane`, before inverting; a
+        // softened mask's plane is something else.
+        MaskKind::Vector { shape, .. } => match (
+            m.plane
+                .filter(|_| mask.feather <= 0.0)
+                .and_then(|p| p.get(x, y)),
+            m.inv,
+        ) {
+            (Some(c), _) => c,
+            (None, Some(inv)) => pixel_coverage(shape, None, m.t, inv, x, y),
+            (None, None) => 0.0,
         },
         // Read off the plane it was worked out into; without one there
         // is nothing to read, and a mask that shows everything is the
@@ -11453,6 +11611,15 @@ struct MaskPlane {
 }
 
 impl MaskPlane {
+    /// What was worked out at a pixel, if it was.
+    fn get(&self, x: u32, y: u32) -> Option<f32> {
+        if x < self.clip.x0 || y < self.clip.y0 || x >= self.clip.x1 || y >= self.clip.y1 {
+            return None;
+        }
+        let w = self.clip.x1 - self.clip.x0;
+        Some(self.cover[((y - self.clip.y0) * w + (x - self.clip.x0)) as usize])
+    }
+
     fn at(&self, x: u32, y: u32) -> f32 {
         if x < self.clip.x0 || y < self.clip.y0 || x >= self.clip.x1 || y >= self.clip.y1 {
             // Nothing was worked out there, and a mask that shows
@@ -14557,6 +14724,133 @@ fn hit_child(
 
 #[cfg(test)]
 mod tests {
+
+    /// A path mask of many edges read row by row comes out, pixel for
+    /// pixel and bit for bit, as it does read a pixel at a time — over
+    /// paths that cross themselves and have holes, moved, scaled and
+    /// flipped. And it is fast: a selection traced back from a large
+    /// page's pixels has thousands of edges, and was minutes to read.
+    #[test]
+    fn a_path_mask_read_by_rows_is_read_as_by_pixels() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f32 / (1u64 << 53) as f32
+        };
+        for case in 0..24 {
+            let ring = |next: &mut dyn FnMut() -> f32, n: usize, spread: f32| {
+                (0..n)
+                    .map(|_| {
+                        // Snapped to halves now and then, so samples land
+                        // on edges and corners exactly.
+                        let v = [next() * spread - 10.0, next() * spread - 10.0];
+                        if next() < 0.3 {
+                            v.map(|c| (c * 2.0).round() / 2.0)
+                        } else {
+                            v
+                        }
+                    })
+                    .collect::<Vec<[f32; 2]>>()
+            };
+            let n = 64 + (next() * 120.0) as usize;
+            let points = ring(&mut next, n, 90.0);
+            let holes = (next() * 3.0) as usize;
+            let subpaths = (0..holes)
+                .map(|_| {
+                    let n = 20 + (next() * 20.0) as usize;
+                    ring(&mut next, n, 90.0)
+                })
+                .collect();
+            let shape = VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: vec![],
+                subpaths,
+            };
+            let (sx, sy) = match case % 4 {
+                0 => (1.0, 1.0),
+                1 => (1.7, 0.6),
+                2 => (-1.0, 1.0),
+                _ => (0.8, -1.3),
+            };
+            let t = Transform {
+                a: sx,
+                b: 0.0,
+                c: 0.0,
+                d: sy,
+                e: 40.0 + next() * 10.0,
+                f: 40.0 + next() * 10.0,
+            };
+            let inv = Inverse::of(t).unwrap();
+            let clip = ClipRect {
+                x0: (next() * 20.0) as u32,
+                y0: (next() * 20.0) as u32,
+                x1: 70 + (next() * 30.0) as u32,
+                y1: 70 + (next() * 30.0) as u32,
+            };
+            let rows = path_plane(&shape, inv, clip).expect("a path of many edges");
+            let mut k = 0;
+            for y in clip.y0..clip.y1 {
+                for x in clip.x0..clip.x1 {
+                    let one = pixel_coverage(&shape, None, t, inv, x, y);
+                    assert_eq!(
+                        rows[k].to_bits(),
+                        one.to_bits(),
+                        "case {case} at {x},{y}: {} by rows, {one} by pixels",
+                        rows[k]
+                    );
+                    k += 1;
+                }
+            }
+        }
+        // A turned path is left to the pixels; a path of few edges too.
+        let few = VectorShape::Path {
+            points: vec![[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]],
+            closed: true,
+            smooth: false,
+            handles: vec![],
+            subpaths: vec![],
+        };
+        let one = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 4,
+            y1: 4,
+        };
+        assert!(path_plane(&few, Inverse::of(Transform::default()).unwrap(), one).is_none());
+        // Fast over a large page: a ring of eight thousand edges.
+        let many: Vec<[f32; 2]> = (0..8000)
+            .map(|i| {
+                let a = i as f32 / 8000.0 * std::f32::consts::TAU;
+                let r = 900.0 + 40.0 * (a * 37.0).sin();
+                [1000.0 + r * a.cos(), 1000.0 + r * a.sin()]
+            })
+            .collect();
+        let shape = VectorShape::Path {
+            points: many,
+            closed: true,
+            smooth: false,
+            handles: vec![],
+            subpaths: vec![],
+        };
+        let page = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 2000,
+            y1: 2000,
+        };
+        let started = std::time::Instant::now();
+        let plane = path_plane(&shape, Inverse::of(Transform::default()).unwrap(), page).unwrap();
+        assert_eq!(plane.len(), 4_000_000);
+        assert!(
+            started.elapsed().as_secs_f32() < 20.0,
+            "four megapixels under eight thousand edges took {:?}",
+            started.elapsed()
+        );
+    }
 
     /// A stop with no alpha keeps its colour: red to a clear red fades
     /// red, as SVG, PDF and every browser fade it, where it used to mix
