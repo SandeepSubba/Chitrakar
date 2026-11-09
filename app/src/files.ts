@@ -145,7 +145,8 @@ export function fileSafe(name: string): string {
     let stem = graphemes(cleaned.slice(0, cleaned.length - end.length - tail.length));
     stem = stem.slice(0, MOST - [...tail].length - [...end].length);
     while (stem.length > 0 && bytes(stem.join("") + tail + end) > 240) stem.pop();
-    cleaned = stem.join("").trim() + tail + end;
+    // Cut short, it may end on a dot or a space Windows would drop.
+    cleaned = stem.join("").replace(/[. ]+$/, "").trim() + tail + end;
   }
   return cleaned || "untitled";
 }

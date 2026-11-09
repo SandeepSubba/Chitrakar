@@ -6173,12 +6173,21 @@ impl Session {
         // with it whenever the drag starts on the same snap line, which
         // is most of the time — see `combine_or_nudge`, which is what
         // keeps that from being an error message.
-        let combined =
-            chitrakar_render::boolean::combine_or_nudge(&want, &have, op).ok_or_else(|| {
-                EngineError::BadCommand(
-                    "these regions cannot be combined — their edges overlap exactly".into(),
-                )
-            })?;
+        let label = match op {
+            chitrakar_render::boolean::BoolOp::Subtract => "Take from selection",
+            chitrakar_render::boolean::BoolOp::Intersect => "Keep the overlap",
+            _ => "Add to selection",
+        };
+        let Some(combined) = chitrakar_render::boolean::combine_or_nudge(&want, &have, op) else {
+            // Outlines that cannot be traced together — edges lying along
+            // edges an earlier combine nudged, a region turned inside out
+            // past the page's edge — said that the regions could not be
+            // combined, or, worse, were answered by a guess. The page's
+            // pixels always can be: each region's coverage, combined one
+            // pixel at a time, is the region, kept as a picture of itself.
+            let selection = self.combined_by_pixels(&current, &fresh, op).map(Box::new);
+            return self.apply_labeled(Command::SetSelection { selection }, Some(label.into()));
+        };
         // The softness of what was already picked carries through: the
         // second box says where, not how sharply. Keeping the overlap of
         // two that do not meet, or taking away a box that covers all of
@@ -6186,14 +6195,61 @@ impl Session {
         // nothing was picked to begin with. It used to be refused as
         // edges that overlap exactly, which they did not.
         let selection = Self::region_of(combined, current.feather).map(Box::new);
-        self.apply_labeled(
-            Command::SetSelection { selection },
-            Some(match op {
-                chitrakar_render::boolean::BoolOp::Subtract => "Take from selection".into(),
-                chitrakar_render::boolean::BoolOp::Intersect => "Keep the overlap".into(),
-                _ => "Add to selection".into(),
-            }),
-        )
+        self.apply_labeled(Command::SetSelection { selection }, Some(label.into()))
+    }
+
+    /// Two regions combined a pixel at a time over the page, as a picture
+    /// mask: what `pick_mask` falls back on when their outlines cannot be
+    /// traced together. `None` when nothing is left.
+    fn combined_by_pixels(
+        &mut self,
+        a: &chitrakar_doc::Mask,
+        b: &chitrakar_doc::Mask,
+        op: chitrakar_render::boolean::BoolOp,
+    ) -> Option<chitrakar_doc::Mask> {
+        use chitrakar_render::boolean::BoolOp;
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        let plane = |m: &chitrakar_doc::Mask| {
+            chitrakar_render::mask_plane_over(&self.doc, m, Transform::default(), clip, (w, h))
+        };
+        let (pa, pb) = (plane(a), plane(b));
+        let mut any = false;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for (x, y) in pa.iter().zip(&pb) {
+            let (x, y) = (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0));
+            let v = match op {
+                BoolOp::Union => x.max(y),
+                BoolOp::Intersect => x.min(y),
+                BoolOp::Subtract => x * (1.0 - y),
+                BoolOp::Exclude => x + y - 2.0 * x * y,
+            };
+            any |= v >= 0.5 / 255.0;
+            // Coverage is read as linear luminance, so the grey carries it
+            // encoded, as a picture mask's does.
+            let g = (chitrakar_color::linear_to_srgb(v) * 255.0).round() as u8;
+            rgba.extend_from_slice(&[g, g, g, 255]);
+        }
+        if !any {
+            return None;
+        }
+        let resource_id = self.doc.add_resource(w, h, rgba);
+        Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Raster {
+                resource_id,
+                width: w,
+                height: h,
+                transform: Transform::default(),
+            },
+            invert: false,
+            // Each region's softness is in its coverage already.
+            feather: 0.0,
+        })
     }
 
     /// A region's outlines in page coordinates.
@@ -22925,6 +22981,55 @@ mod tests {
         assert!(!session.selection_covers(75.0, 100.0) && session.selection_covers(125.0, 100.0));
         pick(&mut session, 100.0, 50.0, 50.0, 100.0, "subtract").unwrap();
         assert!(!session.selection_covers(125.0, 100.0), "nothing left");
+    }
+
+    /// A region turned inside out past the page's edge, then combined —
+    /// and a box only touching an edge an earlier combine nudged: each
+    /// comes to what it means, from the page's pixels where the outlines
+    /// cannot be traced, and never to an alert or a guess.
+    #[test]
+    fn regions_past_the_page_and_on_nudged_edges_combine() {
+        let pick = |s: &mut Session, x: f32, y: f32, w: f32, h: f32, how: &str| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+                Transform::translation(x, y),
+                how,
+            )
+        };
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        pick(&mut session, 300.0, 50.0, 130.0, 200.0, "replace").unwrap();
+        session.keep_selection("past").unwrap();
+        session.pick_inverse().unwrap();
+        assert!(!session.selection_covers(350.0, 150.0) && session.selection_covers(100.0, 150.0));
+        // A box across the hole and the page's edge: added, taken, kept.
+        pick(&mut session, 350.0, 100.0, 100.0, 50.0, "union").unwrap();
+        assert!(
+            session.selection_covers(370.0, 120.0),
+            "the hole grows smaller"
+        );
+        assert!(
+            !session.selection_covers(350.0, 200.0),
+            "and the rest of it stays"
+        );
+        // The kept region over its own inverse.
+        session.pick_inverse().unwrap();
+        session.pick_inverse().unwrap();
+        let kept = session.document().regions().len() - 1;
+        session.pick_kept(kept, "intersect").unwrap();
+        assert!(
+            !session.selection_covers(350.0, 200.0),
+            "kept where both are: nothing of the box"
+        );
+        // Only touching an edge an earlier combine nudged: nothing left.
+        pick(&mut session, 50.0, 50.0, 100.0, 100.0, "replace").unwrap();
+        pick(&mut session, 100.0, 50.0, 100.0, 70.0, "intersect").unwrap();
+        assert!(session.selection_covers(120.0, 80.0));
+        pick(&mut session, 0.0, 0.0, 100.0, 100.0, "intersect").unwrap();
+        assert!(!session.selection_covers(120.0, 80.0) && !session.selection_covers(99.0, 80.0));
     }
 
     /// A step taken back is gone: not undone into the redo list, where

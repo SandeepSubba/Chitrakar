@@ -33,8 +33,10 @@ without reading anything else.*
      found every fix holding and six small things (two the eighth's
      own), all fixed. The tenth found three, all in one corner — boxes
      combined over regions made of boxes — and Alt-measure, fixed. The
-     rounds have gone from twenty-odd bugs to three, none losing work
-     since the seventh. ⬜ until a pass finds nothing.
+     eleventh found the same corner again, and it is closed by falling
+     back on the page's pixels rather than by one more special case. The
+     rounds have gone from twenty-odd bugs to two, none losing work since
+     the seventh. ⬜ until a pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11215,6 +11217,22 @@ without reading anything else.*
   away); and Alt-measure from a layer and its own frame both picked
   measured nothing. Names are cut by the characters a person sees, so
   an emoji keeps its skin tone.
+  **An eleventh audit (November 2026).** Round ten's fixes held — about
+  2,400 random sequences of boxes added, taken and kept, checked cell by
+  cell and undone and redone, came out right — but the selection's
+  booleans still had a family of inputs a person makes easily: a region
+  turned inside out past the page's edge, then combined, alerted or
+  answered with a guess, one of the tenth round's shortcuts among them
+  (kept-where-both-are gave back the box). Rather than another special
+  case, the shortcuts are gone: where two regions' outlines cannot be
+  traced together, they are combined from the page's own pixels, one
+  pixel at a time, into a picture mask of the region (`combined_by_pixels`)
+  — always the right region, and still a region to combine again. A box
+  only touching an edge an earlier combine nudged is asked whether it
+  leaves nothing as given, not only moved. Alt-measure looks only to
+  frames above the highest picked one; a name cut short does not end on
+  a dot. The sweep — a poster and a photograph made, exported, saved and
+  opened again — threw nothing and came back identical.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

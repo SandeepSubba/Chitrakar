@@ -63,6 +63,8 @@ const wide = fileSafe(`${"漢".repeat(110)}@2x.png`);
 check(new TextEncoder().encode(wide).length <= 240 && wide.endsWith("@2x.png"), `cut by its bytes (${new TextEncoder().encode(wide).length})`);
 const thumbs = fileSafe(`${"👍🏽".repeat(130)}.png`);
 check(graphemes(thumbs.slice(0, -4)).every((g) => g === "👍🏽"), "a cut never splits a skin tone from its thumb");
+const dotted = fileSafe(`${"a".repeat(119)}. more words here`);
+check(!dotted.endsWith(".") && !dotted.endsWith(" "), `a cut name does not end on a dot (${dotted.slice(-6)})`);
 const edge = fileSafe(`untitled-${"r".repeat(300)}-1000.jpg`);
 check(edge.endsWith("-1000.jpg"), `a long edge's size is kept (${edge.slice(-12)})`);
 const long = fileSafe(`untitled-${"r".repeat(300)}@2x.png`);

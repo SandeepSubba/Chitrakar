@@ -269,23 +269,12 @@ pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>>
         }
     }
     let Some(rings) = found else {
-        // Still nothing traced: one wholly within the other — the same
-        // box over a region made of it — is answered by what it means.
-        // Wholly: its corners in or on the other, and none of the other's
-        // corners inside it, which a hole or a bite in the other would be.
-        let slack = 2.0 * NUDGE;
-        let inside_of = |inner: &[Ring], outer: &[Ring]| contains(outer, inner, slack);
-        match op {
-            BoolOp::Union if inside_of(b, a) => return Some(a.to_vec()),
-            BoolOp::Union if inside_of(a, b) => return Some(b.to_vec()),
-            BoolOp::Intersect if inside_of(a, b) => return Some(a.to_vec()),
-            BoolOp::Intersect if inside_of(b, a) => return Some(b.to_vec()),
-            BoolOp::Subtract if inside_of(a, b) => return Some(Vec::new()),
-            _ => {}
-        }
-        // Two that only touched, moved apart: an intersection of nothing,
-        // or all of the first taken away. Said as what it is.
-        return leaves_nothing(a, &moved_by(NUDGE, NUDGE), op).then(Vec::new);
+        // Two that only touched, as given or moved apart: an intersection
+        // of nothing, or all of the first taken away. Said as what it is.
+        // Anything else is not traced here: a caller with pixels to hand
+        // (a selection) combines them instead.
+        let nothing = leaves_nothing(a, b, op) || leaves_nothing(a, &moved_by(NUDGE, NUDGE), op);
+        return nothing.then(Vec::new);
     };
     // Thinner on average than two nudges: area against perimeter is half
     // the thickness of a long thin ring.
@@ -300,63 +289,6 @@ pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>>
         twice.abs() / 2.0 >= NUDGE * around
     };
     Some(rings.into_iter().filter(thick).collect())
-}
-
-/// Whether `outer` holds all of `inner`: every corner of `inner` in or
-/// on `outer`, and no corner of `outer` strictly inside `inner` — which
-/// a hole or a notch in `outer` under `inner` would put there.
-fn contains(outer: &[Ring], inner: &[Ring], slack: f32) -> bool {
-    within(inner, outer, slack)
-        && !outer
-            .iter()
-            .flatten()
-            .any(|&p| strictly_inside(p, inner) && !near_edge(p, inner, slack))
-}
-
-fn near_edge(p: [f32; 2], rings: &[Ring], slack: f32) -> bool {
-    rings.iter().any(|ring| {
-        let n = ring.len();
-        (0..n).any(|i| {
-            let (a, b) = (ring[i], ring[(i + 1) % n]);
-            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            let len2 = dx * dx + dy * dy;
-            let t = if len2 > 0.0 {
-                (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let (cx, cy) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
-            cx * cx + cy * cy <= slack * slack
-        })
-    })
-}
-
-/// Even-odd: whether a point is inside the rings.
-fn strictly_inside(p: [f32; 2], rings: &[Ring]) -> bool {
-    let mut odd = false;
-    for ring in rings {
-        let n = ring.len();
-        for i in 0..n {
-            let (a, b) = (ring[i], ring[(i + 1) % n]);
-            if (a[1] > p[1]) != (b[1] > p[1])
-                && p[0] < a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0])
-            {
-                odd = !odd;
-            }
-        }
-    }
-    odd
-}
-
-/// Whether every corner of `inner` lies inside `outer` (even-odd) or
-/// within `slack` of one of its edges.
-fn within(inner: &[Ring], outer: &[Ring], slack: f32) -> bool {
-    !inner.is_empty()
-        && !outer.is_empty()
-        && inner
-            .iter()
-            .flatten()
-            .all(|&p| strictly_inside(p, outer) || near_edge(p, outer, slack))
 }
 
 /// Combine two sets of rings. Returns the result as rings, or `None` when
@@ -543,29 +475,6 @@ mod tests {
 
     fn square(x: f32, y: f32, s: f32) -> Ring {
         vec![[x, y], [x + s, y], [x + s, y + s], [x, y + s]]
-    }
-
-    /// The same box added to a region twice — the second time over the
-    /// first's own nudged edges — is the region, not an alert that their
-    /// edges overlap exactly.
-    #[test]
-    fn the_same_box_added_again_is_the_region() {
-        let a = vec![square(0.0, 0.0, 10.0)];
-        let once = combine_or_nudge(&a, &a, BoolOp::Union).expect("added once");
-        let twice = combine_or_nudge(&once, &a, BoolOp::Union).expect("and again");
-        // Sampled on the same grid as the region added once.
-        let area = covered_area(&once);
-        assert!(
-            (covered_area(&twice) - area).abs() < 1.0,
-            "{} of {area}",
-            covered_area(&twice)
-        );
-        let kept = combine_or_nudge(&once, &a, BoolOp::Intersect).expect("kept where both are");
-        assert!(
-            (covered_area(&kept) - area).abs() < 6.0,
-            "{} of {area}",
-            covered_area(&kept)
-        );
     }
 
     /// How much the rings actually cover, measured the way the renderer

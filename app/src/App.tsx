@@ -5417,20 +5417,25 @@ export function App() {
       // not by what is under its middle, which a locked frame or a layer
       // laid over it answered with nothing, and the page was measured to.
       const byId = new Map(layers.map((l) => [l.id as NodeId, l]));
+      const chain: NodeId[] = [];
       let up = byId.get(selectionSet[0])?.parent as NodeId | undefined;
       for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
         const layer = byId.get(up);
         if (!layer) break;
-        // A frame picked along with what is in it is part of what is
-        // measured, not what it is measured to.
-        if (layer.kind === "artboard" && !selectionSet.includes(up)) {
-          to = boxOf(session.bounds_of(up));
-          break;
-        }
+        chain.push(up);
         const next = layer.parent as NodeId | undefined;
         if (next === up) break;
         up = next;
       }
+      // A frame picked along with what is in it — or one holding such a
+      // frame — is part of what is measured, not what it is measured to:
+      // only frames above the highest picked one count.
+      let from = 0;
+      chain.forEach((id, i) => {
+        if (selectionSet.includes(id)) from = i + 1;
+      });
+      const frame = chain.slice(from).find((id) => byId.get(id)?.kind === "artboard");
+      if (frame !== undefined) to = boxOf(session.bounds_of(frame));
     }
     to = to ?? [0, 0, docSize[0], docSize[1]];
     setMeasures({ gaps: gapsBetween(a, to), to });
