@@ -54,7 +54,10 @@ without reading anything else.*
      not quiet: twenty-four findings, two of them losing work (a reload
      writing an empty page over the crash draft it offered; one tab's
      preferences written over another's), all fixed or, for two, said
-     plainly as limits. ⬜ until a broad pass finds nothing.
+     plainly as limits. The eighteenth, over the seventeenth's fixes,
+     found nine more — one losing work (a file that failed to open
+     wrote the empty page over the offered draft) and the rest edges
+     the fixes missed — all fixed. ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11379,6 +11382,29 @@ without reading anything else.*
   installed editor offline could open no PDF or raw file it had not
   opened online — the readers are fetched into the cache once the
   editor is quiet, and a reader that cannot be fetched is said in words.
+  **An eighteenth audit, of the seventeenth's fixes (November 2026).**
+  Two auditors over the same fixes found nine things, every one at the
+  edge of a fix: a file that could not be opened, opened without
+  answering the draft bar, wrote the empty page over the draft (the
+  page a foreign file is opened onto is not something done until the
+  file lands); a stroke or a shape went to the frame its box's corner
+  was in rather than the one it was begun in (`placeAt` asks where the
+  drawing started); a radial gradient mask carried out of a turned group
+  came out a sliver — an upright ellipse turned as two points — and the
+  same carry served a layer dragged between groups (each radius is now
+  stretched as its own axis is, so a circle comes through any turn
+  whole); a paste with nothing copied said another tab had copied;
+  a path in a locked group still had its anchors dragged; an SVG naming
+  a font collection of four billion fonts stopped the engine, a comment
+  holding `url(` hid a number past any drawing from the check, and a
+  quoted data address did not load its face (one strict reader of
+  `url(data:…)` now serves both, and a face's table directory has to fit
+  in it); a drag or a slider while Straighten or Feather was open was
+  folded into their preview, and Cancel took both back (the window's
+  gesture is marked as held, `preview_held`, and any other preview lets
+  it go); and a whole-page export, unlike a part of one, was drawn with
+  no room past the page's edge, so a softened edge crossing it came out
+  unlike the screen.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

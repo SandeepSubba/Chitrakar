@@ -21754,11 +21754,29 @@ assert(
   await c.waitForTimeout(300);
   const kept = await c.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).nudge);
   assert(kept === 7, `another tab's preference stands after this one changes its own (${kept})`);
+  // A tab that has copied nothing pastes nothing and says nothing — with
+  // the system's clipboard emptied, which earlier blocks leave a picture
+  // on, and a picture there is pasted, rightly.
+  await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: "http://localhost:8123" });
+  await c.evaluate(() => navigator.clipboard.writeText(""));
+  let early = "";
+  c.removeAllListeners("dialog");
+  c.on("dialog", (d) => {
+    early = d.message();
+    d.accept();
+  });
+  await c.keyboard.press("Control+v");
+  await c.waitForTimeout(300);
+  assert(early === "", `a paste with nothing copied here says nothing (${early})`);
+  c.removeAllListeners("dialog");
+  c.on("dialog", (d) => d.accept());
   // A paste where another tab copied since says so, rather than pasting
   // this tab's old copy.
   await drawRect(c, 100, 100, 160, 160);
+  await c.click(".panel ul li .layer-name >> nth=0");
+  await c.waitForTimeout(300);
   await c.keyboard.press("Control+c");
-  await c.waitForTimeout(200);
+  await c.waitForTimeout(300);
   await b.bringToFront();
   await b.click(".panel ul li .layer-name >> nth=0");
   await b.waitForTimeout(300);
@@ -21817,6 +21835,44 @@ assert(
   assert(
     turnedW !== wasW && stillOpen === 0 && Math.abs(nowW - wasW) < 1,
     `an edit beside Straighten lets its preview go (${wasW} → ${turnedW} → ${nowW}, open ${stillOpen})`,
+  );
+  // A drag with the Move tool beside it lets it go as well, rather than
+  // being folded into the turn.
+  await c.click('.menu-label:text-is("Page")');
+  await c.waitForTimeout(100);
+  await c.locator(".menu-pop .menu-item", { hasText: "Straighten" }).first().click();
+  await c.waitForTimeout(300);
+  await c.locator('input[aria-label="Straighten degrees"]').fill("10");
+  await c.locator('input[aria-label="Straighten degrees"]').press("Tab");
+  await c.waitForTimeout(400);
+  await c.click('.toolbar > button[aria-label="Move"], .tool-group > button[aria-label="Move"]');
+  // From the middle of a layer on the page, wherever the turn has put it.
+  const onPage = await c.locator("#engine-page").boundingBox();
+  let [mx, my] = [-1, -1];
+  for (let row = 0; row < (await names(c)).length && mx < 0; row++) {
+    await c.click(`.panel ul li .layer-name >> nth=${row}`);
+    await c.waitForTimeout(250);
+    const box = await c.locator(".sel-outline polygon").first().boundingBox();
+    const [cx, cy] = [box.x + box.width / 2, box.y + box.height / 2];
+    const inside = cx > onPage.x + 5 && cy > onPage.y + 5 && cx < onPage.x + onPage.width - 5 && cy < onPage.y + onPage.height - 5;
+    // And on the canvas as it is shown, not under the bar or a panel.
+    const seen = await c.evaluate(([x, y]) => {
+      const host = document.getElementById("engine-canvas")?.parentElement;
+      const at = document.elementFromPoint(x, y);
+      return !!host && !!at && host.contains(at);
+    }, [cx, cy]);
+    if (inside && seen) [mx, my] = [cx, cy];
+  }
+  await c.mouse.move(mx, my);
+  await c.mouse.down();
+  await c.mouse.move(mx + 30, my + 10, { steps: 4 });
+  await c.mouse.up();
+  await c.waitForTimeout(400);
+  const panels = await c.locator('[role="dialog"][aria-label="Straighten"]').count();
+  const widthNow = await pageW();
+  assert(
+    panels === 0 && Math.abs(widthNow - wasW) < 1,
+    `a drag beside Straighten lets its preview go (open ${panels}, ${wasW} → ${widthNow}, from ${mx},${my})`,
   );
   // Enter in New document's Width makes the document.
   await c.keyboard.press("Escape");

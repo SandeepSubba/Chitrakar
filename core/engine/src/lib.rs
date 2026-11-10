@@ -714,10 +714,11 @@ pub struct Session {
     /// What it would take to restore the state before the current preview
     /// gesture, with the label captured from the gesture's first command.
     preview_gesture: Option<Gesture>,
-    /// Whether the preview is a window's that stays open beside the rest
-    /// of the editor (Straighten, Feather): another edit lets it go
+    /// Whether the gesture in progress is a window's that stays open
+    /// beside the rest of the editor (Straighten, Feather), begun by
+    /// `preview_held`: another edit, or another preview, lets it go
     /// rather than keeping it, and says so (`take_dropped_preview`).
-    holding_preview: bool,
+    held_gesture: bool,
     /// A held preview let go of by another edit, not yet told.
     dropped_preview: bool,
     /// The stroke a brush is in the middle of drawing: which layer it is
@@ -849,7 +850,7 @@ impl Session {
             view_origin: (0.0, 0.0),
             viewport: None,
             preview_gesture: None,
-            holding_preview: false,
+            held_gesture: false,
             dropped_preview: false,
             painting: None,
             pixels_recomputed: 0,
@@ -1529,6 +1530,32 @@ impl Session {
     /// [`commit_preview`](Self::commit_preview); the first preview of a
     /// gesture captures the inverse that undoes the whole gesture.
     pub fn preview(&mut self, cmd: Command) -> Result<(), EngineError> {
+        // A drag or a slider begun while a window's preview stands lets
+        // that preview go: folded into it, a page moved beside Straighten
+        // became part of the turn, and its Cancel took both back.
+        if self.held_gesture && self.preview_gesture.is_some() && self.cancel_preview().is_ok() {
+            self.dropped_preview = true;
+        }
+        self.preview_into_gesture(cmd)
+    }
+
+    /// A preview that is a window's, held open beside the editor: what
+    /// it previews stays one gesture across the window's own changes, and
+    /// anything else done meanwhile lets it go (`settle_stray_preview`).
+    pub fn preview_held(&mut self, cmd: Command) -> Result<(), EngineError> {
+        if !self.held_gesture && self.preview_gesture.is_some() {
+            self.commit_preview();
+        }
+        self.preview_into_gesture(cmd)?;
+        self.held_gesture = true;
+        Ok(())
+    }
+
+    pub fn preview_held_json(&mut self, json: &str) -> Result<(), EngineError> {
+        self.preview_held(parse_command(json)?)
+    }
+
+    fn preview_into_gesture(&mut self, cmd: Command) -> Result<(), EngineError> {
         let label = self.describe(&cmd);
         let slots = slots_of(&cmd);
         let inverse = self.apply_internal(cmd)?;
@@ -1562,6 +1589,7 @@ impl Session {
     /// preview was active.
     pub fn commit_preview(&mut self) -> bool {
         self.painting = None;
+        self.held_gesture = false;
         match self.preview_gesture.take() {
             Some(gesture) => {
                 let label = gesture.label.clone();
@@ -1651,20 +1679,13 @@ impl Session {
     /// Straighten turned stayed turned after its Cancel, and applying it
     /// again turned it twice.
     fn settle_stray_preview(&mut self) {
-        if self.holding_preview && self.preview_gesture.is_some() {
+        if self.held_gesture && self.preview_gesture.is_some() {
             if self.cancel_preview().is_ok() {
                 self.dropped_preview = true;
             }
         } else {
             self.commit_preview();
         }
-    }
-
-    /// Whether the previews to come are a window's held open beside the
-    /// editor (see `settle_stray_preview`).
-    pub fn hold_preview(&mut self, on: bool) {
-        self.holding_preview = on;
-        self.dropped_preview = false;
     }
 
     /// Whether another edit let a held preview go since this was last
@@ -1677,6 +1698,7 @@ impl Session {
     /// no preview was active.
     pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
         self.painting = None;
+        self.held_gesture = false;
         match self.preview_gesture.take() {
             Some(gesture) => {
                 self.apply_internal(gesture.undoing())?;
@@ -9949,6 +9971,38 @@ impl Session {
         region: Option<[f32; 4]>,
     ) -> Result<Surface, EngineError> {
         let scale = scale.clamp(MIN_EXPORT_SCALE, 16.0);
+        let mut surface = self.drawn_with_room(scale, region)?;
+        let (pw, ph) = (surface.width, surface.height);
+        let full = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: pw,
+            y1: ph,
+        };
+        if self.output_sharpen > 0.0 {
+            // At the size it goes out at, a pixel's width: the edges a
+            // smaller copy softened, and no halo a screen would show.
+            let original = chitrakar_render::blur::snapshot(&surface, full);
+            chitrakar_render::blur::gaussian_blur(
+                &mut surface,
+                full,
+                OUTPUT_SHARPEN_SIGMA,
+                chitrakar_render::blur::Beyond::Edge,
+            );
+            for (px, o) in surface.pixels.iter_mut().zip(original) {
+                *px = chitrakar_render::sharpened(o, *px, self.output_sharpen);
+            }
+        }
+        Ok(surface)
+    }
+
+    /// The page, or `region` of it, at `scale`, drawn as the canvas draws
+    /// its window: with room past each side, then cut back.
+    fn drawn_with_room(
+        &self,
+        scale: f32,
+        region: Option<[f32; 4]>,
+    ) -> Result<Surface, EngineError> {
         let [x, y, w, h] = region.unwrap_or([
             0.0,
             0.0,
@@ -9973,12 +10027,13 @@ impl Session {
                 "an export of {pw}x{ph} is larger than can be made"
             )));
         }
-        // A part of the page is drawn as the canvas draws its window: with
-        // room past each side for whatever inside reads across it — a
-        // filter, an effect, a feathered edge — and then cut back. Drawn
-        // only to its own edge, a softened mask the border crossed came out
-        // hard all along it, the file unlike the screen.
-        let past = if region.is_some() {
+        // Drawn as the canvas draws its window: with room past each side
+        // for whatever inside reads across it — a filter, an effect, a
+        // feathered edge — and then cut back. Drawn only to its own edge,
+        // a softened mask the border crossed came out hard all along it,
+        // the file unlike the screen — a part of the page along its
+        // border, and the whole page along the page's edge.
+        let past = {
             let filters = chitrakar_render::filter_reach(&self.doc) as f32 * scale;
             let effects = chitrakar_render::effects_reach(&self.doc) * scale * 2.0;
             let softening = chitrakar_render::softening_reach(&self.doc) * scale;
@@ -9988,8 +10043,6 @@ impl Session {
             } else {
                 0
             }
-        } else {
-            0
         };
         let (sw, sh) = (pw.saturating_add(2 * past), ph.saturating_add(2 * past));
         let past = if chitrakar_doc::canvas_fits(sw, sh) {
@@ -10024,26 +10077,6 @@ impl Session {
                     .copy_from_slice(&surface.pixels[from..from + pw as usize]);
             }
             surface = cut;
-        }
-        let full = ClipRect {
-            x0: 0,
-            y0: 0,
-            x1: pw,
-            y1: ph,
-        };
-        if self.output_sharpen > 0.0 {
-            // At the size it goes out at, a pixel's width: the edges a
-            // smaller copy softened, and no halo a screen would show.
-            let original = chitrakar_render::blur::snapshot(&surface, full);
-            chitrakar_render::blur::gaussian_blur(
-                &mut surface,
-                full,
-                OUTPUT_SHARPEN_SIGMA,
-                chitrakar_render::blur::Beyond::Edge,
-            );
-            for (px, o) in surface.pixels.iter_mut().zip(original) {
-                *px = chitrakar_render::sharpened(o, *px, self.output_sharpen);
-            }
         }
         Ok(surface)
     }
@@ -21954,7 +21987,9 @@ mod tests {
             // wrong order, an alpha composited against the wrong colour or
             // not composited at all, a picture written at the wrong size —
             // every one of those is a file of the proper length.
-            let page = session.render().unwrap();
+            // The page as the canvas and every export draw it, with room
+            // past its edge for whatever reaches across.
+            let page = session.drawn_with_room(1.0, None).unwrap();
             let png = chitrakar_codecs::decode(&session.render_png_at(1.0, None).unwrap())
                 .unwrap_or_else(|e| panic!("the PNG written after {what} reads back: {e}"));
             assert_eq!(
@@ -23346,6 +23381,22 @@ mod tests {
                 },
             })
             .unwrap();
+        // A soft circle masking it, which a turn must leave a circle.
+        session
+            .apply(Command::SetMask {
+                id: a,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Gradient {
+                        radial: true,
+                        from: [80.0, 50.0],
+                        to: [120.0, 90.0],
+                    },
+                    invert: false,
+                    feather: 0.0,
+                })),
+            })
+            .unwrap();
+        let drawn = session.render().unwrap().to_srgb8();
         let was = session.bounds_of(a).unwrap();
         session.copy_nodes(&[a]).unwrap();
         let pasted = session.paste(None).unwrap();
@@ -23364,6 +23415,16 @@ mod tests {
         for (p, q) in there.iter().zip(&was) {
             assert!((p - q).abs() < 0.01, "cut: {there:?} against {was:?}");
         }
+        let again = session.render().unwrap().to_srgb8();
+        let differ = drawn
+            .chunks(4)
+            .zip(again.chunks(4))
+            .filter(|(p, q)| p.iter().zip(q.iter()).any(|(a, b)| a.abs_diff(*b) > 2))
+            .count();
+        assert!(
+            differ < 40,
+            "cut and pasted, its soft circle the same: {differ} pixels differ"
+        );
     }
 
     /// A locked path's anchors are as held as the rest of it: none goes
@@ -23454,25 +23515,17 @@ mod tests {
         let mut session = Session::new(100, 100, ColorMode::Rgb);
         let a = add_rect(&mut session, "a", 20.0, 20.0);
         let b = add_rect(&mut session, "b", 20.0, 20.0);
+        let op = |id, opacity| Command::SetOpacity { id, opacity };
+        let opacity = |s: &Session, id| s.document().node(id).unwrap().opacity;
         let steps = session.history_labels().0.len();
-        session.hold_preview(true);
-        session
-            .preview(Command::SetOpacity {
-                id: a,
-                opacity: 0.25,
-            })
-            .unwrap();
+        session.preview_held(op(a, 0.25)).unwrap();
         session
             .apply(Command::SetVisible {
                 id: b,
                 visible: false,
             })
             .unwrap();
-        assert_eq!(
-            session.document().node(a).unwrap().opacity,
-            1.0,
-            "the preview went"
-        );
+        assert_eq!(opacity(&session, a), 1.0, "the preview went");
         assert!(
             !session.document().node(b).unwrap().visible,
             "the edit stood"
@@ -23484,22 +23537,38 @@ mod tests {
         );
         assert!(session.take_dropped_preview(), "and the window is told");
         assert!(!session.take_dropped_preview(), "once");
+        // A drag begun meanwhile lets it go too, and is a gesture of its
+        // own, not folded into the window's.
+        session.preview_held(op(a, 0.25)).unwrap();
+        session.preview(op(b, 0.5)).unwrap();
+        assert_eq!(opacity(&session, a), 1.0, "the window's went");
+        assert!(session.take_dropped_preview());
+        assert!(session.commit_preview());
+        assert_eq!(opacity(&session, b), 0.5);
+        session.undo().unwrap();
+        assert_eq!(opacity(&session, b), 1.0, "the drag undoes alone");
+        assert_eq!(opacity(&session, a), 1.0);
+        session.redo().unwrap();
+        // The window's own changes stay one gesture.
+        let before = session.history_labels().0.len();
+        session.preview_held(op(a, 0.5)).unwrap();
+        session.preview_held(op(a, 0.3)).unwrap();
+        assert!(!session.take_dropped_preview());
+        assert!(session.commit_preview());
+        assert_eq!(session.history_labels().0.len(), before + 1, "one step");
+        session.undo().unwrap();
+        assert_eq!(opacity(&session, a), 1.0);
         // Not held, a stray preview is kept as its own step, as before.
-        session.hold_preview(false);
-        session
-            .preview(Command::SetOpacity {
-                id: a,
-                opacity: 0.25,
-            })
-            .unwrap();
+        let before = session.history_labels().0.len();
+        session.preview(op(a, 0.25)).unwrap();
         session
             .apply(Command::SetVisible {
                 id: b,
                 visible: true,
             })
             .unwrap();
-        assert_eq!(session.document().node(a).unwrap().opacity, 0.25);
-        assert_eq!(session.history_labels().0.len(), steps + 3);
+        assert_eq!(opacity(&session, a), 0.25);
+        assert_eq!(session.history_labels().0.len(), before + 2);
     }
 
     /// A face only a kept style sets text in travels with the file, as
@@ -23582,6 +23651,34 @@ mod tests {
                     "at {},{}: {p:?} in the part, {q:?} on the page",
                     x + x0,
                     y + y0
+                );
+            }
+        }
+        // And the whole page along the page's own edge, where a softened
+        // mask crosses it: as the canvas shows it, and the eyedropper.
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Ellipse { rx: 80.0, ry: 60.0 },
+                        transform: Transform::translation(70.0, 140.0),
+                    },
+                    invert: false,
+                    feather: 20.0,
+                })),
+            })
+            .unwrap();
+        let page = session.render_scaled(1.0, None).unwrap();
+        for x in [100u32, 150, 200] {
+            for y in [190u32, 199] {
+                let (p, q) = (
+                    page.get(x, y).to_srgb8(),
+                    session.color_at(x as f32 + 0.5, y as f32 + 0.5).unwrap(),
+                );
+                assert!(
+                    p.iter().zip(&q).all(|(a, b)| a.abs_diff(*b) <= 1),
+                    "at {x},{y}: {p:?} exported, {q:?} picked"
                 );
             }
         }

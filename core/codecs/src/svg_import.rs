@@ -401,33 +401,74 @@ const IMAGE_SHAPE_MOST: f64 = 1e6;
 /// not a number at all — an id, a class, a link, a colour written in
 /// hex, a picture's own data, and the attributes other programs keep
 /// for themselves.
-/// A style sheet with what is inside each `url(…)` left out: a font or a
-/// picture carried in a data address is base64, whose `/40E9` read as a
-/// number past anything a drawing holds — and this editor's own SVGs
-/// carry their fonts that way, so one in three with bold words in it was
+/// Each data address in `text` written as `url(data:…)` — quoted or not
+/// — as where it stands (`url(` to its `)`), its head (`font/ttf;base64`)
+/// and its payload. Only a real one: a head of a type and parameters, a
+/// payload of base64 or percent-escapes and nothing else. Anything looser
+/// let `/* url( */ … /* ) */` hide a number past any drawing from the
+/// check, the comment's own `)` taken as the address's end.
+fn data_urls(text: &str) -> Vec<(std::ops::Range<usize>, &str, &str)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(found) = text[from..].find("url(") {
+        let at = from + found;
+        from = at + 4;
+        let rest = &text[at + 4..];
+        let Some(close) = rest.find(')') else {
+            break;
+        };
+        let inner = rest[..close].trim();
+        let inner = inner
+            .strip_prefix('"')
+            .and_then(|i| i.strip_suffix('"'))
+            .or_else(|| inner.strip_prefix('\'').and_then(|i| i.strip_suffix('\'')))
+            .unwrap_or(inner);
+        let Some(address) = inner.strip_prefix("data:") else {
+            continue;
+        };
+        let Some(comma) = address.find(',') else {
+            continue;
+        };
+        let (head, payload) = (&address[..comma], &address[comma + 1..]);
+        let head_ok = head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/;=+-._".contains(c));
+        let payload_ok = payload
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+/=%-_".contains(c) || c.is_ascii_whitespace());
+        if head_ok && payload_ok {
+            out.push((at..at + 4 + close + 1, head, payload));
+            from = at + 4 + close + 1;
+        }
+    }
+    out
+}
+
+/// A style sheet with each data address in it left out: a font or a
+/// picture carried that way is base64, whose `/40E9` read as a number
+/// past anything a drawing holds — and this editor's own SVGs carry
+/// their fonts that way, so one in three with bold words in it was
 /// refused when opened again.
 fn without_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("url(") {
-        out.push_str(&rest[..at]);
+    let mut kept = 0;
+    for (span, _, _) in data_urls(text) {
+        out.push_str(&text[kept..span.start]);
         out.push_str("url()");
-        let after = &rest[at + 4..];
-        match after.find(')') {
-            Some(end) => rest = &after[end + 1..],
-            None => {
-                rest = "";
-            }
-        }
+        kept = span.end;
     }
-    out.push_str(rest);
+    out.push_str(&text[kept..]);
     out
 }
 
 /// The font files a drawing carries in data addresses — `@font-face`
-/// sources in its style sheets — that are TrueType or OpenType, which is
-/// what the reader's font list can take; a WOFF or anything else is passed
-/// over. Held to a total, as everything a file asks for is.
+/// sources in its style sheets, quoted or not — that are TrueType or
+/// OpenType with a table directory that fits in the file, which is what
+/// the reader's font list can take; a collection, a WOFF or anything else
+/// is passed over. A collection claiming four billion fonts in twelve
+/// bytes was handed to the font list, which asked for room for them all
+/// and stopped the engine. Held to a total, as everything a file asks
+/// for is.
 fn carried_faces(data: &[u8]) -> Vec<Vec<u8>> {
     const MOST: usize = 32 << 20;
     let Ok(text) = std::str::from_utf8(data) else {
@@ -435,27 +476,22 @@ fn carried_faces(data: &[u8]) -> Vec<Vec<u8>> {
     };
     let mut out = Vec::new();
     let mut total = 0usize;
-    let mut rest = text;
-    while let Some(at) = rest.find("url(data:") {
-        let after = &rest[at + 9..];
-        let end = after.find(')').unwrap_or(after.len());
-        let address = after[..end].trim_matches(|c| c == '"' || c == '\'' || c == ' ');
-        rest = &after[end..];
-        let Some(comma) = address.find(',') else {
-            continue;
-        };
-        let (head, body) = (&address[..comma], &address[comma + 1..]);
+    for (_, head, payload) in data_urls(text) {
         if !head.ends_with(";base64") || !(head.contains("font") || head.contains("opentype")) {
             continue;
         }
-        let Some(bytes) = unbase64(body) else {
+        let Some(bytes) = unbase64(payload) else {
             continue;
         };
-        let face = bytes.starts_with(&[0, 1, 0, 0])
-            || bytes.starts_with(b"OTTO")
-            || bytes.starts_with(b"true")
-            || bytes.starts_with(b"ttcf");
-        if face && total + bytes.len() <= MOST {
+        let single = matches!(
+            bytes.get(..4),
+            Some([0, 1, 0, 0]) | Some(b"OTTO") | Some(b"true")
+        );
+        let tables = bytes
+            .get(4..6)
+            .map(|n| u16::from_be_bytes([n[0], n[1]]) as usize);
+        let fits = tables.is_some_and(|n| n > 0 && 12 + 16 * n <= bytes.len());
+        if single && fits && total + bytes.len() <= MOST {
             total += bytes.len();
             out.push(bytes);
         }
@@ -4363,6 +4399,28 @@ mod tests {
             carried > regular * 1.08,
             "set in the bold the file carries: {carried} against {regular} without it"
         );
+        // Quoted, as other programs write it, the same.
+        let quoted = wide(&format!(
+            r#"@font-face{{font-family:"DejaVu Sans";font-weight:bold;src:url("data:font/ttf;base64,{}") format("truetype")}}"#,
+            crate::svg::base64_for_tests(bold)
+        ));
+        assert!(
+            (quoted - carried).abs() < 0.5,
+            "quoted: {quoted} against {carried}"
+        );
+        // A collection claiming four billion fonts in twelve bytes, or a
+        // face whose tables do not fit, is passed over, not handed on.
+        for bytes in [
+            &b"ttcf\x00\x01\x00\x00\xff\xff\xff\xff"[..],
+            &b"\x00\x01\x00\x00\xff\xff\x00\x00\x00\x00\x00\x00"[..],
+        ] {
+            let sheet = format!(
+                r#"@font-face{{font-family:X;src:url(data:font/ttf;base64,{})}}"#,
+                crate::svg::base64_for_tests(bytes)
+            );
+            assert!(carried_faces(svg(&sheet).as_bytes()).is_empty());
+            assert!(import_svg(svg(&sheet).as_bytes()).is_ok());
+        }
         // Base64 as written, broken over lines and padded.
         assert_eq!(unbase64("SGVs\nbG8=").unwrap(), b"Hello");
         assert!(unbase64("not*base64").is_none());
@@ -5651,6 +5709,10 @@ mod tests {
         assert!(
             import_svg(sheet("rect{stroke-width:1e30}").as_bytes()).is_err(),
             "a number past any drawing in the sheet does not"
+        );
+        assert!(
+            import_svg(sheet("/* url( */ rect{stroke-width:1e30} /* ) */").as_bytes()).is_err(),
+            "nor one hidden between a comment's url( and another's )"
         );
     }
 

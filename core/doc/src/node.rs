@@ -2253,11 +2253,27 @@ impl Mask {
             // Both ends are points in that space. (A radial one's ellipse
             // stays upright: its radii are how far `to` is each way, so a
             // turn carries the size and not the tilt.)
-            MaskKind::Gradient { from, to, .. } => {
+            MaskKind::Gradient { from, to, radial } => {
                 let at =
                     |p: [f32; 2]| [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
-                *from = at(*from);
-                *to = at(*to);
+                if *radial {
+                    // An upright ellipse, its radii how far `to` is each
+                    // way: the middle goes where it is carried, and each
+                    // radius as far as the carry stretches its own axis.
+                    // Turned as a point, a circle's radius fell onto one
+                    // axis and the other came to nothing — a sliver where
+                    // a soft circle had been. A circle comes through any
+                    // turn whole; an ellipse keeps its proportions upright.
+                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                    let rx = (m.a * dx).hypot(m.b * dx);
+                    let ry = (m.c * dy).hypot(m.d * dy);
+                    let middle = at(*from);
+                    *from = middle;
+                    *to = [middle[0] + rx, middle[1] + ry];
+                } else {
+                    *from = at(*from);
+                    *to = at(*to);
+                }
             }
             MaskKind::Painted { strokes } => {
                 let k = m.max_scale();

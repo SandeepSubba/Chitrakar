@@ -692,6 +692,9 @@ async function putDraftNote(key: DraftNote, value: string): Promise<void> {
  * for it there. */
 const COPIED_KEY = "chitrakar:copied-in";
 const THIS_TAB = Math.random().toString(36).slice(2);
+/** Whether this tab has copied layers this visit: only then has it a
+ * copy that another tab's could have made stale. */
+let copiedHere = false;
 
 /** Let a slot's draft go: its records, and — unless the parts are being
  * taken over (a draft restored into this tab, whose next draft writes
@@ -3061,19 +3064,15 @@ export function App() {
     featherWas.current = selectionFeather;
     setFeatherOpen(true);
   };
-  // Straighten and Feather stay open beside the editor with their
-  // preview standing: another edit lets that preview go rather than
-  // keeping it under its own name.
-  useEffect(() => {
-    session?.hold_preview(straightenOpen || featherOpen);
-  }, [session, straightenOpen, featherOpen]);
   const previewFeather = (radius: number) => {
     if (!session) return;
     try {
       const mask = JSON.parse(session.selection_json()) as Mask | null;
       if (!mask) return;
       mask.feather = Math.max(0, radius);
-      session.preview(JSON.stringify({ SetSelection: { selection: mask } }));
+      // Held: the window stays open beside the editor, and anything else
+      // done meanwhile lets this preview go (`preview_held`).
+      session.preview_held(JSON.stringify({ SetSelection: { selection: mask } }));
       refresh(session);
     } catch (err) {
       console.warn("feather preview:", err);
@@ -3392,11 +3391,14 @@ export function App() {
    * well as an offset — so what was drawn upright on the page lands as it
    * was drawn. Carrying the corners alone left a shape in a turned frame
    * a hundred pixels from the drag, a line turned, and a pen curve's
-   * handles pointing the wrong way. Or on the page. */
-  const placeAt = (x: number, y: number) => {
+   * handles pointing the wrong way. Or on the page. Which frame is asked
+   * of `begun`, where the drawing started. */
+  const placeAt = (x: number, y: number, begun: [number, number] = [x, y]) => {
     const onPage = { parent: session?.root_id ?? 0, index: topLevelCount(layers), at: identity(x, y) };
     if (!session) return onPage;
-    const board = session.frame_at(x, y);
+    // The frame it was begun in, which is where the person was drawing:
+    // the corner of its box can be in another frame, or off a turned one.
+    const board = session.frame_at(begun[0], begun[1]);
     if (board < 0) return onPage;
     const o = session.point_inside(board, x, y);
     const u = session.point_inside(board, x + 100, y);
@@ -3435,7 +3437,7 @@ export function App() {
         // into the frame it was drawn in by the frame's whole space.
         const minX = Math.min(...drawn.map((p) => p[0]));
         const minY = Math.min(...drawn.map((p) => p[1]));
-        const place = placeAt(minX, minY);
+        const place = placeAt(minX, minY, drawn[0]);
         const points = drawn.map(
           (p) => [p[0] - minX, p[1] - minY] as [number, number],
         );
@@ -6196,7 +6198,7 @@ export function App() {
       const local = pts;
       const minX = Math.min(...local.map((p) => p[0]));
       const minY = Math.min(...local.map((p) => p[1]));
-      const place = placeAt(minX, minY);
+      const place = placeAt(minX, minY, local[0]);
       shapeCount.current += 1;
       run({
         AddNode: {
@@ -6289,7 +6291,7 @@ export function App() {
     // coordinates, so it lands under the cursor rather than at the
     // frame's offset. Both corners are carried across, so a frame that
     // has been scaled gets a shape the size it was dragged.
-    const place = placeAt(x0, y0);
+    const place = placeAt(x0, y0, [drag.startX, drag.startY]);
     const [lw, lh] = [w, h];
     // A polygon and a star come out as paths rather than as shapes of
     // their own: every anchor is then draggable the moment it is drawn,
@@ -7124,9 +7126,9 @@ export function App() {
       session.cancel_preview();
       if (degrees !== 0) {
         const [w, h] = Array.from(session.straighten_size(degrees));
-        sendPreview(session, {
-          StraightenCanvas: { degrees, width: w, height: h },
-        });
+        session.preview_held(
+          JSON.stringify({ StraightenCanvas: { degrees, width: w, height: h } }),
+        );
       }
       refresh(session);
     } catch (err) {
@@ -7666,6 +7668,7 @@ export function App() {
     });
     // Which tab copied last, for a paste in another to know its own copy
     // is no longer the newest (`pasteClipboard`).
+    copiedHere = true;
     try {
       localStorage.setItem(COPIED_KEY, THIS_TAB);
     } catch {
@@ -7684,7 +7687,9 @@ export function App() {
     } catch {
       copiedIn = null;
     }
-    if (copiedIn !== null && copiedIn !== THIS_TAB) {
+    // A tab that has copied nothing has nothing stale to paste, and
+    // nothing to say: the mark outlives the tab that left it.
+    if (copiedHere && copiedIn !== null && copiedIn !== THIS_TAB) {
       alert(
         "Paste: those layers were copied in another tab, and layers paste only in the tab they were copied in. Save that document and place it here, or copy in this tab.",
       );
@@ -8543,7 +8548,17 @@ export function App() {
    * the knob, so typing an angle turns it where it stands. */
   /** Whether the layer the panel shows is locked: nothing moves it, as
    * nothing nudges, flips or aligns it. */
-  const selectedLocked = () => layers.find((l) => l.id === selected)?.locked === true;
+  const selectedLocked = () => {
+    // Locked itself, or inside a locked group: a group's lock holds what
+    // is in it, and a path in one still had its anchors dragged.
+    let at = layers.find((l) => l.id === selected);
+    for (let depth = 0; at && depth < 256; depth++) {
+      if (at.locked) return true;
+      const up = at.parent;
+      at = layers.find((l) => l.id === up);
+    }
+    return false;
+  };
   const setAngle = (degrees: number) => {
     if (!session || selected === null || !selBounds || selBounds.length !== 4 || selectedLocked()) {
       return;
@@ -10016,7 +10031,12 @@ export function App() {
     openedOver.current = session
       ? { session, name: docName, path: docPath, savedAt, proofing, gamutWarn }
       : null;
+    // The page it is opened onto is not something done until the file
+    // lands on it: a file that could not be read, or a window for it let
+    // go of, wrote that empty page over the draft the bar was offering.
+    const untouched = untouchedStart.current;
     newDocument(false);
+    untouchedStart.current = untouched;
     setDocName(file.name.replace(/\.[a-z0-9]+$/i, "") || "untitled");
   };
 
