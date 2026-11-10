@@ -14929,6 +14929,162 @@ mod tests {
         }
     }
 
+    /// A mask of many edges under a turned, skewed or mirrored map reads
+    /// the same pixels whether the whole page is asked for or a piece of
+    /// it — a region repainted on its own leaves no seam — and agrees with
+    /// a pixel at a time, inside out as well as not; softened, it agrees
+    /// with itself to the blur's last bit.
+    #[test]
+    fn a_turned_path_mask_reads_the_same_by_the_piece() {
+        let points: Vec<[f32; 2]> = (0..900)
+            .map(|i| {
+                let a = i as f32 / 900.0 * std::f32::consts::TAU;
+                let r = 30.0 + 12.0 * (a * 23.0).sin();
+                [40.0 + r * a.cos(), 40.0 + r * a.sin()]
+            })
+            .collect();
+        let doc = chitrakar_doc::Document::new(120, 100, ColorMode::Rgb);
+        let page = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 120,
+            y1: 100,
+        };
+        let (c, s) = (0.5f32.cos(), 0.5f32.sin());
+        let maps = [
+            (
+                "turned",
+                Transform {
+                    a: c,
+                    b: s,
+                    c: -s,
+                    d: c,
+                    e: 50.0,
+                    f: 5.0,
+                },
+            ),
+            (
+                "skewed",
+                Transform {
+                    a: 1.0,
+                    b: 0.0,
+                    c: 0.6,
+                    d: 1.0,
+                    e: 10.0,
+                    f: 10.0,
+                },
+            ),
+            (
+                "leaning",
+                Transform {
+                    a: 1.0,
+                    b: 0.4,
+                    c: 0.0,
+                    d: 1.0,
+                    e: 10.0,
+                    f: 0.0,
+                },
+            ),
+            (
+                "mirrored and turned",
+                Transform {
+                    a: -c,
+                    b: s,
+                    c: s,
+                    d: c,
+                    e: 100.0,
+                    f: 5.0,
+                },
+            ),
+        ];
+        for (name, parent) in maps {
+            for (invert, feather) in [(false, 0.0), (true, 0.0), (false, 3.0), (true, 3.0)] {
+                let mask = chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Path {
+                            points: points.clone(),
+                            closed: true,
+                            smooth: false,
+                            handles: vec![],
+                            subpaths: vec![],
+                        },
+                        transform: Transform::translation(2.0, 3.0),
+                    },
+                    invert,
+                    feather,
+                };
+                let whole = mask_plane_over(&doc, &mask, parent, page, (120, 100));
+                for piece in [
+                    ClipRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: 37,
+                        y1: 41,
+                    },
+                    ClipRect {
+                        x0: 37,
+                        y0: 41,
+                        x1: 120,
+                        y1: 100,
+                    },
+                    ClipRect {
+                        x0: 60,
+                        y0: 13,
+                        x1: 61,
+                        y1: 90,
+                    },
+                ] {
+                    let part = mask_plane_over(&doc, &mask, parent, piece, (120, 100));
+                    let mut k = 0;
+                    for y in piece.y0..piece.y1 {
+                        for x in piece.x0..piece.x1 {
+                            let at = (y * 120 + x) as usize;
+                            // Hard, to the bit. Softened, the blur's sums run over a
+                            // piece grown by its reach rather than the page, which
+                            // moves the last bit — as it does for any softened
+                            // shape, an ellipse as much — and no further.
+                            let (p, q) = (part[k], whole[at]);
+                            let same = if feather > 0.0 {
+                                (p - q).abs() <= 1e-6
+                            } else {
+                                p.to_bits() == q.to_bits()
+                            };
+                            assert!(
+                                same,
+                                "{name}, invert {invert}, feather {feather}: at {x},{y} {p} in a piece, {q} in the whole"
+                            );
+                            k += 1;
+                        }
+                    }
+                }
+                if feather > 0.0 {
+                    continue;
+                }
+                // Against a pixel at a time.
+                let m = MaskRef::new(Some(&mask), parent);
+                let mut differ = 0;
+                for y in 0..100 {
+                    for x in 0..120 {
+                        let one = bare_coverage(m, x, y);
+                        let gap = (whole[(y * 120 + x) as usize] - one).abs();
+                        assert!(
+                            gap <= 0.25,
+                            "{name}, invert {invert}: at {x},{y} {} by rows, {one} by pixels",
+                            whole[(y * 120 + x) as usize]
+                        );
+                        if gap > 0.0 {
+                            differ += 1;
+                        }
+                    }
+                }
+                assert!(
+                    differ <= 40,
+                    "{name}, invert {invert}: {differ} pixels differ"
+                );
+            }
+        }
+    }
+
     /// A stop with no alpha keeps its colour: red to a clear red fades
     /// red, as SVG, PDF and every browser fade it, where it used to mix
     /// through black — a muddy band on the page and in every picture.

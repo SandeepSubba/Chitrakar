@@ -45,8 +45,11 @@ without reading anything else.*
      a region traced back from pixels took minutes to read. The
      fifteenth, over that fix, found the same freeze where it did not
      reach — a mask of many edges turned with its layer's group or
-     its own transform (two minutes a frame) — fixed. None has lost
-     work since the seventh. ⬜ until a pass finds nothing.
+     its own transform (two minutes a frame) — fixed. The sixteenth,
+     over that, found nothing: the first quiet round. It was a narrow
+     one, over a single change, so what closes this item is a broad
+     pass over the whole editor that comes back as quiet. None has lost
+     work since the seventh. ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11301,6 +11304,17 @@ without reading anything else.*
   a pixel comes out the same whatever part of the page is being drawn.
   The one red CI run since was GitHub failing to serve wasm-pack's
   download (a 504 on every Linux job at once); run again, it passed.
+  **A sixteenth audit, of the turned reading: nothing found (November
+  2026).** A mask of many edges under a turned, a skewed, a leaning and
+  a mirrored-and-turned map, hard and inside out and softened, read
+  over the whole page and over pieces of it: hard, every piece is the
+  whole to the bit, so a region repainted on its own leaves no seam,
+  and the whole agrees with a pixel at a time but for a few samples on
+  an edge (`a_turned_path_mask_reads_the_same_by_the_piece`). Softened,
+  a piece and the whole differ in the last bit of a float — the blur's
+  sums run over a piece grown by its reach — which a softened ellipse
+  does just the same, so it is the blur's and as old as it, and a
+  hundred-millionth cannot reach an eight-bit pixel.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot
