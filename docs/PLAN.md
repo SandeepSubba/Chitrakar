@@ -42,8 +42,11 @@ without reading anything else.*
      of thousands of combines (boxes, ellipses and self-crossing lassos,
      inside out or not, on pages up to 2000×1500, every answer read
      against the shapes), found no wrong region and one freeze, fixed:
-     a region traced back from pixels took minutes to read. None has
-     lost work since the seventh. ⬜ until a pass finds nothing.
+     a region traced back from pixels took minutes to read. The
+     fifteenth, over that fix, found the same freeze where it did not
+     reach — a mask of many edges turned with its layer's group or
+     its own transform (two minutes a frame) — fixed. None has lost
+     work since the seventh. ⬜ until a pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11284,6 +11287,20 @@ without reading anything else.*
   same to the bit, with each row's crossings found once
   (`a_path_mask_read_by_rows_is_read_as_by_pixels`, which also holds
   four megapixels under eight thousand edges to seconds).
+  **A fifteenth audit, of the row-by-row reading (November 2026).**
+  The rows only ran while the mask was upright on the page; turned —
+  a mask's own transform, or a group's — a row of samples is not a row
+  of the path, so it went back to a pixel at a time, and a frame of a
+  layer masked by a traced region of six thousand edges, turned, took
+  128 seconds (measured; 0.1 upright). Turned, the path is now carried
+  onto the page and read there, the same answer but for a sample lying
+  on an edge to within the rounding (a sample or two in a few pixels,
+  held to by the same test). Checked on the way and sound: a softened
+  mask's sharp coverage, an inverted one, a brushed stroke confined to
+  a region, and the GPU's planes all go through the same reading, and
+  a pixel comes out the same whatever part of the page is being drawn.
+  The one red CI run since was GitHub failing to serve wasm-pack's
+  download (a 504 on every Linux job at once); run again, it passed.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

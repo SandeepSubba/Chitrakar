@@ -7904,19 +7904,21 @@ const PATH_PLANE_EDGES: usize = 64;
 /// finds its crossings once and every sample along it looks itself up
 /// among them.
 ///
-/// `None` where it does not apply: a shape that is not a path, one of
-/// few edges (cheap either way), or a map that turns the path, under
-/// which a row of samples is not a row of the path.
-fn path_plane(shape: &VectorShape, inv: Inverse, clip: ClipRect) -> Option<Vec<f32>> {
+/// Under a map that turns the path, a row of samples is not a row of
+/// the path, so the path is carried onto the page and read there: the
+/// same answer, give or take a sample that falls on an edge to within
+/// the rounding.
+///
+/// `None` where it does not apply: a shape that is not a path, or one
+/// of few edges (cheap either way).
+fn path_plane(shape: &VectorShape, t: Transform, inv: Inverse, clip: ClipRect) -> Option<Vec<f32>> {
     let VectorShape::Path {
         points, subpaths, ..
     } = shape
     else {
         return None;
     };
-    if inv.b != 0.0 || inv.c != 0.0 {
-        return None;
-    }
+    let turned = inv.b != 0.0 || inv.c != 0.0;
     let rings: Vec<&[[f32; 2]]> = std::iter::once(points.as_slice())
         .chain(subpaths.iter().map(|r| r.as_slice()))
         .filter(|r| r.len() >= 3)
@@ -7928,6 +7930,19 @@ fn path_plane(shape: &VectorShape, inv: Inverse, clip: ClipRect) -> Option<Vec<f
     if edges.len() < PATH_PLANE_EDGES {
         return None;
     }
+    let (edges, inv) = if turned {
+        let on_page = |p: [f32; 2]| [t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f];
+        let page = Inverse::of(Transform::default())?;
+        (
+            edges
+                .into_iter()
+                .map(|(a, b)| (on_page(a), on_page(b)))
+                .collect(),
+            page,
+        )
+    } else {
+        (edges, inv)
+    };
     // The edges a row of samples at local `y` crosses, where they cross,
     // in order — written as `shape_covers` works each one out.
     let crossings = |y: f32, live: &[usize], out: &mut Vec<f32>| {
@@ -9540,8 +9555,8 @@ impl<'a> MaskRef<'a> {
             let (MaskKind::Vector { shape, .. }, true) = (&m.kind, m.feather <= 0.0) else {
                 return None;
             };
-            let inv = MaskRef::new(Some(m), parent).inv?;
-            return path_plane(shape, inv, clip).map(|cover| MaskPlane { clip, cover });
+            let at = MaskRef::new(Some(m), parent);
+            return path_plane(shape, at.t, at.inv?, clip).map(|cover| MaskPlane { clip, cover });
         };
         // Worked out over more than is asked for, since the softening
         // pulls in coverage from outside the region being drawn: without
@@ -9568,7 +9583,7 @@ impl<'a> MaskRef<'a> {
         };
         let read = MaskRef::new(Some(&hard), parent);
         if let (MaskKind::Vector { shape, .. }, Some(inv)) = (&hard.kind, read.inv) {
-            if let Some(cover) = path_plane(shape, inv, grown) {
+            if let Some(cover) = path_plane(shape, read.t, inv, grown) {
                 let cover = if hard.invert {
                     cover.into_iter().map(|c| 1.0 - c).collect()
                 } else {
@@ -14791,7 +14806,7 @@ mod tests {
                 x1: 70 + (next() * 30.0) as u32,
                 y1: 70 + (next() * 30.0) as u32,
             };
-            let rows = path_plane(&shape, inv, clip).expect("a path of many edges");
+            let rows = path_plane(&shape, t, inv, clip).expect("a path of many edges");
             let mut k = 0;
             for y in clip.y0..clip.y1 {
                 for x in clip.x0..clip.x1 {
@@ -14806,7 +14821,54 @@ mod tests {
                 }
             }
         }
-        // A turned path is left to the pixels; a path of few edges too.
+        // Turned, it is read on the page: the same answer but for a
+        // sample on an edge to within the rounding, which moves a pixel
+        // by a sample or two at most and only a few of them.
+        for (case, angle) in [0.3f32, 1.1, 2.6, -0.7].into_iter().enumerate() {
+            let points: Vec<[f32; 2]> = (0..300).map(|_| [next() * 80.0, next() * 80.0]).collect();
+            let shape = VectorShape::Path {
+                points,
+                closed: true,
+                smooth: false,
+                handles: vec![],
+                subpaths: vec![],
+            };
+            let (c, s) = (angle.cos(), angle.sin());
+            let t = Transform {
+                a: c * 1.2,
+                b: s * 1.2,
+                c: -s * 0.9,
+                d: c * 0.9,
+                e: 60.0,
+                f: 60.0,
+            };
+            let inv = Inverse::of(t).unwrap();
+            let clip = ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 120,
+                y1: 120,
+            };
+            let rows = path_plane(&shape, t, inv, clip).expect("turned, read on the page");
+            let (mut differ, mut k) = (0, 0);
+            for y in clip.y0..clip.y1 {
+                for x in clip.x0..clip.x1 {
+                    let one = pixel_coverage(&shape, None, t, inv, x, y);
+                    let gap = (rows[k] - one).abs();
+                    assert!(
+                        gap <= 0.25,
+                        "turned case {case} at {x},{y}: {} by rows, {one} by pixels",
+                        rows[k]
+                    );
+                    if gap > 0.0 {
+                        differ += 1;
+                    }
+                    k += 1;
+                }
+            }
+            assert!(differ <= 30, "turned case {case}: {differ} pixels differ");
+        }
+        // A path of few edges is left to the pixels.
         let few = VectorShape::Path {
             points: vec![[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]],
             closed: true,
@@ -14820,7 +14882,8 @@ mod tests {
             x1: 4,
             y1: 4,
         };
-        assert!(path_plane(&few, Inverse::of(Transform::default()).unwrap(), one).is_none());
+        let page = Transform::default();
+        assert!(path_plane(&few, page, Inverse::of(page).unwrap(), one).is_none());
         // Fast over a large page: a ring of eight thousand edges.
         let many: Vec<[f32; 2]> = (0..8000)
             .map(|i| {
@@ -14842,14 +14905,28 @@ mod tests {
             x1: 2000,
             y1: 2000,
         };
-        let started = std::time::Instant::now();
-        let plane = path_plane(&shape, Inverse::of(Transform::default()).unwrap(), page).unwrap();
-        assert_eq!(plane.len(), 4_000_000);
-        assert!(
-            started.elapsed().as_secs_f32() < 20.0,
-            "four megapixels under eight thousand edges took {:?}",
-            started.elapsed()
-        );
+        // Straight, and turned a little about the middle of the page.
+        let (c, s) = (0.2f32.cos(), 0.2f32.sin());
+        for at in [
+            Transform::default(),
+            Transform {
+                a: c,
+                b: s,
+                c: -s,
+                d: c,
+                e: 1000.0 - 1000.0 * c + 1000.0 * s,
+                f: 1000.0 - 1000.0 * s - 1000.0 * c,
+            },
+        ] {
+            let started = std::time::Instant::now();
+            let plane = path_plane(&shape, at, Inverse::of(at).unwrap(), page).unwrap();
+            assert_eq!(plane.len(), 4_000_000);
+            assert!(
+                started.elapsed().as_secs_f32() < 20.0,
+                "four megapixels under eight thousand edges took {:?} under {at:?}",
+                started.elapsed()
+            );
+        }
     }
 
     /// A stop with no alpha keeps its colour: red to a clear red fades
