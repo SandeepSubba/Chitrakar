@@ -21758,9 +21758,13 @@ assert(
   // this tab's old copy.
   await drawRect(c, 100, 100, 160, 160);
   await c.keyboard.press("Control+c");
+  await c.waitForTimeout(200);
   await b.bringToFront();
   await b.click(".panel ul li .layer-name >> nth=0");
+  await b.waitForTimeout(300);
   await b.keyboard.press("Control+c");
+  await b.waitForTimeout(300);
+  const copiedIn = await b.evaluate(() => localStorage.getItem("chitrakar:copied-in"));
   await c.bringToFront();
   const before = (await names(c)).length;
   let said = "";
@@ -21771,7 +21775,8 @@ assert(
   });
   await c.keyboard.press("Control+v");
   await c.waitForTimeout(400);
-  assert((await names(c)).length === before && /another tab/.test(said), `a stale copy is not pasted (${said})`);
+  const after = (await names(c)).length;
+  assert(after === before && /another tab/.test(said), `a stale copy is not pasted (${said}; ${before} → ${after} layers; copied in ${copiedIn})`);
   c.removeAllListeners("dialog");
   c.on("dialog", (d) => d.accept());
   // Enter in Find and replace replaces, and presses nothing else.
