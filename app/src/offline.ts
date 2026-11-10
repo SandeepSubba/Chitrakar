@@ -37,6 +37,24 @@ export function keepForOffline() {
           void built.then((build) => reg.active?.postMessage({ keep, build }));
         };
         say();
+        // And, once the editor is up and quiet, the readers a file is
+        // opened with, fetched into the cache ahead of being asked for:
+        // kept only when a visit had loaded them, an installed editor
+        // offline could open neither a PDF nor a camera's raw file it had
+        // not opened before. Not the subject model's runtime, which is
+        // fourteen megabytes and asked for in so many words; nor on a
+        // connection that asks to be spared.
+        const spare = (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData;
+        if (!spare) {
+          window.setTimeout(() => {
+            void built.then((build) => {
+              const readers = build.filter((u) =>
+                /chitrakar_(pdf|raw)_in|rawWorker|rawThread|developWorker/.test(u),
+              );
+              if (readers.length > 0) reg.active?.postMessage({ keep: [new URL("./", location.href).href, ...readers], build });
+            });
+          }, 15000);
+        }
         if (typeof PerformanceObserver !== "undefined") {
           let soon: number | undefined;
           new PerformanceObserver(() => {

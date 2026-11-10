@@ -497,7 +497,10 @@ export function clamp(p: Prefs): Prefs {
 
 export function writePrefs(p: Prefs) {
   try {
-    localStorage.setItem(KEY, JSON.stringify(p));
+    const text = JSON.stringify(p);
+    // Only what changed: written back unchanged, an answer to another
+    // tab's change would be one more change for it to answer.
+    if (localStorage.getItem(KEY) !== text) localStorage.setItem(KEY, text);
   } catch {
     // Out of room, or a browser told not to. The app works the same
     // this session; it just starts over on the next one.
@@ -510,6 +513,17 @@ export function writePrefs(p: Prefs) {
 export function usePrefs() {
   const [prefs, setAll] = useState<Prefs>(readPrefs);
   useEffect(() => writePrefs(prefs), [prefs]);
+  // Another tab's change is taken up here as it is made. Without it each
+  // tab wrote back the whole of what it had read when it opened, so a
+  // colour used in one tab threw away the export setups, brushes and
+  // presets kept in another since.
+  useEffect(() => {
+    const taken = (e: StorageEvent) => {
+      if (e.key === KEY || e.key === null) setAll(readPrefs());
+    };
+    window.addEventListener("storage", taken);
+    return () => window.removeEventListener("storage", taken);
+  }, []);
   // A patch, or a patch worked out from the preferences as they are
   // when it lands — for a change made after waiting on something, by
   // which time the ones it was read from may not be the ones there are.

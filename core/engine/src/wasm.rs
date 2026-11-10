@@ -105,6 +105,17 @@ impl WasmSession {
         self.inner.cancel_preview().map_err(to_js)
     }
 
+    /// Whether previews to come are held by a window open beside the
+    /// editor (`Session::hold_preview`).
+    pub fn hold_preview(&mut self, on: bool) {
+        self.inner.hold_preview(on)
+    }
+
+    /// Whether another edit let a held preview go (`Session::take_dropped_preview`).
+    pub fn take_dropped_preview(&mut self) -> bool {
+        self.inner.take_dropped_preview()
+    }
+
     pub fn undo(&mut self) -> Result<bool, JsError> {
         self.inner.undo().map_err(to_js)
     }

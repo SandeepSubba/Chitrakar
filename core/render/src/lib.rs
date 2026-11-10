@@ -580,7 +580,62 @@ pub fn node_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
 /// pixels must be repainted; it does not change how wide the layer is, and
 /// laying out against a box inflated by one would be nonsense.
 pub fn node_visual_bounds(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
-    node_bounds_inner(doc, id, false)
+    visual_box(doc, id, ancestor_space(doc, id))
+}
+
+/// The upright box on the page round what a layer draws, its own corners
+/// carried through the whole of `outer` (the space it is placed in) and
+/// its own transform at once, and a group's children each through theirs.
+/// Boxed in its parent's space and that box boxed again on the way out —
+/// how the dirty tracking still works, where a box only has to be big
+/// enough — a layer turned back upright inside a turned group was said to
+/// cover a square half again its size, and the size fields, alignment,
+/// snapping and flips all read that.
+fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, DocError> {
+    let node = doc.node(id)?;
+    let t = outer.compose(node.transform);
+    let boxed = |[x0, y0, x1, y1]: [f32; 4]| transformed_local_bounds(t, (x0, y0, x1, y1));
+    Ok(match &node.kind {
+        NodeKind::Adjustment(_) | NodeKind::Filter(_) => Bounds::Everything,
+        NodeKind::Group => {
+            let mut acc = Bounds::None;
+            for &child in doc.children_of(id)? {
+                acc = acc.union(visual_box(doc, child, t)?);
+                if acc == Bounds::Everything {
+                    break;
+                }
+            }
+            acc
+        }
+        NodeKind::Vector { shape, stroke, .. } => {
+            let flat = flatten_shape(shape);
+            let (x0, y0, x1, y1) = local_bounds(flat.as_ref());
+            let mut bounds = boxed([x0, y0, x1, y1]);
+            if let Some(stroke) = stroke {
+                let pad = stroke_pad(shape, stroke) * max_scale(t);
+                if let Bounds::Rect(x0, y0, x1, y1) = bounds {
+                    bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+                }
+            }
+            bounds
+        }
+        NodeKind::Text(spec) => boxed(text::bounds(spec)),
+        NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+            painted_bounds(strokes).map_or(Bounds::None, boxed)
+        }
+        // As `bounds_in_parent_space_inner` reads a copy: its own box, and
+        // where it has none, everything if its original is still here.
+        NodeKind::Instance { of, .. } => match local_bounds_of(doc, id) {
+            Ok(Some(b)) => boxed(b),
+            Ok(None) if doc.node(*of).is_ok() => Bounds::Everything,
+            _ => Bounds::None,
+        },
+        NodeKind::Raster(r) if r.projective().is_some() => boxed(quad_box(r.quad())),
+        kind => {
+            let (w, h) = local_size(kind).unwrap();
+            transformed_bounds(t, w, h)
+        }
+    })
 }
 
 fn node_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bounds, DocError> {
@@ -1798,6 +1853,34 @@ fn feathered_reach(node: &chitrakar_doc::Node, parent: Transform) -> Option<f32>
     Some(blur::plane_reach(sigma) as f32 + 1.0)
 }
 
+/// How far the softest region a brush stroke carries softens, where the
+/// layer's strokes carry any: a stroke painted inside a feathered region
+/// is soft along it, and a window drawn without that much room past its
+/// edge — the eyedropper's, a pixel wide — read it hard. A painted layer's
+/// strokes are in its own space, a brushed mask's in the space it is laid
+/// in. Only room to draw in: what the stroke covers is still its own box.
+fn stroke_clip_reach(node: &chitrakar_doc::Node, parent: Transform) -> f32 {
+    let reach = |strokes: &[chitrakar_doc::PaintStroke], space: Transform| {
+        strokes
+            .iter()
+            .filter_map(|s| s.clip.as_deref())
+            .filter_map(|m| feather_of(m, space))
+            .map(|sigma| blur::plane_reach(sigma) as f32 + 1.0)
+            .fold(0.0f32, f32::max)
+    };
+    let own = match &node.kind {
+        NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
+            reach(strokes, parent.compose(node.transform))
+        }
+        _ => 0.0,
+    };
+    let masked = match node.mask.as_ref().map(|m| &m.kind) {
+        Some(MaskKind::Painted { strokes }) => reach(strokes, parent),
+        _ => 0.0,
+    };
+    own.max(masked)
+}
+
 /// The widest margin any softening in `id` or under it wants, measured in
 /// the space it will be drawn in.
 ///
@@ -1820,7 +1903,9 @@ fn softening_within(doc: &Document, id: NodeId, space: Transform, depth: usize) 
     let Ok(node) = doc.node(id) else {
         return 0.0;
     };
-    let mut most = feathered_reach(node, space).unwrap_or(0.0);
+    let mut most = feathered_reach(node, space)
+        .unwrap_or(0.0)
+        .max(stroke_clip_reach(node, space));
     let inner = space.compose(node.transform);
     for child in doc.children_of(id).unwrap_or_default() {
         most = most.max(softening_within(doc, *child, inner, depth + 1));
@@ -7891,8 +7976,11 @@ fn pixel_coverage(
     hits as f32 / (n * n) as f32
 }
 
-/// How many edges a path mask has before [`path_plane`] reads it.
-const PATH_PLANE_EDGES: usize = 64;
+/// How many edges a path mask has before [`path_plane`] reads it: any
+/// that has an inside. It gives the same answer bit for bit, and even a
+/// four-cornered lasso read a pixel at a time over a forty-megapixel page
+/// was most of the second and more a combine of it took.
+const PATH_PLANE_EDGES: usize = 3;
 
 /// A path mask's hard coverage over `clip`, row by row: the same samples
 /// [`pixel_coverage`] takes, and the same even-odd test, so every pixel
@@ -7910,7 +7998,7 @@ const PATH_PLANE_EDGES: usize = 64;
 /// the rounding.
 ///
 /// `None` where it does not apply: a shape that is not a path, or one
-/// of few edges (cheap either way).
+/// with no inside.
 fn path_plane(shape: &VectorShape, t: Transform, inv: Inverse, clip: ClipRect) -> Option<Vec<f32>> {
     let VectorShape::Path {
         points, subpaths, ..
@@ -14868,9 +14956,9 @@ mod tests {
             }
             assert!(differ <= 30, "turned case {case}: {differ} pixels differ");
         }
-        // A path of few edges is left to the pixels.
+        // A path with no inside is left to the pixels.
         let few = VectorShape::Path {
-            points: vec![[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]],
+            points: vec![[0.0, 0.0], [10.0, 0.0]],
             closed: true,
             smooth: false,
             handles: vec![],

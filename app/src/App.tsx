@@ -143,6 +143,7 @@ import {
   gradientStops,
   initEngine,
   nodePayload,
+  identity,
   sendCommand,
   sendPreview,
   type TextSpec,
@@ -686,6 +687,12 @@ async function putDraftNote(key: DraftNote, value: string): Promise<void> {
     .objectStore(DRAFT_STORE)
     .put(value, slotKey(draftSlot, key));
 }
+
+/** Where the tab that copied layers last says so, and this tab's name
+ * for it there. */
+const COPIED_KEY = "chitrakar:copied-in";
+const THIS_TAB = Math.random().toString(36).slice(2);
+
 /** Let a slot's draft go: its records, and — unless the parts are being
  * taken over (a draft restored into this tab, whose next draft writes
  * the ones it needs) — the parts no other slot lists. */
@@ -707,6 +714,26 @@ const textSelections = new WeakMap<HTMLTextAreaElement, [number, number]>();
 /** What was picked in the on-canvas text editor when it last lost the
  * caret, as bytes of its text, and when. */
 let lastInlinePick: { range: [number, number]; text: string; at: number } | null = null;
+
+/** The part of a text block picked in whichever text box was last used,
+ * as bytes into its words — or what was picked in the on-canvas editor a
+ * press just closed. What a style button, the panel's colour and a
+ * palette swatch all apply to when there is one. */
+function textRange(t: TextSpec): [number, number] | null {
+  for (const label of TEXT_BOXES) {
+    const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
+    if (el && el.selectionStart !== el.selectionEnd) {
+      const [a, b] = [
+        Math.min(el.selectionStart, el.selectionEnd),
+        Math.max(el.selectionStart, el.selectionEnd),
+      ];
+      return [byteAt(el.value, a), byteAt(el.value, b)];
+    }
+  }
+  const kept = lastInlinePick;
+  if (kept && kept.text === t.text && Date.now() - kept.at < 1500) return kept.range;
+  return null;
+}
 
 /** What a proofing failure means, in words: the colour engine's own
  * names for it say nothing to a person. */
@@ -1936,6 +1963,8 @@ export function App() {
    * canvas can reach it; this is the way to it for somebody who does not
    * yet know the rail has one. */
   const [featherOpen, setFeatherOpen] = useState(false);
+  const featherOpenRef = useRef(false);
+  featherOpenRef.current = featherOpen;
   /** The sheet of keys and gestures, opened with "?" or from the View
    * menu: half of what this editor can do is a gesture nobody would
    * guess at, and a menu cannot show a gesture. */
@@ -2168,6 +2197,9 @@ export function App() {
   const slotReady = useRef<Promise<number> | null>(null);
   /** Slots whose drafts were offered and answered this visit. */
   const answered = useRef(new Set<number>());
+  /** Whether the document is still the empty one the visit opened with,
+   * nothing yet done to it. */
+  const untouchedStart = useRef(false);
   useEffect(() => {
     slotReady.current = claimDraftSlot().then((n) => (draftSlot = n));
     // Not offered where it would not have been kept.
@@ -2197,6 +2229,15 @@ export function App() {
     // kept as it is — a crash after deleting the last layer brought it
     // back.
     if (!session || saveTick === 0) return;
+    // The page a visit opens with is put up by a refresh like any other,
+    // so the count above had already moved: a second and a half after
+    // every reload the empty page was written over the draft its own bar
+    // was offering, and with two tabs each swept the other's pictures
+    // away. Until something is done on it, it keeps nothing.
+    if (untouchedStart.current) {
+      if (session.history_mark() === 0) return;
+      untouchedStart.current = false;
+    }
     const t = setTimeout(() => {
       const mine = ++draftRun.current;
       (slotReady.current ?? Promise.resolve(0))
@@ -2459,6 +2500,15 @@ export function App() {
   const refresh = useCallback(
     (s: WasmSession) => {
       setSaveTick((n) => n + 1);
+      // Another edit made while Straighten or Feather stood open let its
+      // preview go (`hold_preview`): the window has nothing left to
+      // apply, and goes as its Cancel would.
+      if (s.take_dropped_preview()) {
+        setStraightenOpen(false);
+        setLevelling(false);
+        if (featherOpenRef.current) setSelectionFeather(featherWas.current);
+        setFeatherOpen(false);
+      }
       // What is picked out, as the engine flattens it. Read on every
       // refresh because a page that turns carries the region round with
       // it: the ants have to follow.
@@ -2603,6 +2653,8 @@ export function App() {
 
   const newDocument = useCallback(
     (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72) => {
+      // A document asked for is something done, and kept.
+      untouchedStart.current = false;
       const s = guardSession(new WasmSession(width, height, useCmyk));
       fitSession(s, width, height);
       s.set_dpi(dpi);
@@ -2633,7 +2685,9 @@ export function App() {
     let cancelled = false;
     initEngine().then(
       () => {
-        if (!cancelled) newDocument(false);
+        if (cancelled) return;
+        newDocument(false);
+        untouchedStart.current = true;
       },
       (err) => {
         if (!cancelled) setEngineFailed(err instanceof Error ? err.message : String(err));
@@ -3007,6 +3061,12 @@ export function App() {
     featherWas.current = selectionFeather;
     setFeatherOpen(true);
   };
+  // Straighten and Feather stay open beside the editor with their
+  // preview standing: another edit lets that preview go rather than
+  // keeping it under its own name.
+  useEffect(() => {
+    session?.hold_preview(straightenOpen || featherOpen);
+  }, [session, straightenOpen, featherOpen]);
   const previewFeather = (radius: number) => {
     if (!session) return;
     try {
@@ -3198,25 +3258,20 @@ export function App() {
   /** Commit the pen path being drawn: closed shapes get the current fill,
    * open polylines get a stroke. Anchors normalize to a (0,0) origin with
    * the offset carried by the node transform. */
-  /** Where a layer made from these page points goes: into the frame the
-   * first of them is in, with the points in the frame's own coordinates,
-   * as the shape tools put what is drawn inside a frame — or on the page.
-   * Text, pen paths and brush strokes stayed on the page wherever they
-   * were drawn, and were left behind when the frame was moved. */
   /** A text block dropped at a point of the page, picked and open for
    * typing — what the Text tool's press does, and the Layer menu's
    * "Add text" in the middle of the view. */
   const dropText = (x: number, y: number) => {
     if (!session) return;
     shapeCount.current += 1;
-    const place = placeAmong([[x, y]]);
-    const [tx, ty] = place.points[0];
+    const place = placeAt(x, y);
     const before = new Set(layers.map((l) => l.id));
     run({
       AddNode: {
         parent: place.parent,
         index: place.index,
-        node: nodePayload(
+        node: {
+          ...nodePayload(
           `Text ${shapeCount.current}`,
           {
             Text: {
@@ -3238,9 +3293,9 @@ export function App() {
               runs: [],
             },
           },
-          tx,
-          ty,
-        ),
+          ),
+          transform: place.at,
+        },
       },
     });
     setTool("Move");
@@ -3275,12 +3330,8 @@ export function App() {
     const seen = Math.min(r.width, r.height) / view.zoom;
     const side = Math.max(MIN_SIZE, Math.round(Math.min(seen, docSize[0], docSize[1]) / 4));
     const [x0, y0] = [cx - side / 2, cy - side / 2];
-    const place = placeAmong([
-      [x0, y0],
-      [x0 + side, y0 + side],
-    ]);
-    const [[lx, ly], [fx, fy]] = place.points;
-    const [w, h] = [Math.abs(fx - lx), Math.abs(fy - ly)];
+    const place = placeAt(x0, y0);
+    const [w, h] = [side, side];
     const ink = currentInk();
     const shape =
       kind === "Rect"
@@ -3322,7 +3373,10 @@ export function App() {
       AddNode: {
         parent: place.parent,
         index: place.index,
-        node: nodePayload(`${kind} ${shapeCount.current}`, { Vector: { shape, ...paint, gradient: null } }, lx, ly),
+        node: {
+          ...nodePayload(`${kind} ${shapeCount.current}`, { Vector: { shape, ...paint, gradient: null } }),
+          transform: place.at,
+        },
       },
     });
     const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
@@ -3332,17 +3386,33 @@ export function App() {
     }
   };
 
-  const placeAmong = (pts: [number, number][]) => {
-    const onPage = { parent: session?.root_id ?? 0, index: topLevelCount(layers), points: pts };
-    if (!session || pts.length === 0) return onPage;
-    const board = session.frame_at(pts[0][0], pts[0][1]);
+  /** Where a layer drawn at the page point `x`, `y` goes, and the
+   * transform that puts its own (0, 0) there: into the frame the point is
+   * in, carried by the whole of the frame's space — a turn and a scale as
+   * well as an offset — so what was drawn upright on the page lands as it
+   * was drawn. Carrying the corners alone left a shape in a turned frame
+   * a hundred pixels from the drag, a line turned, and a pen curve's
+   * handles pointing the wrong way. Or on the page. */
+  const placeAt = (x: number, y: number) => {
+    const onPage = { parent: session?.root_id ?? 0, index: topLevelCount(layers), at: identity(x, y) };
+    if (!session) return onPage;
+    const board = session.frame_at(x, y);
     if (board < 0) return onPage;
-    const mapped = pts.map((p) => Array.from(session.point_inside(board, p[0], p[1])));
-    if (mapped.some((m) => m.length !== 2)) return onPage;
+    const o = session.point_inside(board, x, y);
+    const u = session.point_inside(board, x + 100, y);
+    const v = session.point_inside(board, x, y + 100);
+    if (o.length !== 2 || u.length !== 2 || v.length !== 2) return onPage;
     return {
       parent: board,
       index: session.child_count(board),
-      points: mapped.map((m) => [m[0], m[1]] as [number, number]),
+      at: {
+        a: (u[0] - o[0]) / 100,
+        b: (u[1] - o[1]) / 100,
+        c: (v[0] - o[0]) / 100,
+        d: (v[1] - o[1]) / 100,
+        e: o[0],
+        f: o[1],
+      } as Transform,
     };
   };
 
@@ -3361,11 +3431,12 @@ export function App() {
       const hs = drawn.map((_, i) => fromHandles[i] ?? ([0, 0, 0, 0] as [number, number, number, number]));
       {
         if (drawn.length < (closed ? 3 : 2)) return;
-        const place = placeAmong(drawn);
-        const pts = place.points;
-        const minX = Math.min(...pts.map((p) => p[0]));
-        const minY = Math.min(...pts.map((p) => p[1]));
-        const points = pts.map(
+        // Written on the page as drawn, handles and all, then carried
+        // into the frame it was drawn in by the frame's whole space.
+        const minX = Math.min(...drawn.map((p) => p[0]));
+        const minY = Math.min(...drawn.map((p) => p[1]));
+        const place = placeAt(minX, minY);
+        const points = drawn.map(
           (p) => [p[0] - minX, p[1] - minY] as [number, number],
         );
         shapeCount.current += 1;
@@ -3373,7 +3444,8 @@ export function App() {
           AddNode: {
             parent: place.parent,
             index: place.index,
-            node: nodePayload(
+            node: {
+            ...nodePayload(
               `Path ${shapeCount.current}`,
               {
                 Vector: {
@@ -3407,9 +3479,9 @@ export function App() {
                   gradient: null,
                 },
               },
-              minX,
-              minY,
             ),
+            transform: place.at,
+            },
           },
         });
         setPenPoints([]);
@@ -3452,7 +3524,13 @@ export function App() {
       const typing =
         isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
       if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const shortcut = keys.byKey[e.key.toLowerCase()];
+        // Shift on a digit types its symbol (shift+5 is %), so a tool
+        // given a digit is found by the key itself when shift is down —
+        // or its family, which the Tools page says is shift+5, could not
+        // be walked at all.
+        const pressed =
+          e.shiftKey && /^Digit[0-9]$/.test(e.code) ? e.code.slice(5) : e.key.toLowerCase();
+        const shortcut = keys.byKey[pressed];
         if (shortcut) {
           e.preventDefault();
           // With shift, a key whose tool shares it with a family walks
@@ -4530,7 +4608,12 @@ export function App() {
         // Near the outline, in document units: an anchor goes on the
         // path, so a double-click well inside the shape is not asking
         // for one and falls through to what it otherwise means.
-        session.insert_anchor(selected, x, y, 10 / view.zoom);
+        // The anchor just put on is the one last taken hold of: what
+        // Delete or a cut acts on next, and the indices after it moved.
+        pickedAnchorRef.current = {
+          id: selected,
+          idx: session.insert_anchor(selected, x, y, 10 / view.zoom),
+        };
       } catch {
         return;
       }
@@ -4770,7 +4853,12 @@ export function App() {
         "Path" in selectedKind.Vector.shape
       ) {
         try {
-          session.insert_anchor(selected, x, y, 10 / view.zoom);
+          // The anchor just put on is the one last taken hold of: what
+          // Delete or a cut acts on next, and the indices after it moved.
+          pickedAnchorRef.current = {
+            id: selected,
+            idx: session.insert_anchor(selected, x, y, 10 / view.zoom),
+          };
           refresh(session);
           return;
         } catch {
@@ -4815,7 +4903,12 @@ export function App() {
           return;
         }
         try {
-          session.insert_anchor(hit, x, y, 10 / view.zoom);
+          // The anchor just put on is the one last taken hold of: what
+          // Delete or a cut acts on next, and the indices after it moved.
+          pickedAnchorRef.current = {
+            id: hit,
+            idx: session.insert_anchor(hit, x, y, 10 / view.zoom),
+          };
         } catch {
           // Not near the outline: a press inside the shape asks nothing.
           return;
@@ -6097,19 +6190,20 @@ export function App() {
       const pts = kept.map((i) => stroke[i]);
       const widths = kept.map((i) => strokeWidths[i] ?? 1);
       brushEndRef.current = pts[pts.length - 1];
-      // Into the frame it was drawn in, as a shape would be.
-      const place = placeAmong(pts);
-      const local = place.points;
       // Anchors are stored relative to the stroke's own origin, like every
-      // other path, so the node's transform carries its position.
+      // other path, and the node's transform carries it there — into the
+      // frame it was drawn in, as a shape would be.
+      const local = pts;
       const minX = Math.min(...local.map((p) => p[0]));
       const minY = Math.min(...local.map((p) => p[1]));
+      const place = placeAt(minX, minY);
       shapeCount.current += 1;
       run({
         AddNode: {
           parent: place.parent,
           index: place.index,
-          node: nodePayload(
+          node: {
+          ...nodePayload(
             `Stroke ${shapeCount.current}`,
             {
               Vector: {
@@ -6141,9 +6235,9 @@ export function App() {
                 gradient: null,
               },
             },
-            minX,
-            minY,
           ),
+          transform: place.at,
+          },
         },
       });
       return;
@@ -6195,14 +6289,8 @@ export function App() {
     // coordinates, so it lands under the cursor rather than at the
     // frame's offset. Both corners are carried across, so a frame that
     // has been scaled gets a shape the size it was dragged.
-    const board = session.frame_at(x0, y0);
-    const inside = board >= 0 ? session.point_inside(board, x0, y0) : [];
-    const far = board >= 0 ? session.point_inside(board, x0 + w, y0 + h) : [];
-    const local = inside.length === 2 && far.length === 2;
-    const [ox, oy] = local ? [inside[0], inside[1]] : [x0, y0];
-    const [lw, lh] = local
-      ? [Math.abs(far[0] - inside[0]), Math.abs(far[1] - inside[1])]
-      : [w, h];
+    const place = placeAt(x0, y0);
+    const [lw, lh] = [w, h];
     // A polygon and a star come out as paths rather than as shapes of
     // their own: every anchor is then draggable the moment it is drawn,
     // and every exporter already knows what a path is.
@@ -6288,11 +6376,10 @@ export function App() {
     }
     run({
       AddNode: {
-        parent: local ? board : session.root_id,
-        index: local ? session.child_count(board) : topLevelCount(layers),
-        node: nodePayload(
-          `${drag.tool} ${shapeCount.current}`,
-          {
+        parent: place.parent,
+        index: place.index,
+        node: {
+          ...nodePayload(`${drag.tool} ${shapeCount.current}`, {
             Vector: {
               shape,
               // CMYK documents author ink values so the press profile
@@ -6300,10 +6387,9 @@ export function App() {
               ...paint,
               gradient: null,
             },
-          },
-          ox,
-          oy,
-        ),
+          }),
+          transform: place.at,
+        },
       },
     });
   };
@@ -7578,10 +7664,32 @@ export function App() {
     navigator.clipboard?.writeText(names.join(", ")).catch(() => {
       /* a browser that will not have it goes on preferring the picture */
     });
+    // Which tab copied last, for a paste in another to know its own copy
+    // is no longer the newest (`pasteClipboard`).
+    try {
+      localStorage.setItem(COPIED_KEY, THIS_TAB);
+    } catch {
+      /* storage refused: each tab pastes its own copy, as before */
+    }
   };
 
   const pasteClipboard = () => {
     if (!session) return;
+    // Copied last in another tab: the layers are that tab's — each page
+    // keeps its own — and what this one holds is an older copy, which
+    // was pasted in their place.
+    let copiedIn: string | null = null;
+    try {
+      copiedIn = localStorage.getItem(COPIED_KEY);
+    } catch {
+      copiedIn = null;
+    }
+    if (copiedIn !== null && copiedIn !== THIS_TAB) {
+      alert(
+        "Paste: those layers were copied in another tab, and layers paste only in the tab they were copied in. Save that document and place it here, or copy in this tab.",
+      );
+      return;
+    }
     let ids: NodeId[];
     try {
       ids = Array.from(session.paste()) as NodeId[];
@@ -8172,6 +8280,9 @@ export function App() {
 
   const ungroupSelection = () => {
     if (!session || selected === null) return;
+    // The chord pressed over a layer that is not a group asks nothing:
+    // an alert box saying so was a window to dismiss for a no-op.
+    if (layers.find((l) => l.id === selected)?.kind !== "group") return;
     try {
       session.ungroup_node(selected);
       setSelected(null);
@@ -8199,6 +8310,8 @@ export function App() {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
+    // A locked path's anchors are as held as the rest of it.
+    if (selectedLocked()) return;
     // The anchor last taken hold of is the one a cut is made at.
     pickedAnchorRef.current = { id: selected, idx };
     // Alt takes the anchor off rather than moving it — the gesture that
@@ -8240,6 +8353,11 @@ export function App() {
     const minX = Math.min(...pts.map((p) => p[0]));
     const minY = Math.min(...pts.map((p) => p[1]));
     const norm = pts.map((p) => [p[0] - minX, p[1] - minY] as [number, number]);
+    // A compound path's other rings are in the same space: they move by
+    // the same shift, or every hole slid with the corner being dragged.
+    const subpaths = (path.subpaths ?? []).map((ring) =>
+      ring.map((p) => [p[0] - minX, p[1] - minY] as [number, number]),
+    );
     preview({
       Batch: [
         {
@@ -8249,7 +8367,7 @@ export function App() {
               Vector: {
                 ...drag.vector,
                 shape: {
-                  Path: { ...path, points: norm },
+                  Path: { ...path, points: norm, subpaths },
                 },
               },
             },
@@ -8293,6 +8411,7 @@ export function App() {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
     e.stopPropagation();
+    if (selectedLocked()) return;
     curveDragRef.current = {
       idx,
       side,
@@ -9070,7 +9189,24 @@ export function App() {
         return [{ SetKind: { id, kind: { Vector: { ...kind.Vector, fill: colour, gradient: null } } } }];
       }
       if ("Text" in kind) {
-        return [{ SetKind: { id, kind: { Text: { ...kind.Text, fill: colour } } } }];
+        // Part of one block picked: that part takes it, as the panel's
+        // own colour gives it — a swatch recoloured the whole block.
+        const t = kind.Text;
+        const range = ids.length === 1 ? textRange(t) : null;
+        if (range) {
+          const runs = styleRange(t.text, t.runs ?? [], range[0], range[1], { fill: colour }, {
+            fill: t.fill,
+            bold: !!t.bold,
+            italic: !!t.italic,
+            underline: !!t.underline,
+            strike: !!t.strike,
+            font: t.font ?? "",
+            size: t.size,
+            baseline: 0,
+          });
+          return [{ SetKind: { id, kind: { Text: { ...t, runs } } } }];
+        }
+        return [{ SetKind: { id, kind: { Text: { ...t, fill: colour } } } }];
       }
       return [];
     });
@@ -9117,6 +9253,17 @@ export function App() {
     if (!session || selected === null) return null;
     const b = session.bounds_of(selected);
     return b.length === 4 ? [b[0], b[1], b[2], b[3]] : null;
+  })();
+
+  /** A frame's own size — how many pixels it exports — which is what its
+   * W and H say and what typing them sets. The box round a turned frame is
+   * another number: shown, it read 367 straight after 300 was typed. */
+  const frameOwn = ((): [number, number] | null => {
+    if (!session || selected === null || selectedLayer?.kind !== "artboard") return null;
+    const k = JSON.parse(session.kind_json(selected)) as NodeKind;
+    return typeof k === "object" && "Artboard" in k
+      ? [k.Artboard.width, k.Artboard.height]
+      : null;
   })();
 
   /** Type an exact position or size. Moving is a translation in the
@@ -9784,6 +9931,9 @@ export function App() {
   ): boolean => {
     try {
       const s = guardSession(WasmSession.open(bytes));
+      // Opened — a file, or a draft taken back from a closed tab, whose
+      // old slot lets it go — it is kept in this tab's slot straight away.
+      untouchedStart.current = false;
       // A draft's pictures and originals, kept beside it, put back before
       // anything is drawn.
       for (const [part, b] of parts ?? []) s.restore_part(part, b);
@@ -14719,8 +14869,8 @@ export function App() {
                     [
                       ["x", "X", selBox[0]],
                       ["y", "Y", selBox[1]],
-                      ["w", "W", selBox[2]],
-                      ["h", "H", selBox[3]],
+                      ["w", "W", frameOwn?.[0] ?? selBox[2]],
+                      ["h", "H", frameOwn?.[1] ?? selBox[3]],
                     ] as const
                   ).map(([field, label, value]) => (
                     <label key={field} className={`geo-${field}`}>
@@ -15486,6 +15636,18 @@ function KeysDialog({
   onClose: () => void;
 }) {
   const KEY_HELP = keyHelp(hint, chordOf, own, nudge);
+  // The key that opened the sheet puts it away again. The editor's own
+  // handler stands down while a window is up, so it only ever opened it.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onClose]);
   return (
     <div className="modal-scrim" onPointerDown={onClose}>
       <div
@@ -15722,7 +15884,13 @@ function FindReplaceDialog({
         onChange={(e) => set(e.target.value)}
         onKeyDown={(e) => {
           e.stopPropagation();
-          if (e.key === "Enter") go();
+          if (e.key === "Enter") {
+            // Kept from what the focus goes back to as the window closes,
+            // which the key would otherwise press: the Edit menu's Undo,
+            // or a Delete button last pressed.
+            e.preventDefault();
+            go();
+          }
           if (e.key === "Escape") onCancel();
         }}
         aria-label={label}
@@ -16897,6 +17065,9 @@ function RepeatDialog({
         onValue={(v) => setStep({ ...step, [key]: v })}
         onKeyDown={(e) => {
           if (e.key !== "Enter") return;
+          // Kept from the menu row the focus goes back to as the window
+          // closes, which the key would otherwise press.
+          e.preventDefault();
           // What is typed, settled as the box will settle it — held to
           // its range — rather than the last value it handed on: 600
           // typed and Enter repeated the old count, not 500.
@@ -19269,24 +19440,7 @@ function KindProps({
     // button applies to the selection when there is one and to the whole
     // block when there is not, which is what every editor does — and the
     // offsets survive the button taking focus away from the box.
-    const selection = (): [number, number] | null => {
-      for (const label of TEXT_BOXES) {
-        const el = document.querySelector<HTMLTextAreaElement>(
-          `textarea[aria-label="${label}"]`,
-        );
-        if (el && el.selectionStart !== el.selectionEnd) {
-          const [a, b] = [
-            Math.min(el.selectionStart, el.selectionEnd),
-            Math.max(el.selectionStart, el.selectionEnd),
-          ];
-          return [byteAt(el.value, a), byteAt(el.value, b)];
-        }
-      }
-      // What was picked in the on-canvas editor the press just closed.
-      const kept = lastInlinePick;
-      if (kept && kept.text === t.text && Date.now() - kept.at < 1500) return kept.range;
-      return null;
-    };
+    const selection = () => textRange(t);
     // Apply one styling choice: over the selection as a run, or over the
     // block itself when nothing is selected.
     const styled = (change: Styling): NodeKind => {

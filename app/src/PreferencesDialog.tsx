@@ -196,6 +196,13 @@ export function PreferencesDialog({
   const [catching, setCatching] = useState<string | null>(null);
   /** Why the last chord pressed was not taken, said under the list. */
   const [refused, setRefused] = useState<string | null>(null);
+  // A key button left waiting stops waiting when its page is left: out
+  // of sight, it went on catching every key typed on the next page, and
+  // a 5 typed into a number box became the Brush's key.
+  useEffect(() => {
+    setListening(null);
+    setCatching(null);
+  }, [group]);
   /** Words to find a menu row by. */
   const [rowQuery, setRowQuery] = useState("");
   useEffect(() => {
@@ -341,14 +348,21 @@ export function PreferencesDialog({
   /** The accent the theme in force has of its own, read off the
    * stylesheet with the person's taken away for a moment — what the
    * colour picker starts from when nothing is chosen. */
-  const themeAccent = useMemo(() => {
+  const readAccent = () => {
     const root = document.documentElement;
     const held = root.style.getPropertyValue("--accent");
     root.style.removeProperty("--accent");
     const own = getComputedStyle(root).getPropertyValue("--accent").trim();
     if (held) root.style.setProperty("--accent", held);
     return /^#[0-9a-f]{6}$/i.test(own) ? own : "#6c8cff";
-    // Read again when the theme changes under it.
+  };
+  const [themeAccent, setThemeAccent] = useState(readAccent);
+  // Read again when the theme changes under it — once the page has taken
+  // the new theme, which the editor round this window lays on after the
+  // window has drawn: read as it drew, it was the other theme's accent.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => setThemeAccent(readAccent()));
+    return () => cancelAnimationFrame(frame);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefs.theme]);
 

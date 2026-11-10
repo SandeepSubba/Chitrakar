@@ -73,6 +73,10 @@ check(unreadable("a.png", bytes([0x89]), "broken").includes("broken"), "anything
 check(said(new Error("invalid command: the picture is 9 × 9")) === "the picture is 9 × 9", "the wrapping comes off a sentence");
 check(said("Error: invalid command: io error: out of memory").includes("larger than"), "out of memory is said as size");
 check(
+  said(new TypeError("Failed to fetch dynamically imported module: http://x/assets/chitrakar_pdf_in-1.js")).includes("not been downloaded"),
+  "a reader not fetched while offline is said in words",
+);
+check(
   said("Error: invalid command: Format error decoding Png: CRC error: expected 0xabd4fb1c").includes("damaged"),
   "a decoder's CRC is a damaged file",
 );

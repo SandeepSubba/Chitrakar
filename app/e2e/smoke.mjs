@@ -21697,6 +21697,143 @@ assert(
   await ctx.close();
 }
 
+// 9da. The seventeenth audit, of the whole editor. A reload wrote its empty
+// page over the draft its own bar was offering; one tab wrote its stale
+// preferences over another's; Enter in a window went on to press what the
+// focus came back to; a change made beside Straighten kept its preview for
+// good; Enter in New document's boxes did nothing; "?" opened the keys and
+// would not close them; and a paste gave this tab's old copy when another
+// tab had copied since. A context of its own, so storage is not the
+// suite's.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const tab = async () => {
+    const p = await ctx.newPage();
+    p.on("dialog", (d) => d.accept());
+    await p.goto("http://localhost:8123/");
+    await p.waitForSelector("#engine-canvas");
+    await p.waitForTimeout(1600);
+    return p;
+  };
+  const drawRect = async (p, x0, y0, x1, y1) => {
+    const r = await p.locator("#engine-page").boundingBox();
+    await p.click('.toolbar > button[aria-label="Rect"], .tool-group > button[aria-label="Rect"]');
+    await p.mouse.move(r.x + x0, r.y + y0);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x1, r.y + y1, { steps: 4 });
+    await p.mouse.up();
+    await p.waitForTimeout(200);
+  };
+  const names = (p) => p.locator(".panel ul li .layer-name").allTextContents();
+  // The draft outlives a reload that is not answered.
+  const a = await tab();
+  await drawRect(a, 20, 20, 80, 80);
+  await a.waitForTimeout(2600);
+  await a.reload();
+  await a.waitForSelector("#engine-canvas");
+  await a.waitForTimeout(3500);
+  assert(await a.isVisible(".recover"), "a reload offers the draft");
+  await a.close();
+  const b = await tab();
+  assert(await b.isVisible(".recover"), "and, left unanswered, it is still offered next time");
+  await b.click(".recover >> text=Restore");
+  await b.waitForTimeout(800);
+  assert((await names(b)).some((n) => n.startsWith("Rect")), `with its work in it: ${await names(b)}`);
+  // One tab's preferences are not written over by another's.
+  const c = await tab();
+  await b.evaluate(() => {
+    const p = JSON.parse(localStorage.getItem("chitrakar:prefs") ?? "{}");
+    localStorage.setItem("chitrakar:prefs", JSON.stringify({ ...p, nudge: 7 }));
+  });
+  await c.waitForTimeout(300);
+  await c.click('.menu-label:text-is("View")');
+  await c.waitForTimeout(100);
+  await c.locator(".menu-pop:not(.sub) .menu-item.has-sub", { hasText: "Grid" }).hover();
+  await c.waitForTimeout(150);
+  await c.locator(".menu-pop.sub .menu-item", { hasText: "Grid of 8 px" }).click();
+  await c.waitForTimeout(300);
+  const kept = await c.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).nudge);
+  assert(kept === 7, `another tab's preference stands after this one changes its own (${kept})`);
+  // A paste where another tab copied since says so, rather than pasting
+  // this tab's old copy.
+  await drawRect(c, 100, 100, 160, 160);
+  await c.keyboard.press("Control+c");
+  await b.bringToFront();
+  await b.click(".panel ul li .layer-name >> nth=0");
+  await b.keyboard.press("Control+c");
+  await c.bringToFront();
+  const before = (await names(c)).length;
+  let said = "";
+  c.removeAllListeners("dialog");
+  c.on("dialog", (d) => {
+    said = d.message();
+    d.accept();
+  });
+  await c.keyboard.press("Control+v");
+  await c.waitForTimeout(400);
+  assert((await names(c)).length === before && /another tab/.test(said), `a stale copy is not pasted (${said})`);
+  c.removeAllListeners("dialog");
+  c.on("dialog", (d) => d.accept());
+  // Enter in Find and replace replaces, and presses nothing else.
+  const r = await c.locator("#engine-page").boundingBox();
+  await c.click('.toolbar > button[aria-label="Text"], .tool-group > button[aria-label="Text"]');
+  await c.mouse.click(r.x + 300, r.y + 300);
+  await c.waitForTimeout(200);
+  await c.keyboard.type("Hello");
+  await c.keyboard.press("Control+Enter");
+  await c.waitForTimeout(300);
+  const layersBefore = (await names(c)).length;
+  await c.keyboard.press("Control+f");
+  await c.waitForTimeout(300);
+  await c.keyboard.type("Hello");
+  await c.keyboard.press("Tab");
+  await c.keyboard.type("Bye");
+  await c.keyboard.press("Enter");
+  await c.waitForTimeout(400);
+  const menuOpen = await c.locator(".menu-pop").count();
+  assert(menuOpen === 0 && (await names(c)).length === layersBefore, "Enter in Find and replace opens no menu and changes no layer");
+  // Beside Straighten, another edit lets the preview go: the panel goes
+  // as its Cancel would, and the page is the size it was.
+  const pageW = async () => (await c.locator("#engine-page").boundingBox()).width;
+  const wasW = await pageW();
+  await c.click('.menu-label:text-is("Page")');
+  await c.waitForTimeout(100);
+  await c.locator(".menu-pop .menu-item", { hasText: "Straighten" }).first().click();
+  await c.waitForTimeout(300);
+  const deg = c.locator('input[aria-label="Straighten degrees"]');
+  await deg.fill("10");
+  await deg.press("Tab");
+  await c.waitForTimeout(400);
+  const turnedW = await pageW();
+  await drawRect(c, 30, 300, 70, 340);
+  await c.waitForTimeout(400);
+  const stillOpen = await c.locator('[role="dialog"][aria-label="Straighten"]').count();
+  const nowW = await pageW();
+  assert(
+    turnedW !== wasW && stillOpen === 0 && Math.abs(nowW - wasW) < 1,
+    `an edit beside Straighten lets its preview go (${wasW} → ${turnedW} → ${nowW}, open ${stillOpen})`,
+  );
+  // Enter in New document's Width makes the document.
+  await c.keyboard.press("Escape");
+  await c.click('.menu-label:text-is("File")');
+  await c.waitForTimeout(100);
+  await c.locator(".menu-pop .menu-item", { hasText: "New document" }).first().click();
+  await c.waitForTimeout(300);
+  const width = c.locator('input[aria-label="Width"]');
+  await width.fill("640");
+  await width.press("Enter");
+  await c.waitForTimeout(500);
+  assert((await c.locator('[role="dialog"][aria-label="New document"]').count()) === 0, "Enter in Width makes the document");
+  // "?" opens the keys, and closes them.
+  await c.keyboard.press("Shift+Slash");
+  await c.waitForTimeout(300);
+  const shown = await c.locator('[aria-label="Keys and gestures"]').count();
+  await c.keyboard.press("Shift+Slash");
+  await c.waitForTimeout(300);
+  assert(shown === 1 && (await c.locator('[aria-label="Keys and gestures"]').count()) === 0, '"?" opens the keys and puts them away');
+  await ctx.close();
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 

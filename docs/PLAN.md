@@ -48,8 +48,13 @@ without reading anything else.*
      its own transform (two minutes a frame) — fixed. The sixteenth,
      over that, found nothing: the first quiet round. It was a narrow
      one, over a single change, so what closes this item is a broad
-     pass over the whole editor that comes back as quiet. None has lost
-     work since the seventh. ⬜ until a broad pass finds nothing.
+     pass over the whole editor that comes back as quiet. The
+     seventeenth was that broad pass — four auditors over editing,
+     photographs and selections, files, and the interface — and it was
+     not quiet: twenty-four findings, two of them losing work (a reload
+     writing an empty page over the crash draft it offered; one tab's
+     preferences written over another's), all fixed or, for two, said
+     plainly as limits. ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11315,6 +11320,65 @@ without reading anything else.*
   sums run over a piece grown by its reach — which a softened ellipse
   does just the same, so it is the blur's and as old as it, and a
   hundred-millionth cannot reach an eight-bit pixel.
+  **A seventeenth audit, broad, over the whole editor (November
+  2026).** Four auditors on one frozen build: twenty-four findings.
+  *Lost work, both fixed:* the empty page a visit opens with was put up
+  by a refresh like any edit, so a second and a half after every reload
+  it was written over the draft the bar was offering (and with two tabs
+  each swept the other's pictures away) — the visit's own page now keeps
+  nothing until something is done to it (smoke 9da); and each tab wrote
+  the whole of its preferences on every change, so a colour used in one
+  threw away export setups, brushes and presets kept in another — a tab
+  now takes up another's change as it is made (`storage`), and writes
+  only what changed. *Editing:* dragging a corner of a compound path slid
+  its holes (the other rings now move with the shift); the Node tool
+  edited locked paths (the engine refuses anchor edits on a layer or in
+  a group that is locked, `Session::unlocked`); Delete took the wrong
+  anchor after one was added (the one added is the one held); shapes,
+  pen paths, text and brush strokes drawn in a turned frame landed a
+  hundred pixels off, a line turned and a curve's handles wrong (drawn on
+  the page as they look and carried into the frame by its whole space,
+  `placeAt`); a layer copied out of a frame or a turned group pasted
+  upright, unscaled and elsewhere (carried across the difference between
+  the two spaces, as a drag between groups is — mask and effects too);
+  a layer turned back upright in a turned group was boxed half again its
+  size (`visual_box` carries its own corners through the whole chain); a
+  turned frame's W and H showed the box round it while typing set its
+  own size (they show its own size now); a palette swatch recoloured a
+  whole text block with part of it picked (`textRange`, shared with the
+  panel); Ungroup on a layer not a group put up an alert. *Files:* this
+  editor's own SVGs were refused one time in three with bold words in
+  them — base64 in an embedded font read as numbers past any drawing
+  (`without_urls`); an SVG's bold came back regular (the importer loads
+  the faces a file carries, `carried_faces`) and its text came in as
+  layers called "Path" (named after the text); italic still comes back
+  upright, since this editor slants italic itself and carries no italic
+  face; a font only a kept style used was left out of the file; and a
+  paste in one tab gave its own old copy after another tab had copied —
+  each page's layers are its own, so it says so instead. *Photographs and
+  selections:* a part of the page exported on its own lost a feathered
+  mask's softness along its border (drawn with room past each side, as
+  the canvas draws its window); the eyedropper read a stroke painted
+  inside a feathered region hard (`stroke_clip_reach`); a region turned
+  inside out and combined moved its page-frame along with it
+  (`region_on_page` keeps it inside out); and combining with a lasso that
+  crosses itself, or growing a selection, took seconds on a forty-
+  megapixel page — every path mask is read row by row now
+  (`PATH_PLANE_EDGES` 3, the same answer to the bit), which halved it;
+  about a second natively remains, the price of reading the page twice.
+  *Interface:* Enter that closed Repeat, Find and replace, Feather or
+  Export went on to press what the focus came back to — a menu row, or a
+  Delete button pressed last (`enterMeansGo` takes the key); an edit
+  made beside Straighten or Feather kept the preview as a step, so Cancel
+  left the page turned and applying again turned it twice (the engine
+  lets a held preview go and the window closes, `hold_preview`); a key
+  button left waiting in Preferences caught keys typed on the next page;
+  Enter in New document's boxes did nothing; Shift with a digit could not
+  walk a family given that digit; "?" opened the keys sheet and would not
+  close it; the accent pickers showed the other theme's accent; and an
+  installed editor offline could open no PDF or raw file it had not
+  opened online — the readers are fetched into the cache once the
+  editor is quiet, and a reader that cannot be fetched is said in words.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -330,6 +330,13 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     {
         let fonts = opt.fontdb_mut();
         fonts.load_font_data(FACE.to_vec());
+        // And the faces the file carries in its style sheet, which the
+        // reader passes over (it reads no `@font-face`): this editor's own
+        // SVGs carry their bold face that way, and bold text came back in
+        // the regular weight.
+        for face in carried_faces(data) {
+            fonts.load_font_data(face);
+        }
         // Text in a face the file cannot supply is set in the bundled one
         // — whatever it asks for. Only text naming no face was: a family
         // named (Arial, "sans-serif") fell back to the generic serif,
@@ -394,6 +401,101 @@ const IMAGE_SHAPE_MOST: f64 = 1e6;
 /// not a number at all — an id, a class, a link, a colour written in
 /// hex, a picture's own data, and the attributes other programs keep
 /// for themselves.
+/// A style sheet with what is inside each `url(…)` left out: a font or a
+/// picture carried in a data address is base64, whose `/40E9` read as a
+/// number past anything a drawing holds — and this editor's own SVGs
+/// carry their fonts that way, so one in three with bold words in it was
+/// refused when opened again.
+fn without_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("url(") {
+        out.push_str(&rest[..at]);
+        out.push_str("url()");
+        let after = &rest[at + 4..];
+        match after.find(')') {
+            Some(end) => rest = &after[end + 1..],
+            None => {
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The font files a drawing carries in data addresses — `@font-face`
+/// sources in its style sheets — that are TrueType or OpenType, which is
+/// what the reader's font list can take; a WOFF or anything else is passed
+/// over. Held to a total, as everything a file asks for is.
+fn carried_faces(data: &[u8]) -> Vec<Vec<u8>> {
+    const MOST: usize = 32 << 20;
+    let Ok(text) = std::str::from_utf8(data) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    let mut rest = text;
+    while let Some(at) = rest.find("url(data:") {
+        let after = &rest[at + 9..];
+        let end = after.find(')').unwrap_or(after.len());
+        let address = after[..end].trim_matches(|c| c == '"' || c == '\'' || c == ' ');
+        rest = &after[end..];
+        let Some(comma) = address.find(',') else {
+            continue;
+        };
+        let (head, body) = (&address[..comma], &address[comma + 1..]);
+        if !head.ends_with(";base64") || !(head.contains("font") || head.contains("opentype")) {
+            continue;
+        }
+        let Some(bytes) = unbase64(body) else {
+            continue;
+        };
+        let face = bytes.starts_with(&[0, 1, 0, 0])
+            || bytes.starts_with(b"OTTO")
+            || bytes.starts_with(b"true")
+            || bytes.starts_with(b"ttcf");
+        if face && total + bytes.len() <= MOST {
+            total += bytes.len();
+            out.push(bytes);
+        }
+    }
+    out
+}
+
+/// Base64 read back, ignoring the white space a long line is broken
+/// with; `None` for anything else that is not base64.
+fn unbase64(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| -> Option<u32> {
+        Some(match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        if c == b'=' {
+            break;
+        }
+        acc = (acc << 6) | value(c)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
 fn past_reason(data: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(data).ok()?;
     let options = usvg::roxmltree::ParsingOptions {
@@ -433,12 +535,13 @@ fn past_reason(data: &[u8]) -> Option<String> {
             }
         }
         if node.tag_name().name() == "style" {
-            if let Some(x) = node
+            let sheet: String = node
                 .descendants()
                 .filter_map(|n| n.text())
-                .flat_map(numbers_in)
-                .find(|x| !x.is_finite() || x.abs() > SVG_NUMBER_MOST)
-            {
+                .map(without_urls)
+                .collect();
+            let past = numbers_in(&sheet).find(|x| !x.is_finite() || x.abs() > SVG_NUMBER_MOST);
+            if let Some(x) = past {
                 return Some(format!(
                     "this file's style sheet says {x:e}, which is past anything a drawing holds"
                 ));
@@ -1878,6 +1981,15 @@ fn walk(
                     ..place.clone()
                 };
                 walk(t.flattened(), opacity, clip, inside, None, got);
+                // Its outlines are named after it, where it has a name:
+                // they came in as so many layers called "Path".
+                if !t.id().is_empty() {
+                    for node in &mut got.shapes[before..] {
+                        if node.name == "Path" {
+                            node.name = t.id().to_string();
+                        }
+                    }
+                }
                 let a = t.abs_transform();
                 let placed = match fix(a) {
                     Some(f) => f.compose(as_doc(a)),
@@ -4205,6 +4317,57 @@ mod tests {
         }
     }
 
+    /// A face a drawing carries in its style sheet is the face its text
+    /// is set in — bold text came back in the regular weight, since the
+    /// reader takes no `@font-face` — and the text's outlines are named
+    /// after it rather than each called "Path".
+    #[test]
+    fn a_carried_face_sets_the_text_and_the_text_names_its_outlines() {
+        let bold = include_bytes!("../../../app/public/fonts/DejaVuSans-Bold.ttf");
+        let svg = |sheet: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="80"><style>{sheet}</style><text id="Title" x="0" y="50" font-family="DejaVu Sans" font-weight="bold" font-size="40">Hamburgefonstiv</text></svg>"##
+            )
+        };
+        let wide = |sheet: &str| {
+            let got = import_svg(svg(sheet).as_bytes()).unwrap();
+            assert!(!got.shapes.is_empty(), "the text comes in");
+            assert!(
+                got.shapes.iter().all(|n| n.name == "Title"),
+                "named after the text: {:?}",
+                got.shapes
+                    .iter()
+                    .map(|n| n.name.clone())
+                    .collect::<Vec<_>>()
+            );
+            got.shapes
+                .iter()
+                .filter_map(|n| match &n.kind {
+                    chitrakar_doc::NodeKind::Vector {
+                        shape: chitrakar_doc::VectorShape::Path { points, .. },
+                        ..
+                    } => points
+                        .iter()
+                        .map(|p| n.transform.a * p[0] + n.transform.c * p[1] + n.transform.e)
+                        .reduce(f32::max),
+                    _ => None,
+                })
+                .fold(0.0f32, f32::max)
+        };
+        let regular = wide("");
+        let carried = wide(&format!(
+            r#"@font-face{{font-family:"DejaVu Sans";font-weight:bold;src:url(data:font/ttf;base64,{}) format("truetype")}}"#,
+            crate::svg::base64_for_tests(bold)
+        ));
+        assert!(
+            carried > regular * 1.08,
+            "set in the bold the file carries: {carried} against {regular} without it"
+        );
+        // Base64 as written, broken over lines and padded.
+        assert_eq!(unbase64("SGVs\nbG8=").unwrap(), b"Hello");
+        assert!(unbase64("not*base64").is_none());
+    }
+
     /// Groups nested past what the reader can recurse through are refused
     /// in words; a deep but reasonable drawing still reads. A thousand
     /// nested groups ran the engine's stack out in a browser.
@@ -5468,6 +5631,26 @@ mod tests {
         assert!(
             import_svg(&gz(fine.as_bytes())).is_ok(),
             "and opens compressed"
+        );
+        // A font carried in the style sheet, as this editor's own SVGs
+        // carry theirs: its base64 is not numbers, though `/40E9` reads
+        // as one. A number in the sheet itself still is asked about.
+        let sheet = |rule: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="36"><style>{rule}</style><rect width="20" height="10"/></svg>"##
+            )
+        };
+        assert!(
+            import_svg(
+                sheet("@font-face{font-family:F;src:url(data:font/ttf;base64,AAEAAA/40E9+1e300/AA==)}")
+                    .as_bytes()
+            )
+            .is_ok(),
+            "a font carried in the sheet opens"
+        );
+        assert!(
+            import_svg(sheet("rect{stroke-width:1e30}").as_bytes()).is_err(),
+            "a number past any drawing in the sheet does not"
         );
     }
 

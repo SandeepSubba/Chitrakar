@@ -9,8 +9,8 @@
  * caret leaves, what is there is clamped into range and handed on, or,
  * if it is not a number at all, the box shows the value it had.
  *
- * Keys stay in the box (a digit is not a tool's key), except Escape,
- * which a window round it still hears; in the panel, where Escape would
+ * Keys stay in the box (a digit is not a tool's key), except Escape and
+ * Enter, which a window round it still hears; in the panel, where Escape would
  * let go of the layer, it lets go of the box instead, dropping what was
  * typed and not yet a number.
  */
@@ -96,7 +96,13 @@ export function NumberField({ value, onValue, min, max, integer, blankAs, show, 
       }}
       onKeyDown={(e) => {
         onKeyDown?.(e);
-        if (e.key === "Enter") settle(e.currentTarget.value);
+        if (e.key === "Enter") {
+          settle(e.currentTarget.value);
+          // In a window that answers Enter itself (New document, Export)
+          // it goes on to the window, unless the box's own handler took
+          // it: held here, no box of New document could finish it.
+          if (!e.defaultPrevented && e.currentTarget.closest(".modal")) return;
+        }
         if (e.key === "Escape") {
           if (e.currentTarget.closest(".modal")) return;
           dropping.current = true;

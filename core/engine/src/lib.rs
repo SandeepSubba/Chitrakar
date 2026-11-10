@@ -65,6 +65,13 @@ struct ClipNode {
     id: NodeId,
     node: Node,
     children: Vec<ClipNode>,
+    /// The whole space the layer was placed in on the page — its parent's
+    /// and every group's above it. A layer copied out of a frame or a
+    /// turned group keeps its transform, mask and effects in that space,
+    /// so a paste somewhere else carries them across the difference, or
+    /// it landed somewhere else, upright and unscaled. (Read for what
+    /// was copied; a child travels in its parent.)
+    space: Transform,
 }
 
 #[derive(Clone)]
@@ -707,6 +714,12 @@ pub struct Session {
     /// What it would take to restore the state before the current preview
     /// gesture, with the label captured from the gesture's first command.
     preview_gesture: Option<Gesture>,
+    /// Whether the preview is a window's that stays open beside the rest
+    /// of the editor (Straighten, Feather): another edit lets it go
+    /// rather than keeping it, and says so (`take_dropped_preview`).
+    holding_preview: bool,
+    /// A held preview let go of by another edit, not yet told.
+    dropped_preview: bool,
     /// The stroke a brush is in the middle of drawing: which layer it is
     /// going onto, where in that layer's order, and the stroke so far.
     painting: Option<Painting>,
@@ -836,6 +849,8 @@ impl Session {
             view_origin: (0.0, 0.0),
             viewport: None,
             preview_gesture: None,
+            holding_preview: false,
+            dropped_preview: false,
             painting: None,
             pixels_recomputed: 0,
             last_touched: None,
@@ -1443,7 +1458,7 @@ impl Session {
         label: String,
     ) -> Result<bool, EngineError> {
         let given = serde_json::to_value(&cmd).ok();
-        self.commit_preview();
+        self.settle_stray_preview();
         let inverse = self.apply_internal(cmd)?;
         let back = match &inverse {
             Command::Batch(back) => {
@@ -1478,7 +1493,7 @@ impl Session {
     }
 
     fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
-        self.commit_preview(); // a stray preview must not leak into this edit
+        self.settle_stray_preview(); // a stray preview must not leak into this edit
         let label = label.unwrap_or_else(|| self.describe(&cmd));
         // A value set to what it already is — a shape filled with its own
         // colour, a canvas given its own size — is no step.
@@ -1613,7 +1628,7 @@ impl Session {
     /// copy away, not leave it standing on the original. False when there
     /// are not two steps to fold.
     pub fn merge_last(&mut self) -> bool {
-        self.commit_preview();
+        self.settle_stray_preview();
         if self.undo.len() < 2 {
             return false;
         }
@@ -1630,6 +1645,34 @@ impl Session {
         true
     }
 
+    /// A preview still running when another edit comes: ended as one step
+    /// of its own, as a drag let go of — unless a window holding it open
+    /// beside the editor is, where it is let go of instead. Kept, the page
+    /// Straighten turned stayed turned after its Cancel, and applying it
+    /// again turned it twice.
+    fn settle_stray_preview(&mut self) {
+        if self.holding_preview && self.preview_gesture.is_some() {
+            if self.cancel_preview().is_ok() {
+                self.dropped_preview = true;
+            }
+        } else {
+            self.commit_preview();
+        }
+    }
+
+    /// Whether the previews to come are a window's held open beside the
+    /// editor (see `settle_stray_preview`).
+    pub fn hold_preview(&mut self, on: bool) {
+        self.holding_preview = on;
+        self.dropped_preview = false;
+    }
+
+    /// Whether another edit let a held preview go since this was last
+    /// asked — the window showing it then has nothing left to apply.
+    pub fn take_dropped_preview(&mut self) -> bool {
+        std::mem::take(&mut self.dropped_preview)
+    }
+
     /// Abort the gesture, restoring the pre-gesture state. Returns false if
     /// no preview was active.
     pub fn cancel_preview(&mut self) -> Result<bool, EngineError> {
@@ -1644,7 +1687,7 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> Result<bool, EngineError> {
-        self.commit_preview();
+        self.settle_stray_preview();
         match self.undo.pop() {
             None => Ok(false),
             Some(entry) => {
@@ -4343,6 +4386,19 @@ impl Session {
     /// `within` is how far from the outline the point may be, in the
     /// layer's own units: an anchor goes on the outline, so a point that
     /// is merely *inside* the shape is not asking for one.
+    /// Refused where the layer, or a group it is in, is locked: its
+    /// anchors are as held as the rest of it.
+    fn unlocked(&self, id: NodeId) -> Result<(), EngineError> {
+        let mut at = Some(id);
+        while let Some(here) = at {
+            if self.doc.node(here)?.locked {
+                return Err(EngineError::BadCommand("that layer is locked".into()));
+            }
+            at = self.doc.parent_of(here);
+        }
+        Ok(())
+    }
+
     pub fn insert_anchor(
         &mut self,
         id: NodeId,
@@ -4350,6 +4406,7 @@ impl Session {
         y: f32,
         within: f32,
     ) -> Result<usize, EngineError> {
+        self.unlocked(id)?;
         let Some(added) = self.anchored(id, x, y, within)? else {
             return Ok(0);
         };
@@ -4572,6 +4629,7 @@ impl Session {
     /// Take an anchor off a path. Refuses to leave one that has nothing
     /// left to be a path with.
     pub fn remove_anchor(&mut self, id: NodeId, index: usize) -> Result<(), EngineError> {
+        self.unlocked(id)?;
         let node = self.doc.node(id)?;
         let chitrakar_doc::NodeKind::Vector { shape, .. } = &node.kind else {
             return Err(EngineError::BadCommand("not a shape layer".into()));
@@ -4780,6 +4838,7 @@ impl Session {
     /// do the widths of a brushed line. One step in the history; the
     /// answer is the path's layer, and the new one when there is one.
     pub fn split_path(&mut self, id: NodeId, index: usize) -> Result<Vec<NodeId>, EngineError> {
+        self.unlocked(id)?;
         let parts = self.open_path_parts(id)?;
         let (cmds, made, label) = self.split_commands(id, parts, index)?;
         self.apply_labeled(Command::Batch(cmds), Some(label.into()))?;
@@ -4807,6 +4866,9 @@ impl Session {
         }
         let mut cmds = Vec::new();
         for &id in ids {
+            if self.unlocked(id).is_err() {
+                continue;
+            }
             let node = self.doc.node(id)?;
             let NodeKind::Vector {
                 shape,
@@ -4917,6 +4979,7 @@ impl Session {
         within: f32,
     ) -> Result<Vec<NodeId>, EngineError> {
         // Refused for what a cut refuses, before an anchor is put on.
+        self.unlocked(id)?;
         let (_, _, _, smooth, _) = self.open_path_parts(id)?;
         let added = self
             .anchored(id, x, y, within)?
@@ -5597,6 +5660,7 @@ impl Session {
     fn clip_of(&self, id: NodeId) -> Result<ClipNode, EngineError> {
         Ok(ClipNode {
             id,
+            space: chitrakar_render::ancestor_space(&self.doc, id),
             node: self.doc.node(id)?.clone(),
             children: self
                 .doc
@@ -5710,9 +5774,38 @@ impl Session {
                     && std::mem::discriminant(&n.kind) == std::mem::discriminant(&r.node.kind)
             })
         });
-        let mut cmds = Vec::new();
-        let ids: Vec<NodeId> = clip
+        // Each layer carried from the space it was copied in to the one it
+        // is pasted into, as a layer dragged between groups is: where it
+        // was on the page is where it lands.
+        let now = chitrakar_render::own_space(&self.doc, parent)?;
+        let roots: Vec<ClipNode> = clip
             .roots
+            .iter()
+            .map(|root| {
+                let Some(carry) =
+                    chitrakar_render::invert(now).map(|back| back.compose(root.space))
+                else {
+                    return root.clone();
+                };
+                if carry == Transform::default() {
+                    return root.clone();
+                }
+                let mut moved = root.clone();
+                let node = &mut moved.node;
+                node.transform = carry.compose(node.transform);
+                if let Some(mask) = node.mask.take() {
+                    node.mask = Some(mask.carried_through(carry));
+                }
+                node.effects = node
+                    .effects
+                    .iter()
+                    .map(|e| e.carried_through(carry))
+                    .collect();
+                moved
+            })
+            .collect();
+        let mut cmds = Vec::new();
+        let ids: Vec<NodeId> = roots
             .iter()
             .enumerate()
             .map(|(n, root)| {
@@ -6196,7 +6289,7 @@ impl Session {
         // it, comes to no rings, and picks nothing — as it does when
         // nothing was picked to begin with. It used to be refused as
         // edges that overlap exactly, which they did not.
-        let selection = Self::region_of(combined, current.feather).map(Box::new);
+        let selection = self.region_on_page(combined, current.feather).map(Box::new);
         self.apply_labeled(Command::SetSelection { selection }, Some(label.into()))
     }
 
@@ -6313,6 +6406,50 @@ impl Session {
 
     /// Outlines in page coordinates back into a region, or `None` where
     /// the combination left nothing at all.
+    /// [`region_of`](Self::region_of), with a ring that only frames the
+    /// page — a rectangle round the whole of it, which combining a region
+    /// turned inside out leaves among the rest — taken out and the region
+    /// turned inside out instead. On the page the two pick the same pixels;
+    /// moved, they did not: the frame was moved with the rest, and a strip
+    /// along the page's edge let go, where the same region made by
+    /// Select › Inverse moves its hole.
+    fn region_on_page(
+        &self,
+        mut rings: Vec<Vec<[f32; 2]>>,
+        feather: f32,
+    ) -> Option<chitrakar_doc::Mask> {
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        const NEAR: f32 = 1e-3;
+        let frames = |ring: &Vec<[f32; 2]>| {
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for p in ring {
+                x0 = x0.min(p[0]);
+                y0 = y0.min(p[1]);
+                x1 = x1.max(p[0]);
+                y1 = y1.max(p[1]);
+            }
+            let round_page = x0 <= NEAR && y0 <= NEAR && x1 >= w - NEAR && y1 >= h - NEAR;
+            let on_its_box = ring.iter().all(|p| {
+                (p[0] - x0).abs() <= NEAR
+                    || (p[0] - x1).abs() <= NEAR
+                    || (p[1] - y0).abs() <= NEAR
+                    || (p[1] - y1).abs() <= NEAR
+            });
+            round_page && on_its_box
+        };
+        let framing = (rings.len() > 1)
+            .then(|| rings.iter().position(frames))
+            .flatten();
+        let Some(at) = framing else {
+            return Self::region_of(rings, feather);
+        };
+        rings.remove(at);
+        Self::region_of(rings, feather).map(|mut region| {
+            region.invert = true;
+            region
+        })
+    }
+
     fn region_of(rings: Vec<Vec<[f32; 2]>>, feather: f32) -> Option<chitrakar_doc::Mask> {
         let mut rings = rings.into_iter().filter(|r| r.len() >= 3);
         let first = rings.next()?;
@@ -6651,7 +6788,7 @@ impl Session {
         let inside: Vec<bool> = cover.iter().map(|c| *c >= 0.5).collect();
         let rings =
             chitrakar_render::trace_pixels(&chitrakar_render::grown(&inside, w, h, by), w, h);
-        let Some(grown) = Self::region_of(rings, region.feather) else {
+        let Some(grown) = self.region_on_page(rings, region.feather) else {
             return Err(EngineError::BadCommand(
                 "shrinking that far leaves nothing picked out".into(),
             ));
@@ -9836,25 +9973,64 @@ impl Session {
                 "an export of {pw}x{ph} is larger than can be made"
             )));
         }
-        let mut surface = Surface::new(pw, ph);
+        // A part of the page is drawn as the canvas draws its window: with
+        // room past each side for whatever inside reads across it — a
+        // filter, an effect, a feathered edge — and then cut back. Drawn
+        // only to its own edge, a softened mask the border crossed came out
+        // hard all along it, the file unlike the screen.
+        let past = if region.is_some() {
+            let filters = chitrakar_render::filter_reach(&self.doc) as f32 * scale;
+            let effects = chitrakar_render::effects_reach(&self.doc) * scale * 2.0;
+            let softening = chitrakar_render::softening_reach(&self.doc) * scale;
+            let most = filters.max(effects).max(softening);
+            if most.is_finite() && most > 0.0 {
+                ((most.ceil() as u32).saturating_add(2)).min(1024)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let (sw, sh) = (pw.saturating_add(2 * past), ph.saturating_add(2 * past));
+        let past = if chitrakar_doc::canvas_fits(sw, sh) {
+            past
+        } else {
+            0
+        };
+        let mut surface = Surface::new(pw + 2 * past, ph + 2 * past);
+        chitrakar_render::render_region_at(
+            &self.doc,
+            &mut surface,
+            ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: pw + 2 * past,
+                y1: ph + 2 * past,
+            },
+            Transform {
+                a: scale,
+                d: scale,
+                e: -x * scale + past as f32,
+                f: -y * scale + past as f32,
+                ..Default::default()
+            },
+        )?;
+        if past > 0 {
+            let mut cut = Surface::new(pw, ph);
+            for row in 0..ph {
+                let from = ((row + past) * surface.width + past) as usize;
+                let to = (row * pw) as usize;
+                cut.pixels[to..to + pw as usize]
+                    .copy_from_slice(&surface.pixels[from..from + pw as usize]);
+            }
+            surface = cut;
+        }
         let full = ClipRect {
             x0: 0,
             y0: 0,
             x1: pw,
             y1: ph,
         };
-        chitrakar_render::render_region_at(
-            &self.doc,
-            &mut surface,
-            full,
-            Transform {
-                a: scale,
-                d: scale,
-                e: -x * scale,
-                f: -y * scale,
-                ..Default::default()
-            },
-        )?;
         if self.output_sharpen > 0.0 {
             // At the size it goes out at, a pixel's width: the edges a
             // smaller copy softened, and no halo a screen would show.
@@ -11340,6 +11516,25 @@ impl Session {
                 _ => Vec::new(),
             })
             .collect();
+        // And a face a kept style sets text in, though no text is set in
+        // it now: the style travels with the file, and given to text on
+        // another machine it fell back to the default face.
+        for style in self.doc.styles() {
+            if let Some(look) = &style.look.text {
+                let mut spec = chitrakar_doc::TextSpec::new(
+                    "",
+                    look.size.max(1.0),
+                    chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                );
+                look.give(&mut spec);
+                names.extend(chitrakar_render::text::faces_used(&spec));
+            }
+        }
         names.sort();
         names.dedup();
         names
@@ -23119,6 +23314,378 @@ mod tests {
         assert!(session.selection_covers(120.0, 80.0));
         pick(&mut session, 0.0, 0.0, 100.0, 100.0, "intersect").unwrap();
         assert!(!session.selection_covers(120.0, 80.0) && !session.selection_covers(99.0, 80.0));
+    }
+
+    /// A layer copied out of a turned, scaled group, pasted onto the page,
+    /// lands where it stood — turned and scaled as it was — and cut and
+    /// pasted it lands exactly there; its mask comes with it. It came back
+    /// upright, unscaled and somewhere else.
+    #[test]
+    fn a_layer_pasted_out_of_a_turned_group_lands_where_it_stood() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 100.0, 60.0);
+        let b = add_rect(&mut session, "b", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(30.0, 20.0),
+            })
+            .unwrap();
+        let group = session.group_nodes(&[a, b], "g").unwrap();
+        let (c, s) = (0.5f32.cos(), 0.5f32.sin());
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: Transform {
+                    a: 1.5 * c,
+                    b: 1.5 * s,
+                    c: -1.5 * s,
+                    d: 1.5 * c,
+                    e: 200.0,
+                    f: 40.0,
+                },
+            })
+            .unwrap();
+        let was = session.bounds_of(a).unwrap();
+        session.copy_nodes(&[a]).unwrap();
+        let pasted = session.paste(None).unwrap();
+        let now = session.bounds_of(pasted[0]).unwrap();
+        // Over the original, so nudged clear of it, by the nudge alone.
+        for (k, (p, q)) in now.iter().zip(&was).enumerate() {
+            let off = if k < 2 { DUPLICATE_OFFSET } else { 0.0 };
+            assert!((p - q - off).abs() < 0.01, "copy: {now:?} against {was:?}");
+        }
+        // Cut and pasted: exactly where it was.
+        session.undo().unwrap();
+        session.copy_nodes(&[a]).unwrap();
+        session.delete_layers(&[a]).unwrap();
+        let moved = session.paste(None).unwrap();
+        let there = session.bounds_of(moved[0]).unwrap();
+        for (p, q) in there.iter().zip(&was) {
+            assert!((p - q).abs() < 0.01, "cut: {there:?} against {was:?}");
+        }
+    }
+
+    /// A locked path's anchors are as held as the rest of it: none goes
+    /// on or comes off, it is not cut or split, and its corners are not
+    /// rounded.
+    #[test]
+    fn a_locked_paths_anchors_stay_put() {
+        let mut session = Session::new(200, 200, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 100.0, 100.0);
+        session.as_path(id).unwrap();
+        session
+            .apply(Command::SetLocked { id, locked: true })
+            .unwrap();
+        let before = session.document().node(id).unwrap().kind.clone();
+        assert!(
+            session.insert_anchor(id, 50.0, 0.0, 5.0).is_err(),
+            "no anchor goes on"
+        );
+        assert!(session.remove_anchor(id, 0).is_err(), "none comes off");
+        assert!(session.split_path(id, 0).is_err(), "it is not split");
+        assert!(session.cut_path_at(id, 50.0, 0.0, 5.0).is_err(), "nor cut");
+        assert_eq!(
+            session.round_corners(&[id], 10.0, None).unwrap(),
+            0,
+            "nor rounded"
+        );
+        assert_eq!(session.document().node(id).unwrap().kind, before);
+        // In a locked group, the same.
+        session
+            .apply(Command::SetLocked { id, locked: false })
+            .unwrap();
+        let group = session.group_nodes(&[id], "g").unwrap();
+        session
+            .apply(Command::SetLocked {
+                id: group,
+                locked: true,
+            })
+            .unwrap();
+        assert!(
+            session.insert_anchor(id, 50.0, 0.0, 5.0).is_err(),
+            "nor in a locked group"
+        );
+    }
+
+    /// A layer turned back upright inside a turned group is boxed as what
+    /// it draws: it was said to cover a square half again its size.
+    #[test]
+    fn a_layer_turned_back_inside_a_turned_group_is_boxed_tight() {
+        let mut session = Session::new(400, 400, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 100.0, 60.0);
+        let b = add_rect(&mut session, "b", 10.0, 10.0);
+        let group = session.group_nodes(&[a, b], "g").unwrap();
+        let turn = |deg: f32, e: f32, f: f32| {
+            let (c, s) = (deg.to_radians().cos(), deg.to_radians().sin());
+            Transform {
+                a: c,
+                b: s,
+                c: -s,
+                d: c,
+                e,
+                f,
+            }
+        };
+        session
+            .apply(Command::SetTransform {
+                id: group,
+                transform: turn(45.0, 200.0, 100.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: turn(-45.0, 0.0, 0.0),
+            })
+            .unwrap();
+        let [_, _, w, h] = session.bounds_of(a).unwrap();
+        assert!(
+            (w - 100.0).abs() < 0.01 && (h - 60.0).abs() < 0.01,
+            "{w} by {h}"
+        );
+    }
+
+    /// A preview held by a window open beside the editor (Straighten,
+    /// Feather) is let go of when another edit comes, rather than kept as
+    /// a step of its own, and the window is told.
+    #[test]
+    fn a_held_preview_is_let_go_by_another_edit() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 20.0, 20.0);
+        let b = add_rect(&mut session, "b", 20.0, 20.0);
+        let steps = session.history_labels().0.len();
+        session.hold_preview(true);
+        session
+            .preview(Command::SetOpacity {
+                id: a,
+                opacity: 0.25,
+            })
+            .unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: b,
+                visible: false,
+            })
+            .unwrap();
+        assert_eq!(
+            session.document().node(a).unwrap().opacity,
+            1.0,
+            "the preview went"
+        );
+        assert!(
+            !session.document().node(b).unwrap().visible,
+            "the edit stood"
+        );
+        assert_eq!(
+            session.history_labels().0.len(),
+            steps + 1,
+            "one step: the edit"
+        );
+        assert!(session.take_dropped_preview(), "and the window is told");
+        assert!(!session.take_dropped_preview(), "once");
+        // Not held, a stray preview is kept as its own step, as before.
+        session.hold_preview(false);
+        session
+            .preview(Command::SetOpacity {
+                id: a,
+                opacity: 0.25,
+            })
+            .unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: b,
+                visible: true,
+            })
+            .unwrap();
+        assert_eq!(session.document().node(a).unwrap().opacity, 0.25);
+        assert_eq!(session.history_labels().0.len(), steps + 3);
+    }
+
+    /// A face only a kept style sets text in travels with the file, as
+    /// one text is set in does.
+    #[test]
+    fn a_face_a_style_sets_text_in_is_kept_with_the_file() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let root = session.document().root();
+        let mut spec = chitrakar_doc::TextSpec::new(
+            "Hi",
+            20.0,
+            chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        spec.font = "MyFace".into();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::text("t", spec.clone())),
+            })
+            .unwrap();
+        let id = session.document().children_of(root).unwrap()[0];
+        session.keep_style("Serif style", id).unwrap();
+        spec.font = String::new();
+        session
+            .apply(Command::SetKind {
+                id,
+                kind: Box::new(NodeKind::Text(spec)),
+            })
+            .unwrap();
+        assert!(
+            session.fonts_used().contains(&"MyFace".to_string()),
+            "{:?}",
+            session.fonts_used()
+        );
+    }
+
+    /// A part of the page goes out as the whole page shows it, though a
+    /// feathered mask's soft edge crosses its border: drawn only to its
+    /// own edge, the softness came out hard all along it.
+    #[test]
+    fn a_region_exported_keeps_a_soft_edge_across_its_border() {
+        let mut session = Session::new(300, 200, ColorMode::Rgb);
+        let id = add_rect(&mut session, "r", 300.0, 200.0);
+        session
+            .apply(Command::SetMask {
+                id,
+                mask: Some(Box::new(chitrakar_doc::Mask {
+                    kind: chitrakar_doc::MaskKind::Vector {
+                        shape: VectorShape::Rect {
+                            width: 100.0,
+                            height: 100.0,
+                            radius: 0.0,
+                        },
+                        transform: Transform::translation(100.0, 50.0),
+                    },
+                    invert: false,
+                    feather: 15.0,
+                })),
+            })
+            .unwrap();
+        let whole = session.render_scaled(1.0, None).unwrap();
+        let (x0, y0) = (95u32, 80u32);
+        let part = session
+            .render_scaled(1.0, Some([x0 as f32, y0 as f32, 40.0, 40.0]))
+            .unwrap();
+        for y in 0..40 {
+            for x in 0..40 {
+                let (p, q) = (
+                    part.get(x, y).to_srgb8(),
+                    whole.get(x + x0, y + y0).to_srgb8(),
+                );
+                assert!(
+                    p.iter().zip(&q).all(|(a, b)| a.abs_diff(*b) <= 1),
+                    "at {},{}: {p:?} in the part, {q:?} on the page",
+                    x + x0,
+                    y + y0
+                );
+            }
+        }
+    }
+
+    /// The eyedropper picks what the page shows where a stroke painted
+    /// inside a feathered region is soft: drawn a pixel alone, with room
+    /// only for the layers' own masks, it read the stroke hard.
+    #[test]
+    fn the_eyedropper_reads_a_stroke_soft_where_its_region_is() {
+        let mut session = Session::new(300, 200, ColorMode::Rgb);
+        let root = session.document().root();
+        let stroke = chitrakar_doc::PaintStroke {
+            points: vec![[20.0, 100.0], [280.0, 100.0]],
+            radii: vec![30.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 0.0,
+            erase: false,
+            source: [0.0; 2],
+            heal: false,
+            clip: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 100.0,
+                        height: 100.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(100.0, 50.0),
+                },
+                invert: false,
+                feather: 15.0,
+            })),
+        };
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new({
+                    let mut n = Node::paint("paint");
+                    n.kind = NodeKind::Paint {
+                        strokes: vec![stroke],
+                    };
+                    n
+                }),
+            })
+            .unwrap();
+        let page = session.render().unwrap();
+        for x in [94u32, 100, 106, 112] {
+            let picked = session.color_at(x as f32 + 0.5, 100.5).unwrap();
+            let shown = page.get(x, 100).to_srgb8();
+            assert!(
+                picked.iter().zip(&shown).all(|(a, b)| a.abs_diff(*b) <= 1),
+                "at {x}: picked {picked:?}, shown {shown:?}"
+            );
+        }
+    }
+
+    /// A region turned inside out and combined is still inside out, not
+    /// a frame round the page with a hole in it: the same pixels, but a
+    /// region moved shifts its hole, where the frame moved along with the
+    /// rest and let a strip of the page go.
+    #[test]
+    fn an_inside_out_region_combined_stays_inside_out() {
+        let mut session = Session::new(800, 600, ColorMode::Rgb);
+        let pick = |s: &mut Session, x: f32, y: f32, w: f32, h: f32, how: &str| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: w,
+                    height: h,
+                    radius: 0.0,
+                },
+                Transform::translation(x, y),
+                how,
+            )
+        };
+        pick(&mut session, 300.0, 200.0, 200.0, 200.0, "replace").unwrap();
+        session.pick_inverse().unwrap();
+        let probes = [
+            (5.0, 5.0),
+            (400.0, 300.0),
+            (795.0, 595.0),
+            (299.0, 300.0),
+            (301.0, 300.0),
+        ];
+        let before: Vec<bool> = probes
+            .iter()
+            .map(|&(x, y)| session.selection_covers(x, y))
+            .collect();
+        // A box already picked, added: nothing changes on the page.
+        pick(&mut session, 700.0, 500.0, 60.0, 60.0, "union").unwrap();
+        let after: Vec<bool> = probes
+            .iter()
+            .map(|&(x, y)| session.selection_covers(x, y))
+            .collect();
+        assert_eq!(after, before, "the same pixels");
+        assert!(
+            session.document().selection().is_some_and(|m| m.invert),
+            "and still inside out"
+        );
     }
 
     /// A step taken back is gone: not undone into the redo list, where
