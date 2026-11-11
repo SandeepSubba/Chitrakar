@@ -1438,6 +1438,15 @@ impl Session {
             Command::Batch(cmds) => match cmds.as_slice() {
                 [] => "Multiple edits".into(),
                 [only] => self.describe(only),
+                // A frame's new size, with what is pinned in it following.
+                [Command::SetKind { id, kind }, rest @ ..]
+                    if matches!(**kind, NodeKind::Artboard { .. })
+                        && rest.iter().all(|c| {
+                            matches!(c, Command::SetKind { .. } | Command::SetTransform { .. })
+                        }) =>
+                {
+                    format!("Resize {}", name(id))
+                }
                 many => match verb_of(&many[0]) {
                     Some(verb) if many.iter().all(|c| verb_of(c) == Some(verb)) => {
                         format!("{verb} {} layers", many.len())
@@ -1948,7 +1957,25 @@ impl Session {
             }
             [only] => {
                 let node = scratch.node(*only)?;
-                let kept = (node.blend, node.clipped);
+                // A live copy left at Normal draws with its original's
+                // blend, so that is the blend its picture must keep.
+                let mut blend = node.blend;
+                let mut of = match &node.kind {
+                    NodeKind::Instance { of, .. } => Some(*of),
+                    _ => None,
+                };
+                for _ in 0..64 {
+                    let (true, Some(o)) = (blend == chitrakar_doc::BlendMode::Normal, of) else {
+                        break;
+                    };
+                    let original = scratch.node(o)?;
+                    blend = original.blend;
+                    of = match &original.kind {
+                        NodeKind::Instance { of, .. } => Some(*of),
+                        _ => None,
+                    };
+                }
+                let kept = (blend, node.clipped);
                 gather.push(Command::SetBlendMode {
                     id: *only,
                     blend: chitrakar_doc::BlendMode::Normal,
@@ -14057,6 +14084,72 @@ mod tests {
             .unwrap()
             .last()
             .unwrap()
+    }
+
+    /// Round 23's three: a copy of a group holding an adjustment keeps
+    /// its box once a part is its own; a copy merged alone keeps the
+    /// blend it drew with, its original's; a frame's resize is named.
+    #[test]
+    fn a_copys_box_blend_and_a_frames_resize() {
+        let mut s = Session::new(400, 300, chitrakar_color::ColorMode::Rgb);
+        let rect = add_rect(&mut s, "Rect", 100.0, 80.0);
+        let root = s.document().root();
+        let index = s.document().children_of(root).unwrap().len();
+        s.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(chitrakar_doc::Node::adjustment(
+                "negative",
+                chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+            )),
+        })
+        .unwrap();
+        let invert = *s.document().children_of(root).unwrap().last().unwrap();
+        let group = s.group_nodes(&[rect, invert], "Group").unwrap();
+        let copy = s.make_instance(group).unwrap();
+        s.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(200.0, 40.0),
+        })
+        .unwrap();
+        let before = s.bounds_of(copy).expect("a box before");
+        s.override_child(copy, 0).unwrap();
+        let after = s.bounds_of(copy).expect("and a box with a part its own");
+        for k in 0..4 {
+            assert!(
+                (before[k] - after[k]).abs() < 0.5,
+                "the same box: {before:?} {after:?}"
+            );
+        }
+
+        let mut s = Session::new(200, 120, chitrakar_color::ColorMode::Rgb);
+        add_rect(&mut s, "Ground", 200.0, 120.0);
+        let top = add_rect(&mut s, "Top", 60.0, 40.0);
+        s.apply(Command::SetBlendMode {
+            id: top,
+            blend: chitrakar_doc::BlendMode::Multiply,
+        })
+        .unwrap();
+        let copy = s.make_instance(top).unwrap();
+        s.apply(Command::SetTransform {
+            id: copy,
+            transform: Transform::translation(100.0, 60.0),
+        })
+        .unwrap();
+        let page = |s: &Session| chitrakar_render::render(s.document()).unwrap().to_srgb8();
+        let drawn = page(&s);
+        let merged = s.merge_layers(&[copy]).unwrap();
+        assert_eq!(
+            s.document().node(merged).unwrap().blend,
+            chitrakar_doc::BlendMode::Multiply,
+            "the original's blend, which the copy drew with"
+        );
+        assert!(page(&s) == drawn, "and the page is unchanged");
+
+        let frame = s.add_artboard("Frame", 0.0, 0.0, 80.0, 60.0, None).unwrap();
+        let json = s.artboard_resize(frame, 120.0, 90.0, 0.0, 0.0).unwrap();
+        s.apply(serde_json::from_str(&json).unwrap()).unwrap();
+        assert_eq!(s.history_labels().0.last().unwrap(), "Resize Frame");
     }
 
     fn assert_cache_matches_fresh(session: &mut Session) {

@@ -79,7 +79,8 @@ without reading anything else.*
      a document, a palm on a tablet. The twenty-third: one finding that
      could lose work, and only across two tabs and a crash (a draft's
      pictures deleted by another tab's draft while still being written);
-     the rest edges and words. ⬜ until a broad pass finds nothing.
+     the rest edges and words, and two live-copy slips in editing. ⬜
+     until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11602,6 +11603,17 @@ without reading anything else.*
   hop with some press profiles (the profile's way into inks is not
   quite its way out); a menu choice not ticked is not said as one to a
   screen reader.
+  Its editing pass came in after: a live copy of a group holding an
+  adjustment lost its box once one of its parts was given its own —
+  no handles, the whole page in the fields, turns about the page's
+  middle, frame pins ignored, merge refused (the copy's parts skip an
+  adjustment or a filter as a group's children do); a live copy left
+  at Normal, merged alone, became a Normal picture, though it drew
+  with its original's Multiply (it keeps that); and a frame's resize
+  was "Multiple edits" in the history (now "Resize Frame"). Its fuzzing
+  — 30 runs of 300 steps, RGB and CMYK, pictures, gradients, copies,
+  frames, styles, comps — found nothing else, and undo and save were
+  exact at the end of every run.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

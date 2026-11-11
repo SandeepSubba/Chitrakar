@@ -984,6 +984,21 @@ fn holds_a_change(doc: &Document, id: NodeId) -> bool {
     }
 }
 
+/// Whether a layer is an adjustment or a filter, or a live copy of one:
+/// it changes what is under it rather than drawing anything of its own.
+fn acts_on_what_is_under(doc: &Document, mut id: NodeId) -> bool {
+    // A copy's chain is short and never loops; the bound only guards a
+    // damaged document.
+    for _ in 0..64 {
+        match doc.node(id).map(|n| &n.kind) {
+            Ok(NodeKind::Adjustment(_) | NodeKind::Filter(_)) => return true,
+            Ok(NodeKind::Instance { of, .. }) => id = *of,
+            _ => return false,
+        }
+    }
+    false
+}
+
 pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, DocError> {
     let node = doc.node(id)?;
     Ok(match &node.kind {
@@ -1010,6 +1025,11 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             } else {
                 let mut acc = Bounds::None;
                 for part in stand_ins {
+                    // As for a group below: an adjustment or a filter
+                    // among the parts changes only what the others draw.
+                    if acts_on_what_is_under(doc, part) {
+                        continue;
+                    }
                     acc = acc.union(bounds_in_parent_space_inner(doc, part, false)?);
                 }
                 match acc {
