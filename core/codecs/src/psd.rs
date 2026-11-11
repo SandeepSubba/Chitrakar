@@ -473,7 +473,10 @@ fn read_layers(
         // kept as a drawing is said as one, below.)
         if w == 0 || hh == 0 {
             group_masks.push(None);
-            pixels.push((!rec.drawn).then(|| PsdPixels {
+            // Not an adjustment's record, which has no pixels either:
+            // that is said as lost, and what is clipped to it goes on to
+            // the layer under it, as before.
+            pixels.push((!rec.drawn && !rec.adjustment).then(|| PsdPixels {
                 name: rec.name.clone(),
                 left: rec.left,
                 top: rec.top,
@@ -1044,7 +1047,11 @@ impl Colour {
         Colour {
             mode: h.mode,
             palette: palette.to_vec(),
-            icc_rgb: icc.filter(|_| h.mode == Mode::Rgb).map(<[u8]>::to_vec),
+            // A grey file's own grey profile too: its tones, read as sRGB's,
+            // came in wrong (`normalize_rgba8_to_srgb` takes either).
+            icc_rgb: icc
+                .filter(|_| matches!(h.mode, Mode::Rgb | Mode::Grey))
+                .map(<[u8]>::to_vec),
             cmyk: icc
                 .filter(|_| h.mode == Mode::Cmyk)
                 .and_then(|p| chitrakar_color::cms::CmykCms::new(p).ok()),

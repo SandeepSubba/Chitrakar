@@ -403,7 +403,9 @@ body {
 
 .menu-label.open {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
-  color: var(--accent);
+  /* The text's own colour over the wash: accent on accent was 3.3:1 in
+     the dark theme at the smallest size, short of 4.5. */
+  color: var(--text);
 }
 
 .menu-pop {
@@ -956,6 +958,9 @@ body {
 .history button {
   display: block;
   width: 100%;
+  /* A step named for something long with no spaces breaks where it has
+     to, rather than being cut mid-word at the panel's edge. */
+  overflow-wrap: anywhere;
   text-align: left;
   background: none;
   border: none;
@@ -2150,6 +2155,12 @@ body {
 }
 
 .palette.comps .comp-chip {
+  /* A long name without spaces ran past the panel's edge, cut with no
+     sign it went on. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 1px 7px;
   border: 1px solid var(--border);
   border-radius: 10px;

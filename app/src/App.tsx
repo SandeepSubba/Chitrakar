@@ -809,7 +809,10 @@ if (typeof window !== "undefined") {
   window.addEventListener(
     "keydown",
     (e) => {
-      if (e.code !== "Space" && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) lastByPointer = false;
+      // Only the keys that move the focus: after a click, `]` or Ctrl+Z
+      // leave it on the button clicked, and Space there is still the hand.
+      if (["Tab", "F6", "F10", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key))
+        lastByPointer = false;
     },
     true,
   );
@@ -1600,6 +1603,18 @@ const COMMAND_ROWS = new Set([
  * a recent file, a kept style — rather than a command: they come and
  * go, so a chord given one would wander to whatever took its place. */
 const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("style-");
+
+/** A kept region's name as its chip in the rail can hold it: the rail
+ * is a finger wide, and "Region 1" to "Region 4" all read "R…" there.
+ * A name ending in a number is its first letter and the number ("R3");
+ * any other long one its first three letters. The whole name is the
+ * chip's label and its tip. */
+function chipName(name: string): string {
+  if (name.length <= 4) return name;
+  const numbered = /^(\S)\S*.*?(\d+)$/u.exec(name.trim());
+  if (numbered) return `${numbered[1]}${numbered[2]}`;
+  return [...name.trim()].slice(0, 3).join("");
+}
 
 /** Rows that act on the picked layers and on nothing else: with none
  * picked they are greyed out, where fifty of them did nothing and said
@@ -4580,6 +4595,10 @@ export function App() {
         }
         touchesRef.current.clear();
         pinchRef.current = null;
+        // A finger moves the page once a pen has been seen, so the palm
+        // had begun a pan — and the pen's own travel then moved the page
+        // by that pan, the stroke landing under the heel of the hand.
+        panDragRef.current = null;
         clearLong();
         abandonGesture();
       }
@@ -5370,6 +5389,11 @@ export function App() {
       // rather than starting another one — with no modifier, since
       // shift and alt are how a second region is added or taken away.
       if (!e.shiftKey && !e.altKey && session.selection_covers(x, y)) {
+        // Feather standing open beside it is let go of first, so the
+        // region carried is the one it puts back: a finger's drag (which
+        // does not let the window go, in case it is a pinch) carried the
+        // softness being tried.
+        if (featherOpenRef.current) cancelFeather();
         const was = JSON.parse(session.selection_json()) as Mask | null;
         if (was && regionMoved(was, 0, 0)) {
           // A region carried across the page catches the same lines a
@@ -5489,7 +5513,17 @@ export function App() {
       // and make it the colour to draw with. With a shape or a block of
       // text picked, it becomes that layer's fill as well.
       const hex = colorUnder(session, x, y);
-      if (hex) applyColour(hex);
+      if (hex) {
+        // In a CMYK document with a press profile, the inks that print
+        // what the page shows there, separated by the profile: the plain
+        // formula is not the profile's way back, and a colour picked,
+        // given and picked again drifted further at every hop.
+        const n = parseInt(hex.slice(1), 16);
+        const sep = cmyk ? session.separate(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255) : [];
+        const ink: AuthoredColor | undefined =
+          sep.length === 4 ? { Cmyk: { c: sep[0], m: sep[1], y: sep[2], k: sep[3], a: 1 } } : undefined;
+        applyColour(hex, undefined, ink);
+      }
       setTool("Move");
       return;
     }
@@ -7858,9 +7892,12 @@ export function App() {
     }
     const ids = withoutNested(selectionSet);
     if (ids.length === 0 || !session) return;
+    // A drag still going is let go of first: the layer it moves is about
+    // to be gone, and each move after threw "unknown node id".
+    cancelGesture();
     // A layer live copies follow is asked about: gone, every copy of it
     // shows nothing, and nothing said so.
-    const followed = ids.reduce((n, id) => n + session.copies_following(id), 0);
+    const followed = session.copies_left_empty(new Float64Array(ids));
     if (
       followed > 0 &&
       !window.confirm(
@@ -8198,9 +8235,13 @@ export function App() {
   /** Whether to go on with something that takes `ids` away when live
    * copies follow them: they would show nothing, and only Delete and Cut
    * asked — ungrouping a component emptied every copy of it unsaid. */
-  const copiesAllow = (ids: NodeId[], doing: string): boolean => {
+  const copiesAllow = (ids: NodeId[], doing: string, onlyThese = false): boolean => {
     if (!session) return false;
-    const followed = ids.reduce((n, id) => n + session.copies_following(id), 0);
+    // Ungrouping takes away the group alone: what is in it stays, and so
+    // do copies of it. Everything else takes what is inside too.
+    const followed = onlyThese
+      ? ids.reduce((n, id) => n + session.copies_following(id), 0)
+      : session.copies_left_empty(new Float64Array(ids));
     return (
       followed === 0 ||
       window.confirm(
@@ -8573,7 +8614,7 @@ export function App() {
     // The chord pressed over a layer that is not a group asks nothing:
     // an alert box saying so was a window to dismiss for a no-op.
     if (layers.find((l) => l.id === selected)?.kind !== "group") return;
-    if (!copiesAllow([selected], "ungrouping")) return;
+    if (!copiesAllow([selected], "ungrouping", true)) return;
     try {
       session.ungroup_node(selected);
       setSelected(null);
@@ -9168,7 +9209,12 @@ export function App() {
   // A layer picked on the canvas inside a folded group has its row shown:
   // the groups above it unfold. Picked with no row, it had handles and a
   // panel of numbers and nothing in the list said which it was.
+  // Only when what is picked changes: folding the group round a picked
+  // layer by its own button unfolded it again at once.
+  const unfoldedFor = useRef<NodeId | null>(null);
   useEffect(() => {
+    if (selected === unfoldedFor.current) return;
+    unfoldedFor.current = selected;
     if (selected === null || collapsed.length === 0) return;
     const at = layers.findIndex((l) => l.id === selected);
     if (at < 0) return;
@@ -9494,11 +9540,11 @@ export function App() {
   const usedColour = (hex: string) =>
     setPrefs((p) => ({ recentColors: withRecentColor(p.recentColors, hex) }));
   usedColourRef.current = usedColour;
-  const applyColour = (hex: string, named?: string) => {
+  const applyColour = (hex: string, named?: string, ink?: AuthoredColor) => {
     usedColour(hex);
     setFill(hex);
     setInkFrom(named ?? null);
-    const flat = cmyk ? hexToCmykColor(hex) : hexColor(hex);
+    const flat = ink ?? (cmyk ? hexToCmykColor(hex) : hexColor(hex));
     const colour: AuthoredColor = named
       ? { Named: { name: named, means: flat } }
       : flat;
@@ -10808,10 +10854,17 @@ export function App() {
         const file = session.raw_original(t.id);
         const packed = await readRaw(file);
         await giveLensProfiles(session);
-        session.raw_open(packed, file, t.name);
-        const got = await developedElsewhere(packed, t.name, settings);
-        if (got) session.stage_redevelop_pixels(t.id, got.rgba, got.width, got.height, settings);
-        else session.stage_redevelop(t.id, settings);
+        const info = JSON.parse(session.raw_open(packed, file, t.name)) as RawInfo;
+        // The lens profile each was developed with is its own, as its
+        // opening found it: the source's went on to a Fuji that never
+        // used it, which then said the profile was missing.
+        const { lens_profile: _, ...unprofiled } = JSON.parse(settings) as RawSettings;
+        const own = JSON.stringify(
+          info.lensProfile && !unprofiled.uncorrected ? { ...unprofiled, lens_profile: info.lensProfile } : unprofiled,
+        );
+        const got = await developedElsewhere(packed, t.name, own);
+        if (got) session.stage_redevelop_pixels(t.id, got.rgba, got.width, got.height, own);
+        else session.stage_redevelop(t.id, own);
       }
     } catch (err) {
       alert(`Could not develop every picture: ${said(err)}`);
@@ -10892,6 +10945,15 @@ export function App() {
       doc
         .arrayBuffer()
         .then((buf) => openDocumentBytes(new Uint8Array(buf), doc.name));
+      // What came with it is not placed into it unasked — a document is
+      // opened onto a page of its own — but it is said, where it was left
+      // behind without a word.
+      const others = files.filter((f) => f !== doc).map((f) => f.name || "a file");
+      if (others.length > 0) {
+        alert(
+          `Opened ${doc.name}. ${others.join(", ")} ${others.length > 1 ? "were" : "was"} not placed: drop ${others.length > 1 ? "them" : "it"} again onto the document to place ${others.length > 1 ? "them" : "it"}.`,
+        );
+      }
       return;
     }
     // A file whose name says nothing — no extension, no type, as a share
@@ -11944,6 +12006,7 @@ export function App() {
         {unsaved && (
           <span
             className="unsaved-dot"
+            role="img"
             title="This document has changes that have not been saved"
             aria-label="Unsaved changes"
           >
@@ -13017,7 +13080,7 @@ export function App() {
                     );
                   }}
                 >
-                  {name}
+                  {chipName(name)}
                 </button>
               ))}
               {antRings.length > 0 && (
@@ -18512,11 +18575,24 @@ function MenuItem({
   disabled?: boolean;
   children: React.ReactNode;
 }) {
+  // A row ticked as the one chosen (a grid, a unit) says so to a screen
+  // reader as checked; the tick itself was read out as "check mark".
+  const ticked = hint === "✓" || !!hint?.startsWith("✓ ");
   return (
-    <button className="menu-item" role="menuitem" onClick={onClick} disabled={disabled}>
+    <button
+      className="menu-item"
+      role={ticked ? "menuitemcheckbox" : "menuitem"}
+      aria-checked={ticked || undefined}
+      onClick={onClick}
+      disabled={disabled}
+    >
       <Icon name={icon} size={16} />
       <span className="menu-item-label">{children}</span>
-      {hint && <span className="menu-item-hint">{hint}</span>}
+      {hint && (
+        <span className="menu-item-hint" aria-hidden={ticked || undefined}>
+          {hint}
+        </span>
+      )}
     </button>
   );
 }
@@ -18891,8 +18967,11 @@ function StopList({
     );
   };
   // CSS mixes a gradient on the values a device shows, which is where
-  // the engine mixes one too, so the strip is the ramp.
-  const rampCss = `linear-gradient(90deg, ${stops
+  // the engine mixes one too, so the strip is the ramp — taken in order
+  // of where each stop sits, as the engine takes them: a stop dragged
+  // past another drew one gradient here and another on the canvas.
+  const rampCss = `linear-gradient(90deg, ${[...stops]
+    .sort((a, b) => a.offset - b.offset)
     .map((s) => `${colorToHex(s.color)} ${Math.round(s.offset * 100)}%`)
     .join(", ")})`;
   return (

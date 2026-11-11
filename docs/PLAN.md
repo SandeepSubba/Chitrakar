@@ -73,8 +73,10 @@ without reading anything else.*
      seven states, offline): again nothing lost and nothing thrown, but
      not quiet — live copies of a layer wearing an effect, PSD clips and
      empty layers, a lens profile missing on another device, Space after
-     a click. All fixed or written down as limits. ⬜ until a broad pass
-     finds nothing.
+     a click. All fixed or written down as limits. The twenty-second
+     found the fixes' edges again, and a broad pass whose findings were
+     smaller still — grey pictures' profiles, a damaged picture refusing
+     a document, a palm on a tablet. ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11538,6 +11540,38 @@ without reading anything else.*
   panel moves only it; the panel's sliders take no typed number; a
   frame turned with the page exports upright; Repeat's step is in the
   group's own units; PSD export cuts layers to the page.
+  **A twenty-second audit (November 2026).** Round 21's edges: a PSD
+  adjustment's record came in as an empty layer and what was clipped to
+  it vanished (it is left out again, as lost); Space after a click
+  stood down at any later key (only keys that move the focus count);
+  a flipped frame in a frame grew the wrong way; layers clipped to two
+  different layers merged into one clipped to one (refused, in words);
+  a finger moving a region beside Feather kept the softness tried; the
+  copies-emptied question missed copies of a group's insides and asked
+  about copies merged with their original (`copies_left_empty`); a live
+  copy of a group holding an adjustment had no box; a scaled-up copy's
+  shadow was cut when merged; syncing raws carried one photograph's lens
+  profile onto another; folding the group round a picked layer unfolded
+  it again. The broad pass: a palm on a pen tablet began a pan the pen
+  then drove, and the stroke landed under the palm; grey pictures
+  ignored their profile (`normalize_grey`, in PNG, JPEG, TIFF and PSD);
+  a missing mask picture hid its layer unsaid, and a damaged picture
+  refused the whole document (both now named as missing pictures);
+  pictures dropped with a document were left unsaid; Delete during a
+  drag threw on every move after; kept regions all read "R…" in the
+  rail; long comp names ran off the panel; the open menu's title was
+  short of contrast; ticked menu rows were not said as checked; the
+  eyedropper in a CMYK document with a press profile gave an ink the
+  plain formula made of the page's colour, which drifted further at
+  every pick (it separates through the profile, `Session::separate`);
+  the gradient panel's strip took the stops in list order, not by
+  where they sit. Limits written down: typing in a block of hundreds of
+  styled runs slows (190 ms a key at 3,000 characters and 200 runs);
+  flipping an empty page is a step; a JPEG of a comp or a kept region carries the camera
+  data of the document as it stands, not of what the comp shows;
+  Delete with a panel control focused deletes the picked layer; under
+  a soft or half-shown base, two clipped layers merged differ where
+  they overlap.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -260,7 +260,11 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             }
         }
     }
-    if let (Some(icc), ColorType::RGB(_) | ColorType::RGBA(_)) = (icc.as_deref(), color) {
+    if let (
+        Some(icc),
+        ColorType::RGB(_) | ColorType::RGBA(_) | ColorType::Gray(_) | ColorType::GrayA(_),
+    ) = (icc.as_deref(), color)
+    {
         chitrakar_color::cms::normalize_rgba8_to_srgb(icc, &mut rgba8);
     }
     Ok(crate::upright(

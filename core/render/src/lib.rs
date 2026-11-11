@@ -735,7 +735,16 @@ fn drawn_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bound
                 if let Bounds::Rect(a, b, c, d) =
                     transformed_local_bounds(node.transform, (x0, y0, x1, y1))
                 {
-                    let pad = effects_reach(doc) / max_scale(ancestor_space(doc, id)).max(1e-3);
+                    // As far as any effect reaches on the page, in this
+                    // space — and the copy's own scale carries its
+                    // original's shadow with it: a copy three times the
+                    // size cast one three times as far, cut off here.
+                    let pad = if effects {
+                        effects_reach(doc) * max_scale(node.transform)
+                            / max_scale(ancestor_space(doc, id)).max(1e-3)
+                    } else {
+                        0.0
+                    };
                     return Ok(Bounds::Rect(a - pad, b - pad, c + pad, d + pad));
                 }
             }
@@ -845,6 +854,11 @@ fn bounds_in_parent_space_inner(
         NodeKind::Instance { of, .. } if effects && copy_reaches_out(doc, id, *of) => {
             Bounds::Everything
         }
+        // A copy of a group holding an adjustment or a filter is drawn as
+        // reaching everywhere, as it always was (a filter can spread past
+        // the box of what the group draws); its own box, for its handles
+        // and its pins, is `local_bounds_of`'s.
+        NodeKind::Instance { of, .. } if effects && holds_a_change(doc, *of) => Bounds::Everything,
         // The copy's own box rather than the original's: where it stands
         // in for one of the original's layers with a wider one, what it
         // occupies is what it draws. `local_bounds_of` asks that question
@@ -988,14 +1002,7 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             } else {
                 Vec::new()
             };
-            if holds_a_change(doc, *of) {
-                // A copy of a group holding an adjustment or a filter is
-                // drawn as reaching everywhere (a filter can spread past
-                // the box of what the group draws), as it always was: the
-                // box a group itself is given leaves them out, a copy's
-                // drawing cannot.
-                None
-            } else if stand_ins.is_empty() {
+            if stand_ins.is_empty() {
                 local_bounds_of(doc, *of).unwrap_or(None)
             } else {
                 let mut acc = Bounds::None;
@@ -3555,7 +3562,9 @@ fn render_child(
                 let extent = match local_bounds_of(doc, child)? {
                     // …unless something it copies reaches past its own
                     // box, in which case so does the copy.
-                    Some(_) if copy_reaches_out(doc, child, *of) => Bounds::Everything,
+                    Some(_) if copy_reaches_out(doc, child, *of) || holds_a_change(doc, *of) => {
+                        Bounds::Everything
+                    }
                     Some([x0, y0, x1, y1]) => transformed_local_bounds(t, (x0, y0, x1, y1)),
                     // A copy of an adjustment or a filter reaches as far
                     // as the original would.

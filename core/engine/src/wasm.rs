@@ -1458,6 +1458,22 @@ impl WasmSession {
         self.inner.copies_following(NodeId(id as u64))
     }
 
+    /// An sRGB colour separated into the press profile's inks, `[c, m,
+    /// y, k]` in 0..=1; empty without a profile.
+    pub fn separate(&self, r: f32, g: f32, b: f32) -> Vec<f32> {
+        self.inner
+            .separate(r, g, b)
+            .map(|v| v.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Live copies left following nothing were these layers, and all
+    /// inside them, taken away.
+    pub fn copies_left_empty(&self, ids: &[f64]) -> usize {
+        let ids: Vec<NodeId> = ids.iter().map(|&i| NodeId(i as u64)).collect();
+        self.inner.copies_left_empty(&ids)
+    }
+
     /// Doc-space bounds of a node with its effects' reach, as `[x, y, w,
     /// h]`; empty if it has none.
     pub fn drawn_bounds_of(&self, id: f64) -> Vec<f32> {

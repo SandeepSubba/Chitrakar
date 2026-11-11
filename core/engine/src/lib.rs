@@ -1918,6 +1918,24 @@ impl Session {
             && showing
                 .iter()
                 .all(|id| scratch.node(*id).is_ok_and(|n| n.clipped));
+        if all_clipped {
+            // The layer each is clipped to: the nearest one under it that
+            // is not clipped itself. One picture can keep one clip.
+            let base_of = |id: NodeId| -> Option<NodeId> {
+                let at = siblings.iter().position(|s| *s == id)?;
+                siblings[..at]
+                    .iter()
+                    .rev()
+                    .find(|s| self.doc.node(**s).is_ok_and(|n| !n.clipped))
+                    .copied()
+            };
+            let first = base_of(showing[0]);
+            if showing.iter().any(|id| base_of(*id) != first) {
+                return Err(EngineError::BadCommand(
+                    "those layers are clipped to different layers, and one picture can be clipped to only one: merge each with the layer it is clipped to".into(),
+                ));
+            }
+        }
         let carried = match showing.as_slice() {
             _ if all_clipped => {
                 for id in &showing {
@@ -2843,6 +2861,30 @@ impl Session {
         self.doc
             .nodes()
             .filter(|(_, n)| matches!(n.kind, NodeKind::Instance { of, .. } if of == id))
+            .count()
+    }
+
+    /// How many live copies would be left following nothing were `ids`
+    /// taken away with everything inside them: copies of a layer inside
+    /// a picked group as well as of the picked layers, and not a copy
+    /// that goes with them. What a merge, an ungroup or a delete asks
+    /// about before it empties them.
+    pub fn copies_left_empty(&self, ids: &[NodeId]) -> usize {
+        let mut gone = std::collections::HashSet::new();
+        let mut stack: Vec<NodeId> = ids.to_vec();
+        while let Some(id) = stack.pop() {
+            if gone.insert(id) {
+                if let Ok(kids) = self.doc.children_of(id) {
+                    stack.extend(kids.iter().copied());
+                }
+            }
+        }
+        self.doc
+            .nodes()
+            .filter(|(id, n)| {
+                !gone.contains(id)
+                    && matches!(n.kind, NodeKind::Instance { of, .. } if gone.contains(&of))
+            })
             .count()
     }
 
@@ -4263,12 +4305,18 @@ impl Session {
             {
                 let t = kid.transform;
                 if t.b == 0.0 && t.c == 0.0 && (sx != 1.0 || sy != 1.0) {
-                    cmds.extend(self.artboard_resize_cmds(child, cw * sx, ch * sy, 0.0, 0.0)?);
-                    // Its corner where the pins put it, after the resize
-                    // above has written its transform.
+                    let (nw, nh) = (cw * sx, ch * sy);
+                    cmds.extend(self.artboard_resize_cmds(child, nw, nh, 0.0, 0.0)?);
+                    // Its near edge where the pins put it, after the
+                    // resize above has written its transform. A frame
+                    // flipped across an axis grows from its origin the
+                    // other way on the page, so its origin moves on by
+                    // the change: it grew leftward out of its holder.
+                    let shift_x = if t.a < 0.0 { -t.a * (nw - cw) } else { 0.0 };
+                    let shift_y = if t.d < 0.0 { -t.d * (nh - ch) } else { 0.0 };
                     cmds.push(Command::SetTransform {
                         id: child,
-                        transform: Transform::translation(tx, ty).compose(t),
+                        transform: Transform::translation(tx + shift_x, ty + shift_y).compose(t),
                     });
                     continue;
                 }
@@ -11155,17 +11203,20 @@ impl Session {
     /// Asked once a document is open and its parts are back.
     pub fn missing_pictures(&self) -> Vec<String> {
         let doc = &self.doc;
+        // Every resource a layer names, its picture and anything else —
+        // a picture mask, the region a brushed stroke was confined to, a
+        // colour table: a mask's picture gone hid its whole layer, and
+        // nothing said so.
         let mut names: Vec<String> = doc
             .nodes()
-            .filter_map(|(_, n)| match &n.kind {
-                NodeKind::Raster(r)
-                    if doc
-                        .resource(&r.resource_id)
-                        .is_none_or(|res| res.rgba8.is_empty()) =>
-                {
-                    Some(n.name.clone())
-                }
-                _ => None,
+            .filter_map(|(_, n)| {
+                let mut gone = false;
+                n.each_resource(&mut |id| {
+                    if doc.resource(id).is_none_or(|res| res.rgba8.is_empty()) {
+                        gone = true;
+                    }
+                });
+                gone.then(|| n.name.clone())
             })
             .collect();
         names.sort();
@@ -11431,6 +11482,19 @@ impl Session {
         }
         self.doc.meta.dpi = dpi;
         Ok(())
+    }
+
+    /// An sRGB colour (0..=1 each) separated into the press profile's
+    /// inks, `[c, m, y, k]` in 0..=1, or `None` without a profile. What
+    /// the eyedropper gives a CMYK document: the colour the page showed,
+    /// in the inks that print it — the plain formula it went through
+    /// first was not the profile's way back, and the ink drifted a step
+    /// further from the colour at every pick.
+    pub fn separate(&self, r: f32, g: f32, b: f32) -> Option<[f32; 4]> {
+        let icc = self.doc.cmyk_profile_bytes()?;
+        let out = chitrakar_color::cms::RgbToCmyk::new(icc).ok()?;
+        let ink = out.separate(&[r, g, b]).ok()?;
+        (ink.len() == 4).then(|| [ink[0], ink[1], ink[2], ink[3]].map(|v| v as f32 / 255.0))
     }
 
     /// Set the CMYK press profile authored CMYK colors render through.
@@ -17622,6 +17686,47 @@ mod tests {
             "resized, not scaled: {:?} {width}x{height}",
             n.transform
         );
+    }
+
+    /// What a removal would leave following nothing: copies of what is
+    /// inside a picked group count, a copy going with them does not.
+    #[test]
+    fn copies_left_empty_counts_inside_and_not_the_copies_taken() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let inner = add_rect(&mut s, "inner", 10.0, 10.0);
+        let other = add_rect(&mut s, "other", 10.0, 10.0);
+        let group = s.group_nodes(&[inner, other], "g").unwrap();
+        // A copy of a layer inside the group, outside it.
+        let root = s.document().root();
+        let copy = s.make_instance(inner).unwrap();
+        s.apply(Command::MoveNode {
+            id: copy,
+            parent: root,
+            index: 0,
+        })
+        .unwrap();
+        assert_eq!(s.copies_following(group), 0);
+        assert_eq!(s.copies_left_empty(&[group]), 1, "a copy of what is inside");
+        assert_eq!(
+            s.copies_left_empty(&[group, copy]),
+            0,
+            "the copy goes with it"
+        );
+
+        // Layers clipped to different layers are not one picture.
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let mut clipped = Vec::new();
+        for _ in 0..2 {
+            add_rect(&mut s, "base", 20.0, 20.0);
+            let c = add_rect(&mut s, "clipped", 20.0, 20.0);
+            s.apply(Command::SetClipped {
+                id: c,
+                clipped: true,
+            })
+            .unwrap();
+            clipped.push(c);
+        }
+        assert!(s.merge_layers(&clipped).is_err(), "clipped to two layers");
     }
 
     /// And a drag still costs one command to undo, however long it is.

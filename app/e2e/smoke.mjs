@@ -13053,8 +13053,10 @@ assert(
   await page.waitForTimeout(400);
   const chip = page.locator('[aria-label="Kept region the sky"]');
   assert(await chip.isVisible(), "and the document keeps it by name");
+  // The rail is a finger wide: the chip shows as much of the name as it
+  // holds, and the whole name is its label and its tip.
   assert(
-    (await chip.textContent()) === "the sky",
+    "the sky".startsWith((await chip.textContent()) ?? "-") && (await chip.getAttribute("title"))?.startsWith("the sky"),
     "with the name on it",
   );
 
@@ -19641,7 +19643,7 @@ assert(
     await page.waitForTimeout(250);
   }
   assert(
-    (await page.locator('[aria-label="Kept regions"] .kept').allTextContents()).join(",") ===
+    (await page.locator('[aria-label="Kept regions"] .kept').evaluateAll((els) => els.map((el) => (el.getAttribute("aria-label") ?? "").replace(/^Kept region /, "")))).join(",") ===
       "badge,banner",
     "two regions are kept by name",
   );
@@ -19694,7 +19696,7 @@ assert(
   // Exporting slices moves neither what is picked out nor the history:
   // a kept region is read where it is kept rather than picked first.
   assert(
-    (await page.locator('[aria-label="Kept regions"] .kept').allTextContents()).join(",") ===
+    (await page.locator('[aria-label="Kept regions"] .kept').evaluateAll((els) => els.map((el) => (el.getAttribute("aria-label") ?? "").replace(/^Kept region /, "")))).join(",") ===
       "badge,banner",
     "and the regions are still kept, unpicked and unmoved",
   );

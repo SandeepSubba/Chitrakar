@@ -9,7 +9,7 @@
 
 /** The rows of `pop` itself, not those of a menu open inside it. */
 export function rowsOf(pop: Element): HTMLElement[] {
-  return [...pop.querySelectorAll<HTMLElement>("[role=menuitem]")].filter(
+  return [...pop.querySelectorAll<HTMLElement>("[role=menuitem], [role=menuitemcheckbox]")].filter(
     (row) => row.closest("[role=menu]") === pop && !(row as HTMLButtonElement).disabled,
   );
 }

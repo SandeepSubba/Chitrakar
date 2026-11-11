@@ -20,6 +20,9 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
     let Ok(profile) = ColorProfile::new_from_slice(icc) else {
         return false;
     };
+    if profile.color_space == DataColorSpace::Gray {
+        return normalize_grey(&profile, pixels);
+    }
     if profile.color_space != DataColorSpace::Rgb {
         return false;
     }
@@ -49,6 +52,36 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
         let src = &mut src[..piece.len()];
         src.copy_from_slice(piece);
         if transform.transform(src, piece).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// A grey picture, decoded to RGBA with its grey in all three, taken
+/// through its own grey profile to sRGB. A grey profile whose curve is
+/// not sRGB's — a linear one, Photoshop's Dot Gain 20% — came in with the
+/// grey read as sRGB's, 127 where a browser shows 187, and nothing said.
+fn normalize_grey(profile: &ColorProfile, pixels: &mut [u8]) -> bool {
+    let srgb = ColorProfile::new_srgb();
+    let Ok(transform) = profile.create_transform_8bit(
+        Layout::GrayAlpha,
+        &srgb,
+        Layout::Rgba,
+        TransformOptions::default(),
+    ) else {
+        return false;
+    };
+    const PIECE: usize = 64 * 1024;
+    let mut grey = vec![0u8; (PIECE / 4) * 2];
+    for piece in pixels.chunks_mut(PIECE) {
+        let n = piece.len() / 4;
+        let grey = &mut grey[..n * 2];
+        for (g, p) in grey.chunks_exact_mut(2).zip(piece.chunks_exact(4)) {
+            g[0] = p[0];
+            g[1] = p[3];
+        }
+        if transform.transform(grey, &mut piece[..n * 4]).is_err() {
             return false;
         }
     }
@@ -362,6 +395,21 @@ pub fn display_p3_profile_bytes() -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_grey_picture_goes_through_its_grey_profile() {
+        // A linear grey (gamma 1): 128 of it is half the light, which sRGB
+        // writes as about 188. Read as sRGB's own curve it stayed 128.
+        let icc = ColorProfile::new_gray_with_gamma(1.0).encode().unwrap();
+        let mut px = vec![128u8, 128, 128, 255, 0, 0, 0, 200];
+        assert!(normalize_rgba8_to_srgb(&icc, &mut px));
+        assert!(
+            (185..=190).contains(&px[0]) && px[0] == px[1] && px[1] == px[2],
+            "{px:?}"
+        );
+        assert_eq!(px[3], 255);
+        assert_eq!(&px[4..], &[0, 0, 0, 200]);
+    }
+
     use super::*;
 
     #[test]

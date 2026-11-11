@@ -407,10 +407,21 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         else {
             continue;
         };
+        // A picture that cannot be read is left out, as one that is not
+        // there is: the document opens and says which layers name what it
+        // does not hold (`missing_pictures`). One damaged mask's picture
+        // refused the whole document, every other layer with it.
         let mut png = Vec::new();
-        zip.by_name(&name)?.read_to_end(&mut png)?;
-        let img = crate::decode(&png)
-            .map_err(|e| ContainerError::Io(std::io::Error::other(e.to_string())))?;
+        let Ok(mut entry) = zip.by_name(&name) else {
+            continue;
+        };
+        if entry.read_to_end(&mut png).is_err() {
+            continue;
+        }
+        drop(entry);
+        let Ok(img) = crate::decode(&png) else {
+            continue;
+        };
         // Silently ignores entries the manifest doesn't reference or whose
         // size disagrees — the manifest is the source of truth.
         doc.restore_resource_bytes(&id, img.rgba8);
