@@ -27,6 +27,7 @@ import { NumberField } from "./NumberField";
 import { Icon, type IconName } from "./icons";
 import { SUBJECT_MODEL, fetchSubjectModel, forgetSubjectModel, hasSubjectModel } from "./subject";
 import { isTauri } from "./nativeMenu";
+import { said } from "./imports";
 import {
   COMMANDS,
   COMMAND_GROUPS,
@@ -39,7 +40,7 @@ import {
   restoreChord,
   type CommandId,
 } from "./commands";
-import { DEFAULTS, UI_SCALES, type ExportFormat, type FingerDoes, type Prefs, type Theme, type Units } from "./prefs";
+import { UI_SCALES, withSettingsReset, type ExportFormat, type FingerDoes, type Prefs, type Theme, type Units } from "./prefs";
 import {
   ALWAYS_SHOWN,
   KEYED_TOOLS,
@@ -815,7 +816,7 @@ export function PreferencesDialog({
                               await fetchSubjectModel(setSubjectFetched);
                               setSubjectKept(true);
                             } catch (err) {
-                              alert(`The subject model could not be downloaded: ${err instanceof Error ? err.message : err}`);
+                              alert(`The subject model could not be downloaded: ${said(err)}.`);
                             } finally {
                               setSubjectFetched(null);
                             }
@@ -1000,9 +1001,16 @@ export function PreferencesDialog({
         <div className="modal-actions">
           <button
             className="mask-button"
-            onClick={resetPrefs}
+            onClick={() => {
+              if (
+                window.confirm(
+                  "Put every setting back as it came? Your kept brushes, export setups, develop presets, recent files and colours and the watermark stay.",
+                )
+              )
+                resetPrefs();
+            }}
             disabled={
-              JSON.stringify(prefs) === JSON.stringify(DEFAULTS)
+              JSON.stringify(prefs) === JSON.stringify(withSettingsReset(prefs))
             }
           >
             Put everything back

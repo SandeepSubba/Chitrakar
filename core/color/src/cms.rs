@@ -21,7 +21,12 @@ pub fn normalize_rgba8_to_srgb(icc: &[u8], pixels: &mut [u8]) -> bool {
         return false;
     };
     if profile.color_space == DataColorSpace::Gray {
-        return normalize_grey(&profile, pixels);
+        // Only a grey picture is read through a grey profile. A colour one
+        // carrying one is mislabelled, and is taken as its colours say —
+        // as a browser takes it: read through the grey, (200, 100, 50)
+        // came in as (229, 229, 229).
+        let grey = pixels.chunks_exact(4).all(|p| p[0] == p[1] && p[1] == p[2]);
+        return grey && normalize_grey(&profile, pixels);
     }
     if profile.color_space != DataColorSpace::Rgb {
         return false;
@@ -408,6 +413,10 @@ mod tests {
         );
         assert_eq!(px[3], 255);
         assert_eq!(&px[4..], &[0, 0, 0, 200]);
+        // A colour picture that carries a grey profile keeps its colours.
+        let mut colour = vec![200u8, 100, 50, 255];
+        assert!(!normalize_rgba8_to_srgb(&icc, &mut colour));
+        assert_eq!(colour, [200, 100, 50, 255]);
     }
 
     use super::*;

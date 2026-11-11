@@ -39,7 +39,9 @@ export async function hasSubjectModel(): Promise<boolean> {
  * altered download is refused rather than run. */
 export async function fetchSubjectModel(progress: (done: number) => void): Promise<void> {
   const got = await fetch(SUBJECT_MODEL.url, { mode: "cors" });
-  if (!got.ok || !got.body) throw new Error(`the model could not be fetched (${got.status})`);
+  // Said as what the person can do about it; "could not be downloaded:
+  // the model could not be fetched" said the one thing twice.
+  if (!got.ok || !got.body) throw new Error(`the server answered ${got.status} — try again later`);
   const reader = got.body.getReader();
   const parts: Uint8Array[] = [];
   let have = 0;

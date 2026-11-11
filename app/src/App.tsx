@@ -559,10 +559,17 @@ async function slotsHeld(): Promise<Set<number>> {
   }
   return out;
 }
-/** Every part some slot's draft lists, other than `but`'s. */
+/** Every part some slot's draft lists, other than `but`'s — and every
+ * part a slot is about to list, which it is writing now (`pending`): a
+ * tab writing a big photograph's parts one at a time had them on disk
+ * with no list naming them yet, and another tab's draft deleted them as
+ * stale; the crash draft came back with pictures missing. */
 async function partsListed(db: IDBDatabase, but: number): Promise<Set<string>> {
   const slots = [...Array(DRAFT_SLOTS).keys()].filter((n) => n !== but);
-  const lists = await draftRead<unknown>(db, slots.map((n) => slotKey(n, "parts")));
+  const lists = await draftRead<unknown>(
+    db,
+    slots.flatMap((n) => [slotKey(n, "parts"), slotKey(n, "pending")]),
+  );
   const out = new Set<string>();
   for (const l of lists) {
     if (typeof l !== "string") continue;
@@ -603,6 +610,10 @@ async function putDraft(
   if (!db) return;
   const names = JSON.parse(session.draft_parts()) as string[];
   const kept = await draftPartsKept(db);
+  // Said before any is written, so no other tab takes them for stale.
+  if (names.some((n) => !kept.has(n))) {
+    await draftWrite(db, [[slotKey(draftSlot, "pending"), JSON.stringify(names)]]);
+  }
   for (const name of names) {
     if (kept.has(name)) continue;
     // A picture's part is its PNG, made on this thread — seconds for a
@@ -616,10 +627,15 @@ async function putDraft(
     if (!stillLatest()) return;
   }
   if (!stillLatest()) return;
-  await draftWrite(db, [
-    [slotKey(draftSlot, "current"), session.save_skeleton()],
-    [slotKey(draftSlot, "parts"), JSON.stringify(names)],
-  ]);
+  await draftWrite(
+    db,
+    [
+      [slotKey(draftSlot, "current"), session.save_skeleton()],
+      [slotKey(draftSlot, "parts"), JSON.stringify(names)],
+    ],
+    // Listed now, so no longer only pending.
+    [slotKey(draftSlot, "pending")],
+  );
   const wanted = new Set([...names, ...spare, ...(await partsListed(db, draftSlot))]);
   const stale = [...kept].filter((n) => !wanted.has(n)).map((n) => PART + n);
   if (stale.length) await draftWrite(db, [], stale);
@@ -710,7 +726,7 @@ let copiedHere = false;
 async function clearDraft(slot: number = draftSlot, keepParts = false): Promise<void> {
   const db = await draftDb();
   if (!db) return;
-  const keys = ["current", "parts", "name", "path", "saved"].map((k) => slotKey(slot, k));
+  const keys = ["current", "parts", "pending", "name", "path", "saved"].map((k) => slotKey(slot, k));
   let parts: string[] = [];
   if (!keepParts) {
     const others = await partsListed(db, slot);
@@ -809,10 +825,15 @@ if (typeof window !== "undefined") {
   window.addEventListener(
     "keydown",
     (e) => {
-      // Only the keys that move the focus: after a click, `]` or Ctrl+Z
-      // leave it on the button clicked, and Space there is still the hand.
-      if (["Tab", "F6", "F10", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key))
-        lastByPointer = false;
+      // Only a key that moves the focus: after a click, `]`, Ctrl+Z or
+      // an arrow nudging the layer leave it on the button clicked, and
+      // Space there is still the hand. Asked once the key has done its
+      // work, by whether the focus is somewhere else.
+      if (e.code === "Space") return;
+      const before = document.activeElement;
+      setTimeout(() => {
+        if (document.activeElement !== before) lastByPointer = false;
+      }, 0);
     },
     true,
   );
@@ -1536,6 +1557,8 @@ function regionOutline(drag: ToolDrag, square: boolean): Region | null {
 }
 
 interface PanDrag {
+  /** The pointer that began the pan, and the only one that drives it. */
+  pointerId?: number;
   pointerX: number;
   pointerY: number;
   viewX: number;
@@ -1604,16 +1627,49 @@ const COMMAND_ROWS = new Set([
  * go, so a chord given one would wander to whatever took its place. */
 const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("style-");
 
-/** A kept region's name as its chip in the rail can hold it: the rail
- * is a finger wide, and "Region 1" to "Region 4" all read "R…" there.
- * A name ending in a number is its first letter and the number ("R3");
- * any other long one its first three letters. The whole name is the
- * chip's label and its tip. */
-function chipName(name: string): string {
-  if (name.length <= 4) return name;
-  const numbered = /^(\S)\S*.*?(\d+)$/u.exec(name.trim());
-  if (numbered) return `${numbered[1]}${numbered[2]}`;
-  return [...name.trim()].slice(0, 3).join("");
+/** A number typed into a question the way people type one: "8 px",
+ * "-4 px", "8,5" (a decimal comma), with spaces round it. `null` for
+ * anything that is not one. Read with `Number` alone, these did nothing
+ * and said nothing. */
+function typedNumber(answer: string): number | null {
+  const t = answer.trim().replace(/\s*(?:px|pixels?)$/i, "").replace(/\s+/g, "");
+  const v = Number(/^[-+]?\d+,\d+$/.test(t) ? t.replace(",", ".") : t);
+  return t !== "" && Number.isFinite(v) ? v : null;
+}
+
+/** Kept regions' names as their chips in the rail can hold them: the
+ * rail is a finger wide, and "Region 1" to "Region 4" all read "R…"
+ * there. A name ending in a short number is its first letter and the
+ * number ("R3"); any other long one its first three letters; and where
+ * two would read the same ("Sky 1" and "Sun 1"), each takes another
+ * letter until they differ. The whole name is each chip's label and tip.
+ */
+function chipNames(names: string[]): string[] {
+  const parts = names.map((name) => {
+    const t = name.trim();
+    const m = /^(.*?\S)\s*(\d{1,2})$/u.exec(t);
+    return m ? { stem: [...m[1]], num: m[2] } : { stem: [...t], num: "" };
+  });
+  const take = parts.map((p) => (p.num ? 1 : 3));
+  const say = () =>
+    parts.map((p, i) => (names[i].length <= 4 ? names[i] : p.stem.slice(0, take[i]).join("").trimEnd() + p.num));
+  for (let round = 0; round < 64; round++) {
+    const out = say();
+    const seen = new Map<string, number[]>();
+    out.forEach((o, i) => seen.set(o, [...(seen.get(o) ?? []), i]));
+    let grew = false;
+    for (const same of seen.values()) {
+      if (same.length < 2) continue;
+      for (const i of same) {
+        if (take[i] < parts[i].stem.length) {
+          take[i] += 1;
+          grew = true;
+        }
+      }
+    }
+    if (!grew) return out;
+  }
+  return say();
 }
 
 /** Rows that act on the picked layers and on nothing else: with none
@@ -4617,6 +4673,12 @@ export function App() {
    * finger makes it a pinch rather than a resize. A palm drifting over a
    * corner resized the layer. True when the press is not the handle's. */
   const handleRefuses = (e: React.PointerEvent): boolean => {
+    // A handle is for the plain press. The middle button, the space bar
+    // and the hand pan from it as from anywhere, and the right button
+    // asks for the menu: each of them resized the layer, and the right
+    // one opened the menu after as well. Let through to the canvas round
+    // it, which does what they mean.
+    if (e.pointerType !== "touch" && (e.button !== 0 || spaceRef.current || tool === "Hand")) return true;
     if (rejectPalm(e)) {
       e.stopPropagation();
       return true;
@@ -4646,6 +4708,7 @@ export function App() {
     // still asks for it.
     if (e.pointerType === "touch" && touchesRef.current.size === 1) startLong(e);
     panDragRef.current = {
+      pointerId: e.pointerId,
       pointerX: e.clientX,
       pointerY: e.clientY,
       viewX: view.x,
@@ -4696,6 +4759,14 @@ export function App() {
     }
     const pan = panDragRef.current;
     if (!pan) return;
+    // Only the pointer that began the pan moves the page. A pen hovering
+    // over the glass while a palm's pan stood moved it by the pen's way
+    // across — before the nib touched, so its landing could not undo it;
+    // a pen's hover ends a finger's pan, as its landing does.
+    if (pan.pointerId !== undefined && e.pointerId !== pan.pointerId) {
+      if (e.pointerType === "pen") panDragRef.current = null;
+      return;
+    }
     setView((v) => ({
       ...v,
       x: pan.viewX + (e.clientX - pan.pointerX),
@@ -4726,6 +4797,10 @@ export function App() {
 
   const onHostPointerCancel = (e: React.PointerEvent) => {
     if (e.pointerType === "touch") tapsRef.current.spoil(e.pointerId);
+    // A gesture the system took back is taken back: a finger's drag of a
+    // handle cancelled half way left its size on the layer with no step
+    // in the history, folded into whatever was done next.
+    if (!ignoredRef.current.has(e.pointerId)) cancelGesture();
     onHostPointerUp(e);
   };
 
@@ -8290,6 +8365,9 @@ export function App() {
       return;
     }
     const [a, b] = [selectionSet[0], selectionSet[1] ?? selectionSet[0]];
+    // The second path is taken into the first and goes: a live copy of it
+    // would show nothing, and is asked about as Delete asks.
+    if (a !== b && !copiesAllow([b], "joining the paths", true)) return;
     try {
       const id = session.join_paths(a, b);
       setSelected(id);
@@ -8362,8 +8440,12 @@ export function App() {
     }
     const answer = window.prompt("How many shapes between the two?", "5");
     if (answer === null) return;
-    const steps = Math.round(Number(answer));
-    if (!Number.isFinite(steps) || steps < 1) return;
+    const typed = typedNumber(answer);
+    const steps = typed === null ? NaN : Math.round(typed);
+    if (!Number.isFinite(steps) || steps < 1) {
+      alert(`Blend: “${answer}” is not a number of shapes — type one or more, such as 5.`);
+      return;
+    }
     try {
       const id = session.blend_shapes(selectionSet[0], selectionSet[1], Math.min(steps, 100));
       setSelected(id);
@@ -8402,8 +8484,11 @@ export function App() {
       "8",
     );
     if (answer === null) return;
-    const by = Number(answer);
-    if (answer.trim() === "" || !Number.isFinite(by) || by === 0) return;
+    const by = typedNumber(answer);
+    if (by === null || by === 0) {
+      alert(`Offset path: “${answer}” is not a distance — type a number of pixels, such as 8 or -4.`);
+      return;
+    }
     // A billion pixels was taken, and made a shape a billion pixels out.
     if (Math.abs(by) > 10000) {
       alert("Offset path: at most 10,000 pixels either way.");
@@ -8458,8 +8543,11 @@ export function App() {
       "0.5",
     );
     if (answer === null) return;
-    const tolerance = Number(answer);
-    if (!Number.isFinite(tolerance) || tolerance <= 0) return;
+    const tolerance = typedNumber(answer);
+    if (tolerance === null || tolerance <= 0) {
+      alert(`Simplify path: “${answer}” is not a distance — type a number of pixels above nought, such as 0.5 or 2.`);
+      return;
+    }
     try {
       session.simplify_path(selected, tolerance);
       refresh(session);
@@ -10338,7 +10426,7 @@ export function App() {
         missing.length > 0
           ? {
               name: name ?? "This document",
-              notes: missing.map((layer) => `the picture of “${layer}”, which the file names but does not hold`),
+              notes: missing.map((part) => `${part}, which the file names but does not hold`),
             }
           : null,
       );
@@ -10948,12 +11036,22 @@ export function App() {
       // What came with it is not placed into it unasked — a document is
       // opened onto a page of its own — but it is said, where it was left
       // behind without a word.
-      const others = files.filter((f) => f !== doc).map((f) => f.name || "a file");
-      if (others.length > 0) {
-        alert(
-          `Opened ${doc.name}. ${others.join(", ")} ${others.length > 1 ? "were" : "was"} not placed: drop ${others.length > 1 ? "them" : "it"} again onto the document to place ${others.length > 1 ? "them" : "it"}.`,
+      const rest = files.filter((f) => f !== doc);
+      const docs = rest.filter((f) => f.name.toLowerCase().endsWith(".chitra")).map((f) => f.name);
+      const pictures = rest.filter((f) => !f.name.toLowerCase().endsWith(".chitra")).map((f) => f.name || "a file");
+      const said: string[] = [];
+      if (pictures.length > 0) {
+        const many = pictures.length > 1;
+        said.push(
+          `${pictures.join(", ")} ${many ? "were" : "was"} not placed: drop ${many ? "them" : "it"} again onto the document to place ${many ? "them" : "it"}.`,
         );
       }
+      // A document is opened one at a time: a second dropped beside it
+      // was told to be dropped again "to place it", which opens it.
+      if (docs.length > 0) {
+        said.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+      }
+      if (said.length > 0) alert(`Opened ${doc.name}. ${said.join(" ")}`);
       return;
     }
     // A file whose name says nothing — no extension, no type, as a share
@@ -12640,7 +12738,7 @@ export function App() {
                   } catch (err) {
                     setSubjectFetched(null);
                     setSubjectOffer(null);
-                    alert(`The subject model could not be downloaded: ${err instanceof Error ? err.message : err}. The subject is picked by colour instead.`);
+                    alert(`The subject model could not be downloaded: ${said(err)}. The subject is picked by colour instead.`);
                     subjectByColour(id);
                     return;
                   }
@@ -13056,7 +13154,7 @@ export function App() {
               which is free of the three the combining already uses. */}
           {SELECT_TOOLS.includes(tool as never) && (
             <div className="palette" role="group" aria-label="Kept regions">
-              {kept.map((name, i) => (
+              {chipNames(kept).map((short, i) => [kept[i], short] as const).map(([name, short], i) => (
                 <button
                   key={i}
                   className="kept"
@@ -13080,7 +13178,7 @@ export function App() {
                     );
                   }}
                 >
-                  {chipName(name)}
+                  {short}
                 </button>
               ))}
               {antRings.length > 0 && (

@@ -532,8 +532,20 @@ export function usePrefs() {
       setAll((p) => clamp({ ...p, ...(typeof patch === "function" ? patch(p) : patch) })),
     [],
   );
-  const reset = useCallback(() => setAll({ ...DEFAULTS }), []);
+  const reset = useCallback(() => setAll((p) => withSettingsReset(p)), []);
   return { prefs, set, reset };
+}
+
+/** What a person has kept by name, which putting the settings back
+ * leaves alone: brushes, export setups, develop presets, the files and
+ * colours used lately, the watermark's words. "Put everything back"
+ * erased them all with no question and no undo. */
+const KEPT_BY_NAME = ["brushes", "exportSetups", "developPresets", "recent", "recentColors", "exportWatermark"] as const;
+
+/** The settings as they came, and what is kept by name as it is. */
+export function withSettingsReset(p: Prefs): Prefs {
+  const kept = Object.fromEntries(KEPT_BY_NAME.map((k) => [k, p[k]])) as Partial<Prefs>;
+  return { ...DEFAULTS, ...kept };
 }
 
 /** Where a watermark can stand. */

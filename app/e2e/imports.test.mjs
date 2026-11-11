@@ -76,6 +76,9 @@ check(
   said("invalid command: SVG data parsing failed cause nodes limit reached").includes("more parts"),
   "an SVG over the reader's count is too big, not broken",
 );
+check(said("InvalidProfile").includes("damaged"), "a profile's reader's own word is said in words");
+check(said("profile device space is Gray, expected RGB").includes("grey profile"), "a grey profile for a screen is said");
+check(said(new TypeError("Failed to fetch")).includes("connection"), "a fetch that failed is said as the connection");
 check(
   said(new TypeError("Failed to fetch dynamically imported module: http://x/assets/chitrakar_pdf_in-1.js")).includes("not been downloaded"),
   "a reader not fetched while offline is said in words",

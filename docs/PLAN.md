@@ -76,7 +76,10 @@ without reading anything else.*
      a click. All fixed or written down as limits. The twenty-second
      found the fixes' edges again, and a broad pass whose findings were
      smaller still — grey pictures' profiles, a damaged picture refusing
-     a document, a palm on a tablet. ⬜ until a broad pass finds nothing.
+     a document, a palm on a tablet. The twenty-third: one finding that
+     could lose work, and only across two tabs and a crash (a draft's
+     pictures deleted by another tab's draft while still being written);
+     the rest edges and words. ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11572,6 +11575,33 @@ without reading anything else.*
   Delete with a panel control focused deletes the picked layer; under
   a soft or half-shown base, two clipped layers merged differ where
   they overlap.
+  **A twenty-third audit (November 2026).** Round 22's edges: a pen's
+  hover still drove a palm's pan (a pan answers only the pointer that
+  began it, and a pen hovering ends a finger's); a colour picture
+  carrying a grey profile came in grey (only a grey picture is read
+  through one); a scaled-down copy's own shadow was cut when merged; an
+  arrow nudging a layer ended "clicked" for Space (it is whether the
+  focus moved); Join paths emptied a copy of the path it takes in,
+  unasked; a damaged mask's picture was named as the layer's own; kept
+  regions' chips could read the same ("Sky 1" and "Sun 1", now "Sk1"
+  and "Su1"); a second document dropped with the first was told to be
+  dropped again "to place it". The broad pass: one tab's draft deleted
+  the pictures another tab was still writing — between writing its
+  parts and listing them — so a crash draft came back with pictures
+  missing (each tab says what it is about to write, `pending`, and no
+  tab takes those for stale); a corner, side or rotate handle answered
+  the right and middle buttons and Space, resizing where they should
+  pan or ask for the menu; a touch the system took back mid-drag left
+  its change with no step in the history; "Put everything back" erased
+  kept brushes, export setups and presets unasked (it puts back the
+  settings, after asking); a download that failed, and a damaged or
+  grey monitor profile, were said in the library's words ("Failed to
+  fetch", "InvalidProfile"); and "8 px" or "8,5" typed into Offset path,
+  Simplify path and Blend did nothing and said nothing. Limits written
+  down: the CMYK eyedropper settles but can drift a level or two a
+  hop with some press profiles (the profile's way into inks is not
+  quite its way out); a menu choice not ticked is not said as one to a
+  screen reader.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

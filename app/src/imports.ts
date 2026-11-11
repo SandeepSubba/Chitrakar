@@ -129,6 +129,11 @@ export function said(err: unknown): string {
     [/image format \w+ is not supported/i, "the picture could not be decoded here (it may be damaged)"],
     [/image format could not be determined/i, "it is not a picture this editor can read"],
     [/^InvalidFont$/i, "it is not a font file this editor can read"],
+    // A colour profile's reader's own words.
+    [/^InvalidProfile$/i, "the file is damaged, or is not a colour profile"],
+    [/profile device space is Gray, expected RGB/i, "it is a grey profile, and a screen's is a colour (RGB) one"],
+    [/profile device space is \w+, expected RGB/i, "it is not a screen's colour (RGB) profile"],
+    [/profile device space is \w+, expected CMYK/i, "it is not a press (CMYK) profile"],
     [/specified file not found in archive/i, "the file is damaged: it is not a whole .chitra"],
     [
       /failed to fetch dynamically imported module|importing a module script failed|error loading dynamically imported module/i,
@@ -136,6 +141,9 @@ export function said(err: unknown): string {
       // to load as failed for as long as the page is open.
       "the part of the editor that reads it has not been downloaded yet — connect to the internet and reload the editor, then try again",
     ],
+    // Any other download the browser could not make: after the one above,
+    // which is the same words about a part of the editor.
+    [/failed to fetch|networkerror|load failed|network request failed/i, "the connection failed — check it and try again"],
   ];
   for (const [re, says] of plain) if (re.test(text)) return says;
   return text;

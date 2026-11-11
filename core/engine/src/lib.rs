@@ -11207,16 +11207,31 @@ impl Session {
         // a picture mask, the region a brushed stroke was confined to, a
         // colour table: a mask's picture gone hid its whole layer, and
         // nothing said so.
+        // Which part of the layer is gone is said: a damaged mask's picture
+        // said "the picture of" the layer, whose own photograph was whole.
+        let gone = |id: &str| doc.resource(id).is_none_or(|res| res.rgba8.is_empty());
         let mut names: Vec<String> = doc
             .nodes()
             .filter_map(|(_, n)| {
-                let mut gone = false;
-                n.each_resource(&mut |id| {
-                    if doc.resource(id).is_none_or(|res| res.rgba8.is_empty()) {
-                        gone = true;
-                    }
-                });
-                gone.then(|| n.name.clone())
+                let own = match &n.kind {
+                    NodeKind::Raster(r) => gone(&r.resource_id),
+                    _ => false,
+                };
+                let mut mask = false;
+                if let Some(m) = &n.mask {
+                    m.each_resource(&mut |id| mask |= gone(id));
+                }
+                let mut any = false;
+                n.each_resource(&mut |id| any |= gone(id));
+                if own {
+                    Some(format!("the picture of “{}”", n.name))
+                } else if mask {
+                    Some(format!("the mask of “{}”", n.name))
+                } else if any {
+                    Some(format!("a part of “{}”", n.name))
+                } else {
+                    None
+                }
             })
             .collect();
         names.sort();

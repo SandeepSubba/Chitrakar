@@ -739,8 +739,11 @@ fn drawn_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bound
                     // space — and the copy's own scale carries its
                     // original's shadow with it: a copy three times the
                     // size cast one three times as far, cut off here.
+                    // The copy's own effects are not scaled with it, so
+                    // never less than the plain reach: at a quarter the
+                    // size, its own shadow was cut.
                     let pad = if effects {
-                        effects_reach(doc) * max_scale(node.transform)
+                        effects_reach(doc) * max_scale(node.transform).max(1.0)
                             / max_scale(ancestor_space(doc, id)).max(1e-3)
                     } else {
                         0.0
