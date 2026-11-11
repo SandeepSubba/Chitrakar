@@ -509,6 +509,34 @@ fn read_layers(
                 } else {
                     Vec::new()
                 };
+                // Pass Through, every Photoshop group's own mode, blends
+                // what is in the group with what is under it; a group
+                // here is drawn on its own, so a Multiply inside one
+                // multiplied nothing. Where the group itself changes
+                // nothing — whole, showing, unmasked — its layers come in
+                // without it, which is exactly the same; otherwise the
+                // difference is said.
+                let passes = matches!(&rec.blend_key, b"pass");
+                let blended = children.iter().any(|c| match c {
+                    PsdItem::Pixels(p) => p.blend != BlendMode::Normal,
+                    PsdItem::Group { blend, .. } => *blend != BlendMode::Normal,
+                });
+                if passes && blended {
+                    if rec.visible && rec.opacity >= 1.0 && group_mask.is_none() {
+                        lost.push(format!(
+                            "the group \"{}\", which lets its layers blend with what is under it: they come in on their own",
+                            rec.name
+                        ));
+                        if let Some(top) = stack.last_mut() {
+                            top.extend(children);
+                        }
+                        continue;
+                    }
+                    lost.push(format!(
+                        "how the group \"{}\" lets its layers blend with what is under it: here they blend inside it",
+                        rec.name
+                    ));
+                }
                 let group = PsdItem::Group {
                     name: rec.name,
                     visible: rec.visible,
@@ -1395,6 +1423,52 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["Inside 1", "Inside 2"]);
+    }
+
+    #[test]
+    fn a_group_passing_through_comes_in_as_its_layers() {
+        let file = |opacity: u8| {
+            let mut close = layer("</Layer group>", [0, 0, 0, 0], vec![]);
+            close.section = Some(3);
+            let mut open = layer("Shade", [0, 0, 0, 0], vec![]);
+            open.section = Some(1);
+            open.blend = *b"pass";
+            open.opacity = opacity;
+            let mut mul = layer("Mul", [0, 0, 2, 2], solid(2, 2, [200, 200, 100, 255]));
+            mul.blend = *b"mul ";
+            write(
+                2,
+                2,
+                &[
+                    layer("Bottom", [0, 0, 2, 2], solid(2, 2, [100, 150, 200, 255])),
+                    close,
+                    mul,
+                    open,
+                ],
+                &solid(2, 2, [0, 0, 0, 255]),
+            )
+        };
+        // Whole and showing, the group changes nothing of its own: its
+        // Multiply comes in beside the bottom layer, and multiplies it.
+        let f = read_psd(&file(255)).unwrap();
+        let names: Vec<&str> = f
+            .items
+            .iter()
+            .map(|c| match c {
+                PsdItem::Pixels(p) => p.name.as_str(),
+                PsdItem::Group { name, .. } => name.as_str(),
+            })
+            .collect();
+        assert_eq!(names, ["Bottom", "Mul"]);
+        assert!(f.lost.iter().any(|l| l.contains("Shade")), "{:?}", f.lost);
+        // Faded, the group has to stay, and how it blends is said.
+        let f = read_psd(&file(128)).unwrap();
+        assert!(matches!(f.items[1], PsdItem::Group { .. }));
+        assert!(
+            f.lost.iter().any(|l| l.contains("blend inside it")),
+            "{:?}",
+            f.lost
+        );
     }
 
     #[test]

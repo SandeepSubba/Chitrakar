@@ -65,8 +65,9 @@ without reading anything else.*
      no lost work, no crash, undo and save exact across 2,200 random
      edits — but not quiet: the fixes' own edges (a chord at Straighten
      did nothing, palette TIFFs under a byte still refused), Merge
-     layers on a blended, clipped or adjustment-holding layer, and a
-     run of interface rough edges. All fixed. ⬜ until a broad pass
+     layers on a blended, clipped or adjustment-holding layer, a
+     Photoshop group passing its blends through, and a run of
+     interface rough edges. All fixed. ⬜ until a broad pass
      finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -11480,6 +11481,23 @@ without reading anything else.*
   Preferences window changed height page by page. Cancelling Straighten
   still leaves float noise (a turn back by the opposite angle, about
   2e-4 px after thirty) — the one inexact inverse, written down above.
+  Files and photographs, the fourth auditor's (about 160 files in, 105
+  damaged ones refused in words, every export read back): a Photoshop
+  group left at Pass Through, every group's own mode, was drawn on a
+  surface of its own, so a Multiply inside it multiplied nothing — 400
+  of 1200 pixels off Photoshop's composite, unsaid (a whole, showing,
+  unmasked one comes in as its layers, which is the same; any other is
+  said in the notes); grey-with-alpha TIFFs were refused (read through
+  the same plain copy, twice as wide), and planar and fax-compressed
+  ones are refused in words that say how to save them again; an SVG
+  whose uses multiply past the reader's count was called "not
+  well-formed"; and the develop window's Defringe greyed ten levels
+  more than the photograph got (the preview's reach is a block of eight
+  pixels; laid on at three eighths it agrees within two on the Canon
+  and the Fuji files). Limits found and kept: usvg's CSS has no
+  `:not()`, `:nth-child()`, `:last-child` or `:is()`, so a rule using
+  one is left out and the shape keeps its own fill; a many-page TIFF
+  brings in its first page.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

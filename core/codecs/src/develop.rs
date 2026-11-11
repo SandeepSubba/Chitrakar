@@ -2476,8 +2476,24 @@ impl RawPreview {
         let geometry = photo.straighten(s, pw, ph);
         let (width, height, rgba8) =
             orient_through(upright, pw, ph, photo.orientation, geometry.as_ref());
-        let rgba8 =
-            defringe(&rgba8, width, height, s.defringe[0], s.defringe[1], 1).unwrap_or(rgba8);
+        // A preview pixel is a block of the photograph's, so a reach of
+        // one here spans three blocks — about 24 pixels where the whole
+        // development reaches five — and greyed far more of the picture
+        // than the photograph gets (ten levels over a magenta-lit frame).
+        // Laid on at about the share of a block the band along an edge
+        // covers, three eighths at the usual eight, the two agree within a level
+        // or two as every other setting does.
+        let block = (photo.width as f32 / pw.max(1) as f32).max(1.0);
+        let share = (3.0 / block).min(1.0);
+        let rgba8 = defringe(
+            &rgba8,
+            width,
+            height,
+            s.defringe[0] * share,
+            s.defringe[1] * share,
+            1,
+        )
+        .unwrap_or(rgba8);
         SourceImage {
             width: width as u32,
             height: height as u32,

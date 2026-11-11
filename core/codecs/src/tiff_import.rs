@@ -10,7 +10,8 @@
 //! one through the same normalisation a photograph's goes through, a CMYK
 //! one through the press transform — and associated (premultiplied) alpha
 //! is undone, since the engine keeps straight alpha at this edge. Only the
-//! first picture of a many-page TIFF is read.
+//! first picture of a many-page TIFF is read. Two layouts are refused in
+//! words: colours kept in planes of their own, and a fax's compression.
 //!
 //! The `tiff` crate refuses a palette picture outright (it has no colour
 //! type for one), and reads samples narrower than a byte as if each were
@@ -51,6 +52,8 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             }
             if plain.palette {
                 ColorType::Palette(plain.bits)
+            } else if plain.alpha {
+                ColorType::GrayA(plain.bits)
             } else {
                 ColorType::Gray(plain.bits)
             }
@@ -103,6 +106,30 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         ColorType::RGBA(b) | ColorType::CMYK(b) => (4, b),
     };
     let pixels = width as usize * height as usize;
+    // Two layouts the decoder cannot read, said in words rather than in
+    // its own: each colour kept as a plane of its own (Photoshop's "Per
+    // Channel" order), and a fax machine's compression.
+    if channels > 1
+        && dec
+            .find_tag_unsigned::<u16>(Tag::PlanarConfiguration)
+            .ok()
+            .flatten()
+            == Some(2)
+    {
+        return Err(bad(
+            "its colours are kept in separate planes, which is not read; save it again with the pixels interleaved",
+        ));
+    }
+    if matches!(
+        dec.find_tag_unsigned::<u16>(Tag::Compression)
+            .ok()
+            .flatten(),
+        Some(2..=4)
+    ) {
+        return Err(bad(
+            "it is compressed as a fax is (CCITT), which is not read; save it again uncompressed or with LZW",
+        ));
+    }
     let data = dec.read_image().map_err(bad)?;
     // Each sample as 0..=255 — or, for a palette, as its index.
     let samples: Vec<u16> = match data {
@@ -134,8 +161,19 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     }
     // Read through the plain copy, white-is-zero grey is still the
     // other way up (the decoder turns it only when it reads it itself).
+    // Only the grey: an alpha beside it is coverage either way.
     let samples = if white_is_zero {
-        samples.into_iter().map(|v| 255 - v.min(255)).collect()
+        samples
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i % channels == 0 {
+                    255 - v.min(255)
+                } else {
+                    v
+                }
+            })
+            .collect()
     } else {
         samples
     };
@@ -215,6 +253,8 @@ struct PlainGrey {
     bytes: Vec<u8>,
     bits: u8,
     palette: bool,
+    /** Grey and alpha, interleaved. */
+    alpha: bool,
     white_is_zero: bool,
 }
 
@@ -247,9 +287,17 @@ fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
     };
     let value_at = if big { 12 } else { 8 };
     // Each tag asked about: where its value sits in its entry, its type,
-    // and the value — only a single SHORT or LONG, held in the entry.
-    let mut found: [Option<(usize, u64, u64)>; 5] = [None; 5];
-    const TAGS: [u64; 5] = [256, 258, 262, 277, 322];
+    // the value — only a SHORT or LONG held in the entry — and where its
+    // count is and what it says.
+    struct Entry {
+        value_at: usize,
+        kind: u64,
+        value: u64,
+        count_at: usize,
+        count: u64,
+    }
+    let mut found: [Option<Entry>; 7] = Default::default();
+    const TAGS: [u64; 7] = [256, 258, 262, 277, 322, 284, 317];
     for i in 0..usize::try_from(count).ok()?.min(4096) {
         let at = first + head + i * entry;
         let tag = int(at, 2)?;
@@ -261,22 +309,44 @@ fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
                 4 => 4,
                 _ => return None,
             };
-            if n != 1 {
+            // Bits a sample may be given once a sample (grey and its
+            // alpha: two SHORTs, still in the entry); everything else once.
+            if n != 1 && !(tag == 258 && n == 2 && kind == 3) {
                 return None;
             }
-            found[k] = Some((at + value_at, kind, int(at + value_at, width)?));
+            found[k] = Some(Entry {
+                value_at: at + value_at,
+                kind,
+                value: int(at + value_at, width)?,
+                count_at: at + 4,
+                count: n,
+            });
         }
     }
-    let [width, bits, photometric, samples, tiled] = found;
-    let (width_at, width_kind, width) = width?;
-    let bits = bits.map_or(1, |b| b.2);
-    let (photometric_at, _, photometric) = photometric?;
-    if samples.is_some_and(|s| s.2 != 1) || !matches!(photometric, 0 | 1 | 3) {
+    let [width, bits, photometric, samples, tiled, planar, predictor] = found;
+    let width = width?;
+    let bits_value = bits.as_ref().map_or(1, |b| b.value);
+    let photometric = photometric?;
+    let samples_n = samples.as_ref().map_or(1, |s| s.value);
+    if !matches!(photometric.value, 0 | 1 | 3) {
         return None;
     }
-    let palette = photometric == 3;
-    let narrow = matches!(bits, 1 | 2 | 4);
-    if !(narrow || palette && matches!(bits, 1 | 2 | 4 | 8 | 16)) {
+    let palette = photometric.value == 3;
+    let narrow = samples_n == 1 && matches!(bits_value, 1 | 2 | 4);
+    // Grey with an alpha beside it, which the crate has no colour type for
+    // either: read as plain grey twice as wide, the two interleaved. Not
+    // where the samples are in planes of their own, or each differs from
+    // the one before (a predictor), or tiles count pixels across.
+    let with_alpha = samples_n == 2
+        && !palette
+        && matches!(bits_value, 8 | 16)
+        && planar.as_ref().is_none_or(|p| p.value == 1)
+        && predictor.as_ref().is_none_or(|p| p.value == 1)
+        && tiled.is_none();
+    if samples_n != 1 && !with_alpha {
+        return None;
+    }
+    if !(narrow || with_alpha || palette && matches!(bits_value, 1 | 2 | 4 | 8 | 16)) {
         return None;
     }
     // A tile is a number of pixels across, which a narrower sample does
@@ -285,24 +355,37 @@ fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
         return None;
     }
     let mut copy = bytes.to_vec();
-    let mut put = |at: usize, kind: u64, v: u64| {
-        let n = if kind == 3 { 2 } else { 4 };
+    let mut put = |at: usize, n: usize, v: u64| {
         for i in 0..n {
             let shift = if little { 8 * i } else { 8 * (n - 1 - i) };
             copy[at + i] = (v >> shift) as u8;
         }
     };
-    put(photometric_at, 3, 1);
+    let size = |kind: u64| if kind == 3 { 2 } else { 4 };
+    put(photometric.value_at, 2, 1);
     if narrow {
-        let (bits_at, _, _) = found[1]?;
-        put(bits_at, 3, 8);
-        put(width_at, width_kind, (width * bits).div_ceil(8));
+        let b = bits.as_ref()?;
+        put(b.value_at, 2, 8);
+        put(
+            width.value_at,
+            size(width.kind),
+            (width.value * bits_value).div_ceil(8),
+        );
+    }
+    if with_alpha {
+        let s = samples?;
+        put(s.value_at, size(s.kind), 1);
+        put(width.value_at, size(width.kind), width.value * 2);
+        if let Some(b) = bits.filter(|b| b.count == 2) {
+            put(b.count_at, if big { 8 } else { 4 }, 1);
+        }
     }
     Some(PlainGrey {
         bytes: copy,
-        bits: bits as u8,
+        bits: bits_value as u8,
         palette,
-        white_is_zero: photometric == 0 && !palette,
+        alpha: with_alpha,
+        white_is_zero: photometric.value == 0 && !palette,
     })
 }
 
@@ -549,6 +632,35 @@ mod tests {
                 &[0, 0, 0, 255]
             ]
         );
+    }
+
+    #[test]
+    fn grey_with_alpha_reads_as_both() {
+        // Two pixels of grey and coverage, interleaved: written as plain
+        // grey of four columns, then said to be two of grey and alpha.
+        for (photometric, grey) in [(1u16, [40u8, 200]), (0, [215, 55])] {
+            let mut out = Cursor::new(Vec::new());
+            let mut tiff = TiffEncoder::new(&mut out).unwrap();
+            let mut img = tiff.new_image::<colortype::Gray8>(4, 1).unwrap();
+            img.encoder().write_tag(Tag::ImageWidth, 2u32).unwrap();
+            img.encoder().write_tag(Tag::SamplesPerPixel, 2u16).unwrap();
+            img.encoder()
+                .write_tag(Tag::BitsPerSample, &[8u16, 8][..])
+                .unwrap();
+            img.encoder().write_tag(Tag::ExtraSamples, 2u16).unwrap();
+            img.encoder()
+                .write_tag(Tag::PhotometricInterpretation, photometric)
+                .unwrap();
+            img.write_data(&[grey[0], 255, grey[1], 128]).unwrap();
+            let bytes = out.into_inner();
+            let got = decode_tiff(&bytes).expect("grey and alpha read");
+            assert_eq!((got.width, got.height), (2, 1));
+            assert_eq!(
+                got.rgba8,
+                [40, 40, 40, 255, 200, 200, 200, 128],
+                "photometric {photometric}"
+            );
+        }
     }
 
     #[test]

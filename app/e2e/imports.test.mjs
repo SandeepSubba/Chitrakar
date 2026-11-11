@@ -73,6 +73,10 @@ check(unreadable("a.png", bytes([0x89]), "broken").includes("broken"), "anything
 check(said(new Error("invalid command: the picture is 9 × 9")) === "the picture is 9 × 9", "the wrapping comes off a sentence");
 check(said("Error: invalid command: io error: out of memory").includes("larger than"), "out of memory is said as size");
 check(
+  said("invalid command: SVG data parsing failed cause nodes limit reached").includes("more parts"),
+  "an SVG over the reader's count is too big, not broken",
+);
+check(
   said(new TypeError("Failed to fetch dynamically imported module: http://x/assets/chitrakar_pdf_in-1.js")).includes("not been downloaded"),
   "a reader not fetched while offline is said in words",
 );
