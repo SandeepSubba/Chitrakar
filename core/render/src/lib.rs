@@ -3101,6 +3101,12 @@ fn draw_layer(
     }
 }
 
+thread_local! {
+    /// How many pages widened for effects are being drawn on, one inside
+    /// another (`draw_with_room`): only the outermost widens.
+    static WIDENED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// How many pixels a page widened for its layers' effects may hold, or
 /// twice the page where that is more (a large export still has room):
 /// the widened page, and each surface made over it, is that or smaller.
@@ -3181,6 +3187,20 @@ fn draw_with_room(
             base: None,
         }),
     };
+    // Inside the widened page nothing widens it again: a group wearing an
+    // effect, inside another, inside another, each took a margin round
+    // the last, and three of them deep zoomed in ran the engine out of
+    // memory. Counted rather than marked on the surface, since every
+    // surface made inside stands for part of this one; the renderer draws
+    // on one thread, so the count is this drawing's alone.
+    struct Widened;
+    impl Drop for Widened {
+        fn drop(&mut self) {
+            WIDENED.with(|w| w.set(w.get().saturating_sub(1)));
+        }
+    }
+    WIDENED.with(|w| w.set(w.get() + 1));
+    let held = Widened;
     let taken = draw_effected(
         doc,
         child,
@@ -3191,7 +3211,9 @@ fn draw_with_room(
         capture,
         bare,
         m,
-    )?;
+    );
+    drop(held);
+    let taken = taken?;
     let n = (clip.x1 - clip.x0) as usize;
     for y in clip.y0 as usize..clip.y1 as usize {
         let (from, to) = (
@@ -3317,7 +3339,7 @@ fn draw_effected(
         // mask, or a filter inside the layer, softens against the page's
         // edge as it always has, and would not with room.
         let drawn = Effect::reach_of(node.effects.iter().filter(|e| e.draws()));
-        if room == 0 && drawn > 0.0 && !clip.is_empty() {
+        if room == 0 && WIDENED.with(|w| w.get()) == 0 && drawn > 0.0 && !clip.is_empty() {
             let past = match extent {
                 Bounds::Rect(x0, y0, x1, y1) => {
                     x0 < 0.0 || y0 < 0.0 || x1 > dst.width as f32 || y1 > dst.height as f32

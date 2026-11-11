@@ -90,10 +90,11 @@ check(
   "a decoder's CRC is a damaged file",
 );
 check(said("manifest error: missing field `meta` at line 1 column 3091").includes("document inside"), "a manifest's field");
+check(said("Invalid checksum").includes("not a whole .chitra"), "a zip's checksum is a damaged document");
 check(said("SVG data parsing failed cause expected 'g' tag, not 'svg' at 1:152").includes("not well-formed"), "an SVG's XML");
 check(said("The image format Bmp is not supported").includes("could not be decoded"), "a format the engine leaves to the browser");
 check(
-  said("The Decoder does not support the image format `RGB with [8, 8, 8, 8, 8] bits per sample`").includes("more channels"),
+  said("The Decoder does not support the image format `RGB with [8, 8, 8, 8, 8] bits per sample`").includes("extra channels"),
   "a TIFF with a selection beside its alpha is said in words",
 );
 check(said("The Decoder does not support the image format `CIELab with [8, 8, 8] bits per sample`").includes("Lab"), "a Lab TIFF too");

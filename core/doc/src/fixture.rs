@@ -4744,6 +4744,7 @@ pub fn every_command(f: &Fixture) -> Vec<Command> {
             degrees: 7.5,
             width: 61,
             height: 44,
+            keep: Vec::new(),
         },
         Command::TurnCanvas { quarters: 1 },
         Command::TurnCanvas { quarters: 2 },

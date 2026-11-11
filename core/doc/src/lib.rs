@@ -1390,11 +1390,23 @@ impl Document {
                 degrees,
                 width,
                 height,
+                keep,
             } => {
                 if !canvas_fits(width, height) {
                     return Err(DocError::BadCanvasSize(width, height));
                 }
                 let prev = (self.meta.width, self.meta.height);
+                // The radial masks as they are, for the way back.
+                let was: Vec<(NodeId, Mask)> = self
+                    .nodes
+                    .iter()
+                    .filter_map(|(id, n)| {
+                        n.mask
+                            .as_ref()
+                            .filter(|m| matches!(m.kind, MaskKind::Gradient { radial: true, .. }))
+                            .map(|m| (*id, m.clone()))
+                    })
+                    .collect();
                 let (cx, cy) = (prev.0 as f32 / 2.0, prev.1 as f32 / 2.0);
                 let (nx, ny) = (width as f32 / 2.0, height as f32 / 2.0);
                 let (s, c) = degrees.to_radians().sin_cos();
@@ -1413,10 +1425,16 @@ impl Document {
                 self.meta.width = width;
                 self.meta.height = height;
                 self.map_page(turn);
+                for (id, mask) in keep {
+                    if let Some(node) = self.nodes.get_mut(&id) {
+                        node.mask = Some(mask);
+                    }
+                }
                 Ok(Command::StraightenCanvas {
                     degrees: -degrees,
                     width: prev.0,
                     height: prev.1,
+                    keep: was,
                 })
             }
             Command::TurnCanvas { quarters } => {
@@ -2050,6 +2068,14 @@ pub enum Command {
         degrees: f32,
         width: u32,
         height: u32,
+        /// Radial masks to lay on once the page has turned, as they were:
+        /// what an undo carries. A radial mask stays upright through a
+        /// turn that is not a quarter one (`Mask::carried_through`), so
+        /// turning back alone did not give the mask it began as, and each
+        /// undo and redo drifted it further. Empty for a straighten asked
+        /// for, which carries masks as a turn does.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<(NodeId, Mask)>,
     },
     /// Turn the page a quarter of the way round, `quarters` times
     /// clockwise. An odd number swaps the page's width and height, and
@@ -2603,6 +2629,7 @@ mod tests {
             degrees: 7.5,
             width: w,
             height: h,
+            keep: Vec::new(),
         })
         .unwrap();
         // Still upright, and still the same way over from the middle of

@@ -359,8 +359,15 @@ export function ExportDialog({
    * the encode, so the size shown is the size written. */
   /** Whether the format is pixels, which sharpening for the screen is for. */
   const pixels = format === "png" || format === "jpeg" || format === "webp";
-  const encodeAt = useCallback(
-    (scale: number, slice: number | null = null): Uint8Array => {
+  // Each file made once for these settings: the size beside them was
+  // worked out by encoding, and Export then encoded everything again —
+  // a PSD of two thousand layers froze the window twice over.
+  const encodeAt = useMemo(() => {
+    const made = new Map<string, Uint8Array>();
+    return (scale: number, slice: number | null = null): Uint8Array => {
+      const key = `${scale}|${slice}`;
+      const kept = made.get(key);
+      if (kept) return kept;
       // Sharpened for the screen around this encode alone, and put back
       // after, so no other export is sharpened by what this window asked.
       session.set_output_sharpen(pixels ? prefs.exportSharpen : 0);
@@ -372,10 +379,19 @@ export function ExportDialog({
         session.set_output_sharpen(0);
         session.set_output_watermark("");
       }
-      return format === "jpeg" && prefs.exportCameraData ? session.jpeg_with_capture(bytes) : bytes;
-    },
-    [encodePlain, format, pixels, prefs.exportCameraData, prefs.exportSharpen, prefs.exportWatermark, session],
-  );
+      const out = format === "jpeg" && prefs.exportCameraData ? session.jpeg_with_capture(bytes) : bytes;
+      made.set(key, out);
+      return out;
+    };
+  }, [encodePlain, format, pixels, prefs.exportCameraData, prefs.exportSharpen, prefs.exportWatermark, session]);
+  /** How many layers a Photoshop file draws, each alone over the page. */
+  const layerCount = useMemo(() => {
+    try {
+      return (JSON.parse(session.layers_json()) as unknown[]).length;
+    } catch {
+      return 1;
+    }
+  }, [session]);
   /** The photograph's camera and lens, for the window to say what a JPEG
    * will carry; empty where the page holds no photograph that said. */
   const cameraSummary = useMemo(() => session.capture_summary(), [session]);
@@ -475,7 +491,11 @@ export function ExportDialog({
     }
     // The set is one, four and nine times the page — `outW` by `outH`
     // is its first — and the ceiling counts all of it.
-    const big = outW * outH * (set ? SET.reduce((n, s) => n + s * s, 0) : 1) > AUTO_LIMIT;
+    // A Photoshop file draws every layer alone over the whole page, so
+    // it costs the page once a layer: two thousand small shapes froze
+    // the window for a minute and a half before it said a size.
+    const layers = format === "psd" ? Math.max(1, layerCount) : 1;
+    const big = outW * outH * layers * (set ? SET.reduce((n, s) => n + s * s, 0) : 1) > AUTO_LIMIT;
     if (big && measure === 0) {
       setSize(-1);
       setFailed(null);
@@ -524,7 +544,7 @@ export function ExportDialog({
       }
     }, 350);
     return () => clearTimeout(timer);
-  }, [encode, encodeAt, set, refusal, outW, outH, measure, spec.shows, spec.mime, session]);
+  }, [encode, encodeAt, set, refusal, outW, outH, measure, spec.shows, spec.mime, session, format, layerCount]);
 
   // Asking for a size is about the export as it now stands, so changing
   // any of it puts the question back.

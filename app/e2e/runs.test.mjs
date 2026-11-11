@@ -25,7 +25,7 @@ const src = readFileSync(join(here, "..", "src", "runs.ts"), "utf8");
 const js = (await transform(src, { loader: "ts", format: "esm" })).code;
 const tmp = join(here, "out", "runs.generated.mjs");
 writeFileSync(tmp, js);
-const { byteAt, shiftRuns, styleRange, rangeSays, editOf } = await import(
+const { byteAt, shiftRuns, styleRange, rangeSays, editOf, rangePieces } = await import(
   "file://" + tmp
 );
 unlinkSync(tmp);
@@ -275,6 +275,17 @@ check(byteAt("😀", 2) === 4, "and the whole of it is four");
   check(JSON.stringify(editOf("abc", "ac", [1, 1], 1)) === "[1,2]", "delete takes the one after");
   check(JSON.stringify(editOf("ac", "abc", [1, 1], 2)) === "[1,1]", "typing goes in at the caret");
   check(editOf("abc", "xyz", [1, 1], 2) === undefined, "and a change that is none of those is not read as one");
+}
+
+// The pieces of a range, each with the run that styles it.
+{
+  const runs = [{ start: 3, end: 6, size: 60 }];
+  const pieces = rangePieces("abcdefgh", runs, 0, 8);
+  check(
+    JSON.stringify(pieces.map((p) => [p.start, p.end, p.run?.size ?? null])) === "[[0,3,null],[3,6,60],[6,8,null]]",
+    `pieces cut where the runs change: ${JSON.stringify(pieces)}`,
+  );
+  check(rangePieces("abc", runs, 2, 2).length === 0, "an empty range has none");
 }
 
 for (const f of fails) console.error("FAIL: " + f);

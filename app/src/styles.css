@@ -648,7 +648,8 @@ body {
 
 /* A row that is a box to tick: the box first, where it is read from,
    rather than pushed to the far side like a field. */
-.modal .row.check input {
+.modal .row.check input,
+.modal .row label.check input[type="checkbox"] {
   margin: 0;
   width: auto;
 }
@@ -1413,6 +1414,12 @@ body {
   cursor: grab;
 }
 
+/* A guide is moved with the Move tool; under any other a press beside
+   one is the tool's, and drew nothing while the guide moved instead. */
+.guide-overlay:not(.grabbable) .guide-hit {
+  pointer-events: none;
+}
+
 .guide-overlay .guide.dragging {
   pointer-events: none;
   stroke-dasharray: 4 3;
@@ -1958,6 +1965,18 @@ body {
   transform: translate(-50%, -50%);
 }
 
+/* Over the guides (whose layer is 1, and comes before them): a shape
+   snapped to a guide has its handles on it, and the guide took the press
+   meant for the handle. Under an anchor (2), which sits on a side's
+   middle on a path, and under what has a layer of its own already. */
+.handle,
+.warp-pin,
+.rot-handle,
+.mask-handle,
+.grad-handle {
+  z-index: 1;
+}
+
 .handle {
   position: absolute;
   width: 10px;
@@ -2042,6 +2061,14 @@ body {
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: none;
+}
+
+/* The rail scrolls; the tools keep their size, everywhere — on a short
+   window they were squeezed to 24 pixels before it scrolled, and a
+   tablet's 44-pixel finger targets with them. */
+.toolbar > *,
+.toolbar .tool-group {
+  flex: 0 0 auto;
 }
 
 /* Carried off its edge: the same rail, floating over the canvas, with a

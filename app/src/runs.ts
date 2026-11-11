@@ -132,6 +132,27 @@ export function rangeSays<K extends keyof Styling>(
   return answer;
 }
 
+/** The bytes `start..end` cut where the runs change, each piece with the
+ * run that styles it (none where the block's own styling holds): for a
+ * change that depends on what each piece already is, such as making the
+ * picked text a superscript a size smaller than each part's own. */
+export function rangePieces(
+  text: string,
+  runs: StyleRun[],
+  start: number,
+  end: number,
+): { start: number; end: number; run: StyleRun | undefined }[] {
+  const len = new TextEncoder().encode(text).length;
+  if (start >= end) return [];
+  const cuts = marks(runs, len, [start, end]).filter((p) => p >= start && p <= end);
+  const out: { start: number; end: number; run: StyleRun | undefined }[] = [];
+  for (let i = 0; i + 1 < cuts.length; i++) {
+    const [a, b] = [cuts[i], cuts[i + 1]];
+    if (a < b) out.push({ start: a, end: b, run: governing(runs, a, b) });
+  }
+  return out;
+}
+
 /** The runs carried across an edit to the block's text.
  *
  * An edit is read as one replaced stretch — everything between the

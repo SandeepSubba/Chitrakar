@@ -130,7 +130,7 @@ export function said(err: unknown): string {
     // out past the reader's count is whole, only too big to read.
     [/nodes limit reached|elements limit/i, "the drawing has more parts than can be read (its uses of one another multiply too far)"],
     [/svg data parsing failed|xml|unexpected .* tag|expected '.*' tag/i, "the SVG is not well-formed (an unclosed or mismatched tag)"],
-    [/invalid zip|zip archive|could not find central directory/i, "the file is damaged: it is not a whole .chitra"],
+    [/invalid zip|zip archive|could not find central directory|invalid checksum/i, "the file is damaged: it is not a whole .chitra"],
     [/image format \w+ is not supported/i, "the picture could not be decoded here (it may be damaged)"],
     // A TIFF's reader on a kind it does not take: Lab, or more channels
     // than colour and one transparency (a saved selection beside them).
@@ -140,7 +140,7 @@ export function said(err: unknown): string {
     ],
     [
       /does not support the image format `\w+ with \[[\d, ]+\] bits per sample/i,
-      "the TIFF has more channels than colour and transparency (a saved selection, perhaps) — save it without them first",
+      "the TIFF holds channels in a way the editor does not read (CMYK with transparency, or extra channels such as a saved selection) — save it as RGB, or without the extra channels, first",
     ],
     [/image format could not be determined/i, "it is not a picture this editor can read"],
     [/^InvalidFont$/i, "it is not a font file this editor can read"],

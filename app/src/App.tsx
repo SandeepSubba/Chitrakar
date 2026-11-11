@@ -9,7 +9,7 @@ import {
   type MenuEntry,
   type MenuSpec,
 } from "./nativeMenu";
-import { byteAt, editOf, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
+import { byteAt, editOf, rangePieces, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
 import { accentAsText, onColour, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
 import {
   DOCUMENTS,
@@ -1954,6 +1954,23 @@ export function App() {
       return null;
     }
   });
+  // Kept inside the window, the grip and some of the rail in sight: put
+  // near an edge and the window then made smaller, the rail sat wholly
+  // off it, and so did the grip that docks it again.
+  useEffect(() => {
+    const hold = () =>
+      setFloating((at) => {
+        if (!at) return at;
+        const held: [number, number] = [
+          Math.max(0, Math.min(at[0], window.innerWidth - 64)),
+          Math.max(0, Math.min(at[1], window.innerHeight - 120)),
+        ];
+        return held[0] === at[0] && held[1] === at[1] ? at : held;
+      });
+    hold();
+    window.addEventListener("resize", hold);
+    return () => window.removeEventListener("resize", hold);
+  }, []);
   useEffect(() => {
     try {
       if (floating) localStorage.setItem("chitrakar:toolbar", JSON.stringify(floating));
@@ -2045,8 +2062,8 @@ export function App() {
     const from = floating ?? [8, 96];
     const move = (m: PointerEvent) => {
       const at: [number, number] = [
-        Math.max(0, from[0] + m.clientX - start[0]),
-        Math.max(0, from[1] + m.clientY - start[1]),
+        Math.max(0, Math.min(from[0] + m.clientX - start[0], window.innerWidth - 64)),
+        Math.max(0, Math.min(from[1] + m.clientY - start[1], window.innerHeight - 120)),
       ];
       setFloating(at[0] < 40 ? null : at);
     };
@@ -2918,6 +2935,9 @@ export function App() {
       setDocName("untitled");
       setDocPath(null);
       setSavedAt(0);
+      // What was said about the document before goes with it: a missing
+      // picture's note stayed over the new empty page.
+      setImportNotes(null);
       refresh(s);
       fitView();
     },
@@ -3538,7 +3558,7 @@ export function App() {
     gradMaskRef.current !== null;
 
   /** Let go of whatever is in flight, and say whether anything was. */
-  const cancelGesture = useCallback((): boolean => {
+  const cancelGesture = useCallback((keepWork = false): boolean => {
     if (!session) return false;
     const held = toolDragRef.current;
     const inFlight = handleHeld() || zoomBoxRef.current !== null;
@@ -3557,8 +3577,13 @@ export function App() {
     // A zoom box let go of with Escape zooms nowhere when the button is.
     zoomBoxRef.current = null;
     setZoomBox(null);
-    setPenPoints([]);
-    setCropFrame(null);
+    // A pinch lets go of what the fingers were dragging, not of the work
+    // the tool has in hand: a path's anchors so far and a crop frame
+    // waiting for Enter went with every two-finger zoom.
+    if (!keepWork) {
+      setPenPoints([]);
+      setCropFrame(null);
+    }
     cropEditRef.current = null;
     const cancelled = session.cancel_preview();
     // An alt-drag let go of takes its copies with it.
@@ -3656,12 +3681,36 @@ export function App() {
    * picked — so a rectangle, an ellipse, a line or a text block can be
    * made from the menus, and from the keyboard, where every other way of
    * making one is a drag. */
-  const addInView = (kind: "Rect" | "Ellipse" | "Line" | "Text") => {
+  const addInView = (kind: "Rect" | "Ellipse" | "Line" | "Text" | "Frame") => {
     if (!session || !canvasRef.current) return;
     const r = canvasRef.current.getBoundingClientRect();
     const [cx, cy] = docPoint({ clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
     if (kind === "Text") {
       dropText(cx, cy);
+      return;
+    }
+    if (kind === "Frame") {
+      // A frame from the keyboard, as the Frame tool draws one: half
+      // what is in view, white, picked. There was no way to make one
+      // without dragging.
+      const seen = Math.min(r.width, r.height) / view.zoom;
+      const side = Math.max(MIN_SIZE, Math.round(Math.min(seen, docSize[0], docSize[1]) / 2));
+      frameCount.current += 1;
+      try {
+        const id = session.add_artboard(
+          `Artboard ${frameCount.current}`,
+          Math.round(cx - side / 2),
+          Math.round(cy - side / 2),
+          side,
+          side,
+          JSON.stringify(hexColor("#ffffff")),
+        );
+        setSelected(id);
+        setMultiSel([]);
+        refresh(session);
+      } catch (err) {
+        alert(`Frame: ${said(err)}`);
+      }
       return;
     }
     const seen = Math.min(r.width, r.height) / view.zoom;
@@ -4046,10 +4095,15 @@ export function App() {
       // does everywhere. A button only clicked keeps the focus without
       // showing it, and Space there still pans, so picking a tool and
       // then holding Space to look around works (`clickedControls`).
+      // A slider, a tick box or a colour well is a control like a button:
+      // clicked, Space there is the hand too — a drag after clicking the
+      // opacity slider moved the layer instead of the view.
+      const toggled =
+        e.target instanceof HTMLInputElement && ["range", "checkbox", "radio", "color"].includes(e.target.type);
       const pressing =
-        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement) &&
-        !clickedControls.has(e.target);
-      if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !pressing && !typing) {
+        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement || toggled) &&
+        !clickedControls.has(e.target as Element);
+      if (e.code === "Space" && (!(e.target instanceof HTMLInputElement) || toggled) && !pressing && !typing) {
         spaceRef.current = true;
         e.preventDefault();
       }
@@ -4693,7 +4747,7 @@ export function App() {
     // A finger's press still being held back is let go of with it: it
     // never reached the tool, so there is nothing to take back.
     dropHeldPress();
-    cancelGesture();
+    cancelGesture(true);
     // One that had reached it and dropped a text block, with nothing
     // done since, takes the block back: a pinch is not a wish for text.
     const dropped = justDropped.current;
@@ -6074,7 +6128,7 @@ export function App() {
       const [u, v] = gradTool.unit(x, y);
       const [su, sv] = gradTool.start;
       const had = gradTool.vector.gradient;
-      const white = cmyk ? hexToCmykColor("#ffffff") : hexColor("#ffffff");
+      const white = inkOf("#ffffff");
       const stops: GradientStop[] = had
         ? gradientStops(had)
         : [
@@ -6817,6 +6871,9 @@ export function App() {
         break;
       }
     }
+    // The shape drawn is picked, as a frame or text drawn is: the layer
+    // picked before stayed picked, and Delete next took that instead.
+    const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
     run({
       AddNode: {
         parent: place.parent,
@@ -6835,6 +6892,11 @@ export function App() {
         },
       },
     });
+    const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+    if (made) {
+      setSelected(made.id as NodeId);
+      setMultiSel([]);
+    }
   };
 
   /** A picture's corner being dragged: which picture, which corner, the
@@ -10819,7 +10881,7 @@ export function App() {
             id = session.place_image(picture, name);
           }
           placed(id, was);
-          if (kind === "psd") {
+          if (kind === "psd" || kind === "picture") {
             const notes = JSON.parse(session.import_notes()) as string[];
             setImportNotes(notes.length > 0 ? { name, notes } : null);
           }
@@ -11188,13 +11250,12 @@ export function App() {
     // used to be dropped without a word.
     void (async () => {
       const kinds: (string | null)[] = [];
+      // By its bytes always, as File › Open goes: a document named .png
+      // was refused as no picture, and a PNG named .chitra as a damaged
+      // document, which then claimed to have opened.
       for (const file of files) {
-        let kind: string | null = importKind(file.name, undefined, file.type);
-        if (!kind) {
-          const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
-          kind = importKind(file.name, head, file.type);
-        }
-        kinds.push(kind);
+        const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+        kinds.push(importKind(file.name, head, file.type));
       }
       const named = (f: File) => f.name || "a file";
       const at = kinds.indexOf("document");
@@ -11873,6 +11934,7 @@ export function App() {
           item("add-ellipse", "ellipse", "Ellipse", () => addInView("Ellipse")),
           item("add-line", "line", "Line", () => addInView("Line")),
           item("add-text", "text", "Text", () => addInView("Text")),
+          item("add-frame", "frame", "Frame", () => addInView("Frame")),
         ]),
         item("repeat", "duplicate", "Repeat…", repeatSelection),
         item("blend-shapes", "shapes", "Blend shapes…", blendSelection),
@@ -12568,10 +12630,16 @@ export function App() {
             onKeyDown={fieldKeys}
             onBlur={(e) => {
               if (asGiven(e.currentTarget)) return;
-              const v = Number(e.currentTarget.value);
-              if (e.currentTarget.value.trim() !== "" && Number.isFinite(v) && v > 0) zoomTo(v / 100);
-              // What is not a zoom is not kept in the box.
-              else e.currentTarget.value = String(Math.round(view.zoom * 100));
+              const el = e.currentTarget;
+              const v = Number(el.value);
+              if (el.value.trim() !== "" && Number.isFinite(v) && v > 0) zoomTo(v / 100);
+              // What is not a zoom is not kept in the box — nor a number
+              // held to the limit the view is already at, which changes
+              // nothing and so draws the box nowhere afresh ("5000%" at
+              // 800%): the box says what the view is, once it has moved.
+              requestAnimationFrame(() => {
+                if (el.isConnected) el.value = el.defaultValue;
+              });
             }}
             aria-label="Zoom"
             title="How far in the view is, as a percentage"
@@ -12605,11 +12673,7 @@ export function App() {
             e.target.value = "";
             const raws = chosen.filter((f) => importKind(f.name) === "raw");
             if (raws.length === 0) return;
-            setBatch(
-              await Promise.all(
-                raws.map(async (f) => ({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) })),
-              ),
-            );
+            setBatch(raws.map((f) => ({ name: f.name, read: async () => new Uint8Array(await f.arrayBuffer()) })));
           }}
           aria-label="Raw files to develop and export"
           hidden
@@ -13098,7 +13162,13 @@ export function App() {
           ref={railRef}
           className={floating ? "toolbar floating" : "toolbar"}
           aria-label="Tools"
-          style={floating ? { left: floating[0], top: floating[1] } : undefined}
+          // As tall as the window leaves below where it was put: held to
+          // the window's height, it ran past the bottom by its own top.
+          style={
+            floating
+              ? { left: floating[0], top: floating[1], maxHeight: `calc(100vh - ${floating[1] + 16}px)` }
+              : undefined
+          }
         >
           {/* Picked up by its grip and put down anywhere; dropped back
               against the left edge, or double-clicked, it docks again. */}
@@ -13732,6 +13802,14 @@ export function App() {
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
           onDrop={onHostDrop}
+          // A number typed into the panel is taken before the press does
+          // anything: the press picks another layer, the field is drawn
+          // afresh for it, and the typing went with the old one, unsaid.
+          onPointerDownCapture={() => {
+            const typed = document.activeElement;
+            if (typed instanceof HTMLInputElement && settlesOnLeave.has(typed) && typed.value !== typed.defaultValue)
+              typed.blur();
+          }}
           onPointerDown={onHostPointerDown}
           onPointerMove={onHostPointerMove}
           onPointerUp={onHostPointerUp}
@@ -13971,7 +14049,7 @@ export function App() {
             </svg>
           )}
           {showGuides && (
-            <svg className="guide-overlay" aria-hidden="true">
+            <svg className={tool === "Move" ? "guide-overlay grabbable" : "guide-overlay"} aria-hidden="true">
               {docGuides.map((g, i) => {
                 const vertical = guideIsVertical(g);
                 const at =
@@ -15301,7 +15379,8 @@ export function App() {
                   // Named for what it is and pressed for whether it is
                   // on, so the name and the state never disagree: it was
                   // "Hide layer", pressed, while the layer was shown.
-                  aria-label="Show layer"
+                  // And which layer: every row's read "Show layer".
+                  aria-label={`Show layer ${l.name}`}
                   aria-pressed={l.visible}
                   title={
                     solo === l.id
@@ -15319,7 +15398,7 @@ export function App() {
                   }}
                   aria-pressed={l.locked}
                   title={l.locked ? "Unlock layer" : "Lock layer"}
-                  aria-label="Lock layer"
+                  aria-label={`Lock layer ${l.name}`}
                 >
                   <Icon name={l.locked ? "lock" : "unlock"} size={14} />
                 </button>
@@ -15840,6 +15919,7 @@ export function App() {
                     lookupInputRef.current?.click();
                   }}
                   cmyk={cmyk}
+                  ink={inkOf}
                   fonts={fontNames}
                   shapes={layers
                     .filter(
@@ -15888,9 +15968,7 @@ export function App() {
                             )}
                             onChange={(e) =>
                               tuneEffect(at, {
-                                [field]: cmyk
-                                  ? hexToCmykColor(e.target.value)
-                                  : hexColor(e.target.value),
+                                [field]: inkOf(e.target.value),
                               })
                             }
                             title={`${EFFECT_LABELS[kind]} ${called}`}
@@ -15968,7 +16046,7 @@ export function App() {
                       const kind = value as EffectKind;
                       if (!kind) return;
                       const ink = (hex: string) =>
-                        cmyk ? hexToCmykColor(hex) : hexColor(hex);
+                        inkOf(hex);
                       setEffects([
                         ...selectedEffects,
                         newEffect(kind, ink("#000000"), ink("#ffe08a"), ink("#ffffff")),
@@ -16928,6 +17006,11 @@ function RawDevelopDialog({
    * light, so the settings alone cannot say which was chosen. */
   const [lightNamed, setLightNamed] = useState<string | null>(null);
   const named = LIGHTS.find(([n]) => n === lightNamed)?.[1];
+  /** The camera's own light, as the photograph was shot. */
+  const asShot = () => {
+    setLightNamed(null);
+    setS((o) => ({ ...o, white: undefined }));
+  };
   const light =
     autoWhite && s.white && s.white[0] === autoWhite[0] && s.white[1] === autoWhite[1]
       ? "Auto"
@@ -17263,7 +17346,9 @@ function RawDevelopDialog({
                 Pick grey
               </button>
             </div>
-            <label>
+            {/* Double-clicked, the light goes back to the camera's own, as
+                every other slider here goes back to where it began. */}
+            <label onDoubleClick={asShot} title="Double-click to put it back as shot">
               <SliderHead label="Temperature" value={white[0]} unit=" K" />
               <input
                 type="range"
@@ -17286,7 +17371,7 @@ function RawDevelopDialog({
                 aria-valuetext={`${Math.round(white[0])} K`}
               />
             </label>
-            <label>
+            <label onDoubleClick={asShot} title="Double-click to put it back as shot">
               <SliderHead label="Tint" value={Math.round(white[1])} />
               <input
                 type="range"
@@ -19403,6 +19488,9 @@ interface CurvesPanelProps {
 
 interface KindPropsProps {
   kind: NodeKind;
+  /** A colour from a well as the document holds it (through the press
+   * profile, where there is one). */
+  ink?: (hex: string) => AuthoredColor;
   /** Ask for another `.cube` file for the picked colour lookup. */
   onLoadLookup?: () => void;
   /** The document's resolution, for the paper sizes a frame can be given
@@ -19461,7 +19549,11 @@ function KindProps({
   onAutoColour,
   onLoadLookup,
   onRoundCorners,
+  ink,
 }: KindPropsProps) {
+  // A colour picked here as the document holds one: through the press
+  // profile in a CMYK document that has one, as the bar's well goes.
+  const inkOf = (hex: string): AuthoredColor => (ink ? ink(hex) : cmyk ? hexToCmykColor(hex) : hexColor(hex));
   // How far a path's corners are rounded when asked.
   const [roundBy, setRoundBy] = useState(8);
   // Which band of colour the panel is showing, when it is showing one.
@@ -19709,7 +19801,7 @@ function KindProps({
         ["Sepia", "#ac7a33"],
         ["Green", "#19c919"],
       ];
-      const authoredOf = (hex: string) => (cmyk ? hexToCmykColor(hex) : hexColor(hex));
+      const authoredOf = (hex: string) => (inkOf(hex));
       return (
         <>
           <label className="row">
@@ -19888,7 +19980,7 @@ function KindProps({
         <StopList
           stops={stops}
           name="Map stop"
-          authored={(hex) => (cmyk ? hexToCmykColor(hex) : hexColor(hex))}
+          authored={(hex) => (inkOf(hex))}
           onChange={(next, gesture) =>
             onEdit(wrap({ GradientMap: { stops: next } }), gesture)
           }
@@ -20316,6 +20408,7 @@ function KindProps({
               className={(t.align ?? "Left") === mode ? "active" : undefined}
               title={title}
               aria-label={title}
+              aria-pressed={(t.align ?? "Left") === mode}
               // Already so, it is no step.
               onClick={() => {
                 if ((t.align ?? "Left") !== mode) onEdit({ Text: { ...t, align: mode } }, false);
@@ -20454,19 +20547,39 @@ function KindProps({
                 aria-pressed={on}
                 disabled={!range}
                 onClick={() => {
-                  // Smaller than the size the picked text is set in, its
-                  // own where it has one: 0.6 of the block's took a run
-                  // set at 60 down to 29, and back off it lost the 60.
-                  const own = Number(rangeSays(t.text, t.runs ?? [], range![0], range![1], "size", t.size) ?? t.size);
-                  const back = Math.round(own / 0.6);
-                  onEdit(
-                    styled(
-                      on
-                        ? { baseline: null, size: back === Math.round(t.size) ? null : back }
-                        : { baseline: rise, size: Math.round(own * 0.6) },
-                    ),
-                    false,
-                  );
+                  // Each part of what is picked by its own size: 0.6 of the
+                  // block's took a run set at 60 down to 29, and back off
+                  // it lost the 60. Kept to a hundredth rather than a whole
+                  // pixel, so on and off again is where it began (24 came
+                  // back 23), and back at the block's size it follows the
+                  // block again. From the other script it only moves: a
+                  // superscript made a subscript shrank a second time.
+                  if (!range) return;
+                  const exact = (v: number) => Math.round(v * 100) / 100;
+                  let runs = t.runs ?? [];
+                  for (const piece of rangePieces(t.text, runs, range[0], range[1])) {
+                    const size = piece.run?.size ?? t.size;
+                    const raised = piece.run?.baseline ?? 0;
+                    const change: Styling = on
+                      ? {
+                          baseline: null,
+                          size: Math.abs(size / 0.6 - t.size) < 0.05 ? null : exact(size / 0.6),
+                        }
+                      : raised !== 0
+                        ? { baseline: rise }
+                        : { baseline: rise, size: exact(size * 0.6) };
+                    runs = styleRange(t.text, runs, piece.start, piece.end, change, {
+                      fill: t.fill,
+                      bold: !!t.bold,
+                      italic: !!t.italic,
+                      underline: !!t.underline,
+                      strike: !!t.strike,
+                      font: t.font ?? "",
+                      size: t.size,
+                      baseline: 0,
+                    });
+                  }
+                  onEdit({ Text: { ...t, runs } }, false);
                 }}
               >
                 {glyph}
@@ -20526,7 +20639,7 @@ function KindProps({
             type="color"
             value={colorToHex(t.fill)}
             onChange={(e) =>
-              onEdit(styled({ fill: cmyk ? hexToCmykColor(e.target.value) : hexColor(e.target.value) }), true)
+              onEdit(styled({ fill: inkOf(e.target.value) }), true)
             }
             onBlur={onGestureEnd}
             aria-label="Text color"
@@ -20604,7 +20717,7 @@ function KindProps({
             value={colorToHex(f.background ?? hexColor("#ffffff"))}
             onChange={(e) =>
               onEdit(
-                ground(cmyk ? hexToCmykColor(e.target.value) : hexColor(e.target.value)),
+                ground(inkOf(e.target.value)),
                 true,
               )
             }
@@ -20623,9 +20736,7 @@ function KindProps({
               onEdit(
                 ground(
                   e.target.checked
-                    ? cmyk
-                      ? hexToCmykColor("#ffffff")
-                      : hexColor("#ffffff")
+                    ? inkOf("#ffffff")
                     : null,
                 ),
                 false,
@@ -20646,7 +20757,7 @@ function KindProps({
     });
 
     const authored = (hex: string) =>
-      cmyk ? hexToCmykColor(hex) : hexColor(hex);
+      inkOf(hex);
     const grad = v.gradient;
     const gradStops = grad ? gradientStops(grad) : [];
     const fillKind = !grad

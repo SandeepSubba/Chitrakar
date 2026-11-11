@@ -1791,6 +1791,32 @@ impl Session {
 
     /// Group same-parent nodes into a new group at the topmost member's
     /// position, as one undo step. Returns the group's id.
+    /// The comps with a group about to be made round `members` kept in
+    /// each that keeps any of them — in place, shown, whole — so a later
+    /// move of the group is undone by showing the comp, as a move of its
+    /// layers was before they were grouped. `None` where no comp keeps
+    /// any of them.
+    fn comps_with_group(&self, group: NodeId, members: &[NodeId]) -> Option<Command> {
+        let comps: Vec<chitrakar_doc::LayerComp> = self
+            .doc
+            .comps()
+            .iter()
+            .map(|comp| {
+                let mut out = comp.clone();
+                if out.layers.iter().any(|k| members.contains(&k.id)) {
+                    out.layers.push(chitrakar_doc::CompLayer {
+                        id: group,
+                        visible: true,
+                        opacity: 1.0,
+                        transform: Transform::default(),
+                    });
+                }
+                out
+            })
+            .collect();
+        (comps.as_slice() != self.doc.comps()).then_some(Command::SetComps { comps })
+    }
+
     pub fn group_nodes(&mut self, ids: &[NodeId], name: &str) -> Result<NodeId, EngineError> {
         if ids.is_empty() {
             return Err(EngineError::BadCommand("nothing selected".into()));
@@ -1817,36 +1843,13 @@ impl Session {
             .unwrap();
 
         let group_id = self.doc.peek_next_id();
-        // A comp that keeps any of these layers keeps the group too, as
-        // it is made — in place, shown, whole — so a later move of the
-        // group is undone by showing the comp, as a move of its layers
-        // was before they were grouped.
-        let comps: Vec<chitrakar_doc::LayerComp> = self
-            .doc
-            .comps()
-            .iter()
-            .map(|comp| {
-                let mut out = comp.clone();
-                if out.layers.iter().any(|k| ordered.contains(&k.id)) {
-                    out.layers.push(chitrakar_doc::CompLayer {
-                        id: group_id,
-                        visible: true,
-                        opacity: 1.0,
-                        transform: Transform::default(),
-                    });
-                }
-                out
-            })
-            .collect();
-        let carries = comps.as_slice() != self.doc.comps();
+        let carried = self.comps_with_group(group_id, &ordered);
         let mut cmds = vec![Command::AddNode {
             parent,
             index: top_index + 1,
             node: Box::new(Node::group(name)),
         }];
-        if carries {
-            cmds.push(Command::SetComps { comps });
-        }
+        cmds.extend(carried);
         cmds.extend(
             ordered
                 .drain(..)
@@ -3472,6 +3475,8 @@ impl Session {
             index: 1,
             node: Box::new(node),
         });
+        // The comps keep the wrapper, as they keep a group made by Group.
+        cmds.extend(self.comps_with_group(group_id, &[id]));
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
         Ok(group_id)
     }
@@ -11071,11 +11076,50 @@ impl Session {
         // page takes the picture's own size. Nothing is disturbed by it,
         // since there was nothing there — which is exactly the condition
         // being asked, rather than "the page looks empty".
-        let opening = index == 0
-            && self.undo.is_empty()
-            && chitrakar_doc::canvas_fits(width, height)
-            && (width, height) != (pw, ph);
-        if opening {
+        let opening = index == 0 && self.undo.is_empty() && (width, height) != (pw, ph);
+        // A picture larger than a page can be — a hundred-megapixel
+        // camera's — opens on the largest page that can, in its own
+        // proportions, taken down to fill it, and says so. It opened on
+        // whatever page was there, a 1280×720 one, at 7%, and nothing said.
+        if opening && !chitrakar_doc::canvas_fits(width, height) {
+            let (w, h) = (width as f64, height as f64);
+            let k = (chitrakar_doc::MAX_CANVAS_SIDE as f64 / w)
+                .min(chitrakar_doc::MAX_CANVAS_SIDE as f64 / h)
+                .min((chitrakar_doc::MAX_CANVAS_PIXELS as f64 / (w * h)).sqrt());
+            let (fw, fh) = (
+                ((w * k).floor() as u32).max(1),
+                ((h * k).floor() as u32).max(1),
+            );
+            if chitrakar_doc::canvas_fits(fw, fh) {
+                node.transform = Transform {
+                    a: fw as f32 / width as f32,
+                    d: fh as f32 / height as f32,
+                    ..Default::default()
+                };
+                self.import_notes.push(format!(
+                    "it is {width}×{height}, larger than a page can be, so it opened on a page of {fw}×{fh} with the picture taken down to fill it; the picture itself is kept at its full size"
+                ));
+                return self
+                    .apply_labeled(
+                        Command::Batch(vec![
+                            Command::ResizeCanvas {
+                                width: fw,
+                                height: fh,
+                                dx: 0.0,
+                                dy: 0.0,
+                            },
+                            Command::AddNode {
+                                parent: root,
+                                index,
+                                node: Box::new(node),
+                            },
+                        ]),
+                        Some(format!("Open {name}")),
+                    )
+                    .map(|()| id);
+            }
+        }
+        if opening && chitrakar_doc::canvas_fits(width, height) {
             return self
                 .apply_labeled(
                     Command::Batch(vec![
@@ -11274,8 +11318,20 @@ impl Session {
                 }
                 let mut any = false;
                 n.each_resource(&mut |id| any |= gone(id));
+                // And a developed picture's raw file, which Develop again
+                // reads: gone, the picture opened with nothing said, and
+                // Develop again was offered and only then refused.
+                let raw = match &n.kind {
+                    NodeKind::Raster(r) => r
+                        .develop
+                        .as_ref()
+                        .is_some_and(|d| doc.original(&d.original).is_none()),
+                    _ => false,
+                };
                 if own {
                     Some(format!("the picture of “{}”", n.name))
+                } else if raw {
+                    Some(format!("the raw file of “{}”", n.name))
                 } else if mask {
                     Some(format!("the mask of “{}”", n.name))
                 } else if any {
@@ -11432,6 +11488,7 @@ impl Session {
             degrees,
             width,
             height,
+            keep: Vec::new(),
         })
     }
 
@@ -14798,6 +14855,31 @@ mod tests {
     /// carried the same way, or showing it afterwards puts the layer's
     /// old numbers in the new parent's space; and dissolving a group
     /// hands each child the group's placement as each comp kept it.
+    /// A picture larger than a page can be opens on the largest page that
+    /// can hold it, in its proportions, filled by it, and says so.
+    #[test]
+    fn a_picture_past_the_largest_page_opens_on_the_largest() {
+        let mut s = Session::new(1280, 720, ColorMode::Rgb);
+        let id = s
+            .place_rendered(31_000, 2, vec![200; 31_000 * 2 * 4], "wide.png")
+            .unwrap();
+        assert_eq!(
+            (s.document().meta.width, s.document().meta.height),
+            (30_000, 1)
+        );
+        let t = s.document().node(id).unwrap().transform;
+        assert!(
+            (t.a - 30_000.0 / 31_000.0).abs() < 1e-6 && (t.d - 0.5).abs() < 1e-6,
+            "{t:?}"
+        );
+        assert_eq!(s.import_notes().len(), 1, "and it is said");
+        s.undo().unwrap();
+        assert_eq!(
+            (s.document().meta.width, s.document().meta.height),
+            (1280, 720)
+        );
+    }
+
     /// A comp kept before its layers were grouped: the group moved after
     /// is put back by showing the comp, as the layers' own move was.
     #[test]
@@ -14836,6 +14918,28 @@ mod tests {
             "one undo takes the group and its comp entry"
         );
         assert!(session.comp_showing("A"));
+
+        // The same for the group an adjustment scoped to the layer wraps
+        // it in.
+        let wrap = session
+            .adjust_node(
+                a,
+                Node::adjustment(
+                    "negative",
+                    chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+                ),
+            )
+            .unwrap();
+        assert!(session.comp_showing("A"));
+        session
+            .apply(Command::SetTransform {
+                id: wrap,
+                transform: Transform::translation(150.0, 0.0),
+            })
+            .unwrap();
+        session.apply_comp("A").unwrap();
+        let [x, _, _, _] = session.bounds_of(a).unwrap();
+        assert!((x - 50.0).abs() < 0.5, "the wrapper is put back too: {x}");
     }
 
     #[test]
@@ -25945,6 +26049,7 @@ mod tests {
                 degrees: 9.0,
                 width: 110,
                 height: 80,
+                keep: Vec::new(),
             },
         ] {
             let what = format!("{command:?}");
@@ -29623,6 +29728,37 @@ mod tests {
 
     /// Straightening turns the page about its own middle and crops back
     /// to its own proportions; undoing it puts every point back exactly.
+    /// A radial mask stays upright through a turn, so turning back alone
+    /// did not give it back: undoing a straighten, and redoing it, puts
+    /// back exactly the mask each side had.
+    #[test]
+    fn undoing_a_straighten_gives_a_radial_mask_back_exactly() {
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let r = add_rect(&mut s, "r", 200.0, 150.0);
+        let mask = chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Gradient {
+                from: [100.0, 75.0],
+                to: [180.0, 110.0],
+                radial: true,
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        s.apply(Command::SetMask {
+            id: r,
+            mask: Some(Box::new(mask.clone())),
+        })
+        .unwrap();
+        s.straighten(9.0).unwrap();
+        let turned = s.document().node(r).unwrap().mask.clone();
+        s.undo().unwrap();
+        assert_eq!(s.document().node(r).unwrap().mask.as_ref(), Some(&mask));
+        s.redo().unwrap();
+        assert_eq!(s.document().node(r).unwrap().mask, turned);
+        s.undo().unwrap();
+        assert_eq!(s.document().node(r).unwrap().mask.as_ref(), Some(&mask));
+    }
+
     #[test]
     fn straightening_turns_the_page_and_crops_it_back_to_shape() {
         let mut session = Session::new(400, 300, ColorMode::Rgb);

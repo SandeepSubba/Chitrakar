@@ -83,8 +83,12 @@ without reading anything else.*
      The twenty-fourth: nothing lost and nothing thrown, every long
      run undone, redone and reopened exactly; an undo in a typed box
      that could lose a redo, Space-pan after a window, a merge fix
-     gone too far, CMYK well colours off the profile. ⬜ until a broad
-     pass finds nothing.
+     gone too far, CMYK well colours off the profile. The
+     twenty-fifth, by a person's pace (a poster with mouse, keys and a
+     phone; a shoot through develop and batch): guides that stole
+     presses, a shape drawn left unpicked, a number lost to a click, a
+     100-megapixel photograph on the wrong page. ⬜ until a broad pass
+     finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11680,6 +11684,71 @@ without reading anything else.*
   reader); a `<use>` of a `<symbol>` under a turn is clipped by the
   symbol's viewport unturned; a shadow blurred a thousand pixels past
   the slider takes half a minute to export.
+
+  **A twenty-fifth audit (November 2026).** Its interface pass, a
+  poster made with the mouse, the keyboard alone and a phone: a guide
+  took the press meant for a drawing tool, and for a handle sitting on
+  it (a guide is moved with the Move tool now, and handles sit over
+  guides); a shape drawn was not picked, so Delete next took the layer
+  picked before it; a number typed into X, Y, W or H was lost when the
+  next press was on the canvas (the press settles it first); a toolbar
+  floated near an edge could end up off the window, its grip with it;
+  tools were squeezed to 24 pixels before the rail scrolled; the zoom
+  box kept "5000%" at the limit; the alignment in force was not said to
+  a screen reader, nor which layer a row's eye and lock were for; the
+  watermark's tick sat away from its word; no frame could be made from
+  the keyboard (Layer › Add › Frame). Its files pass: a picture over a
+  hundred megapixels — a GFX100's — opened on whatever page was there
+  at 7% (it opens on the largest page that can be, in its proportions,
+  and says so); choosing PSD for a page of two thousand layers froze
+  the window for a minute and a half, twice (the window counts a PSD's
+  layers before it encodes unasked, and makes each file once); the
+  batch window read every raw into memory before opening (each is read
+  when its turn comes); a damaged raw in the batch, and a damaged zip,
+  were said in the library's words; a missing raw original was not
+  said on opening; notes stayed over a new document; a tab drew as a
+  missing glyph's box; Temperature and Tint did not go back on a
+  double-click. Limits written down: a layer with a blend and effects
+  is drawn on the canvas with each effect laid under it at the layer's
+  blend (an outline under a Multiply shape shows through it), while
+  SVG and PSD lay the effects at Normal and blend the whole — the
+  files differ from the canvas there; a layer nested in a frame reads
+  the same to a screen reader as one beside it; the colour-grading
+  wheel takes no Home, End or Page keys; a panel slider's arrow keys
+  make a step each.
+  Its check of round 24: groups each wearing an effect, nested three
+  deep and zoomed in, ran the engine out of memory — each took a
+  margin round the last one's (only the outermost widens the page
+  now); a pinch, not only a cancelled finger, wiped the Pen's anchors
+  and the crop frame; superscript drifted a pixel each way, shrank
+  again going from super to sub, and lost mixed sizes (each part is
+  taken by its own size, to a hundredth); a drop did not let the bytes
+  decide over a .chitra name; the other colour wells of a CMYK
+  document (effects, text, a frame's ground, gradient maps, photo
+  filters) still skipped the press profile; Space after clicking a
+  slider moved the layer; comps did not keep the group "Only on this
+  layer" wraps a layer in. Limits written down: a print-size page
+  exported at 2× with groups wearing effects nested inside one another
+  can still ask more memory than a browser gives (every surface there
+  is the whole page); merging alone a layer clipped to a base and
+  wearing a shadow differs along the base's soft edge; a 16× export of
+  a small page cuts a long shadow's tail from a layer off the page
+  sooner than it did, the room round the page being held to a budget.
+  Its editing pass, effects and adjustments at every zoom against the
+  export, painting on turned pictures, page operations with every kind
+  of layer: the live view matched the export to the pixel, and only a
+  radial mask moved — undoing a Straighten gave it back a couple of
+  pixels off and each undo and redo drifted it further (the command
+  now carries the masks back exactly). Limits written down: a radial
+  mask carried through a turn that is not a quarter one (ungrouping a
+  turned group, a layer taken out of a turned frame) keeps its size
+  and not its tilt; the size fields act on the layer picked last of
+  several; effects can be added to an adjustment layer, which ignores
+  them; six effects at their tops zoomed in take seconds a frame; with
+  Posterize, Threshold or Emboss in the stack the view and the export
+  can differ by a level that the filter magnifies; an eraser stroke is
+  "Set mask" in the history, and a handle drag over several layers
+  "Move".
 
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the

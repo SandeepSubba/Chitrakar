@@ -24,7 +24,10 @@ import { NumberField } from "./NumberField";
 import { readRaw } from "./raw";
 
 /** A file chosen, as read. */
-export type BatchFile = { name: string; bytes: Uint8Array };
+/** A raw file chosen for the batch, read only when its turn comes: read
+ * up front, eight 43 MB files took the page from 51 MB to 396 MB before
+ * anything was developed, and a whole shoot could not fit in a tab. */
+export type BatchFile = { name: string; read: () => Promise<Uint8Array> };
 
 const SHARPEN: [string, number][] = [
   ["Off", 0],
@@ -41,11 +44,12 @@ export async function developToJpeg(
   settings: string,
   opts: { longEdge: number; quality: number; sharpen: number; cameraData: boolean; watermark: string },
 ): Promise<Outgoing> {
-  const packed = await readRaw(file.bytes);
+  const raw = await file.read();
+  const packed = await readRaw(raw);
   const temp = new WasmSession(1, 1, false);
   try {
     await giveLensProfiles(temp);
-    temp.raw_open(packed, file.bytes, file.name);
+    temp.raw_open(packed, raw, file.name);
     // On every core where the page can wait for them (the develop
     // worker), else here.
     const got = await developElsewhere(packed, file.name, settings, await lensProfileTexts());
@@ -117,7 +121,13 @@ export function BatchDialog({
       try {
         done.push(await developToJpeg(f, settings, opts));
       } catch (err) {
-        failed.push(`${f.name}: ${err}`);
+        // As Place says it: the reader's own words only after ours.
+        const text = String(err);
+        failed.push(
+          /camera raw|decode|EOF|corrupt/i.test(text)
+            ? `${f.name}: it may be damaged, or from a camera this editor does not know yet (${text})`
+            : `${f.name}: ${text}`,
+        );
       }
     }
     setRunning(done.length > 0 ? "Writing…" : null);

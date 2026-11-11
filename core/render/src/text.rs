@@ -68,7 +68,7 @@ pub fn glyphs_a_reader_may_ask(face_bytes: &[u8], text: &str) -> std::collection
             continue;
         }
         let mut buffer = rustybuzz::UnicodeBuffer::new();
-        buffer.push_str(line);
+        buffer.push_str(&line.replace('\t', " "));
         let shaped = rustybuzz::shape(&face, &[], buffer);
         out.extend(shaped.glyph_infos().iter().map(|g| g.glyph_id as u16));
     }
@@ -559,7 +559,10 @@ fn shaped(
         return found;
     }
     let mut buffer = rustybuzz::UnicodeBuffer::new();
-    buffer.push_str(piece);
+    // A tab is set as a space: the face has no glyph for it, and it was
+    // drawn as the box a missing glyph is. One byte for one, so every
+    // cluster still points where it did.
+    buffer.push_str(&piece.replace('\t', " "));
     let off =
         |tag: &[u8; 4]| rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..);
     let features = if ligatures {
@@ -2746,6 +2749,22 @@ mod tests {
     /// for (from what was kept) is the first: upright, leaned for an
     /// italic the face has no oblique for, set along a ring so each glyph
     /// is turned, at two sizes and a fraction of a pixel off the grid.
+    /// A tab is set as a space, not as the box a missing glyph is.
+    #[test]
+    fn a_tab_is_set_as_a_space() {
+        let fonts = bundled();
+        let tab = shaped(fonts, &fonts.face, "a\tb", true);
+        let space = shaped(fonts, &fonts.face, "a b", true);
+        assert!(tab.iter().all(|g| g.glyph != 0), "no missing glyph");
+        assert_eq!(
+            tab.iter().map(|g| (g.glyph, g.cluster)).collect::<Vec<_>>(),
+            space
+                .iter()
+                .map(|g| (g.glyph, g.cluster))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn a_glyph_from_a_kept_outline_is_the_glyph() {
         let upright = spec("Kept glyphs, kept again.", 23.0);

@@ -332,7 +332,11 @@ const pickTool = async (name) => {
       // Which family's corner to open: the region tools share a slot the
       // way the shapes do.
       const region = ["Select", "Select ellipse", "Lasso", "Wand"].includes(name);
-      await page.click(`button[aria-label="${region ? "More ways to select" : "More shapes"}"]`);
+      // Brought into sight first: a scroll of the rail puts a flyout away.
+      const corner = page.locator(`button[aria-label="${region ? "More ways to select" : "More shapes"}"]`);
+      await corner.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(60);
+      await corner.click();
       await page.waitForTimeout(80);
       await page.click(`.tool-flyout button[aria-label="${name}"]`);
     }
@@ -5383,7 +5387,7 @@ assert(
   await page.mouse.click(...at(200, 175));
   await page.waitForTimeout(200);
   assert((await page.locator(".handle").count()) > 0, "the rect is picked and handled to begin with");
-  await page.click('button[aria-label="Lock layer"]');
+  await page.click('button[aria-label^="Lock layer"]');
   await page.waitForTimeout(150);
   await page.keyboard.press("Escape");
   await page.mouse.click(...at(200, 175));
@@ -5395,7 +5399,7 @@ assert(
     (await page.locator(".sel-outline").count()) >= 1 && (await page.locator(".handle").count()) === 0,
     "picked from the panel it shows its outline but no handles",
   );
-  await page.click('button[aria-label="Lock layer"][aria-pressed="true"]');
+  await page.click('button[aria-label^="Lock layer"][aria-pressed="true"]');
   await page.waitForTimeout(150);
   await page.keyboard.press("Escape");
   await page.mouse.click(...at(200, 175));
@@ -7093,6 +7097,9 @@ assert(
   // The toolbar is carried off its edge by its grip, and put back.
   const railAt = async () => (await page.locator(".toolbar").boundingBox()).x;
   const home = await railAt();
+  // The rail scrolls rather than squeezing its tools, so the grip at its
+  // top may have been scrolled out of sight by what came before.
+  await page.locator('button[aria-label="Move the toolbar"]').scrollIntoViewIfNeeded();
   const grip = await page.locator('button[aria-label="Move the toolbar"]').boundingBox();
   await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
   await page.mouse.down();
@@ -7838,7 +7845,7 @@ assert(
   const names = await rows.allTextContents();
   assert(names.length === 4, `four rectangles (${names})`);
   // The last one drawn is locked.
-  await rows.first().locator('button[aria-label="Lock layer"]').click();
+  await rows.first().locator('button[aria-label^="Lock layer"]').click();
   await page.waitForTimeout(200);
   const picked = () => page.locator(".panel ul li.selected, .panel ul li.multi").count();
 
@@ -18390,6 +18397,10 @@ assert(
   assert((await onRail("Crop").count()) === 0, "a tool unticked leaves the rail");
   const more = rail.locator('button[aria-label^="More tools"]');
   assert((await more.count()) === 1, "and a slot appears at the end to hold it");
+  // The rail scrolls rather than squeezing its tools, and a scroll of it
+  // puts an open flyout away: brought into sight first, as a hand would.
+  await more.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(120);
   await more.click();
   await page.waitForTimeout(120);
   const putAway = await rail.locator(".tool-flyout button").allTextContents();
@@ -21031,14 +21042,14 @@ assert(
   await page.waitForTimeout(150);
   const xBox = page.locator('input[aria-label="X position"]');
   const xWas = await xBox.inputValue();
-  await page.locator(".panel ul li").first().locator('button[aria-label="Lock layer"]').click();
+  await page.locator(".panel ul li").first().locator('button[aria-label^="Lock layer"]').click();
   await page.waitForTimeout(150);
   const before = await steps();
   await xBox.fill(String(Number(xWas) + 50));
   await xBox.press("Enter");
   await page.waitForTimeout(200);
   assert((await steps()) === before, "a typed X does not move a locked layer");
-  await page.locator(".panel ul li").first().locator('button[aria-label="Lock layer"][aria-pressed="true"]').click();
+  await page.locator(".panel ul li").first().locator('button[aria-label^="Lock layer"][aria-pressed="true"]').click();
   await page.waitForTimeout(150);
 
   // A rename to the name it has is no step.
@@ -21990,6 +22001,8 @@ assert(
   // A flyout goes with Escape.
   const more = p.locator('button[aria-label="More shapes"]');
   if (await more.count()) {
+    await more.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(120);
     await more.click();
     await p.waitForTimeout(200);
     const open = await p.locator(".tool-flyout").count();
@@ -21997,6 +22010,66 @@ assert(
     await p.waitForTimeout(200);
     assert(open === 1 && (await p.locator(".tool-flyout").count()) === 0, "Escape puts a flyout away");
   }
+  await ctx.close();
+}
+
+// 9df. The twenty-fifth audit's interface pass. A guide took a press
+// meant for a drawing tool (and for a handle sitting on it); a shape
+// drawn was not picked, so Delete took the layer picked before it; a
+// number typed into X was lost when the next press was on the canvas;
+// and no frame could be made without dragging one.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  const steps = () => p.locator(".history li:not(.history-start):not(.future)").count();
+  // A guide down the page, out of the left ruler.
+  const host = await p.locator("#engine-canvas").boundingBox();
+  await p.mouse.move(host.x + 8, host.y + 200);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 200, host.y + 200, { steps: 6 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  const guides = () => p.locator(".guide-overlay .guide-hit").count();
+  assert((await guides()) === 1, "a guide out of the ruler");
+  const at = Number((await p.locator(".guide-overlay .guide-hit").first().getAttribute("x1")) ?? 0);
+  // Rect pressed right beside it draws a rectangle, and leaves it picked.
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  const before = await steps();
+  await p.mouse.move(host.x + at + 2, r.y + 40);
+  await p.mouse.down();
+  await p.mouse.move(host.x + at + 80, r.y + 110, { steps: 5 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  assert((await steps()) === before + 1 && (await guides()) === 1, "a press beside a guide draws, and the guide stays");
+  const picked = await p.locator(".panel ul li.selected .layer-name").textContent().catch(() => "");
+  assert(/^Rect/.test(picked ?? ""), `the shape drawn is picked (${picked})`);
+  // A number typed into X is taken when the canvas is pressed next.
+  await p.keyboard.press("v");
+  const X = p.locator('input[aria-label="X position"]');
+  await X.click();
+  await p.keyboard.press("Control+a");
+  await p.keyboard.type("300");
+  const typed = await steps();
+  await p.mouse.click(r.x + r.width - 20, r.y + r.height - 20);
+  await p.waitForTimeout(300);
+  assert((await steps()) === typed + 1, "the number typed is taken before the press picks elsewhere");
+  // A frame from the menus.
+  await p.click('.menu-label:text-is("Layer")');
+  await p.locator('.menu-pop:not(.sub) .menu-item.has-sub', { hasText: "Add" }).first().hover();
+  const add = p.locator('.menu-pop.sub[aria-label="Add"]');
+  await add.waitFor({ timeout: 2000 });
+  await add.locator(".menu-item", { hasText: "Frame" }).click();
+  await p.waitForTimeout(300);
+  assert(
+    /^Artboard/.test((await p.locator(".panel ul li.selected .layer-name").textContent()) ?? ""),
+    "Layer › Add › Frame adds a frame, picked",
+  );
   await ctx.close();
 }
 
@@ -22187,6 +22260,8 @@ assert(
   await p.waitForTimeout(200);
   const more = p.locator('button[aria-label="More shapes"]');
   if (await more.count()) {
+    await more.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(120);
     await more.click();
     await p.waitForTimeout(200);
     await p.keyboard.press("Escape");
