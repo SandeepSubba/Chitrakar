@@ -176,7 +176,10 @@ export function unreadable(name: string, bytes: Uint8Array, err: unknown, verb =
     );
   }
   if (heifBrand(bytes) === "avif") {
-    return `${name} is an AVIF picture, which this browser cannot decode. Open it in a current Chrome, Firefox or Safari, or save it as PNG first.`;
+    // Which of the two it is the browser does not say: a current one
+    // reads AVIF, and one the file is cut short in says the same as one
+    // with no decoder at all.
+    return `${name} is an AVIF picture this browser could not decode: the file may be damaged, or the browser too old to read AVIF (a current Chrome, Firefox or Safari reads it). Save it as PNG first if it opens elsewhere.`;
   }
   return `Could not ${verb} ${name}: ${said(err)}`;
 }

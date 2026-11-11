@@ -70,6 +70,13 @@ const partsOf = (path: string): string[] => {
 /** A path's last part: what a person calls the file. */
 export const baseName = (path: string) => partsOf(path).pop() ?? path;
 
+/** Whether a place to save says what the file is called. An address
+ * Android gives for Downloads names the file by a number
+ * (`…/document/msf%3A1000`), and taken for a name it renamed the
+ * document "1000"; a path, or an address carrying one, does say. */
+export const saysItsName = (path: string) =>
+  !/^[a-z][a-z0-9+.-]+:\/\//i.test(path) || /^file:/i.test(path) || /\.[a-z0-9]{1,8}$/i.test(baseName(path));
+
 /** The folder a path is in, by its own last part — enough to tell two
  * files of the same name apart on a menu. */
 export const folderName = (path: string) => {

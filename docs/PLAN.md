@@ -87,8 +87,11 @@ without reading anything else.*
      twenty-fifth, by a person's pace (a poster with mouse, keys and a
      phone; a shoot through develop and batch): guides that stole
      presses, a shape drawn left unpicked, a number lost to a click, a
-     100-megapixel photograph on the wrong page. ⬜ until a broad pass
-     finds nothing.
+     100-megapixel photograph on the wrong page. The twenty-sixth:
+     still nothing lost; drawn paths left unpicked, CMYK chips off the
+     profile, a squeezed floating rail, focus dropped after a delete, a
+     crash draft that could keep a drag never let go of.
+     ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11750,6 +11753,58 @@ without reading anything else.*
   "Set mask" in the history, and a handle drag over several layers
   "Move".
 
+  **A twenty-sixth audit (November 2026).** Its check of round 25: a
+  path drawn with the Pen or a stroke with the Brush was still left
+  unpicked (both are picked now, as every drawn shape is); a pinch, or
+  the Pen let go of mid-drag, left half an anchor; a drop of two
+  documents opened the first and placed the second as a picture (one
+  is opened and the rest said, in the browser and the shell alike);
+  superscript taken off lost a size set while it was on; a dodge layer
+  stopped short of a grown page; a frame at the page's edge did not
+  bleed with it in a PDF with marks; an adjustment preset in a CMYK
+  document skipped the press profile; gradient knobs sat under the
+  side handles. Its editing pass: a CMYK document's palette chips,
+  wells and recent colours showed the plain formula's colour rather
+  than the press profile's (`Session::ink_shown` is what they show),
+  and an export of what is picked wrote the whole page for a live copy
+  wearing a shadow (`copy_drawn_bounds`). Its interface pass: a
+  floated toolbar on a short window was squeezed to two tools, and a
+  window made small moved it for good (where it was put is kept, and
+  held only where it is shown); Space after clicking a drop-down, or
+  over a guide, did not pan; the keys sheet ran wider than a phone;
+  submenus ran off the window at 125%; the keyboard's place fell to the
+  page when the button, row, effect or stop it was on went
+  (`keepPanelFocus`); a tool whose key another took was "Rect ()"; a
+  crop frame zoomed past the view drew negative panels. Its files pass,
+  a shoot developed and framed, a designer's hand-off in every format, a
+  print job and two crashes: the crash draft could be written while a
+  drag was held still or the Straighten window was open on an angle,
+  and Restore then gave back a turn nobody had taken with no step to
+  undo it (the draft is written from the document as committed); an
+  SVG with a live copy in it gave a filter, a mask and a layer's id
+  twice (each writing has its own); a damaged AVIF was blamed on the
+  browser; the shell's drop went by name, so a document saved as
+  "card.png" was placed (it reads every file, as the page does); on
+  Android, saving into Downloads renamed the document "1000" (a place
+  that names nothing leaves the name alone). Limits written down: an
+  Inkscape or Illustrator SVG's layer names (`inkscape:label`,
+  `data-name`) do not come in, and a hidden layer in one is left out
+  without a note. And from the passes before: groups each wearing
+  effects nested six deep, zoomed in on a
+  high-density screen, can still ask more memory than a browser gives;
+  undoing a hundred-megapixel open leaves its note up; a frame does not
+  take what is dragged, pasted or placed onto it, and a live copy of a
+  frame is not a frame to Export frames; text on a path shorter than
+  it is cut without saying; the Fill tool on nothing it can fill does
+  nothing without saying; shapes combined again and again keep growing
+  their names, and a knife's pieces share one; a swatch is renamed by
+  taking it out and keeping it again; at 1366×768 the ink well and the
+  last tools are below the rail's fold, and nothing shows the rail
+  scrolls; a family's second tool's tooltip names the family's key;
+  new frames are still named "Artboard"; the flyout openers are small
+  for a mouse; the toolbar's grip does nothing from the keyboard;
+  About opened by the mouse lands on its link; a phone at 125% clips
+  the document's name without an ellipsis.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -960,6 +960,57 @@ fn copy_reaches_out(doc: &Document, instance: NodeId, of: NodeId) -> bool {
             .unwrap_or(false)
 }
 
+/// Where a live copy wearing an effect (or copying one) can draw, on the
+/// page: its own box grown by how far the effects inside it reach, each
+/// carried out through the transforms between it and the page. What
+/// [`node_bounds`] calls "everything" for such a copy, for the dirty
+/// tracking's sake, is the whole page to an export of what is picked; this
+/// is the box that export wants. `None` where the copy is not one of these
+/// (a copy of a change, or of nothing).
+pub fn copy_drawn_bounds(doc: &Document, id: NodeId) -> Option<Bounds> {
+    let node = doc.node(id).ok()?;
+    let NodeKind::Instance { of, .. } = &node.kind else {
+        return None;
+    };
+    if holds_a_change(doc, *of) || !copy_reaches_out(doc, id, *of) {
+        return None;
+    }
+    /// How far `id`'s effects and everything inside it reach, in the
+    /// space `id` is placed in. A copy's original is drawn in the copy's
+    /// own space, so its own placement is not part of it.
+    fn reach(doc: &Document, id: NodeId, placed: bool, left: u32) -> f32 {
+        let Ok(node) = doc.node(id) else {
+            return 0.0;
+        };
+        let scale = if placed {
+            node.transform.max_scale()
+        } else {
+            1.0
+        };
+        let mut inner = doc
+            .children_of(id)
+            .map(|kids| {
+                kids.iter()
+                    .map(|&k| reach(doc, k, true, left))
+                    .fold(0.0f32, f32::max)
+            })
+            .unwrap_or(0.0);
+        if let NodeKind::Instance { of, .. } = &node.kind {
+            if left > 0 {
+                inner = inner.max(reach(doc, *of, false, left - 1));
+            }
+        }
+        Effect::reach_of(&node.effects) + scale * inner
+    }
+    let pad = reach(doc, id, true, 16) * ancestor_space(doc, id).max_scale();
+    match visual_box(doc, id, ancestor_space(doc, id)).ok()? {
+        Bounds::Rect(x0, y0, x1, y1) if pad.is_finite() => {
+            Some(Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad))
+        }
+        _ => None,
+    }
+}
+
 /// Whether a group holds an adjustment or a filter (or a live copy of
 /// one), at any depth.
 fn holds_a_change(doc: &Document, id: NodeId) -> bool {

@@ -20257,9 +20257,16 @@ assert(
       paths,
     );
   const before = await layerCount();
+  const erred = shellErrors.length;
   await drop(["/home/ané/Notes/list.txt"]);
   await shell.waitForTimeout(300);
   assert((await layerCount()) === before, "a dropped file that is not a picture is passed over");
+  // And said, as a drop on a page says it, rather than without a word.
+  const told = shellErrors.splice(erred);
+  assert(
+    told.length === 1 && /list\.txt is not a picture, a drawing or a document/.test(told[0]),
+    `and named as not something the editor reads (${told.join(" | ")})`,
+  );
   await drop(["/home/ané/Posters/winter.png"]);
   await shell.waitForTimeout(600);
   assert(
@@ -22010,6 +22017,94 @@ assert(
     await p.waitForTimeout(200);
     assert(open === 1 && (await p.locator(".tool-flyout").count()) === 0, "Escape puts a flyout away");
   }
+  await ctx.close();
+}
+
+// 9dg. The twenty-sixth audit's interface pass. A pen path or a brush
+// stroke just drawn was not picked, so Delete took the layer before it;
+// the keyboard's place fell to the page when the button it was on was
+// disabled by its own deletion; a floating toolbar was squeezed to two
+// tools on a short window; and the keys sheet ran wider than a phone.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  const pickedName = () => p.locator(".panel ul li.selected .layer-name").textContent().catch(() => "");
+  // A rectangle first, picked, so a stroke left unpicked would show.
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 20, r.y + 20);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 90, r.y + 80, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(250);
+  await p.keyboard.press("b");
+  await p.mouse.move(r.x + 150, r.y + 150);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 220, r.y + 190, { steps: 8 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  assert(/^Stroke/.test((await pickedName()) ?? ""), `the brush stroke drawn is picked (${await pickedName()})`);
+  await p.keyboard.press("p");
+  for (const [x, y] of [[260, 60], [320, 90], [300, 150]]) {
+    await p.mouse.click(r.x + x, r.y + y);
+    await p.waitForTimeout(80);
+  }
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(300);
+  const path = (await pickedName()) ?? "";
+  assert(path !== "" && !/^(Rect|Stroke)/.test(path), `the pen's path is picked (${path})`);
+  // Delete selected layer, pressed from the keyboard, keeps the focus
+  // in the panel rather than dropping it to the page.
+  const del = p.locator('button[aria-label="Delete selected layer"]');
+  await del.focus();
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(400);
+  const where = await p.evaluate(() => {
+    const a = document.activeElement;
+    return a && a !== document.body && !!a.closest("aside.panel") && !a.disabled
+      ? ""
+      : `${a?.tagName} ${a?.getAttribute("aria-label")} ${a?.disabled}`;
+  });
+  assert(where === "", `the focus stays in the panel after its delete button is disabled (${where})`);
+  await ctx.close();
+}
+{
+  // Floated on a large window, the rail on a short one is the whole rail.
+  const ctx = await browser.newContext({ viewport: { width: 863, height: 360 } });
+  await ctx.addInitScript(() => {
+    try {
+      localStorage.setItem("chitrakar:toolbar", JSON.stringify([500, 300]));
+    } catch {}
+  });
+  const p = await ctx.newPage();
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const rail = await p.locator("nav.toolbar").boundingBox();
+  assert(rail && rail.height > 200, `the rail fills a short window (${rail?.height})`);
+  await ctx.close();
+}
+{
+  // The keys sheet on a phone fits its width.
+  const ctx = await browser.newContext({ viewport: { width: 360, height: 740 }, hasTouch: true });
+  const p = await ctx.newPage();
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  await p.keyboard.press("Shift+?");
+  await p.waitForTimeout(400);
+  const cols = p.locator(".keys-columns");
+  assert((await cols.count()) > 0, "the keys sheet opens on a phone");
+  const fit = await cols.evaluate((el) => {
+    const box = el.closest("[role=dialog]") ?? el;
+    return box.scrollWidth <= box.clientWidth + 1 && el.scrollWidth <= el.clientWidth + 1;
+  });
+  assert(fit, "the keys sheet's columns fit a phone");
   await ctx.close();
 }
 

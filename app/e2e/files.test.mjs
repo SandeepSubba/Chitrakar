@@ -18,7 +18,7 @@ const src = readFileSync(join(here, "..", "src", "files.ts"), "utf8").replace(
 const js = (await transform(src, { loader: "ts", format: "esm" })).code;
 const tmp = join(here, "out", "files.generated.mjs");
 writeFileSync(tmp, js);
-const { baseName, folderName, replacing, fileSafe, distinctNames, graphemes } = await import("file://" + tmp);
+const { baseName, folderName, replacing, fileSafe, distinctNames, graphemes, saysItsName } = await import("file://" + tmp);
 unlinkSync(tmp);
 
 let ran = 0;
@@ -43,6 +43,10 @@ names(
 );
 // Downloads by number: no name to give, so the number it has.
 names("content://com.android.providers.downloads.documents/document/msf%3A1000", "1000", "");
+// So a save there keeps the document's own name rather than taking "1000".
+check(!saysItsName("content://com.android.providers.downloads.documents/document/msf%3A1000"), "a numbered address names nothing");
+check(saysItsName("content://p/document/primary%3ADownload%2Fcard.chitra"), "an address with a file in it names it");
+check(saysItsName("/home/me/card.chitra") && saysItsName("C:\\x\\card") && saysItsName("file:///tmp/a.chitra"), "a path names its file");
 // Not encoded after all, or badly: read as it is, never thrown.
 names("content://some.provider/files/pic.png", "pic.png", "");
 names("content://some.provider/files/100%25%ZZ", "100%25%ZZ", "");

@@ -150,3 +150,92 @@ export function watchWindowFocus(doc: Document = document): void {
     true,
   );
 }
+
+/** The layers panel, whose rows and buttons go away under the focus. */
+const KEPT_IN = "aside.panel";
+
+let keeping = false;
+
+/** Keeps the keyboard's place in the layers panel when what held it
+ * goes: a deleted row, a removed effect or gradient stop, a button that
+ * the deletion disabled (Delete selected layer, Ungroup). The focus fell
+ * to the page, and the next Tab began again from the top of it. It goes
+ * to the nearest part of the panel still there — the picked row if that
+ * part holds one, else its first stop. Only while the focus was the
+ * panel's when it went (a row's menu counts, as the menu gives it back
+ * to the row): a press elsewhere lets go, so a layer deleted from the
+ * canvas does not pull the focus over. */
+export function keepPanelFocus(doc: Document = document): void {
+  if (keeping || typeof MutationObserver === "undefined") return;
+  keeping = true;
+  let held: HTMLElement | null = null;
+  let chain: Element[] = [];
+  const inMenu = (el: Element) => !!el.closest("[role=menu]");
+  doc.addEventListener(
+    "focusin",
+    (e) => {
+      const el = e.target;
+      if (!(el instanceof HTMLElement)) return;
+      const panel = el.closest(KEPT_IN);
+      // Only a button or a row is kept after: a field the panel took away
+      // as it showed another layer was being typed into, not pressed, and
+      // a button the focus was handed to then took Space from the hand.
+      const field =
+        el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement || el.isContentEditable;
+      if (panel && field) {
+        held = null;
+      } else if (panel) {
+        held = el;
+        chain = [];
+        for (let a = el.parentElement; a && a !== panel.parentElement; a = a.parentElement) chain.push(a);
+      } else if (!inMenu(el)) {
+        held = null;
+      }
+    },
+    true,
+  );
+  doc.addEventListener(
+    "pointerdown",
+    (e) => {
+      const el = e.target;
+      if (el instanceof Element && (el.closest(KEPT_IN) || inMenu(el))) return;
+      held = null;
+    },
+    true,
+  );
+  let pending = false;
+  const check = () => {
+    pending = false;
+    const lost = held;
+    if (!lost) return;
+    const gone = !lost.isConnected || (lost as HTMLButtonElement).disabled === true;
+    if (!gone) return;
+    // Still on the disabled button (the browser lets go of it only when
+    // it next draws), or already fallen to the page.
+    const active = doc.activeElement;
+    if (active && active !== doc.body && active !== lost) return;
+    for (const part of chain) {
+      if (!part.isConnected) continue;
+      // A button or a row, never a field: put in X, the next Delete was
+      // typed there rather than taking the layer away.
+      const stops = focusables(part).filter(
+        (el) => !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && !el.isContentEditable,
+      );
+      if (stops.length === 0) continue;
+      const picked = stops.find((s) => s.closest(".selected, [aria-selected=true]"));
+      (picked ?? stops[0]).focus({ preventScroll: true });
+      return;
+    }
+  };
+  const later = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(check);
+  };
+  new MutationObserver(later).observe(doc.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["disabled"],
+  });
+}

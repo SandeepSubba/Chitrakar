@@ -236,7 +236,7 @@ pub fn export_pdf_document(doc: &Document) -> Result<Vec<u8>, PdfError> {
 pub fn export_pdf_document_marked(doc: &Document, marks: PrintMarks) -> Result<Vec<u8>, PdfError> {
     let icc = doc.cmyk_profile_bytes();
     let mut page = Page {
-        doc: doc.clone(),
+        doc: bled_frames(doc, marks.bleed())?,
         separate: icc
             .map(chitrakar_color::cms::RgbToCmyk::new)
             .transpose()
@@ -273,6 +273,68 @@ pub fn export_pdf_document_marked(doc: &Document, marks: PrintMarks) -> Result<V
     let body = std::mem::take(&mut page.content);
     page.pages.push((body, page.view, page.size));
     page.finish()
+}
+
+/// The document with each frame that reaches the page's edge carried past
+/// it by the bleed on that side, for the whole page printed: a frame cuts
+/// what is in it to its box, and a frame laid over the whole page — a
+/// card's ground — bled white, where the same file printed frame by frame
+/// bled its colour. Only an upright frame at the top of the page, without
+/// a mask (whose own space says where the frame shows); grown about its
+/// corner and moved back, with its layers moved on by as much, so
+/// everything stays where it was.
+fn bled_frames(doc: &Document, bleed: f32) -> Result<Document, PdfError> {
+    let mut out = doc.clone();
+    if bleed <= 0.0 {
+        return Ok(out);
+    }
+    let (pw, ph) = (doc.meta.width as f32, doc.meta.height as f32);
+    let root = doc.root();
+    for id in doc.children_of(root)?.to_vec() {
+        let node = doc.node(id)?;
+        let NodeKind::Artboard { width, height, .. } = node.kind else {
+            continue;
+        };
+        let t = node.transform;
+        if !node.visible
+            || node.mask.is_some()
+            || t.b.abs() > 1e-6
+            || t.c.abs() > 1e-6
+            || t.a <= 0.0
+            || t.d <= 0.0
+        {
+            continue;
+        }
+        let (x0, y0) = (t.e, t.f);
+        let (x1, y1) = (t.e + width * t.a, t.f + height * t.d);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+        // How far each side goes on, in the frame's own units.
+        let left = if near(x0, 0.0) { bleed / t.a } else { 0.0 };
+        let top = if near(y0, 0.0) { bleed / t.d } else { 0.0 };
+        let right = if near(x1, pw) { bleed / t.a } else { 0.0 };
+        let bottom = if near(y1, ph) { bleed / t.d } else { 0.0 };
+        if left + top + right + bottom == 0.0 {
+            continue;
+        }
+        let mut grown = node.kind.clone();
+        if let NodeKind::Artboard { width, height, .. } = &mut grown {
+            *width += left + right;
+            *height += top + bottom;
+        }
+        out.apply(Command::SetKind {
+            id,
+            kind: Box::new(grown),
+        })?;
+        out.apply(Command::SetTransform {
+            id,
+            transform: t.compose(Transform::translation(-left, -top)),
+        })?;
+        for kid in out.children_of(id)?.to_vec() {
+            let transform = Transform::translation(left, top).compose(out.node(kid)?.transform);
+            out.apply(Command::SetTransform { id: kid, transform })?;
+        }
+    }
+    Ok(out)
 }
 
 /// The document's frames as the pages of one file, in the order they sit
@@ -4190,6 +4252,54 @@ mod tests {
     /// by the bleed for its page, its layers staying where they were, so
     /// the ground under its artwork, its own colour, and what goes as
     /// pixels all run on past the trim — and only what is in that frame.
+    /// A frame over the whole page reaches out by the bleed for the whole
+    /// page printed, on the sides it meets the page's edge, and its layers
+    /// stay where they were on the page; a frame inside the page is left.
+    #[test]
+    fn a_frame_at_the_pages_edge_bleeds_with_the_page() {
+        let mut doc = Document::new(300, 200, chitrakar_color::ColorMode::Rgb);
+        let full = add(
+            &mut doc,
+            chitrakar_doc::Node::artboard("card", 300.0, 200.0, None),
+            [0.0, 0.0],
+        );
+        let corner = VectorShape::Rect {
+            width: 10.0,
+            height: 10.0,
+            radius: 0.0,
+        };
+        doc.apply(Command::AddNode {
+            parent: full,
+            index: 0,
+            node: Box::new(shape("corner", corner, Some(BLUE))),
+        })
+        .unwrap();
+        let inner = add(
+            &mut doc,
+            chitrakar_doc::Node::artboard("inside", 50.0, 40.0, None),
+            [100.0, 80.0],
+        );
+        let bled = bled_frames(&doc, 9.0).unwrap();
+        let NodeKind::Artboard { width, height, .. } = bled.node(full).unwrap().kind else {
+            panic!()
+        };
+        assert_eq!((width, height), (318.0, 218.0));
+        let t = bled.node(full).unwrap().transform;
+        assert_eq!((t.e, t.f), (-9.0, -9.0));
+        let kid = bled.children_of(full).unwrap()[0];
+        let k = bled.node(kid).unwrap().transform;
+        assert_eq!(
+            (k.e + t.e, k.f + t.f),
+            (0.0, 0.0),
+            "the layer stays where it was"
+        );
+        assert_eq!(
+            bled.node(inner).unwrap(),
+            doc.node(inner).unwrap(),
+            "a frame inside the page is left"
+        );
+    }
+
     #[test]
     fn a_frames_page_bleeds_what_is_in_the_frame() {
         if std::process::Command::new("gs")

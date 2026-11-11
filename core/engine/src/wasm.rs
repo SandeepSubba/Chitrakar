@@ -1460,6 +1460,12 @@ impl WasmSession {
 
     /// An sRGB colour separated into the press profile's inks, `[c, m,
     /// y, k]` in 0..=1; empty without a profile.
+    /// An ink as the page shows it, `[r, g, b]` sRGB 0..1, through the
+    /// press profile where there is one.
+    pub fn ink_shown(&self, c: f32, m: f32, y: f32, k: f32) -> Vec<f32> {
+        self.inner.ink_shown(c, m, y, k).to_vec()
+    }
+
     pub fn separate(&self, r: f32, g: f32, b: f32) -> Vec<f32> {
         self.inner
             .separate(r, g, b)

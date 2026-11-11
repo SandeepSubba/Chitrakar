@@ -702,17 +702,32 @@ export function swatchName(color: AuthoredColor): string | null {
 }
 
 /** Render an authored color as "#rrggbb" for a color input (alpha dropped). */
+/** How the open document shows an ink: through its press profile where
+ * it has one, as the renderer draws it. Set by the editor for the
+ * session in hand; without it an ink is shown by the plain formula. */
+let inkShown: ((c: number, m: number, y: number, k: number) => ArrayLike<number>) | null = null;
+export function showInksWith(session: { ink_shown(c: number, m: number, y: number, k: number): ArrayLike<number> } | null) {
+  inkShown = session ? (c, m, y, k) => session.ink_shown(c, m, y, k) : null;
+}
+
 export function colorToHex(named: AuthoredColor): string {
   const color = flatColor(named);
-  const c =
-    "Srgb" in color
-      ? color.Srgb
-      : // CMYK preview via the naive formula, mirroring the engine edge.
-        {
-          r: (1 - color.Cmyk.c) * (1 - color.Cmyk.k),
-          g: (1 - color.Cmyk.m) * (1 - color.Cmyk.k),
-          b: (1 - color.Cmyk.y) * (1 - color.Cmyk.k),
-        };
+  let c: { r: number; g: number; b: number };
+  if ("Srgb" in color) c = color.Srgb;
+  else {
+    const { c: cy, m, y, k } = color.Cmyk;
+    let shown: ArrayLike<number> | null = null;
+    try {
+      shown = inkShown ? inkShown(cy, m, y, k) : null;
+    } catch {
+      shown = null;
+    }
+    c =
+      shown && shown.length === 3
+        ? { r: shown[0], g: shown[1], b: shown[2] }
+        : // The plain formula, where no document says otherwise.
+          { r: (1 - cy) * (1 - k), g: (1 - m) * (1 - k), b: (1 - y) * (1 - k) };
+  }
   const h = (v: number) =>
     Math.round(Math.min(1, Math.max(0, v)) * 255)
       .toString(16)

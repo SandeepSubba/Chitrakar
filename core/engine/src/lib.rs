@@ -4539,8 +4539,13 @@ impl Session {
             kind: chitrakar_doc::MaskKind::Painted {
                 strokes: vec![chitrakar_doc::PaintStroke {
                     points: vec![[w * 0.5, h * 0.5]],
-                    // Past every corner, with room for the page to grow.
-                    radii: vec![(w * w + h * h).sqrt() * 2.0],
+                    // Past every corner of any page this one can become:
+                    // twice its diagonal was outgrown by a canvas made
+                    // three times larger from a corner, and the exposure
+                    // showed beyond it. A million pixels is past a page
+                    // grown and cropped over and over (a side is held to
+                    // thirty thousand), and costs a distance a pixel.
+                    radii: vec![(w * w + h * h).sqrt().max(1_000_000.0)],
                     color: chitrakar_color::AuthoredColor::Srgb {
                         r: 0.0,
                         g: 0.0,
@@ -11561,7 +11566,16 @@ impl Session {
     /// shadow's or a glow's reach as well as the layer — as `[x, y, w,
     /// h]`: what an export of the layer has to hold.
     pub fn drawn_bounds_of(&self, id: NodeId) -> Option<[f32; 4]> {
-        match chitrakar_render::node_bounds(&self.doc, id).ok()? {
+        let bounds = match chitrakar_render::node_bounds(&self.doc, id).ok()? {
+            // A live copy wearing a shadow is "everything" to the dirty
+            // tracking, which cannot follow its effects through three
+            // spaces; an export of what is picked wrote the whole page.
+            Bounds::Everything => {
+                chitrakar_render::copy_drawn_bounds(&self.doc, id).unwrap_or(Bounds::Everything)
+            }
+            other => other,
+        };
+        match bounds {
             Bounds::None => None,
             Bounds::Everything => Some([
                 0.0,
@@ -11613,6 +11627,17 @@ impl Session {
     /// in the inks that print it — the plain formula it went through
     /// first was not the profile's way back, and the ink drifted a step
     /// further from the colour at every pick.
+    /// An ink as the page shows it, sRGB 0..1: through the press profile
+    /// where there is one, as the renderer draws it — a chip, a well or a
+    /// tip worked out by the plain formula said a vivid blue for a navy.
+    pub fn ink_shown(&self, c: f32, m: f32, y: f32, k: f32) -> [f32; 3] {
+        let lin = chitrakar_render::resolve_color(
+            &self.doc,
+            &chitrakar_color::AuthoredColor::Cmyk { c, m, y, k, a: 1.0 },
+        );
+        [lin.r, lin.g, lin.b].map(|v| chitrakar_color::linear_to_srgb(v.clamp(0.0, 1.0)))
+    }
+
     pub fn separate(&self, r: f32, g: f32, b: f32) -> Option<[f32; 4]> {
         let icc = self.doc.cmyk_profile_bytes()?;
         let out = chitrakar_color::cms::RgbToCmyk::new(icc).ok()?;
@@ -11815,8 +11840,29 @@ impl Session {
             .iter()
             .filter_map(|n| chitrakar_render::text::font_bytes(n).map(|b| (n.as_str(), b)))
             .collect();
-        chitrakar_codecs::save_chitra_skeleton(&self.doc, &fonts)
+        chitrakar_codecs::save_chitra_skeleton(&self.committed(), &fonts)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The document as its history has it: a gesture still in flight —
+    /// a drag held still, the Straighten window open on an angle — set
+    /// aside. The crash draft is written a breath after every refresh,
+    /// and written mid-preview it kept a turn nobody had taken, restored
+    /// with no step to undo it by.
+    fn committed(&self) -> std::borrow::Cow<'_, Document> {
+        let Some(gesture) = &self.preview_gesture else {
+            return std::borrow::Cow::Borrowed(&self.doc);
+        };
+        if gesture.inverses.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.doc);
+        }
+        let mut doc = self.doc.clone();
+        for inverse in gesture.inverses.iter().rev() {
+            if doc.apply(inverse.clone()).is_err() {
+                return std::borrow::Cow::Borrowed(&self.doc);
+            }
+        }
+        std::borrow::Cow::Owned(doc)
     }
 
     /// The parts a skeleton leaves out, by the names a whole file keeps
@@ -14165,6 +14211,120 @@ mod tests {
             .unwrap()
             .last()
             .unwrap()
+    }
+
+    /// A live copy of a layer wearing a shadow and a mask writes its own
+    /// filter, mask and element ids into an SVG: written twice under one
+    /// id each, the file was not XML another editor would keep.
+    #[test]
+    fn a_copy_in_an_svg_gives_each_id_once() {
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let r = add_rect(&mut s, "Card", 100.0, 80.0);
+        s.apply(Command::SetEffects {
+            id: r,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.6,
+                dx: 4.0,
+                dy: 4.0,
+                blur: 3.0,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        s.apply(Command::SetMask {
+            id: r,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Gradient {
+                    from: [10.0, 10.0],
+                    to: [90.0, 70.0],
+                    radial: false,
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        s.make_instance(r).unwrap();
+        let svg = s.export_svg().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for part in svg.split(" id=\"").skip(1) {
+            let id = part.split('"').next().unwrap();
+            assert!(seen.insert(id.to_string()), "id {id} given twice:\n{svg}");
+        }
+        assert!(seen.len() >= 4, "{seen:?}");
+    }
+
+    /// A draft written while a drag is still in hand keeps where the
+    /// layer was, not where the drag has it for now.
+    #[test]
+    fn a_draft_mid_gesture_keeps_the_committed_page() {
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let rect = add_rect(&mut s, "Rect", 100.0, 80.0);
+        let mut t = s.document().node(rect).unwrap().transform;
+        t.e = 90.0;
+        t.f = 90.0;
+        s.preview(Command::SetTransform {
+            id: rect,
+            transform: t,
+        })
+        .unwrap();
+        assert_eq!(s.document().node(rect).unwrap().transform.e, 90.0);
+        let mid = s.save_skeleton().unwrap();
+        let back = Session::load(&mid).unwrap();
+        let kept = back.document().node(rect).unwrap().transform;
+        assert_eq!(
+            (kept.e, kept.f),
+            (0.0, 0.0),
+            "the draft keeps the page as committed"
+        );
+        // And the session itself still shows the drag.
+        assert_eq!(s.document().node(rect).unwrap().transform.e, 90.0);
+    }
+
+    /// An export of what is picked, for a live copy of a layer wearing a
+    /// shadow, is the copy and its shadow — not the whole page, which is
+    /// what the dirty tracking's "everything" for such a copy said.
+    #[test]
+    fn a_shadowed_copys_drawn_box_is_its_own() {
+        let mut s = Session::new(2000, 2000, chitrakar_color::ColorMode::Rgb);
+        let rect = add_rect(&mut s, "Rect", 100.0, 80.0);
+        s.apply(Command::SetEffects {
+            id: rect,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.6,
+                dx: 10.0,
+                dy: 10.0,
+                blur: 8.0,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        let copy = s.make_instance(rect).unwrap();
+        let mut t = s.document().node(copy).unwrap().transform;
+        t.e = 600.0;
+        t.f = 500.0;
+        s.apply(Command::SetTransform {
+            id: copy,
+            transform: t,
+        })
+        .unwrap();
+        let [x, y, w, h] = s.drawn_bounds_of(copy).unwrap();
+        // Its own box, and room for the shadow off it.
+        assert!(x <= 600.0 && y <= 500.0, "{x},{y}");
+        assert!(x + w >= 710.0 && y + h >= 590.0, "{x},{y},{w},{h}");
+        assert!(w < 400.0 && h < 400.0, "the whole page: {w}×{h}");
     }
 
     /// Round 23's three: a copy of a group holding an adjustment keeps
@@ -24827,6 +24987,41 @@ mod tests {
         session.commit_preview();
         let darker = chitrakar_render::render(session.document()).unwrap();
         assert!(darker.get(15, 30).r < before.get(15, 30).r * 0.75);
+
+        // Unpainted, it changes nothing however far the page grows: one
+        // made six times larger from its corner showed the exposure past
+        // the circle that hid it.
+        let mut grown = Session::new(80, 60, ColorMode::Rgb);
+        let root = grown.document().root();
+        let dodge = grown.add_dodge_burn(root, 0, true).unwrap();
+        grown
+            .apply(Command::ResizeCanvas {
+                width: 480,
+                height: 360,
+                dx: 0.0,
+                dy: 0.0,
+            })
+            .unwrap();
+        add_rect(&mut grown, "ground", 480.0, 360.0);
+        grown
+            .apply(Command::MoveNode {
+                id: dodge,
+                parent: root,
+                index: 1,
+            })
+            .unwrap();
+        let with = chitrakar_render::render(grown.document()).unwrap();
+        grown
+            .apply(Command::SetVisible {
+                id: dodge,
+                visible: false,
+            })
+            .unwrap();
+        let without = chitrakar_render::render(grown.document()).unwrap();
+        assert!(
+            (with.get(470, 350).r - without.get(470, 350).r).abs() < 1e-6,
+            "nothing past the old page either"
+        );
     }
 
     /// A camera's JPEG placed says how it was taken, the page keeps it

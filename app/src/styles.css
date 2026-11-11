@@ -1972,9 +1972,15 @@ body {
 .handle,
 .warp-pin,
 .rot-handle,
-.mask-handle,
-.grad-handle {
+.mask-handle {
   z-index: 1;
+}
+
+/* A gradient's ends over the layer's side handles: a gradient laid
+   across the layer has an end on a side's middle, and the handle took
+   the press meant for the knob. */
+.grad-handle {
+  z-index: 2;
 }
 
 .handle {
@@ -2079,7 +2085,8 @@ body {
   border: 1px solid var(--border);
   border-radius: 10px;
   box-shadow: 0 12px 32px var(--shadow);
-  max-height: calc(100vh - 2rem);
+  /* As tall as the window leaves below where it was put. */
+  max-height: calc(100vh - var(--float-top, 0px) - 16px);
   overflow-y: auto;
 }
 
@@ -2495,6 +2502,14 @@ body {
     overflow-y: auto;
     overflow-x: hidden;
     max-height: 100%;
+  }
+
+  /* Back against the edge, it looks it: no float's corners or shadow. */
+  .toolbar.floating {
+    border: none;
+    border-right: 1px solid var(--border);
+    border-radius: 0;
+    box-shadow: none;
   }
 
   .toolbar > *,
@@ -3409,7 +3424,7 @@ button.fold:hover {
 }
 .keys-columns {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(19rem, 100%), 1fr));
   gap: 0.2rem 1.6rem;
 }
 .keys-columns h3 {

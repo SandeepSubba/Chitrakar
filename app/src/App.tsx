@@ -14,6 +14,7 @@ import { accentAsText, onColour, usePrefs, withRecent, withRecentColor, type Ali
 import {
   DOCUMENTS,
   baseName,
+  saysItsName,
   chooseToOpen,
   chooseToSave,
   folderName,
@@ -133,6 +134,7 @@ import {
   VectorShape,
   WasmSession,
   colorToHex,
+  showInksWith,
   flatColor,
   display_p3_profile,
   engine_version,
@@ -1957,20 +1959,21 @@ export function App() {
   // Kept inside the window, the grip and some of the rail in sight: put
   // near an edge and the window then made smaller, the rail sat wholly
   // off it, and so did the grip that docks it again.
+  // Held only where it is shown: where it was put is kept, so a window
+  // made small and then large again finds it where it was rather than
+  // where the small window pushed it.
+  const [windowSize, setWindowSize] = useState<[number, number]>(() => [window.innerWidth, window.innerHeight]);
   useEffect(() => {
-    const hold = () =>
-      setFloating((at) => {
-        if (!at) return at;
-        const held: [number, number] = [
-          Math.max(0, Math.min(at[0], window.innerWidth - 64)),
-          Math.max(0, Math.min(at[1], window.innerHeight - 120)),
-        ];
-        return held[0] === at[0] && held[1] === at[1] ? at : held;
-      });
-    hold();
-    window.addEventListener("resize", hold);
-    return () => window.removeEventListener("resize", hold);
+    const sized = () => setWindowSize([window.innerWidth, window.innerHeight]);
+    window.addEventListener("resize", sized);
+    return () => window.removeEventListener("resize", sized);
   }, []);
+  const floatingAt: [number, number] | null = floating
+    ? [
+        Math.max(0, Math.min(floating[0], windowSize[0] - 64)),
+        Math.max(0, Math.min(floating[1], windowSize[1] - 120)),
+      ]
+    : null;
   useEffect(() => {
     try {
       if (floating) localStorage.setItem("chitrakar:toolbar", JSON.stringify(floating));
@@ -2059,7 +2062,7 @@ export function App() {
   const onGripDown = (e: React.PointerEvent) => {
     e.preventDefault();
     const start = [e.clientX, e.clientY];
-    const from = floating ?? [8, 96];
+    const from = floatingAt ?? [8, 96];
     const move = (m: PointerEvent) => {
       const at: [number, number] = [
         Math.max(0, Math.min(from[0] + m.clientX - start[0], window.innerWidth - 64)),
@@ -2262,6 +2265,9 @@ export function App() {
    * keys sheet all read. */
   const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
   const TOOL_HINT = keys.hint;
+  /** A tool's tooltip: its name and its key, or its name alone when
+   * another tool has taken its key — "Rect ()" said nothing. */
+  const toolTitle = (t: Tool) => (TOOL_HINT[t] ? `${t} (${TOOL_HINT[t]})` : t);
   /** The command chords as they stand, and what a menu row writes for
    * one: the person's rebindings over what each shipped with. */
   const chords = useMemo(
@@ -3830,6 +3836,9 @@ export function App() {
           (p) => [p[0] - minX, p[1] - minY] as [number, number],
         );
         shapeCount.current += 1;
+        // Picked once made, as a shape drawn is: the layer picked before
+        // stayed picked, and Delete next took it instead of the path.
+        const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
         run({
           AddNode: {
             parent: place.parent,
@@ -3874,6 +3883,11 @@ export function App() {
             },
           },
         });
+        const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+        if (made) {
+          setSelected(made.id as NodeId);
+          setMultiSel([]);
+        }
         setPenPoints([]);
         setPenHandles([]);
         penDragRef.current = null;
@@ -4103,7 +4117,17 @@ export function App() {
       const pressing =
         (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement || toggled) &&
         !clickedControls.has(e.target as Element);
-      if (e.code === "Space" && (!(e.target instanceof HTMLInputElement) || toggled) && !pressing && !typing) {
+      // A drop-down counts as typing for the tools' letters (they choose
+      // an option there), but a clicked one is a control like the rest:
+      // read as typing here too, Space after picking a blend mode opened
+      // the list and the drag that followed moved the layer.
+      const clickedSelect = e.target instanceof HTMLSelectElement && !pressing;
+      if (
+        e.code === "Space" &&
+        (!(e.target instanceof HTMLInputElement) || toggled) &&
+        !pressing &&
+        (!typing || clickedSelect)
+      ) {
         spaceRef.current = true;
         e.preventDefault();
       }
@@ -4773,7 +4797,8 @@ export function App() {
     marqueeRef.current = null;
     setMarquee(null);
     paintingRef.current = null;
-    setPenPoints([]);
+    // Not the Pen's anchors: a pinch, a long press or a palm lets go of
+    // what the fingers were doing, not of a path half put down.
   };
 
   /** Palm rejection, asked first of every press. A pen landing takes the
@@ -4952,6 +4977,14 @@ export function App() {
       [...pointersDown.current.keys()].every((id) => id === e.pointerId)
     )
       cancelGesture();
+    // An anchor the Pen put down on this press, taken back with it: the
+    // press is what the system cancelled, and its anchor stayed.
+    const pen = penDragRef.current;
+    if (pen && [...pointersDown.current.keys()].every((id) => id === e.pointerId)) {
+      penDragRef.current = null;
+      setPenPoints((pts) => pts.slice(0, pen.index));
+      setPenHandles((hs) => hs.slice(0, pen.index));
+    }
     onHostPointerUp(e);
   };
 
@@ -5012,6 +5045,9 @@ export function App() {
     e: React.PointerEvent,
   ) => {
     if (e.button !== 0) return;
+    // Space held is the hand, here as on a handle: the press is left to
+    // the canvas to pan with, where it moved the guide.
+    if (index !== null && spaceRef.current) return;
     e.preventDefault();
     e.stopPropagation();
     const host = hostRef.current;
@@ -6695,6 +6731,9 @@ export function App() {
       const minY = Math.min(...local.map((p) => p[1]));
       const place = placeAt(minX, minY, local[0]);
       shapeCount.current += 1;
+      // The stroke just drawn is the one picked, as a drawn shape is: the
+      // layer picked before stayed picked, and Delete took that instead.
+      const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
       run({
         AddNode: {
           parent: place.parent,
@@ -6737,6 +6776,11 @@ export function App() {
           },
         },
       });
+      const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+      if (made) {
+        setSelected(made.id as NodeId);
+        setMultiSel([]);
+      }
       return;
     }
 
@@ -7510,7 +7554,27 @@ export function App() {
       return;
     }
     const preset = ADJUSTMENT_PRESETS[key];
-    if (preset) putAdjustment(only, preset.name, preset.kind);
+    if (!preset) return;
+    // In a CMYK document the colours a preset starts with are inks, as a
+    // colour picked into it is: a gradient map's black and white went in
+    // as sRGB, and picking the same black in its well changed the page.
+    let kind = preset.kind;
+    if (cmyk && typeof kind === "object" && "Adjustment" in kind) {
+      const adj = kind.Adjustment;
+      if (typeof adj === "object" && "GradientMap" in adj) {
+        kind = {
+          Adjustment: {
+            GradientMap: {
+              ...adj.GradientMap,
+              stops: adj.GradientMap.stops.map((st) => ({ ...st, color: inkOf(colorToHex(st.color)) })),
+            },
+          },
+        };
+      } else if (typeof adj === "object" && "PhotoFilter" in adj) {
+        kind = { Adjustment: { PhotoFilter: { ...adj.PhotoFilter, color: inkOf(colorToHex(adj.PhotoFilter.color)) } } };
+      }
+    }
+    putAdjustment(only, preset.name, kind);
   };
 
   /** Put an adjustment on the page: over everything below, holding the
@@ -9777,6 +9841,9 @@ export function App() {
    * separates it into: the plain formula is not the profile's way, so
    * #20a040 picked in the well was drawn as #0f836a, and an eyedropped
    * colour kept in the palette became another ink. */
+  // Every chip, well and tip shows an ink as this document draws it.
+  showInksWith(session);
+
   const inkOf = (hex: string): AuthoredColor => {
     if (!cmyk) return hexColor(hex);
     const n = parseInt(hex.slice(1, 7), 16);
@@ -10466,7 +10533,7 @@ export function App() {
       // A name chosen in the panel is the document's name from now on.
       // Saving back to the file it already has leaves alone whatever
       // has been typed in the bar since.
-      if (!path) setDocName(baseName(target).replace(/\.chitra$/i, ""));
+      if (!path && saysItsName(target)) setDocName(baseName(target).replace(/\.chitra$/i, ""));
       setSavedAt(at);
       remember(target);
     } catch (err) {
@@ -10661,23 +10728,27 @@ export function App() {
   /** Open a document by its path, in the desktop shell. A path that no
    * longer opens — moved, deleted, a disk not there — is taken off the
    * recent list, since offering it again would only fail again. */
-  const openPath = async (path: string) => {
+  /** Open a file by its path; whether a document of the editor's own
+   * opened from it. */
+  const openPath = async (path: string): Promise<boolean> => {
     let bytes: Uint8Array;
     try {
       bytes = await readPath(path);
     } catch (err) {
       alert(`Could not open ${baseName(path)}: ${said(err)}`);
       forget(path);
-      return;
+      return false;
     }
     if (importKind(path, bytes.subarray(0, 1024)) !== "document") {
       openForeign(new File([bytes as BlobPart], baseName(path), { type: imageType(path) ?? "" }));
-      return;
+      return false;
     }
     if (openDocumentBytes(bytes, baseName(path))) {
       setDocPath(path);
       remember(path);
+      return true;
     }
+    return false;
   };
 
   /** Open something that is not a document of the editor's own — a
@@ -11259,12 +11330,23 @@ export function App() {
       }
       const named = (f: File) => f.name || "a file";
       const at = kinds.indexOf("document");
+      let opened = false;
       if (at >= 0) {
         const doc = files[at];
         // Opening by dropping is still opening: what has not been saved
         // is asked about the same as by any other way in.
         if (!mayDiscard()) return;
-        openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
+        opened = openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
+      }
+      // A document that would not open has said so; what came with it is
+      // placed as though it had come alone, rather than told it was left
+      // behind by an open that did not happen.
+      if (at >= 0 && !opened) {
+        files = files.filter((_, i) => i !== at);
+        kinds.splice(at, 1);
+      }
+      if (at >= 0 && opened) {
+        const doc = files[at];
         // What came with it is not placed into it unasked — a document
         // is opened onto a page of its own — but it is said, where it
         // was left behind without a word. A document found by its bytes
@@ -11292,14 +11374,20 @@ export function App() {
         return;
       }
       const unread: string[] = [];
+      const unopened: string[] = [];
       files.forEach((file, i) => {
-        if (kinds[i]) placeImageFile(file);
+        if (kinds[i] === "document") unopened.push(named(file));
+        else if (kinds[i]) placeImageFile(file);
         else unread.push(named(file));
       });
       if (unread.length > 0) {
         alert(
           `${unread.length === 1 ? `${unread[0]} is not` : `${unread.join(", ")} are not`} a picture, a drawing or a document the editor can read.`,
         );
+      }
+      // Another document beside one that would not open: one at a time.
+      if (unopened.length > 0) {
+        alert(`${unopened.join(", ")} ${unopened.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
       }
     })();
   };
@@ -11310,30 +11398,71 @@ export function App() {
    * document dropped on the window has its file the way one opened from
    * the panel does, and Save writes back to it. */
   const onShellDrop = async (paths: string[]) => {
-    const doc = paths.find((p) => p.toLowerCase().endsWith(".chitra"));
-    if (doc) {
-      if (!mayDiscard()) return;
-      await openPath(doc);
-      // What came with it is said, as a drop on the page says it.
-      const rest = paths.filter((p) => p !== doc).map(baseName);
-      if (rest.length > 0) {
-        alert(
-          `Opened ${baseName(doc)}. ${rest.join(", ")} ${rest.length > 1 ? "were" : "was"} not placed or opened: a document opens on its own — drop pictures again onto it to place them.`,
-        );
-      }
-      return;
-    }
-    for (const path of paths) {
-      const kind = importKind(baseName(path));
-      if (!kind || kind === "document") continue;
-      const type = imageType(path) ?? "";
+    // As a drop on the page goes: the bytes decide where the name would
+    // mislead (a document named .png, a file named nothing at all), one
+    // document opens and what came with it is said, and a file nobody can
+    // read is named rather than skipped without a word.
+    const read = new Map<string, Uint8Array>();
+    // Every file is read, as a drop on the page is: it is read to be
+    // placed anyway, and a document saved as "card.png" was placed as a
+    // picture by its name.
+    const kindOf = async (path: string) => {
       try {
         const bytes = await readPath(path);
+        read.set(path, bytes);
+        return importKind(baseName(path), bytes.subarray(0, 1024));
+      } catch {
+        return null;
+      }
+    };
+    const kinds = await Promise.all(paths.map(kindOf));
+    const at = kinds.indexOf("document");
+    let rest = paths.map((p, i) => [p, kinds[i]] as const);
+    if (at >= 0) {
+      if (!mayDiscard()) return;
+      const opened = await openPath(paths[at]);
+      rest = rest.filter(([p]) => p !== paths[at]);
+      if (opened) {
+        if (rest.length > 0) {
+          const docs = rest.filter(([, k]) => k === "document").map(([p]) => baseName(p));
+          const others = rest.filter(([, k]) => k !== "document").map(([p]) => baseName(p));
+          const told: string[] = [];
+          if (others.length > 0)
+            told.push(
+              `${others.join(", ")} ${others.length > 1 ? "were" : "was"} not placed: drop ${others.length > 1 ? "them" : "it"} again onto the document to place ${others.length > 1 ? "them" : "it"}.`,
+            );
+          if (docs.length > 0)
+            told.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+          alert(`Opened ${baseName(paths[at])}. ${told.join(" ")}`);
+        }
+        return;
+      }
+    }
+    const unread: string[] = [];
+    const unopened: string[] = [];
+    for (const [path, kind] of rest) {
+      if (kind === "document") {
+        unopened.push(baseName(path));
+        continue;
+      }
+      if (!kind) {
+        unread.push(baseName(path));
+        continue;
+      }
+      const type = imageType(path) ?? "";
+      try {
+        const bytes = read.get(path) ?? (await readPath(path));
         placeImageFile(new File([bytes as BlobPart], baseName(path), { type }));
       } catch (err) {
         alert(`Could not place ${baseName(path)}: ${said(err)}`);
       }
     }
+    if (unread.length > 0)
+      alert(
+        `${unread.length === 1 ? `${unread[0]} is not` : `${unread.join(", ")} are not`} a picture, a drawing or a document the editor can read.`,
+      );
+    if (unopened.length > 0)
+      alert(`${unopened.join(", ")} ${unopened.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
   };
   const onShellDropRef = useRef(onShellDrop);
   const takeFilesRef = useRef(takeFiles);
@@ -13165,8 +13294,15 @@ export function App() {
           // As tall as the window leaves below where it was put: held to
           // the window's height, it ran past the bottom by its own top.
           style={
-            floating
-              ? { left: floating[0], top: floating[1], maxHeight: `calc(100vh - ${floating[1] + 16}px)` }
+            // Its height through the stylesheet, which a phone's
+            // layout overrides: written here, it held a rail put back in
+            // the flow on a short window to a few tools.
+            floatingAt
+              ? ({
+                  left: floatingAt[0],
+                  top: floatingAt[1],
+                  "--float-top": `${floatingAt[1]}px`,
+                } as React.CSSProperties)
               : undefined
           }
         >
@@ -13203,7 +13339,7 @@ export function App() {
                         setTool(selectSlot);
                         setPenPoints([]);
                       }}
-                      title={`${selectSlot} (${TOOL_HINT[selectSlot]})`}
+                      title={toolTitle(selectSlot)}
                       aria-label={selectSlot}
                     >
                       <Icon name={TOOL_ICONS[selectSlot]} size={20} />
@@ -13240,7 +13376,7 @@ export function App() {
                               setPenPoints([]);
                               setSelectsOpen(false);
                             }}
-                            title={`${s} (${TOOL_HINT[s]})`}
+                            title={toolTitle(s)}
                             aria-label={s}
                           >
                             <Icon name={TOOL_ICONS[s]} size={20} />
@@ -13264,7 +13400,7 @@ export function App() {
                         setTool(shapeSlot);
                         setPenPoints([]);
                       }}
-                      title={`${shapeSlot} (${TOOL_HINT[shapeSlot]})`}
+                      title={toolTitle(shapeSlot)}
                       aria-label={shapeSlot}
                     >
                       <Icon name={TOOL_ICONS[shapeSlot]} size={20} />
@@ -13296,7 +13432,7 @@ export function App() {
                               setPenPoints([]);
                               setShapesOpen(false);
                             }}
-                            title={`${s} (${TOOL_HINT[s]})`}
+                            title={toolTitle(s)}
                             aria-label={s}
                           >
                             <Icon name={TOOL_ICONS[s]} size={20} />
@@ -13314,7 +13450,7 @@ export function App() {
                       setTool(t);
                       setPenPoints([]);
                     }}
-                    title={`${t} (${TOOL_HINT[t]})`}
+                    title={toolTitle(t)}
                     aria-label={t}
                   >
                     <Icon name={TOOL_ICONS[t]} size={20} />
@@ -13364,7 +13500,7 @@ export function App() {
                           setPenPoints([]);
                           setMoreOpen(false);
                         }}
-                        title={`${s} (${TOOL_HINT[s]})`}
+                        title={toolTitle(s)}
                         aria-label={s}
                       >
                         <Icon name={TOOL_ICONS[s]} size={20} />
@@ -13666,7 +13802,8 @@ export function App() {
                     );
                     return;
                   }
-                  applyColour(colorToHex(sw.color), sw.name);
+                  // The entry's own ink, not one worked back out of the hex.
+                  applyColour(colorToHex(sw.color), sw.name, flatColor(sw.color));
                 }}
               />
             ))}
@@ -14157,8 +14294,10 @@ export function App() {
                   className="crop-shade"
                   x={x}
                   y={y}
-                  width={w}
-                  height={h}
+                  // A frame zoomed past the view's edge leaves a panel
+                  // with nothing in it, not a negative one.
+                  width={typeof w === "number" ? Math.max(0, w) : w}
+                  height={typeof h === "number" ? Math.max(0, h) : h}
                 />
               ))}
               <rect
@@ -16319,7 +16458,7 @@ const keyHelp = (
     [
       ["Wheel", "Zoom about the cursor"],
       ["Space-drag, middle-drag", "Pan"],
-      ["Drag out of a ruler", "Place a guide; drop it back to remove it"],
+      ["Drag out of a ruler", "Place a guide; with the Move tool, drag it again or back to remove it"],
       [cs("zoom-in", "zoom-out"), "Zoom in, out"],
       [cs("zoom-fit", "zoom-actual"), "Fit the page to the window, actual size"],
       [
@@ -18845,8 +18984,11 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
   const place = () => {
     const row = rowRef.current?.getBoundingClientRect();
     if (!row) return;
-    const width = 15 * 16;
-    const height = Math.min(window.innerHeight - 16, 24 + entry.entries.length * 30);
+    // In the root's own units: at a larger interface size the popup is
+    // wider than sixteen pixels a rem said, and ran off the window.
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const width = 15 * rem;
+    const height = Math.min(window.innerHeight - 16, 24 + (entry.entries.length * 30 * rem) / 16);
     // Flush with the row's edge rather than beside it: a gap between
     // the two is a strip of the menu's own padding, and a pointer
     // crossing it has left the row and not yet reached the popup.
@@ -20560,10 +20702,16 @@ function KindProps({
                   for (const piece of rangePieces(t.text, runs, range[0], range[1])) {
                     const size = piece.run?.size ?? t.size;
                     const raised = piece.run?.baseline ?? 0;
+                    // Coming off: a part with no size of its own is at the
+                    // block's already (its Size set back to it), and one
+                    // within a point of the block's — a superscript made
+                    // before sizes were kept to a hundredth, 24 stored as
+                    // 14 — goes back to following the block.
+                    const back = size / 0.6;
                     const change: Styling = on
                       ? {
                           baseline: null,
-                          size: Math.abs(size / 0.6 - t.size) < 0.05 ? null : exact(size / 0.6),
+                          size: piece.run?.size == null || Math.abs(back - t.size) < 1 ? null : exact(back),
                         }
                       : raised !== 0
                         ? { baseline: rise }

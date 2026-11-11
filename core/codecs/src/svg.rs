@@ -16,6 +16,7 @@ use std::fmt::Write;
 /// Serialize the document's renderable tree as an SVG string.
 pub fn export_svg(doc: &Document) -> Result<String, DocError> {
     LAYER_IDS.with(|ids| ids.borrow_mut().clear());
+    WITHIN.with(|w| w.borrow_mut().clear());
     let mut out = String::new();
     let _ = write!(
         out,
@@ -493,6 +494,7 @@ fn write_node(
                     // under it in the copy's list (`stand_in_clip_pixels`),
                     // which `clip_attrs` is told about here.
                     STANDING.with(|s| s.borrow_mut().push(child));
+                    WITHIN.with(|w| w.borrow_mut().push(child));
                     let mut written = Ok(());
                     for part in stand_ins {
                         written = write_node(
@@ -510,6 +512,7 @@ fn write_node(
                         }
                     }
                     STANDING.with(|s| s.borrow_mut().pop());
+                    WITHIN.with(|w| w.borrow_mut().pop());
                     written?;
                     let _ = writeln!(out, "{pad}</g>");
                 } else {
@@ -563,6 +566,7 @@ fn write_node(
                                     None => false,
                                 }
                             });
+                        WITHIN.with(|w| w.borrow_mut().push(child));
                         let written = write_node(
                             doc,
                             *of,
@@ -573,6 +577,7 @@ fn write_node(
                             "",
                             space.compose(node.transform).compose(back),
                         );
+                        WITHIN.with(|w| w.borrow_mut().pop());
                         if standing {
                             STOOD.with(|stood| stood.borrow_mut().pop());
                         }
@@ -1650,7 +1655,7 @@ fn effect_filter(doc: &Document, id: NodeId, defs: &mut String) -> Option<String
         let _ = write!(merge, r#"<feMergeNode in="{n}"/>"#);
     }
     merge.push_str("</feMerge>");
-    let filter = format!("effects{}", id.0);
+    let filter = fresh_def_id(defs, &format!("effects{}", id.0));
     let _ = writeln!(
         defs,
         r#"<filter id="{filter}" filterUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}">{body}{merge}</filter>"#
@@ -1671,13 +1676,26 @@ fn mask_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
     };
     let (w, h) = (m.width, m.height);
     let [x, y] = m.origin;
-    let name = format!("mask{}", id.0);
+    let name = fresh_def_id(defs, &format!("mask{}", id.0));
     let _ = writeln!(
         defs,
         r#"<mask id="{name}" maskUnits="userSpaceOnUse" x="{x}" y="{y}" width="{w}" height="{h}"><image x="{x}" y="{y}" width="{w}" height="{h}" href="data:image/png;base64,{}"/></mask>"#,
         base64(&png)
     );
     format!(r#" mask="url(#{name})""#)
+}
+
+/// An id for something written into the defs, not yet given in this
+/// file: a layer an original and its live copy both write is written
+/// twice, and an id is one to a file.
+fn fresh_def_id(defs: &str, base: &str) -> String {
+    let mut name = base.to_string();
+    let mut k = 0;
+    while defs.contains(&format!(r#"id="{name}""#)) {
+        k += 1;
+        name = format!("{base}_{k}");
+    }
+    name
 }
 
 /// The same for a clipped layer, whose mask is the picture the layer
@@ -2388,6 +2406,10 @@ thread_local! {
     /// The layer names written as ids in the file being written, so each
     /// is given once (`layer_id`).
     static LAYER_IDS: std::cell::RefCell<LayerIds> = std::cell::RefCell::new(LayerIds::default());
+    /// The live copies whose original is being written again, innermost
+    /// last: a layer written there is another element than the same
+    /// layer written where it stands, and takes an id of its own.
+    static WITHIN: std::cell::RefCell<Vec<NodeId>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The ids given so far, and to which layer: a layer's attributes are
@@ -2395,7 +2417,7 @@ thread_local! {
 #[derive(Default)]
 struct LayerIds {
     taken: std::collections::HashSet<String>,
-    given: std::collections::HashMap<NodeId, String>,
+    given: std::collections::HashMap<(Option<NodeId>, NodeId), String>,
 }
 
 impl LayerIds {
@@ -2431,9 +2453,10 @@ fn layer_id(layer: NodeId, name: &str) -> String {
     } else {
         name.to_string()
     };
+    let key = (WITHIN.with(|w| w.borrow().last().copied()), layer);
     let id = LAYER_IDS.with(|ids| {
         let mut ids = ids.borrow_mut();
-        if let Some(id) = ids.given.get(&layer) {
+        if let Some(id) = ids.given.get(&key) {
             return id.clone();
         }
         let mut id = base.clone();
@@ -2443,7 +2466,7 @@ fn layer_id(layer: NodeId, name: &str) -> String {
             n += 1;
         }
         ids.taken.insert(id.clone());
-        ids.given.insert(layer, id.clone());
+        ids.given.insert(key, id.clone());
         id
     });
     format!(r#" id="{}""#, escape_xml(&id))
