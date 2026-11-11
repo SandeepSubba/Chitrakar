@@ -67,7 +67,13 @@ without reading anything else.*
      did nothing, palette TIFFs under a byte still refused), Merge
      layers on a blended, clipped or adjustment-holding layer, a
      Photoshop group passing its blends through, and a run of
-     interface rough edges. All fixed. ⬜ until a broad pass
+     interface rough edges. All fixed. The twenty-first checked those
+     and made a fourth broad pass, aimed where the third looked least
+     (frames, live copies, effects, layered PSDs, every menu row in
+     seven states, offline): again nothing lost and nothing thrown, but
+     not quiet — live copies of a layer wearing an effect, PSD clips and
+     empty layers, a lens profile missing on another device, Space after
+     a click. All fixed or written down as limits. ⬜ until a broad pass
      finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -11498,6 +11504,40 @@ without reading anything else.*
   `:not()`, `:nth-child()`, `:last-child` or `:is()`, so a rule using
   one is left out and the shape keeps its own fill; a many-page TIFF
   brings in its first page.
+  **A twenty-first audit (November 2026).** Round 20's fixes held but
+  for their edges: a group holding an adjustment still had no handles
+  (its own box, `local_bounds_of`, now leaves the adjustment out too; a
+  live copy of one is still drawn as reaching everywhere); a PSD layer
+  clipped to a Pass Through group, or a group whose bottom layer is
+  clipped, changed meaning when the group was spliced away (the splice
+  is decided over the finished tree, `settle_passes`, and a group's own
+  clip comes in); grey-with-alpha TIFFs with a predictor (undone here,
+  two samples apart); a finger's marquee beside Feather took the
+  cancelled softness; a window opened over a flyout lost its first
+  Escape; Ctrl+Z on a history row dropped the focus (one list, keyed by
+  step); two layers clipped to one not merged lost their clip. The broad
+  pass: a live copy of a layer wearing an effect was "everything" —
+  nothing to merge, turned about the page's corner, unpinned in a frame
+  (`occupied_bounds_in_parent_space`); the clone brush on a turned clone
+  layer lifted from a quarter-turn away; Ungroup, Merge, Text to shapes,
+  Stroke to shape and the combines emptied live copies unasked (they ask
+  as Delete does); a copy of a copy lost what made it differ; a frame in
+  a frame was scaled, not resized; an empty PSD layer was dropped and
+  what clipped to it covered the page (one clear pixel stands in); a raw
+  developed again where its lens profile is missing lost the corrections
+  unsaid (`RawDevelop::lens_profile` is recorded and the window says
+  so); Space after a click on a button pressed it again (the last input
+  is remembered, `:focus-visible` is set at that very key); a layer
+  picked in a folded group had no row (the group unfolds); Cut, Copy
+  and Delete with only a region did nothing (greyed); Zoom to selection
+  ignored the region; millimetre rulers ran together at 1%; the Feather
+  and Straighten panels were unstyled. Limits written down: a menu row
+  that cannot act in the state it is in (Inverse with nothing picked
+  out, Combine with one shape, Paste style with nothing copied) is
+  enabled and does nothing; dragging one of several picked rows in the
+  panel moves only it; the panel's sliders take no typed number; a
+  frame turned with the page exports upright; Repeat's step is in the
+  group's own units; PSD export cuts layers to the page.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

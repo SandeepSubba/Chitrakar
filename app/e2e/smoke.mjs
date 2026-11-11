@@ -17335,8 +17335,8 @@ assert(
   for (const named of ["Ctrl+G, Ctrl+Shift+G", "Ctrl+S", "Ctrl+E"]) {
     assert(sheet.includes(named), `the sheet names ${named}`);
   }
-  // Ctrl+N and Ctrl+O are bound but a browser keeps them, so the sheet
-  // must not promise them here.
+  // Ctrl+N is bound but a browser keeps it, so the sheet must not
+  // promise it here.
   assert(
     !sheet.includes("Ctrl+N"),
     "and does not promise the two a browser never passes on",
@@ -22095,8 +22095,33 @@ assert(
     await p.evaluate(() => document.activeElement?.classList.contains("current") ?? false),
     "Enter on a history step leaves the focus on it",
   );
+  // Undo with the focus there keeps it in the list (it fell to the page).
+  await p.keyboard.press("Control+z");
+  await p.waitForTimeout(300);
+  assert(
+    await p.evaluate(() => !!document.activeElement?.closest(".history")),
+    "Ctrl+Z on a history row keeps the focus in the list",
+  );
+  await p.keyboard.press("Control+Shift+z");
+  await p.waitForTimeout(300);
+  // A window opened over a flyout takes the first Escape.
+  const shapes = p.locator('button[aria-label="More shapes"]');
+  if (await shapes.count()) {
+    await shapes.click();
+    await p.waitForTimeout(200);
+    await p.keyboard.press("Control+,");
+    await p.waitForTimeout(300);
+    await p.keyboard.press("Escape");
+    await p.waitForTimeout(300);
+    assert(
+      (await p.locator('[role="dialog"][aria-label="Preferences"]').count()) === 0,
+      "a window opened over a flyout closes on the first Escape",
+    );
+  }
   // With nothing picked (a step in the history lets the layers go), the
   // rows that need a layer are greyed out.
+  await p.locator(".history li.history-start button").click();
+  await p.waitForTimeout(300);
   assert((await p.locator(".panel ul li.selected").count()) === 0, "nothing is picked after the step");
   await p.click('.menu-label:text-is("Layer")');
   await p.waitForTimeout(200);

@@ -54,6 +54,11 @@ pub enum PsdItem {
         blend: BlendMode,
         /// A group mask, which cuts everything the group holds.
         mask: Option<PsdMask>,
+        /// Clipped to the layer under it, as a layer can be.
+        clipped: bool,
+        /// Photoshop's Pass Through: what is in it blends with what is
+        /// under it. Settled once the whole tree is read (`settle_passes`).
+        passes: bool,
         /// Bottom first.
         children: Vec<PsdItem>,
     },
@@ -455,9 +460,32 @@ fn read_layers(
         };
         // A group's record carries a mask the same way a layer's does,
         // and nothing else of its own.
-        if !matches!(rec.section, Section::Pixels) || w == 0 || hh == 0 {
+        if !matches!(rec.section, Section::Pixels) {
             group_masks.push(mask);
             pixels.push(None);
+            continue;
+        }
+        // A layer with nothing in it still is one: what is clipped to it
+        // shows nowhere, and its mask and name are its own. Left out, the
+        // layer clipped to it clipped to the one below and covered the
+        // page — our own export writes an empty layer for one drawing
+        // nothing on the page. One clear pixel stands in for it. (A shape
+        // kept as a drawing is said as one, below.)
+        if w == 0 || hh == 0 {
+            group_masks.push(None);
+            pixels.push((!rec.drawn).then(|| PsdPixels {
+                name: rec.name.clone(),
+                left: rec.left,
+                top: rec.top,
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+                opacity: rec.opacity,
+                visible: rec.visible,
+                blend: rec.blend.unwrap_or_default(),
+                clipped: rec.clipped,
+                mask,
+            }));
             continue;
         }
         group_masks.push(None);
@@ -509,40 +537,14 @@ fn read_layers(
                 } else {
                     Vec::new()
                 };
-                // Pass Through, every Photoshop group's own mode, blends
-                // what is in the group with what is under it; a group
-                // here is drawn on its own, so a Multiply inside one
-                // multiplied nothing. Where the group itself changes
-                // nothing — whole, showing, unmasked — its layers come in
-                // without it, which is exactly the same; otherwise the
-                // difference is said.
-                let passes = matches!(&rec.blend_key, b"pass");
-                let blended = children.iter().any(|c| match c {
-                    PsdItem::Pixels(p) => p.blend != BlendMode::Normal,
-                    PsdItem::Group { blend, .. } => *blend != BlendMode::Normal,
-                });
-                if passes && blended {
-                    if rec.visible && rec.opacity >= 1.0 && group_mask.is_none() {
-                        lost.push(format!(
-                            "the group \"{}\", which lets its layers blend with what is under it: they come in on their own",
-                            rec.name
-                        ));
-                        if let Some(top) = stack.last_mut() {
-                            top.extend(children);
-                        }
-                        continue;
-                    }
-                    lost.push(format!(
-                        "how the group \"{}\" lets its layers blend with what is under it: here they blend inside it",
-                        rec.name
-                    ));
-                }
                 let group = PsdItem::Group {
                     name: rec.name,
                     visible: rec.visible,
                     opacity: rec.opacity,
                     blend: rec.blend.unwrap_or_default(),
                     mask: group_mask,
+                    clipped: rec.clipped,
+                    passes: matches!(&rec.blend_key, b"pass"),
                     children,
                 };
                 if let Some(top) = stack.last_mut() {
@@ -563,7 +565,81 @@ fn read_layers(
             top.extend(inner);
         }
     }
-    Ok(stack.pop().unwrap_or_default())
+    let mut items = stack.pop().unwrap_or_default();
+    settle_passes(&mut items, lost);
+    Ok(items)
+}
+
+/// Pass Through, every Photoshop group's own mode, blends what is in the
+/// group with what is under it; a group here is drawn on its own, so a
+/// Multiply inside one multiplied nothing. Where the group itself changes
+/// nothing — whole, showing, unmasked, clipped to nothing, nothing
+/// clipped to it, and its bottom layer not clipped (which in a group
+/// clips to nothing, and beside the layers under it would clip to them)
+/// — its layers come in without it, which is exactly the same; otherwise
+/// the difference is said. Worked over the finished tree, since whether
+/// something is clipped to a group is said by the record above it.
+fn settle_passes(items: &mut Vec<PsdItem>, lost: &mut Vec<String>) {
+    let mut i = 0;
+    while i < items.len() {
+        let above_clips = matches!(
+            items.get(i + 1),
+            Some(
+                PsdItem::Pixels(PsdPixels { clipped: true, .. })
+                    | PsdItem::Group { clipped: true, .. }
+            )
+        );
+        let PsdItem::Group {
+            name,
+            visible,
+            opacity,
+            mask,
+            clipped,
+            passes,
+            children,
+            ..
+        } = &mut items[i]
+        else {
+            i += 1;
+            continue;
+        };
+        settle_passes(children, lost);
+        let blended = children.iter().any(|c| match c {
+            PsdItem::Pixels(p) => p.blend != BlendMode::Normal,
+            PsdItem::Group { blend, .. } => *blend != BlendMode::Normal,
+        });
+        if !(*passes && blended) {
+            i += 1;
+            continue;
+        }
+        let bottom_clipped = matches!(
+            children.first(),
+            Some(
+                PsdItem::Pixels(PsdPixels { clipped: true, .. })
+                    | PsdItem::Group { clipped: true, .. }
+            )
+        );
+        if *visible
+            && *opacity >= 1.0
+            && mask.is_none()
+            && !*clipped
+            && !above_clips
+            && !bottom_clipped
+        {
+            lost.push(format!(
+                "the group \"{name}\", which lets its layers blend with what is under it: they come in on their own"
+            ));
+            let inner = std::mem::take(children);
+            let n = inner.len();
+            items.splice(i..=i, inner);
+            i += n;
+        } else {
+            lost.push(format!(
+                "how the group \"{name}\" lets its layers blend with what is under it: here they blend inside it"
+            ));
+            i += 1;
+        }
+    }
 }
 
 fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
@@ -1097,12 +1173,15 @@ impl PsdFile {
                     opacity,
                     blend,
                     mask,
+                    clipped,
                     children,
+                    ..
                 } => {
                     let mut node = Node::group(&name);
                     node.visible = visible;
                     node.opacity = opacity;
                     node.blend = blend;
+                    node.clipped = clipped;
                     node.mask = mask.map(|m| raster_mask(doc, m));
                     let id = NodeId(*next);
                     *next += 1;
@@ -1468,6 +1547,80 @@ mod tests {
             f.lost.iter().any(|l| l.contains("blend inside it")),
             "{:?}",
             f.lost
+        );
+
+        // A layer clipped to the group clips to all of it, so the group
+        // stays; so it does when its bottom layer is clipped, which in a
+        // group clips to nothing and beside the layers under it would not.
+        let with = |clip_above: bool, clip_bottom: bool| {
+            let mut close = layer("</Layer group>", [0, 0, 0, 0], vec![]);
+            close.section = Some(3);
+            let mut open = layer("Shade", [0, 0, 0, 0], vec![]);
+            open.section = Some(1);
+            open.blend = *b"pass";
+            let mut mul = layer("Mul", [0, 0, 2, 2], solid(2, 2, [200, 200, 100, 255]));
+            mul.blend = *b"mul ";
+            mul.clipped = clip_bottom;
+            let mut over = layer("Over", [0, 0, 2, 2], solid(2, 2, [255, 0, 0, 255]));
+            over.clipped = clip_above;
+            write(
+                2,
+                2,
+                &[
+                    layer("Bottom", [0, 0, 2, 2], solid(2, 2, [100, 150, 200, 255])),
+                    close,
+                    mul,
+                    open,
+                    over,
+                ],
+                &solid(2, 2, [0, 0, 0, 255]),
+            )
+        };
+        for (above, bottom) in [(true, false), (false, true)] {
+            let f = read_psd(&with(above, bottom)).unwrap();
+            assert!(
+                matches!(f.items[1], PsdItem::Group { .. }),
+                "kept with a clip above {above}, below {bottom}"
+            );
+        }
+        let f = read_psd(&with(false, false)).unwrap();
+        assert_eq!(
+            f.items.len(),
+            3,
+            "the bottom, the multiply, the layer over them"
+        );
+    }
+
+    #[test]
+    fn an_empty_layer_is_kept_for_what_is_clipped_to_it() {
+        let mut top = layer("Top", [0, 0, 2, 2], solid(2, 2, [0, 255, 0, 255]));
+        top.clipped = true;
+        let bytes = write(
+            2,
+            2,
+            &[
+                layer("Bottom", [0, 0, 2, 2], solid(2, 2, [0, 0, 255, 255])),
+                layer("Empty", [0, 0, 0, 0], vec![]),
+                top,
+            ],
+            &solid(2, 2, [0, 0, 255, 255]),
+        );
+        let f = read_psd(&bytes).unwrap();
+        let names: Vec<&str> = f
+            .items
+            .iter()
+            .map(|c| match c {
+                PsdItem::Pixels(p) => p.name.as_str(),
+                PsdItem::Group { name, .. } => name.as_str(),
+            })
+            .collect();
+        assert_eq!(names, ["Bottom", "Empty", "Top"]);
+        let PsdItem::Pixels(e) = &f.items[1] else {
+            panic!()
+        };
+        assert_eq!(
+            (e.width, e.height, &e.rgba[..]),
+            (1, 1, &[0u8, 0, 0, 0][..])
         );
     }
 

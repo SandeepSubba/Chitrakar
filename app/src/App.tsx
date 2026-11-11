@@ -797,6 +797,23 @@ if (typeof window !== "undefined") {
     true,
   );
 }
+/** Whether the last thing done was with the pointer rather than a key:
+ * a button clicked keeps the focus, and Space there is the hand, where a
+ * button reached with Tab is pressed by it. `:focus-visible` was read
+ * for this, and Chromium sets it on the clicked button at the very Space
+ * that asks — so Space undid again after a click on Undo, toggled an eye
+ * back, and a drag meant to pan moved the picture. */
+let lastByPointer = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("pointerdown", () => (lastByPointer = true), true);
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.code !== "Space" && !["Shift", "Control", "Alt", "Meta"].includes(e.key)) lastByPointer = false;
+    },
+    true,
+  );
+}
 /** What counts as a window for the keys: a dialog's scrim, a panel laid
  * over the canvas (feather, straighten), and an open menu or the
  * canvas's menu — Escape that puts one of those away is not also a
@@ -980,8 +997,10 @@ function perPixel(units: Units, dpi: number): number {
 /** Tick spacings a ruler chooses between, per unit. */
 const UNIT_TICKS: Record<Units, number[]> = {
   px: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
-  mm: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000],
-  in: [0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100],
+  // Far enough for a 30,000-pixel page seen at 1%: steps that stopped at a
+  // metre ran their labels into one another there.
+  mm: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000],
+  in: [0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000],
 };
 /** The heading over a layer's own settings — what makes it the kind of
  * layer it is — or none for a kind that has none of its own. */
@@ -1584,9 +1603,10 @@ const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("st
 
 /** Rows that act on the picked layers and on nothing else: with none
  * picked they are greyed out, where fifty of them did nothing and said
- * nothing (a few others explain themselves in words, and Cut, Copy and
- * Delete also take a region picked out of the page). */
+ * nothing (a few others explain themselves in words). Cut, Copy and
+ * Delete are among them: a region alone gives them nothing to take. */
 const NEEDS_A_LAYER = new Set([
+  "cut", "copy", "delete",
   "duplicate", "instance", "copy-style", "same-fill", "same-stroke", "same-kind",
   "pick-from-layer", "pick-layer-mask", "group", "ungroup", "bring-front", "bring-forward",
   "send-backward", "send-back", "flip-h", "flip-v", "square-corners", "mask-rect",
@@ -1759,9 +1779,13 @@ export function App() {
       // The flyout's alone: it also let go of the layer, or of what was
       // picked out, with a Deselect in the history.
       if (e.key === "Escape") {
-        e.preventDefault();
-        e.stopPropagation();
         close();
+        // Unless a window has come up over it (the keys sheet, Export):
+        // that Escape is the window's, and was swallowed here.
+        if (!aWindowIsUp()) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
       }
     };
     const onScroll = (e: Event) => {
@@ -3142,6 +3166,11 @@ export function App() {
   /** The softness regions were being given when the Feather window
    * opened, which Cancel puts back. */
   const featherWas = useRef(0);
+  /** The softness a region picked now is given: while Feather stands
+   * open, what it will put back as it is let go (a region drawn beside
+   * it lets it go), not the number typed into it — a finger's marquee
+   * beside the window took the cancelled 12. */
+  const newFeather = () => (featherOpenRef.current ? featherWas.current : selectionFeather);
   const openFeather = () => {
     if (!session) return;
     if (!session.selection_json() || session.selection_json() === "null") {
@@ -3858,11 +3887,10 @@ export function App() {
       // Space held is the hand — except on a control reached with the
       // keyboard, where it presses the button or opens the list as it
       // does everywhere. A button only clicked keeps the focus without
-      // showing it (no :focus-visible), and Space there still pans, so
-      // picking a tool and then holding Space to look around works.
+      // showing it, and Space there still pans, so picking a tool and
+      // then holding Space to look around works (`lastByPointer`).
       const pressing =
-        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement) &&
-        e.target.matches(":focus-visible");
+        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement) && !lastByPointer;
       if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !pressing && !typing) {
         spaceRef.current = true;
         e.preventDefault();
@@ -5326,7 +5354,7 @@ export function App() {
         // Folded into the picking only when the picking was a step: the
         // same region picked again is none, and the softness is its own.
         const picked = session.history_mark() !== before;
-        if (selectionFeather > 0 && session.feather_selection(selectionFeather) && picked) session.merge_last();
+        if (newFeather() > 0 && session.feather_selection(newFeather()) && picked) session.merge_last();
         // Picked sharp and softened again to just what it was: no step.
         if (session.history_mark() !== before && session.selection_json() === was) session.take_back();
         refresh(session);
@@ -6349,7 +6377,7 @@ export function App() {
         // One step with the picking, not a second one to undo apart —
         // when the picking was a step at all.
         const picked = session.history_mark() !== before;
-        if (selectionFeather > 0 && session.feather_selection(selectionFeather) && picked) session.merge_last();
+        if (newFeather() > 0 && session.feather_selection(newFeather()) && picked) session.merge_last();
         // Picked sharp and softened again to just what it was: no step.
         if (session.history_mark() !== before && session.selection_json() === was) session.take_back();
         refresh(session);
@@ -8006,11 +8034,11 @@ export function App() {
           case "preferences":
             setPrefsOpen(true);
             return;
-          // A browser keeps Ctrl+N and Ctrl+O for itself and will not
-          // give them up to preventDefault, so these two only ever fire
-          // in the desktop shell. They are bound all the same — the
-          // cost is nothing where they never arrive — and the menu only
-          // *claims* them where they work.
+          // A browser keeps Ctrl+N for itself and will not give it up to
+          // preventDefault, so New only fires from it in the desktop
+          // shell; Open's Ctrl+O reaches a page. Both are bound all the
+          // same, and the menu only *claims* a chord where it works
+          // (`browserKeeps`).
           case "new":
             if (mayDiscard()) setNewDocOpen(true);
             return;
@@ -8167,8 +8195,23 @@ export function App() {
   };
 
   /** Combine the picked shapes into one compound path. */
+  /** Whether to go on with something that takes `ids` away when live
+   * copies follow them: they would show nothing, and only Delete and Cut
+   * asked — ungrouping a component emptied every copy of it unsaid. */
+  const copiesAllow = (ids: NodeId[], doing: string): boolean => {
+    if (!session) return false;
+    const followed = ids.reduce((n, id) => n + session.copies_following(id), 0);
+    return (
+      followed === 0 ||
+      window.confirm(
+        `${followed === 1 ? "A live copy follows" : `${followed} live copies follow`} what ${doing} takes away, and will show nothing. Go on?`,
+      )
+    );
+  };
+
   const combineSelection = (op: string) => {
     if (!session || selectionSet.length < 2) return;
+    if (!copiesAllow(selectionSet, "combining")) return;
     try {
       const id = session.boolean_nodes(new Float64Array(selectionSet), op);
       setSelected(id);
@@ -8296,6 +8339,7 @@ export function App() {
    * is picked after it. */
   const outlineStroke = () => {
     if (!session || selected === null) return;
+    if (!copiesAllow([selected], "making a shape of the stroke")) return;
     try {
       const id = session.outline_stroke(selected);
       setSelected(id);
@@ -8388,6 +8432,7 @@ export function App() {
    * reshaped. The group is picked after it. */
   const textToShapes = () => {
     if (!session || selected === null) return;
+    if (!copiesAllow([selected], "turning the text into shapes")) return;
     try {
       const id = session.text_to_outlines(selected);
       setSelected(id);
@@ -8403,6 +8448,7 @@ export function App() {
    * be painted on. The picture is picked after it. */
   const mergeLayers = () => {
     if (!session || selectionSet.length === 0) return;
+    if (!copiesAllow(selectionSet, "merging")) return;
     try {
       const id = session.merge_layers(new Float64Array(selectionSet));
       setSelected(id);
@@ -8430,7 +8476,15 @@ export function App() {
   const zoomToSelection = () => {
     const host = hostRef.current;
     if (!host) return;
-    const box = selectionSet.length > 0 ? unionBounds(selectionSet) : null;
+    // What is picked out of the page first, as Fill selection and Crop to
+    // selection read "selection"; the picked layers where there is none.
+    const region = session?.region_export_box(-1) ?? [];
+    const box: [number, number, number, number] | null =
+      region.length === 4
+        ? [region[0], region[1], region[0] + region[2], region[1] + region[3]]
+        : selectionSet.length > 0
+          ? unionBounds(selectionSet)
+          : null;
     if (!box) {
       fitView();
       return;
@@ -8519,6 +8573,7 @@ export function App() {
     // The chord pressed over a layer that is not a group asks nothing:
     // an alert box saying so was a window to dismiss for a no-op.
     if (layers.find((l) => l.id === selected)?.kind !== "group") return;
+    if (!copiesAllow([selected], "ungrouping")) return;
     try {
       session.ungroup_node(selected);
       setSelected(null);
@@ -9109,6 +9164,26 @@ export function App() {
       );
     }
   };
+
+  // A layer picked on the canvas inside a folded group has its row shown:
+  // the groups above it unfold. Picked with no row, it had handles and a
+  // panel of numbers and nothing in the list said which it was.
+  useEffect(() => {
+    if (selected === null || collapsed.length === 0) return;
+    const at = layers.findIndex((l) => l.id === selected);
+    if (at < 0) return;
+    const above: number[] = [];
+    let depth = layers[at].depth;
+    for (let i = at - 1; i >= 0 && depth > 0; i--) {
+      if (layers[i].depth < depth) {
+        above.push(layers[i].id as number);
+        depth = layers[i].depth;
+      }
+    }
+    if (above.some((id) => collapsed.includes(id))) {
+      setCollapsed((prev) => prev.filter((id) => !above.includes(id)));
+    }
+  }, [selected, layers, collapsed]);
 
   /** Which layers hold others: the list runs parent-first, so a layer
    * has children exactly when the row after it is one level deeper. */
@@ -10594,10 +10669,15 @@ export function App() {
    * layer as its new picture in one step of history. With `all`, every
    * raw file still waiting is placed with the same settings too — the
    * same light and exposure for a run of photographs taken together. */
-  const finishDevelop = async (settings: RawSettings, all = false) => {
+  const finishDevelop = async (given: RawSettings, all = false) => {
     const d = developing;
     setDeveloping(null);
     if (!session || !d) return;
+    // The lens profile it is developed with, written down beside the
+    // settings (or taken off, where there is none now).
+    const { lens_profile: _, ...unprofiled } = given;
+    const settings: RawSettings =
+      d.info.lensProfile && !given.uncorrected ? { ...unprofiled, lens_profile: d.info.lensProfile } : unprofiled;
     const json = JSON.stringify(settings);
     const left = all ? rawQueue.current.splice(0) : [];
     const total = rawDone.current + 1 + rawQueue.current.length + left.length;
@@ -15700,29 +15780,26 @@ export function App() {
                     As it began
                   </button>
                 </li>
-                {history.past.map((label, i) => (
-                  <li key={`p${i}`}>
-                    <button
-                      className={
-                        i === history.past.length - 1 ? "current" : undefined
-                      }
-                      aria-current={i === history.past.length - 1 ? "step" : undefined}
-                      onClick={() => jumpHistory(i + 1 - history.past.length)}
-                    >
-                      {label}
-                    </button>
-                  </li>
-                ))}
-                {history.future.map((label, i) => (
-                  <li key={`f${i}`} className="future">
-                    <button
-                      onClick={() => jumpHistory(i + 1)}
-                      aria-label={`${label} (undone)`}
-                    >
-                      {label}
-                    </button>
-                  </li>
-                ))}
+                {/* One list, keyed by step, past or future, so a step
+                    undone or redone is the same row — and the same
+                    button, which keeps the focus: drawn as two lists,
+                    Ctrl+Z on a row put the focus on the page. */}
+                {[...history.past, ...history.future].map((label, step) => {
+                  const done = step < history.past.length;
+                  const current = step === history.past.length - 1;
+                  return (
+                    <li key={`s${step}`} className={done ? undefined : "future"}>
+                      <button
+                        className={current ? "current" : undefined}
+                        aria-current={current ? "step" : undefined}
+                        onClick={() => jumpHistory(step + 1 - history.past.length)}
+                        aria-label={done ? undefined : `${label} (undone)`}
+                      >
+                        {label}
+                      </button>
+                    </li>
+                  );
+                })}
               </ol>
             </div>
           )}
@@ -16643,7 +16720,7 @@ function RawDevelopDialog({
       />
     </label>
   );
-  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") =>
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "lens_profile" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") =>
     slider(label, s[k], (v) => set(k, v), min, max, step, unit);
   /** Defringe's purple (0) or green (1), kept only while it asks for something. */
   const fringeRow = (label: string, i: 0 | 1) =>
@@ -17162,6 +17239,15 @@ function RawDevelopDialog({
               )}
           </div>
         </div>
+        {initial.lens_profile && !info.lensProfile && (
+          // Developed elsewhere with a profile this device has not been
+          // given: developed again here it loses those corrections, which
+          // happened without a word.
+          <p className="modal-note" role="note" aria-label="Lens profile missing">
+            Developed with lensfun's profile for {initial.lens_profile}, which is not on this device: without it the
+            lens is not corrected. Add it in Preferences › Camera raw to keep the corrections.
+          </p>
+        )}
         <div className="modal-actions">
           <button onClick={() => setS(RAW_DEFAULTS)}>Reset</button>
           <button type="button" disabled={past.current.length === 0} onClick={() => undoRef.current()} title="Undo the last change here">

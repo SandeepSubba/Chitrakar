@@ -33,6 +33,10 @@ export type RawSettings = {
   masking: number;
   /** Leave off the lens corrections the file carries (a Fuji's RAF). */
   uncorrected?: boolean;
+  /** The lens profile the corrections came from when it was developed
+   * (lensfun's name), kept as a record: another device without it can
+   * say so. */
+  lens_profile?: string;
   /** Take out the colour fringes of a lens nothing else corrects them
    * for, measured from the photograph itself (Lightroom's "Remove
    * chromatic aberration"). */
@@ -162,7 +166,7 @@ export const RAW_DEFAULTS: RawSettings = {
 export type DevelopPreset = { name: string; settings: RawSettings };
 
 /** What each setting can be, as the engine holds it to. */
-const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
+const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "lens_profile" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, [number, number]> = {
   exposure: [-5, 5],
   contrast: [-100, 100],
   highlights: [-100, 100],

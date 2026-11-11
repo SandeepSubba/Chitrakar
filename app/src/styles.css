@@ -1529,6 +1529,20 @@ body {
   font-size: 0.9rem;
 }
 
+/* Its rows as a window's are, smaller than its heading and with room
+   between a label and its field; and its buttons on the panel's own
+   grey rather than a window's strip of another colour. */
+.straighten-panel .row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+.straighten-panel .modal-actions {
+  position: static;
+  background: none;
+}
+
 /* The line drawn along something that ought to be level. */
 .level-overlay {
   position: absolute;

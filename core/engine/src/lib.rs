@@ -1909,7 +1909,25 @@ impl Session {
         // scratch group, the blend had nothing under it to act on and
         // the clip nothing to clip to, and the picture came back Normal
         // and whole — the page changed under it.
+        // Several layers all clipped to one under them that is not
+        // merged: each is drawn whole and the picture keeps the clip, as
+        // Photoshop keeps it. Gathered as they were, the lowest clipped
+        // to nothing and the rest to it, and the picture spilled out
+        // over the page round the layer they were clipped to.
+        let all_clipped = showing.len() > 1
+            && showing
+                .iter()
+                .all(|id| scratch.node(*id).is_ok_and(|n| n.clipped));
         let carried = match showing.as_slice() {
+            _ if all_clipped => {
+                for id in &showing {
+                    gather.push(Command::SetClipped {
+                        id: *id,
+                        clipped: false,
+                    });
+                }
+                Some((chitrakar_doc::BlendMode::Normal, true))
+            }
             [only] => {
                 let node = scratch.node(*only)?;
                 let kept = (node.blend, node.clipped);
@@ -3863,11 +3881,19 @@ impl Session {
         let node = self.doc.node(of)?;
         // A copy of a copy is a copy of the same original: a chain of
         // them would work, but it is never what was meant and it makes
-        // the original hard to find.
-        let target = match node.kind {
-            NodeKind::Instance { of: original, .. } => original,
-            _ => of,
-        };
+        // the original hard to find. It is that copy again, with what
+        // makes it differ — its own layers standing in, its effects — as
+        // a duplicate of it is: started afresh, the new copy drew the
+        // original's blue rectangle with no shadow.
+        if matches!(node.kind, NodeKind::Instance { .. }) {
+            // In place, on the copy it was made from, as any copy is.
+            return self
+                .duplicate_nodes(&[of], false)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| EngineError::BadCommand("nothing was copied".into()));
+        }
+        let target = of;
         let name = copy_name(&self.doc.node(target)?.name);
         let parent = self.doc.parent_of(of).unwrap_or_else(|| self.doc.root());
         let index = self
@@ -4167,6 +4193,21 @@ impl Session {
         dx: f32,
         dy: f32,
     ) -> Result<String, EngineError> {
+        let cmds = self.artboard_resize_cmds(id, width, height, dx, dy)?;
+        serde_json::to_string(&Command::Batch(cmds))
+            .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// The commands [`Session::artboard_resize`] sends, so a frame inside
+    /// a frame can be resized by the same rules as its holder.
+    fn artboard_resize_cmds(
+        &self,
+        id: NodeId,
+        width: f32,
+        height: f32,
+        dx: f32,
+        dy: f32,
+    ) -> Result<Vec<Command>, EngineError> {
         let node = self.doc.node(id)?;
         let NodeKind::Artboard {
             width: w0,
@@ -4199,7 +4240,7 @@ impl Session {
         for &child in self.doc.children_of(id)? {
             let kid = self.doc.node(child)?;
             let Bounds::Rect(x0, y0, x1, y1) =
-                chitrakar_render::bounds_in_parent_space(&self.doc, child)?
+                chitrakar_render::occupied_bounds_in_parent_space(&self.doc, child)?
             else {
                 // An adjustment or a filter fills whatever it is in and
                 // has no box to pin by; it needs no moving either.
@@ -4209,6 +4250,28 @@ impl Session {
             let (sy, ty) = Self::axis(kid.pinned.y, y0, y1, dh);
             if sx == 1.0 && sy == 1.0 && tx == 0.0 && ty == 0.0 {
                 continue;
+            }
+            // A frame inside, stretched with this one, is resized — as a
+            // frame is everywhere — and what is in it follows its own
+            // pins: scaled, its width read 60 while it showed 160, and
+            // the circle in it came out an oval.
+            if let NodeKind::Artboard {
+                width: cw,
+                height: ch,
+                ..
+            } = &kid.kind
+            {
+                let t = kid.transform;
+                if t.b == 0.0 && t.c == 0.0 && (sx != 1.0 || sy != 1.0) {
+                    cmds.extend(self.artboard_resize_cmds(child, cw * sx, ch * sy, 0.0, 0.0)?);
+                    // Its corner where the pins put it, after the resize
+                    // above has written its transform.
+                    cmds.push(Command::SetTransform {
+                        id: child,
+                        transform: Transform::translation(tx, ty).compose(t),
+                    });
+                    continue;
+                }
             }
             // The move is written in the frame's space, so it goes on the
             // outside of the layer's own transform.
@@ -4225,8 +4288,7 @@ impl Session {
                 transform: outer.compose(kid.transform),
             });
         }
-        serde_json::to_string(&Command::Batch(cmds))
-            .map_err(|e| EngineError::BadCommand(e.to_string()))
+        Ok(cmds)
     }
 
     /// A frame's contents as a PNG, at the size the frame shows on the
@@ -5330,10 +5392,23 @@ impl Session {
         };
         let (layer, index, on_mask) = (painting.layer, painting.index, painting.on_mask);
         // The offset arrives in document units, like the point and the
-        // radius, and like them it is written in the layer's own.
-        let scale = chitrakar_render::layer_scale(&self.doc, layer, on_mask)?.max(1e-6);
+        // radius, and like them it is written in the layer's own: carried
+        // through the layer's whole placing, turns and flips with its
+        // scale, as a difference of two points. Divided by the scale
+        // alone, a clone layer turned with the page lifted from a
+        // quarter-turn away — green where blue was asked for.
+        let source = match (
+            chitrakar_render::point_in_layer(&self.doc, layer, on_mask, dx, dy)?,
+            chitrakar_render::point_in_layer(&self.doc, layer, on_mask, 0.0, 0.0)?,
+        ) {
+            (Some((x1, y1)), Some((x0, y0))) => [x1 - x0, y1 - y0],
+            _ => {
+                let scale = chitrakar_render::layer_scale(&self.doc, layer, on_mask)?.max(1e-6);
+                [dx / scale, dy / scale]
+            }
+        };
         let painting = self.painting.as_mut().expect("checked above");
-        painting.stroke.source = [dx / scale, dy / scale];
+        painting.stroke.source = source;
         painting.stroke.heal = heal;
         let stroke = Box::new(painting.stroke.clone());
         self.preview(Command::SetStroke {
@@ -5487,7 +5562,7 @@ impl Session {
         let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
         for id in &ordered {
             if let Ok(chitrakar_render::Bounds::Rect(a, b, c, d)) =
-                chitrakar_render::bounds_in_parent_space(&self.doc, *id)
+                chitrakar_render::occupied_bounds_in_parent_space(&self.doc, *id)
             {
                 (x0, y0, x1, y1) = (x0.min(a), y0.min(b), x1.max(c), y1.max(d));
             }
@@ -17424,6 +17499,131 @@ mod tests {
         }
     }
 
+    /// A live copy of a layer wearing an effect has a box of its own
+    /// (merged, repeated, pinned in a frame), a copy of a copy keeps what
+    /// makes it differ, and a frame in a frame stretched with it is
+    /// resized rather than scaled.
+    #[test]
+    fn copies_and_frames_inside_frames_keep_their_shape() {
+        use chitrakar_doc::{Pin, Pinning};
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let rect = add_rect(&mut session, "shaded", 40.0, 30.0);
+        session
+            .apply(Command::SetEffects {
+                id: rect,
+                effects: vec![chitrakar_doc::Effect::DropShadow {
+                    dx: 4.0,
+                    dy: 4.0,
+                    blur: 2.0,
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                    opacity: 0.5,
+                    spread: 0.0,
+                }],
+            })
+            .unwrap();
+        let copy = session.make_instance(rect).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(200.0, 100.0),
+            })
+            .unwrap();
+        // Its box is its own, so it turns about its own middle.
+        let made = session
+            .repeat_nodes(&[copy], 1, 0.0, 0.0, 90.0, 1.0, [0.5, 0.5])
+            .unwrap();
+        let [x, y, w, h] = session.bounds_of(made[0]).unwrap();
+        assert!(
+            (x + w / 2.0 - 220.0).abs() < 2.0 && (y + h / 2.0 - 115.0).abs() < 2.0,
+            "turned about its own middle: {x} {y} {w} {h}"
+        );
+        session.undo().unwrap();
+        // Merged alone, it is a picture of what it draws.
+        let lit = |s: &Session| {
+            let page = chitrakar_render::render(s.document()).unwrap();
+            page.pixels.iter().filter(|p| p.a > 0.5).count()
+        };
+        let before = lit(&session);
+        session
+            .merge_layers(&[copy])
+            .expect("a copy wearing a shadow merges");
+        assert!(
+            lit(&session).abs_diff(before) < 20,
+            "and draws what it drew"
+        );
+        session.undo().unwrap();
+
+        // A copy of a copy: what the copy wears, it wears too.
+        session
+            .apply(Command::SetOpacity {
+                id: copy,
+                opacity: 0.4,
+            })
+            .unwrap();
+        let again = session.make_instance(copy).unwrap();
+        let node = session.document().node(again).unwrap();
+        assert!(
+            (node.opacity - 0.4).abs() < 1e-6,
+            "the copy's own look comes with it"
+        );
+        assert!(matches!(node.kind, NodeKind::Instance { of, .. } if of == rect));
+
+        // A frame in a frame, stretched with it, is resized.
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::artboard("outer", 200.0, 100.0, None)),
+            })
+            .unwrap();
+        let outer = session.document().children_of(root).unwrap()[0];
+        session
+            .apply(Command::AddNode {
+                parent: outer,
+                index: 0,
+                node: Box::new(Node::artboard("inner", 60.0, 40.0, None)),
+            })
+            .unwrap();
+        let inner = session.document().children_of(outer).unwrap()[0];
+        session
+            .apply(Command::SetTransform {
+                id: inner,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetPinning {
+                id: inner,
+                pinned: Pinning {
+                    x: Pin::Stretch,
+                    y: Pin::Start,
+                },
+            })
+            .unwrap();
+        let cmd: Command = serde_json::from_str(
+            &session
+                .artboard_resize(outer, 300.0, 100.0, 0.0, 0.0)
+                .unwrap(),
+        )
+        .unwrap();
+        session.apply(cmd).unwrap();
+        let n = session.document().node(inner).unwrap();
+        let NodeKind::Artboard { width, height, .. } = n.kind else {
+            panic!("still a frame")
+        };
+        assert!(
+            (n.transform.a - 1.0).abs() < 1e-5 && width > 61.0 && (height - 40.0).abs() < 1e-3,
+            "resized, not scaled: {:?} {width}x{height}",
+            n.transform
+        );
+    }
+
     /// And a drag still costs one command to undo, however long it is.
     ///
     /// The gesture keeps a list of inverses now, and the reason that is
@@ -19643,6 +19843,26 @@ mod tests {
         assert!(node.clipped, "the picture is still clipped");
         assert!(near_page(&page(&s3), &before), "and the page is as it was");
 
+        // Two layers both clipped to one not merged keep the clip too.
+        let mut s5 = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        add(
+            &mut s5,
+            shape("base", rect(60.0, 60.0), 20.0, 20.0, srgb(0.9, 0.9, 0.2)),
+        );
+        let mut both = Vec::new();
+        for (x, c) in [(40.0, srgb(0.9, 0.1, 0.1)), (60.0, srgb(0.1, 0.1, 0.9))] {
+            let mut n = shape("over", rect(80.0, 30.0), x, 30.0, c);
+            n.clipped = true;
+            both.push(add(&mut s5, n));
+        }
+        let before = page(&s5);
+        let flat = s5.merge_layers(&both).unwrap();
+        assert!(
+            s5.document().node(flat).unwrap().clipped,
+            "the merged picture is clipped"
+        );
+        assert!(near_page(&page(&s5), &before), "and the page is as it was");
+
         // A group holding an adjustment has a box of what it draws, and
         // merges into a picture of it.
         let mut s4 = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
@@ -19671,6 +19891,15 @@ mod tests {
                 && (w - 40.0).abs() < 0.5
                 && (h - 30.0).abs() < 0.5,
             "the group's box is the disc's: {x} {y} {w} {h}"
+        );
+        // And its own box, the one its handles and size fields work from.
+        let [x0, y0, x1, y1] = s4.local_bounds_of(group).expect("a box of its own");
+        assert!(
+            (x0 - 60.0).abs() < 0.5
+                && (y0 - 40.0).abs() < 0.5
+                && (x1 - 100.0).abs() < 0.5
+                && (y1 - 70.0).abs() < 0.5,
+            "the group's own box is the disc's: {x0} {y0} {x1} {y1}"
         );
         let before = page(&s4);
         s4.merge_layers(&[group]).unwrap();

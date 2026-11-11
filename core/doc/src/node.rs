@@ -739,6 +739,13 @@ pub struct RawDevelop {
     /// them), which are otherwise applied.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub uncorrected: bool,
+    /// The lens profile (lensfun's name for the lens) whose corrections
+    /// this was developed with, where the file carried none of its own.
+    /// Only a record: profiles are the person's, not the document's, so a
+    /// device without this one develops it again uncorrected — and can
+    /// say so rather than change the picture without a word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lens_profile: Option<String>,
     /// Take a lens's colour fringes out as the photograph shows them:
     /// red's and blue's size against green measured from its own edges
     /// (`core/codecs/src/fringe.rs`), as Lightroom's "Remove chromatic

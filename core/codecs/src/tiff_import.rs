@@ -42,10 +42,29 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let (width, height) = dec.dimensions().map_err(bad)?;
     let as_grey;
     let mut white_is_zero = false;
+    let mut differenced = false;
+    // Colours in planes of their own are not read; said before the
+    // decoder says it in its own words.
+    let planes = dec
+        .find_tag_unsigned::<u16>(Tag::PlanarConfiguration)
+        .ok()
+        .flatten()
+        == Some(2)
+        && dec
+            .find_tag_unsigned::<u16>(Tag::SamplesPerPixel)
+            .ok()
+            .flatten()
+            .is_some_and(|n| n > 1);
+    if planes {
+        return Err(bad(
+            "its colours are kept in separate planes, which is not read; save it again with the pixels interleaved",
+        ));
+    }
     let color = match as_plain_grey(bytes) {
         Some(plain) => {
             as_grey = plain.bytes;
             white_is_zero = plain.white_is_zero;
+            differenced = plain.differenced;
             dec = Decoder::new(Cursor::new(&as_grey[..])).map_err(bad)?;
             if !matches!(dec.colortype().map_err(bad)?, ColorType::Gray(_)) {
                 return Err(bad("a grey or palette picture that is neither"));
@@ -106,20 +125,9 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         ColorType::RGBA(b) | ColorType::CMYK(b) => (4, b),
     };
     let pixels = width as usize * height as usize;
-    // Two layouts the decoder cannot read, said in words rather than in
-    // its own: each colour kept as a plane of its own (Photoshop's "Per
-    // Channel" order), and a fax machine's compression.
-    if channels > 1
-        && dec
-            .find_tag_unsigned::<u16>(Tag::PlanarConfiguration)
-            .ok()
-            .flatten()
-            == Some(2)
-    {
-        return Err(bad(
-            "its colours are kept in separate planes, which is not read; save it again with the pixels interleaved",
-        ));
-    }
+    // A fax machine's compression, which the decoder cannot read, said in
+    // words rather than in its own. (Colours in planes of their own,
+    // Photoshop's "Per Channel" order, are said at the start.)
     if matches!(
         dec.find_tag_unsigned::<u16>(Tag::Compression)
             .ok()
@@ -130,7 +138,25 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             "it is compressed as a fax is (CCITT), which is not read; save it again uncompressed or with LZW",
         ));
     }
-    let data = dec.read_image().map_err(bad)?;
+    let mut data = dec.read_image().map_err(bad)?;
+    // Each row's samples are differences from the one two before (grey
+    // from grey, alpha from alpha): added back up, a row at a time.
+    if differenced {
+        let row = width as usize * 2;
+        match &mut data {
+            DecodingResult::U8(v) => v.chunks_mut(row).for_each(|r| {
+                for i in 2..r.len() {
+                    r[i] = r[i].wrapping_add(r[i - 2]);
+                }
+            }),
+            DecodingResult::U16(v) => v.chunks_mut(row).for_each(|r| {
+                for i in 2..r.len() {
+                    r[i] = r[i].wrapping_add(r[i - 2]);
+                }
+            }),
+            _ => {}
+        }
+    }
     // Each sample as 0..=255 — or, for a palette, as its index.
     let samples: Vec<u16> = match data {
         DecodingResult::U8(v) if bits < 8 => {
@@ -255,6 +281,9 @@ struct PlainGrey {
     palette: bool,
     /** Grey and alpha, interleaved. */
     alpha: bool,
+    /** Written with horizontal differencing, to be undone here, two
+     * samples apart. */
+    differenced: bool,
     white_is_zero: bool,
 }
 
@@ -341,8 +370,13 @@ fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
         && !palette
         && matches!(bits_value, 8 | 16)
         && planar.as_ref().is_none_or(|p| p.value == 1)
-        && predictor.as_ref().is_none_or(|p| p.value == 1)
+        && predictor.as_ref().is_none_or(|p| matches!(p.value, 1 | 2))
         && tiled.is_none();
+    // Each sample the difference from the one before it of its own kind:
+    // read as one kind twice as wide, the crate would take the difference
+    // from the wrong one, so it is told there is none and it is undone
+    // here (`PlainGrey::differenced`).
+    let differenced = with_alpha && predictor.as_ref().is_some_and(|p| p.value == 2);
     if samples_n != 1 && !with_alpha {
         return None;
     }
@@ -379,12 +413,16 @@ fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
         if let Some(b) = bits.filter(|b| b.count == 2) {
             put(b.count_at, if big { 8 } else { 4 }, 1);
         }
+        if let Some(p) = predictor.filter(|_| differenced) {
+            put(p.value_at, size(p.kind), 1);
+        }
     }
     Some(PlainGrey {
         bytes: copy,
         bits: bits_value as u8,
         palette,
         alpha: with_alpha,
+        differenced,
         white_is_zero: photometric.value == 0 && !palette,
     })
 }
@@ -661,6 +699,21 @@ mod tests {
                 "photometric {photometric}"
             );
         }
+        // Differenced (Predictor 2): each sample less the one of its own
+        // kind before it, grey from grey and alpha from alpha.
+        let mut out = Cursor::new(Vec::new());
+        let mut tiff = TiffEncoder::new(&mut out).unwrap();
+        let mut img = tiff.new_image::<colortype::Gray8>(4, 1).unwrap();
+        img.encoder().write_tag(Tag::ImageWidth, 2u32).unwrap();
+        img.encoder().write_tag(Tag::SamplesPerPixel, 2u16).unwrap();
+        img.encoder()
+            .write_tag(Tag::BitsPerSample, &[8u16, 8][..])
+            .unwrap();
+        img.encoder().write_tag(Tag::ExtraSamples, 2u16).unwrap();
+        img.encoder().write_tag(Tag::Predictor, 2u16).unwrap();
+        img.write_data(&[40, 255, 160, 129]).unwrap();
+        let got = decode_tiff(&out.into_inner()).expect("differenced grey and alpha read");
+        assert_eq!(got.rgba8, [40, 40, 40, 255, 200, 200, 200, 128]);
     }
 
     #[test]

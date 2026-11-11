@@ -2003,6 +2003,7 @@ pub fn everything() -> Fixture {
                         color_noise: Some(35.0),
                         masking: 30.0,
                         uncorrected: true,
+                        lens_profile: Some("Canon EF 24-105mm f/4L IS USM".into()),
                         fringe: true,
                         defringe: [40.0, 10.0],
                         curve: true,

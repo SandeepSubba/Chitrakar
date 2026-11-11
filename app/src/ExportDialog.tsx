@@ -223,6 +223,8 @@ export function ExportDialog({
    * on the page. One off it used to stop the whole write at the first
    * file, so a region that was there was never written either. */
   const ats: number[] = many.map((_, i) => i).filter((i) => area !== "regions" || regionBox(i) !== null);
+  /** How many kept regions are on the page, whichever area is chosen. */
+  const onPageRegions = keptRegions.filter((_, i) => regionBox(i) !== null).length;
   /** The regions left out for being off the page, said by name. */
   const offPage: string[] = area === "regions" ? many.filter((_, i) => !ats.includes(i)) : [];
   /** Every slice that will be written, with where it is among `many`,
@@ -743,7 +745,9 @@ export function ExportDialog({
             <option value="selection">What is picked</option>
             {keptRegions.length > 0 && (
               <option value="regions">
-                Each kept region ({keptRegions.length})
+                {/* How many will be written, of how many kept: the ones off
+                    the page are left out, and seven said here wrote two. */}
+                Each kept region ({onPageRegions < keptRegions.length ? `${onPageRegions} of ${keptRegions.length}` : keptRegions.length})
               </option>
             )}
             {keptComps.length > 0 && (

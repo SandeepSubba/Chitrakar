@@ -708,9 +708,39 @@ pub fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocE
 /// group had nothing of its own to merge, and beside a small layer it was
 /// cut down to that layer's box.
 pub fn drawn_bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    drawn_bounds_inner(doc, id, true)
+}
+
+/// The box a layer occupies in its parent's space, without what its
+/// effects reach: what it is pinned by in a frame and turned about when
+/// repeated. A group holding an adjustment or a filter is the box of its
+/// other layers, and a live copy whose original wears an effect is its
+/// own box — both were "everything" here, and a frame left the copy
+/// where it was and Repeat turned it about the page's corner.
+pub fn occupied_bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    drawn_bounds_inner(doc, id, false)
+}
+
+/// As [`drawn_bounds_in_parent_space`], with or without the reach of
+/// the layers' effects (`bounds_in_parent_space_inner`'s choice).
+fn drawn_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bounds, DocError> {
     let node = doc.node(id)?;
     if !matches!(node.kind, NodeKind::Group) {
-        return bounds_in_parent_space(doc, id);
+        let b = bounds_in_parent_space_inner(doc, id, effects)?;
+        // A copy whose original wears an effect is drawn as reaching
+        // everywhere; what it draws is its own box and as far past it
+        // as any effect reaches. A merge took it for nothing to draw.
+        if let (Bounds::Everything, NodeKind::Instance { .. }) = (&b, &node.kind) {
+            if let Some([x0, y0, x1, y1]) = local_bounds_of(doc, id)? {
+                if let Bounds::Rect(a, b, c, d) =
+                    transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+                {
+                    let pad = effects_reach(doc) / max_scale(ancestor_space(doc, id)).max(1e-3);
+                    return Ok(Bounds::Rect(a - pad, b - pad, c + pad, d + pad));
+                }
+            }
+        }
+        return Ok(b);
     }
     let mut acc = Bounds::None;
     for &child in doc.children_of(id)? {
@@ -720,9 +750,13 @@ pub fn drawn_bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds
         ) {
             continue;
         }
-        acc = acc.union(drawn_bounds_in_parent_space(doc, child)?);
+        acc = acc.union(drawn_bounds_inner(doc, child, effects)?);
     }
-    let pad = Effect::reach_of(&node.effects);
+    let pad = if effects {
+        Effect::reach_of(&node.effects)
+    } else {
+        0.0
+    };
     Ok(match acc {
         Bounds::Rect(x0, y0, x1, y1) => {
             match transformed_local_bounds(node.transform, (x0, y0, x1, y1)) {
@@ -915,6 +949,24 @@ fn copy_reaches_out(doc: &Document, instance: NodeId, of: NodeId) -> bool {
             .unwrap_or(false)
 }
 
+/// Whether a group holds an adjustment or a filter, at any depth.
+fn holds_a_change(doc: &Document, id: NodeId) -> bool {
+    match doc.node(id).map(|n| &n.kind) {
+        Ok(NodeKind::Group) => doc
+            .children_of(id)
+            .map(|kids| {
+                kids.iter().any(|&c| {
+                    matches!(
+                        doc.node(c).map(|n| &n.kind),
+                        Ok(NodeKind::Adjustment(_) | NodeKind::Filter(_))
+                    ) || holds_a_change(doc, c)
+                })
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, DocError> {
     let node = doc.node(id)?;
     Ok(match &node.kind {
@@ -936,7 +988,14 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
             } else {
                 Vec::new()
             };
-            if stand_ins.is_empty() {
+            if holds_a_change(doc, *of) {
+                // A copy of a group holding an adjustment or a filter is
+                // drawn as reaching everywhere (a filter can spread past
+                // the box of what the group draws), as it always was: the
+                // box a group itself is given leaves them out, a copy's
+                // drawing cannot.
+                None
+            } else if stand_ins.is_empty() {
                 local_bounds_of(doc, *of).unwrap_or(None)
             } else {
                 let mut acc = Bounds::None;
@@ -959,8 +1018,18 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
                 for &child in doc.children_of(id)? {
                     // The box the group occupies, so without the reach of
                     // anything's effects: this is what gets an outline and
-                    // handles drawn round it.
-                    acc = acc.union(bounds_in_parent_space_inner(doc, child, false)?);
+                    // handles drawn round it. An adjustment or a filter in
+                    // it changes only what the group's other layers draw
+                    // (the group is drawn on its own), so it adds nothing:
+                    // taken as everything, such a group had no box, no
+                    // handles, and its width could not be typed.
+                    if matches!(
+                        doc.node(child)?.kind,
+                        NodeKind::Adjustment(_) | NodeKind::Filter(_)
+                    ) {
+                        continue;
+                    }
+                    acc = acc.union(drawn_bounds_inner(doc, child, false)?);
                 }
                 match acc {
                     Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1, y1]),
