@@ -470,6 +470,19 @@ body {
   color: var(--text);
 }
 
+/* Nothing it could act on now: still read, not pressed. */
+.menu-item:disabled {
+  color: var(--muted);
+  opacity: 0.55;
+  cursor: default;
+}
+.menu-item:disabled:hover {
+  background: none;
+}
+.menu-item:disabled .icon {
+  color: var(--muted);
+}
+
 .menu-item-label {
   flex: 1;
 }
@@ -973,7 +986,7 @@ body {
   font-style: normal;
 }
 
-.history li.history-start button:disabled {
+.history li.history-start button[aria-disabled="true"] {
   cursor: default;
 }
 
@@ -3677,6 +3690,10 @@ button.fold:hover {
 
 .prefs-modal {
   width: min(42rem, calc(100vw - 2rem));
+  /* One height for every page: sized to each, the window re-centred as
+     the rail was walked and the rail moved under the pointer. A longer
+     page scrolls inside. */
+  height: min(38rem, calc(100vh - 2rem));
 }
 
 .prefs-body {

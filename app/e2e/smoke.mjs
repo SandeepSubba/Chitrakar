@@ -21998,6 +21998,114 @@ assert(
   await ctx.close();
 }
 
+// 9dd. The twentieth audit. A chord pressed while Straighten stood open
+// let the window go and did nothing else (the browser's own shortcut ran
+// instead); panning with the middle button let it go too; Escape on a
+// flyout also let go of the layer, and its own button would not close
+// it; rows that need a picked layer did nothing, silently, with none
+// picked; Enter on a history row moved the focus to another step; and
+// F2 put the caret after the name rather than taking it.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 }, acceptDownloads: true });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.click('.toolbar > button[aria-label="Rect"], .tool-group > button[aria-label="Rect"]');
+  await p.mouse.move(r.x + 40, r.y + 40);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 140, r.y + 120, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  const straighten = async (deg) => {
+    await p.click('.menu-label:text-is("Page")');
+    await p.locator(".menu-pop .menu-item", { hasText: "Straighten" }).first().click();
+    await p.waitForTimeout(300);
+    const box = p.locator('input[aria-label="Straighten degrees"]');
+    await box.fill(String(deg));
+    await box.press("Tab");
+    await p.waitForTimeout(300);
+  };
+  const open = () => p.locator('[role="dialog"][aria-label="Straighten"]').count();
+  // A press with the middle button pans and leaves the window be.
+  await straighten(8);
+  const c = await p.locator("#engine-canvas").boundingBox();
+  await p.mouse.move(c.x + c.width - 60, c.y + c.height - 60);
+  await p.mouse.down({ button: "middle" });
+  await p.mouse.move(c.x + c.width - 90, c.y + c.height - 80, { steps: 3 });
+  await p.mouse.up({ button: "middle" });
+  await p.waitForTimeout(300);
+  assert((await open()) === 1, "panning with the middle button keeps Straighten open");
+  // A chord lets it go and then does what it says: Ctrl+E exports.
+  const landed = [];
+  const take = (d) => landed.push(d);
+  p.on("download", take);
+  await p.locator("#engine-canvas").focus().catch(() => {});
+  await p.keyboard.press("Control+e");
+  for (let i = 0; i < 40 && landed.length === 0; i++) await p.waitForTimeout(100);
+  p.off("download", take);
+  assert(
+    (await open()) === 0 && landed.length === 1 && landed[0].suggestedFilename().endsWith(".png"),
+    `a chord at Straighten lets it go and still runs (${landed.map((d) => d.suggestedFilename())})`,
+  );
+  // Escape on a flyout puts the flyout away and nothing else; its own
+  // button closes it too.
+  await p.locator(".panel ul li .layer-name").first().click();
+  await p.waitForTimeout(200);
+  const more = p.locator('button[aria-label="More shapes"]');
+  if (await more.count()) {
+    await more.click();
+    await p.waitForTimeout(200);
+    await p.keyboard.press("Escape");
+    await p.waitForTimeout(200);
+    assert(
+      (await p.locator(".tool-flyout").count()) === 0 && (await p.locator(".panel ul li.selected").count()) === 1,
+      "Escape puts a flyout away and keeps the layer picked",
+    );
+  }
+  const away = p.locator('button[aria-label="More tools"]');
+  if (await away.count()) {
+    await away.click();
+    await p.waitForTimeout(200);
+    const was = await p.locator(".tool-flyout").count();
+    await away.click();
+    await p.waitForTimeout(200);
+    assert(was === 1 && (await p.locator(".tool-flyout").count()) === 0, "More tools closes from its own button");
+  }
+  // F2 takes the name, ready to be typed over.
+  const row = p.locator(".panel ul li").first();
+  await row.focus();
+  await p.keyboard.press("F2");
+  await p.waitForTimeout(200);
+  await p.keyboard.type("Box");
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(300);
+  assert(
+    (await p.locator(".panel ul li .layer-name").first().textContent()).trim() === "Box",
+    `F2 then typing names it afresh (${await p.locator(".panel ul li .layer-name").first().textContent()})`,
+  );
+  // Enter on a history row: the focus is on the step now current.
+  const steps = p.locator(".history li:not(.history-start) button");
+  await steps.first().focus();
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(400);
+  assert(
+    await p.evaluate(() => document.activeElement?.classList.contains("current") ?? false),
+    "Enter on a history step leaves the focus on it",
+  );
+  // With nothing picked (a step in the history lets the layers go), the
+  // rows that need a layer are greyed out.
+  assert((await p.locator(".panel ul li.selected").count()) === 0, "nothing is picked after the step");
+  await p.click('.menu-label:text-is("Layer")');
+  await p.waitForTimeout(200);
+  const group = p.locator(".menu-pop .menu-item", { hasText: /^Group/ }).first();
+  assert(await group.isDisabled(), "Group is greyed out with nothing picked");
+  await p.keyboard.press("Escape");
+  await ctx.close();
+}
+
 // 9dc. Each kept region with one of them off the page: the export stopped
 // at the first file it could not make, said so without naming the region,
 // and the region that was on the page was never written. Now the regions

@@ -1354,6 +1354,8 @@ impl Session {
             Command::SetGuides { guides } => {
                 if guides.is_empty() {
                     "Clear guides".into()
+                } else if guides.len() == 1 {
+                    "1 guide".into()
                 } else {
                     format!("{} guides", guides.len())
                 }
@@ -1879,8 +1881,6 @@ impl Session {
                 && node.effects.is_empty()
                 && node.mask.is_none()
                 && node.opacity >= 1.0
-                && node.blend == chitrakar_doc::BlendMode::Normal
-                && !node.clipped
                 && (t.a, t.b, t.c, t.d) == (1.0, 0.0, 0.0, 1.0)
                 && t.e.fract() == 0.0
                 && t.f.fract() == 0.0
@@ -1904,6 +1904,27 @@ impl Session {
             parent: gathered,
             index: i,
         }));
+        // One layer alone keeps its blend and its clip on the picture it
+        // becomes, as Photoshop's Rasterize does: drawn alone in the
+        // scratch group, the blend had nothing under it to act on and
+        // the clip nothing to clip to, and the picture came back Normal
+        // and whole — the page changed under it.
+        let carried = match showing.as_slice() {
+            [only] => {
+                let node = scratch.node(*only)?;
+                let kept = (node.blend, node.clipped);
+                gather.push(Command::SetBlendMode {
+                    id: *only,
+                    blend: chitrakar_doc::BlendMode::Normal,
+                });
+                gather.push(Command::SetClipped {
+                    id: *only,
+                    clipped: false,
+                });
+                Some(kept)
+            }
+            _ => None,
+        };
         scratch.apply(Command::Batch(gather))?;
         // What the layers that draw something reach. An adjustment or a
         // filter among them says "everything", meaning everything under
@@ -1912,7 +1933,7 @@ impl Session {
         let mut reach: Option<[f32; 4]> = None;
         for id in &showing {
             if let Bounds::Rect(a, b, c, d) =
-                chitrakar_render::bounds_in_parent_space(&scratch, *id)?
+                chitrakar_render::drawn_bounds_in_parent_space(&scratch, *id)?
             {
                 reach = Some(match reach {
                     Some([p, q, r, t]) => [p.min(a), q.min(b), r.max(c), t.max(d)],
@@ -1986,6 +2007,10 @@ impl Session {
             f: y0,
             ..Default::default()
         };
+        if let Some((blend, clipped)) = carried {
+            picture.blend = blend;
+            picture.clipped = clipped;
+        }
         let new_id = self.doc.peek_next_id();
         let mut cmds = vec![Command::AddNode {
             parent,
@@ -2416,6 +2441,10 @@ impl Session {
         // that is that many pixels every way; the average scale is used.
         let seen = chitrakar_render::ancestor_space(&self.doc, id).compose(node.transform);
         let scale = (seen.a * seen.d - seen.b * seen.c).abs().sqrt();
+        // The history says the distance as it was asked for, in page
+        // pixels, not the one the outline is moved by in its own units:
+        // 8 typed in a group three times the size read "2.666641 px".
+        let asked = by;
         let by = if scale > 1e-6 && scale.is_finite() {
             by / scale
         } else {
@@ -2463,8 +2492,8 @@ impl Session {
             },
             Some(format!(
                 "Move the outline {} by {} px",
-                if by > 0.0 { "out" } else { "in" },
-                by.abs()
+                if asked > 0.0 { "out" } else { "in" },
+                (asked.abs() * 100.0).round() / 100.0
             )),
         )?;
         Ok(new_id)
@@ -8064,6 +8093,17 @@ impl Session {
     ) -> chitrakar_render::ClipRect {
         let pad = region.feather * 3.0;
         let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        // A region that is off the page is off it whatever its softening:
+        // only the fading edge of it reaches the page, and the window
+        // wrote that as a file of nothing rather than leaving it out.
+        if x1 <= 0.0 || y1 <= 0.0 || x0 >= pw as f32 || y0 >= ph as f32 {
+            return chitrakar_render::ClipRect {
+                x0: 0,
+                y0: 0,
+                x1: 0,
+                y1: 0,
+            };
+        }
         chitrakar_render::ClipRect {
             x0: (x0 - pad).max(0.0).floor() as u32,
             y0: (y0 - pad).max(0.0).floor() as u32,
@@ -19569,6 +19609,76 @@ mod tests {
             "four pixels outside the shape, still its blur: {halo:?}"
         );
 
+        // One layer alone keeps its blend and its clip: the page is the
+        // page it was, and the picture still multiplies and still clips.
+        let near_page = |a: &Surface, b: &Surface| {
+            a.pixels.iter().zip(&b.pixels).all(|(p, q)| {
+                (p.r - q.r).abs() < 0.02 && (p.g - q.g).abs() < 0.02 && (p.b - q.b).abs() < 0.02
+            })
+        };
+        let mut s3 = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        add(
+            &mut s3,
+            shape("ground", rect(160.0, 120.0), 0.0, 0.0, srgb(0.2, 0.3, 0.9)),
+        );
+        let base = add(
+            &mut s3,
+            shape("base", rect(60.0, 60.0), 20.0, 20.0, srgb(0.9, 0.9, 0.2)),
+        );
+        let mut times = shape(
+            "times",
+            VectorShape::Ellipse { rx: 30.0, ry: 20.0 },
+            50.0,
+            40.0,
+            srgb(0.3, 0.9, 0.3),
+        );
+        times.blend = chitrakar_doc::BlendMode::Multiply;
+        times.clipped = true;
+        let times = add(&mut s3, times);
+        let _ = base;
+        let before = page(&s3);
+        let flat = s3.merge_layers(&[times]).unwrap();
+        let node = s3.document().node(flat).unwrap();
+        assert_eq!(node.blend, chitrakar_doc::BlendMode::Multiply);
+        assert!(node.clipped, "the picture is still clipped");
+        assert!(near_page(&page(&s3), &before), "and the page is as it was");
+
+        // A group holding an adjustment has a box of what it draws, and
+        // merges into a picture of it.
+        let mut s4 = Session::new(160, 120, chitrakar_color::ColorMode::Rgb);
+        let disc = add(
+            &mut s4,
+            shape(
+                "disc",
+                VectorShape::Ellipse { rx: 20.0, ry: 15.0 },
+                60.0,
+                40.0,
+                srgb(0.9, 0.2, 0.3),
+            ),
+        );
+        let turn = add(
+            &mut s4,
+            chitrakar_doc::Node::adjustment(
+                "negative",
+                chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+            ),
+        );
+        let group = s4.group_nodes(&[disc, turn], "held").unwrap();
+        let [x, y, w, h] = s4.bounds_of(group).unwrap();
+        assert!(
+            (x - 60.0).abs() < 0.5
+                && (y - 40.0).abs() < 0.5
+                && (w - 40.0).abs() < 0.5
+                && (h - 30.0).abs() < 0.5,
+            "the group's box is the disc's: {x} {y} {w} {h}"
+        );
+        let before = page(&s4);
+        s4.merge_layers(&[group]).unwrap();
+        assert!(
+            near_page(&page(&s4), &before),
+            "merged, it draws what it drew"
+        );
+
         // Nothing showing is nothing to merge; layers of two parents are
         // not one picture.
         let hidden = add(&mut session, {
@@ -23629,6 +23739,37 @@ mod tests {
     /// A part of the page goes out as the whole page shows it, though a
     /// feathered mask's soft edge crosses its border: drawn only to its
     /// own edge, the softness came out hard all along it.
+    #[test]
+    fn a_region_off_the_page_is_off_it_whatever_its_softening() {
+        let mut session = Session::new(300, 200, ColorMode::Rgb);
+        add_rect(&mut session, "r", 300.0, 200.0);
+        // Ten pixels past the right edge, with a softening whose reach
+        // (three times it) comes back onto the page.
+        for (name, x) in [("off", 310.0), ("on", 100.0)] {
+            session
+                .apply(Command::SetSelection {
+                    selection: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Vector {
+                            shape: VectorShape::Rect {
+                                width: 40.0,
+                                height: 40.0,
+                                radius: 0.0,
+                            },
+                            transform: Transform::translation(x, 50.0),
+                        },
+                        invert: false,
+                        feather: 8.0,
+                    })),
+                })
+                .unwrap();
+            session.keep_selection(name).unwrap();
+        }
+        assert_eq!(session.region_export_box(Some(0)), None);
+        assert!(session.kept_region_png(0, 1.0).is_err());
+        assert!(session.region_export_box(Some(1)).is_some());
+        assert!(session.kept_region_png(1, 1.0).is_ok());
+    }
+
     #[test]
     fn a_region_exported_keeps_a_soft_edge_across_its_border() {
         let mut session = Session::new(300, 200, ColorMode::Rgb);

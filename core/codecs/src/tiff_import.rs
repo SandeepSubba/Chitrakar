@@ -13,9 +13,12 @@
 //! first picture of a many-page TIFF is read.
 //!
 //! The `tiff` crate refuses a palette picture outright (it has no colour
-//! type for one), so a palette TIFF is read through a copy that says it is
-//! grey: the decoder hands back the indices, and the palette is looked up
-//! here.
+//! type for one), and reads samples narrower than a byte as if each were
+//! a byte, running off the end of the strip. So a palette picture, or a
+//! grey one of 1, 2 or 4 bits, is read through a copy whose directory says
+//! it is plain grey — of 8 bits, as many columns as each row has bytes,
+//! when it is narrower — and the decoder hands back the bytes as stored:
+//! they are unpacked, and the palette looked up, here.
 
 use crate::{CodecError, SourceImage};
 use std::io::Cursor;
@@ -37,19 +40,22 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let mut dec = Decoder::new(Cursor::new(bytes)).map_err(bad)?;
     let (width, height) = dec.dimensions().map_err(bad)?;
     let as_grey;
-    let color = match dec.colortype() {
-        Ok(c) => c,
-        Err(err) => match palette_as_grey(bytes) {
-            Some(copy) => {
-                as_grey = copy;
-                dec = Decoder::new(Cursor::new(&as_grey[..])).map_err(bad)?;
-                match dec.colortype().map_err(bad)? {
-                    ColorType::Gray(b) => ColorType::Palette(b),
-                    _ => return Err(bad(err)),
-                }
+    let mut white_is_zero = false;
+    let color = match as_plain_grey(bytes) {
+        Some(plain) => {
+            as_grey = plain.bytes;
+            white_is_zero = plain.white_is_zero;
+            dec = Decoder::new(Cursor::new(&as_grey[..])).map_err(bad)?;
+            if !matches!(dec.colortype().map_err(bad)?, ColorType::Gray(_)) {
+                return Err(bad("a grey or palette picture that is neither"));
             }
-            None => return Err(bad(err)),
-        },
+            if plain.palette {
+                ColorType::Palette(plain.bits)
+            } else {
+                ColorType::Gray(plain.bits)
+            }
+        }
+        None => dec.colortype().map_err(bad)?,
     };
     // Which way up the picture is meant to be seen (a camera turned on
     // its side writes 6 or 8 here and leaves the pixels as they fell).
@@ -126,6 +132,13 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     if samples.len() < pixels * channels {
         return Err(bad("fewer samples than the picture is big"));
     }
+    // Read through the plain copy, white-is-zero grey is still the
+    // other way up (the decoder turns it only when it reads it itself).
+    let samples = if white_is_zero {
+        samples.into_iter().map(|v| 255 - v.min(255)).collect()
+    } else {
+        samples
+    };
 
     let mut rgba8 = vec![0u8; pixels * 4];
     let mut cmyk: Option<chitrakar_color::cms::CmykCms> = None;
@@ -196,11 +209,19 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     ))
 }
 
-/// A palette picture's bytes with its first directory saying grey
-/// (PhotometricInterpretation 3 made 1, black is zero), so the decoder
-/// hands back each pixel's index unchanged. `None` when the first
-/// picture is not a palette one, or the directory cannot be read.
-fn palette_as_grey(bytes: &[u8]) -> Option<Vec<u8>> {
+/// A TIFF the decoder is handed in another's words: see the module's
+/// note. `bits` is the width of a sample as stored.
+struct PlainGrey {
+    bytes: Vec<u8>,
+    bits: u8,
+    palette: bool,
+    white_is_zero: bool,
+}
+
+/// A copy of a palette picture, or a grey one narrower than a byte, whose
+/// first directory says plain grey; `None` for any other picture, and for
+/// one whose directory cannot be read or rewritten in place.
+fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
     let little = match bytes.get(..2)? {
         b"II" => true,
         b"MM" => false,
@@ -224,20 +245,65 @@ fn palette_as_grey(bytes: &[u8]) -> Option<Vec<u8>> {
         let first = usize::try_from(int(4, 4)?).ok()?;
         (first, int(first, 2)?, 12, 2)
     };
+    let value_at = if big { 12 } else { 8 };
+    // Each tag asked about: where its value sits in its entry, its type,
+    // and the value — only a single SHORT or LONG, held in the entry.
+    let mut found: [Option<(usize, u64, u64)>; 5] = [None; 5];
+    const TAGS: [u64; 5] = [256, 258, 262, 277, 322];
     for i in 0..usize::try_from(count).ok()?.min(4096) {
         let at = first + head + i * entry;
-        // Tag 262, a SHORT, whose value sits in the entry itself.
-        if int(at, 2)? == 262 && int(at + 2, 2)? == 3 {
-            let value = at + if big { 12 } else { 8 };
-            if int(value, 2)? != 3 {
+        let tag = int(at, 2)?;
+        if let Some(k) = TAGS.iter().position(|&t| t == tag) {
+            let kind = int(at + 2, 2)?;
+            let n = int(at + 4, if big { 8 } else { 4 })?;
+            let width = match kind {
+                3 => 2,
+                4 => 4,
+                _ => return None,
+            };
+            if n != 1 {
                 return None;
             }
-            let mut copy = bytes.to_vec();
-            copy[value..value + 2].copy_from_slice(&if little { [1, 0] } else { [0, 1] });
-            return Some(copy);
+            found[k] = Some((at + value_at, kind, int(at + value_at, width)?));
         }
     }
-    None
+    let [width, bits, photometric, samples, tiled] = found;
+    let (width_at, width_kind, width) = width?;
+    let bits = bits.map_or(1, |b| b.2);
+    let (photometric_at, _, photometric) = photometric?;
+    if samples.is_some_and(|s| s.2 != 1) || !matches!(photometric, 0 | 1 | 3) {
+        return None;
+    }
+    let palette = photometric == 3;
+    let narrow = matches!(bits, 1 | 2 | 4);
+    if !(narrow || palette && matches!(bits, 1 | 2 | 4 | 8 | 16)) {
+        return None;
+    }
+    // A tile is a number of pixels across, which a narrower sample does
+    // not keep; tiled narrow pictures are left to the decoder.
+    if narrow && tiled.is_some() {
+        return None;
+    }
+    let mut copy = bytes.to_vec();
+    let mut put = |at: usize, kind: u64, v: u64| {
+        let n = if kind == 3 { 2 } else { 4 };
+        for i in 0..n {
+            let shift = if little { 8 * i } else { 8 * (n - 1 - i) };
+            copy[at + i] = (v >> shift) as u8;
+        }
+    };
+    put(photometric_at, 3, 1);
+    if narrow {
+        let (bits_at, _, _) = found[1]?;
+        put(bits_at, 3, 8);
+        put(width_at, width_kind, (width * bits).div_ceil(8));
+    }
+    Some(PlainGrey {
+        bytes: copy,
+        bits: bits as u8,
+        palette,
+        white_is_zero: photometric == 0 && !palette,
+    })
 }
 
 /// Samples narrower than a byte, packed along each row (a row starts on a
@@ -412,6 +478,76 @@ mod tests {
         assert_eq!(
             got.rgba8,
             [0, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 128, 128, 128, 255]
+        );
+    }
+
+    /// A TIFF of samples narrower than a byte: written as 8-bit grey of
+    /// as many columns as a row has bytes, then its directory set to say
+    /// what the bytes are.
+    fn narrow(
+        width: u32,
+        rows: &[&[u8]],
+        bits: u16,
+        photometric: u16,
+        map: Option<&[u16]>,
+    ) -> Vec<u8> {
+        let row_bytes = rows[0].len() as u32;
+        let mut out = Cursor::new(Vec::new());
+        let mut tiff = TiffEncoder::new(&mut out).unwrap();
+        let mut img = tiff
+            .new_image::<colortype::Gray8>(row_bytes, rows.len() as u32)
+            .unwrap();
+        img.encoder().write_tag(Tag::ImageWidth, width).unwrap();
+        img.encoder().write_tag(Tag::BitsPerSample, bits).unwrap();
+        img.encoder()
+            .write_tag(Tag::PhotometricInterpretation, photometric)
+            .unwrap();
+        if let Some(map) = map {
+            img.encoder().write_tag(Tag::ColorMap, map).unwrap();
+        }
+        img.write_data(&rows.concat()).unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn narrow_samples_read_whole() {
+        // One bit, black is zero: 1 0 1 across ten pixels a row, so a
+        // row runs into a second byte.
+        let bytes = narrow(
+            10,
+            &[&[0b1010_1010, 0b1000_0000], &[0b0101_0101, 0b0100_0000]],
+            1,
+            1,
+            None,
+        );
+        let got = decode_tiff(&bytes).expect("a one-bit TIFF reads");
+        let grey: Vec<u8> = got.rgba8.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(&grey[..10], &[255, 0, 255, 0, 255, 0, 255, 0, 255, 0]);
+        assert_eq!(&grey[10..], &[0, 255, 0, 255, 0, 255, 0, 255, 0, 255]);
+        // White is zero: the same bits the other way up.
+        let bytes = narrow(10, &[&[0b1010_1010, 0b1000_0000]], 1, 0, None);
+        let got = decode_tiff(&bytes).expect("a white-is-zero TIFF reads");
+        assert_eq!(got.rgba8[..8], [0, 0, 0, 255, 255, 255, 255, 255]);
+        // Four bits through a palette of sixteen.
+        let mut map = vec![0u16; 48];
+        map[3] = 65535; // red of index 3
+        map[16 + 5] = 65535; // green of index 5
+        let bytes = narrow(3, &[&[0x35, 0x00]], 4, 3, Some(&map));
+        let got = decode_tiff(&bytes).expect("a four-bit palette TIFF reads");
+        assert_eq!(got.rgba8, [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 0, 255]);
+        // One bit through a palette of two.
+        let map = [0u16, 65535, 0, 0, 0, 65535];
+        let bytes = narrow(4, &[&[0b0110_0000]], 1, 3, Some(&map));
+        let got = decode_tiff(&bytes).expect("a one-bit palette TIFF reads");
+        let px: Vec<&[u8]> = got.rgba8.chunks(4).collect();
+        assert_eq!(
+            px,
+            [
+                &[0, 0, 0, 255][..],
+                &[255, 0, 255, 255],
+                &[255, 0, 255, 255],
+                &[0, 0, 0, 255]
+            ]
         );
     }
 

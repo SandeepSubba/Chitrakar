@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import { Icon, IconName } from "./icons";
 import {
   findEntry,
@@ -48,6 +49,7 @@ import {
   chordFromEvent,
   typesAlone,
   chordLabel,
+  browserKeeps,
   firesWhileTyping,
   onAMac,
   type CommandId,
@@ -204,6 +206,12 @@ function composeT(outer: Transform, inner: Transform): Transform {
     e: outer.a * inner.e + outer.c * inner.f + outer.e,
     f: outer.b * inner.e + outer.d * inner.f + outer.f,
   };
+}
+
+/** An offset in a radial gradient's box units as its rings measure it:
+ * through its axes, where it has them (`Gradient::Radial::axes`). */
+function throughAxes(axes: [number, number, number, number] | null | undefined, du: number, dv: number): [number, number] {
+  return axes ? [axes[0] * du + axes[1] * dv, axes[2] * du + axes[3] * dv] : [du, dv];
 }
 
 /** The transform that undoes `t`, or null where it collapses a dimension
@@ -1574,6 +1582,30 @@ const COMMAND_ROWS = new Set([
  * go, so a chord given one would wander to whatever took its place. */
 const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("style-");
 
+/** Rows that act on the picked layers and on nothing else: with none
+ * picked they are greyed out, where fifty of them did nothing and said
+ * nothing (a few others explain themselves in words, and Cut, Copy and
+ * Delete also take a region picked out of the page). */
+const NEEDS_A_LAYER = new Set([
+  "duplicate", "instance", "copy-style", "same-fill", "same-stroke", "same-kind",
+  "pick-from-layer", "pick-layer-mask", "group", "ungroup", "bring-front", "bring-forward",
+  "send-backward", "send-back", "flip-h", "flip-v", "square-corners", "mask-rect",
+  "mask-ellipse", "mask-linear", "mask-radial", "mask-from-picked", "hide-picked",
+  "mask-remove", "clip", "keep-style", "join-paths", "cut-path", "offset-path",
+  "simplify-path", "repeat", "blend-shapes", "text-to-shapes", "outline-stroke",
+  "trace-picture", "merge-layers", "develop-again", "rename", "lock", "hide",
+]);
+const needsALayer = (id: string) =>
+  NEEDS_A_LAYER.has(id) || id.startsWith("align-") || id.startsWith("combine-");
+
+/** Grey out the rows that need a picked layer, when none is. */
+function markNeedsALayer(entries: MenuEntry[], nonePicked: boolean) {
+  for (const e of entries) {
+    if (e.kind === "item" && nonePicked && needsALayer(e.id)) e.disabled = true;
+    else if (e.kind === "sub") markNeedsALayer(e.entries, nonePicked);
+  }
+}
+
 /** Write each row's own chord, the one a person gave it, beside it —
  * after whatever the row already says (a tick, "Del"). */
 function markMenuKeys(entries: MenuEntry[], menuOf: Record<string, string>) {
@@ -1619,6 +1651,12 @@ type MenuId =
 
 export function App() {
   const [session, setSession] = useState<WasmSession | null>(null);
+  /** The document on screen now, for work that outlives the render that
+   * began it: a file still being read when a New document took the
+   * page's place went into the document thrown away, and a raw file's
+   * develop window opened on a document with nothing to develop. */
+  const liveSession = useRef(session);
+  liveSession.current = session;
   const [tool, setTool] = useState<Tool>("Move");
   const [fill, setFill] = useState("#6c8cff");
   /** The palette entry the colour in hand was taken from, if it was taken
@@ -1713,11 +1751,18 @@ export function App() {
       setMoreOpen(false);
     };
     const onDown = (e: PointerEvent) => {
-      if (e.target instanceof Element && e.target.closest(".tool-flyout, .tool-more")) return;
+      // Its own button toggles it, on the click after this press.
+      if (e.target instanceof Element && e.target.closest(".tool-flyout, [data-flyout]")) return;
       close();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
+      // The flyout's alone: it also let go of the layer, or of what was
+      // picked out, with a Deselect in the history.
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        close();
+      }
     };
     const onScroll = (e: Event) => {
       if (e.target instanceof Element && e.target.closest(".toolbar")) close();
@@ -2163,6 +2208,9 @@ export function App() {
      * measured from. */
     from: [number, number];
     radial: boolean;
+    /** A radial one's axes: the box's units carried onto the page, so
+     * its rings are circles there whatever the box's proportions. */
+    axes: [number, number, number, number];
   } | null>(null);
   /** The knife being dragged: where the line started, in document
    * coordinates. */
@@ -3125,8 +3173,8 @@ export function App() {
   // moved or flipped beside Straighten kept the turn, a Save wrote it
   // down, and the two windows open at once shared one preview. A press
   // on the canvas while the level line is being drawn is the window's.
-  const heldWindows = useRef({ cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling });
-  heldWindows.current = { cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling };
+  const heldWindows = useRef({ cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling, tool });
+  heldWindows.current = { cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling, tool };
   /** Let a standing Straighten or Feather go before what writes the
    * document down: a save asked for from the system's own menu bar comes
    * with no press on the page, and wrote down a turn not applied, then
@@ -3154,7 +3202,22 @@ export function App() {
         return;
       }
       const host = document.getElementById("engine-canvas")?.parentElement;
-      if (heldWindows.current.levelling && host && e.target instanceof Node && host.contains(e.target)) return;
+      const onCanvas = !!host && e.target instanceof Node && host.contains(e.target);
+      if (heldWindows.current.levelling && onCanvas) return;
+      // Looking about the page is not leaving the window: the middle
+      // button, the space bar, the hand, and a finger (a pinch's first)
+      // move the view and nothing in it, and closing the window for
+      // them threw away the angle typed — on a phone there was no way
+      // to zoom in on the line being levelled. A finger that goes on
+      // to draw lets the window go through the engine, as any other
+      // preview does (`preview_held`).
+      if (
+        onCanvas &&
+        (e.button === 1 ||
+          (e.button === 0 && (spaceRef.current || heldWindows.current.tool === "Hand")) ||
+          e.pointerType === "touch")
+      )
+        return;
       letGo(null);
     };
     const onKey = (e: KeyboardEvent) => {
@@ -3164,7 +3227,12 @@ export function App() {
       // Typing in the window's own box, its text keys included, is the
       // window's.
       if (panel && (!chord || ["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase()))) return;
-      letGo(null);
+      // Let go of at once, and the window off the page before the
+      // editor's own keys hear this one: they stand down while a window
+      // is up, so Ctrl+S closed Straighten and saved nothing, and the
+      // browser's own "save page" came up instead.
+      flushSync(() => letGo(null));
+      windowUpForKey = document.querySelector(WINDOWS) !== null;
     };
     window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey, true);
@@ -3704,8 +3772,10 @@ export function App() {
       // be rebound. With shift, "=" is "+" and "-" is "_", and a hand
       // reaching for "+" means zoom in: while zoom in and out keep their
       // shipped chords and nothing else has the shifted ones, those
-      // mean the same.
-      if (!typing) {
+      // mean the same. They mean nothing to a box, so they are the
+      // view's with the caret in one too: held back there, they reached
+      // the browser, which zoomed the whole app instead.
+      {
         const pressed = chordFromEvent(e);
         const alternate =
           !chords.byChord[pressed] && !chords.menuByChord[pressed]
@@ -3918,6 +3988,17 @@ export function App() {
     present(session);
   }, [session, view, viewport, dpr, docSize, present]);
 
+  // Ctrl+wheel, and a trackpad's pinch (which the browser sends as one),
+  // over the panel, the rail or the bar zoomed the browser's page — the
+  // whole app — rather than nothing. The canvas has its own below.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, []);
+
   // Wheel zoom toward the cursor. Attached manually: React wheel listeners
   // are passive, and we must preventDefault to stop page scroll.
   useEffect(() => {
@@ -4090,7 +4171,9 @@ export function App() {
     const xs = snapLines(0, docSize[0]);
     const ys = snapLines(0, docSize[1]);
     // A guide is placed to be snapped to; that is the whole point of one.
-    for (const g of docGuides) {
+    // Hidden, it is not there to be caught on: a drag landed on a line
+    // nobody could see.
+    for (const g of showGuides ? docGuides : []) {
       (guideIsVertical(g) ? xs : ys).push(guideAt(g));
     }
     // So is a grid. Its lines are listed rather than solved for, which
@@ -4660,6 +4743,9 @@ export function App() {
     e.stopPropagation();
     const host = hostRef.current;
     if (!host) return;
+    // A guide drawn out of the ruler is one to be seen: with guides
+    // hidden it went down unseen and unfelt.
+    if (!showGuides) setShowGuides(true);
     const rect = host.getBoundingClientRect();
     const positionOf = (ev: { clientX: number; clientY: number }) =>
       vertical
@@ -4931,7 +5017,14 @@ export function App() {
         const [lx, ly] = inv ? inv(px, py) : [px, py];
         return [(lx - lb[0]) / span(lb[0], lb[2]), (ly - lb[1]) / span(lb[1], lb[3])];
       };
-      gradToolRef.current = { id, vector, unit, start: unit(x, y), from: [x, y], radial: e.altKey };
+      // The box's units on the page: its two sides through the layer's
+      // whole placing, scaled to the longer so the numbers stay near one.
+      const onPage = composeT(toTransform(session.parent_space_of(id)), toTransform(session.transform_of(id)));
+      const [bw, bh] = [span(lb[0], lb[2]), span(lb[1], lb[3])];
+      const p = [onPage.a * bw, onPage.c * bh, onPage.b * bw, onPage.d * bh];
+      const most = Math.max(Math.hypot(p[0], p[2]), Math.hypot(p[1], p[3]), 1e-9);
+      const axes = p.map((v) => v / most) as [number, number, number, number];
+      gradToolRef.current = { id, vector, unit, start: unit(x, y), from: [x, y], radial: e.altKey, axes };
       if (id !== selected) {
         setSelected(id);
         setMultiSel([]);
@@ -5764,7 +5857,11 @@ export function App() {
             Radial: {
               ...same("Radial"),
               center: [su, sv],
-              radius: Math.max(0.02, Math.hypot(u - su, v - sv)),
+              // A circle the length dragged on the page, not an ellipse
+              // squashed to the box: rings measured in the box's own
+              // units stood 40 out across a wide box and 13 down it.
+              axes: gradTool.axes,
+              radius: Math.max(0.02, Math.hypot(...throughAxes(gradTool.axes, u - su, v - sv))),
               stops,
             },
           } as Gradient)
@@ -7830,7 +7927,20 @@ export function App() {
       // A window's keys are its own: a layer chord or Delete pressed at
       // the export window or a menu once reached the picked layer
       // behind it, where the window's own undo could not take it back.
-      if (aWindowIsUp()) return;
+      if (aWindowIsUp()) {
+        // Not the editor's, and not the browser's either: Ctrl+S at a
+        // window brought up the browser's "save page", Ctrl+J its
+        // downloads. A field's own keys (select all, copy, undo) stay
+        // the field's.
+        const held = chords.byChord[chordFromEvent(e)];
+        if (
+          held &&
+          (e.ctrlKey || e.metaKey) &&
+          !["select-all", "copy", "cut", "paste", "undo", "redo"].includes(held)
+        )
+          e.preventDefault();
+        return;
+      }
       const typing = isTextEntry(e.target);
       // One table, one lookup. These were a dozen nested tests on
       // modifiers and letters, which is also why the more specific
@@ -8840,7 +8950,7 @@ export function App() {
         const home = Math.hypot(u - rad.center[0], v - rad.center[1]) < 0.02;
         next = { Radial: { ...rad, focus: home ? null : [u, v] } };
       } else if (drag.part === "radius") {
-        const r = Math.hypot(u - rad.center[0], v - rad.center[1]);
+        const r = Math.hypot(...throughAxes(rad.axes, u - rad.center[0], v - rad.center[1]));
         next = { Radial: { ...rad, radius: Math.max(0.02, r) } };
       }
     }
@@ -8857,38 +8967,39 @@ export function App() {
     if (session?.commit_preview()) refresh(session);
   };
 
-  /** Mask editing on the canvas. A mask created here is an ellipse with a
-   * translation, so its box in the layer's parent space is simply
-   * [e, e+2rx] x [f, f+2ry] — which is what these drags rewrite. */
+  /** Mask editing on the canvas. An ellipse mask is the box
+   * [0, 2rx] × [0, 2ry] of its own space, carried into the layer's parent
+   * space by its transform — which is turned when the mask came through
+   * a turned group, so the drags work in the mask's own space and keep
+   * the turn: worked out as an upright box from the translation alone,
+   * the knobs stood somewhere else and a nudge threw the turn away. */
   const maskDragRef = useRef<{
     corner: Handle | "move";
     mask: Mask;
     box: [number, number, number, number];
+    transform: Transform;
     start: [number, number];
   } | null>(null);
 
-  const maskBox = (m: Mask | null): [number, number, number, number] | null => {
+  /** The ellipse's box in its own space, and the transform carrying it. */
+  const maskBox = (m: Mask | null): { box: [number, number, number, number]; transform: Transform } | null => {
     if (!m || !("Vector" in m.kind)) return null;
     const { shape, transform } = m.kind.Vector;
     if (!("Ellipse" in shape)) return null;
-    return [
-      transform.e,
-      transform.f,
-      transform.e + shape.Ellipse.rx * 2,
-      transform.f + shape.Ellipse.ry * 2,
-    ];
+    return { box: [0, 0, shape.Ellipse.rx * 2, shape.Ellipse.ry * 2], transform };
   };
 
   const onMaskHandleDown = (e: React.PointerEvent, corner: Handle | "move") => {
     if (handleRefuses(e)) return;
     if (!session || selected === null || !selectedMask) return;
-    const box = maskBox(selectedMask);
-    if (!box) return;
+    const held = maskBox(selectedMask);
+    if (!held || !invertT(held.transform)) return;
     e.stopPropagation();
     maskDragRef.current = {
       corner,
       mask: JSON.parse(JSON.stringify(selectedMask)),
-      box,
+      box: held.box,
+      transform: held.transform,
       start: layerPoint(e),
     };
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -8899,16 +9010,24 @@ export function App() {
     if (!drag || !session || selected === null) return;
     if (e.buttons === 0) return;
     const [px, py] = layerPoint(e);
+    const t = drag.transform;
     let [x0, y0, x1, y1] = drag.box;
+    let transform: Transform;
     if (drag.corner === "move") {
+      // Moved in the parent's space, as the pointer goes.
       const [dx, dy] = [px - drag.start[0], py - drag.start[1]];
-      [x0, y0, x1, y1] = [x0 + dx, y0 + dy, x1 + dx, y1 + dy];
+      transform = { ...t, e: t.e + dx, f: t.f + dy };
     } else {
+      // The pointer read in the mask's own space, where the box is
+      // upright; the corner across from the one held stays put.
+      const inv = invertT(t)!;
+      const [qx, qy] = [inv.a * px + inv.c * py + inv.e, inv.b * px + inv.d * py + inv.f];
       const west = drag.corner === "nw" || drag.corner === "sw";
       const north = drag.corner === "nw" || drag.corner === "ne";
       const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
-      [x0, x1] = [Math.min(px, fx), Math.max(px, fx)];
-      [y0, y1] = [Math.min(py, fy), Math.max(py, fy)];
+      [x0, x1] = [Math.min(qx, fx), Math.max(qx, fx)];
+      [y0, y1] = [Math.min(qy, fy), Math.max(qy, fy)];
+      transform = { ...t, e: t.a * x0 + t.c * y0 + t.e, f: t.b * x0 + t.d * y0 + t.f };
     }
     preview({
       SetMask: {
@@ -8923,7 +9042,7 @@ export function App() {
                   ry: Math.max(MIN_SIZE, y1 - y0) / 2,
                 },
               },
-              transform: { a: 1, b: 0, c: 0, d: 1, e: x0, f: y0 },
+              transform,
             },
           },
         },
@@ -8976,10 +9095,19 @@ export function App() {
 
   const jumpHistory = (delta: number) => {
     if (!session || delta === 0) return;
+    const fromList = !!document.activeElement?.closest(".history");
     session.jump(delta);
     setSelected(null);
     setMultiSel([]);
     refresh(session);
+    // From the keyboard, the focus goes with the step now current: the
+    // rows are drawn afresh, and it stayed on the row in the same place,
+    // which is another step, so a second Enter stepped again.
+    if (fromList) {
+      requestAnimationFrame(() =>
+        historyListRef.current?.querySelector<HTMLElement>("button.current")?.focus({ preventScroll: true }),
+      );
+    }
   };
 
   /** Which layers hold others: the list runs parent-first, so a layer
@@ -10262,7 +10390,15 @@ export function App() {
       if (!session) return;
       const name = file.name || "Pasted image";
       const verb = undoOpen ? "open" : "place";
+      /** Whether the document this was asked for has gone meanwhile:
+       * then it is said, and goes nowhere. */
+      const gone = () => {
+        if (liveSession.current === session) return false;
+        alert(`${name} was not ${verb === "open" ? "opened" : "placed"}: the document it was going into was closed while it was read.`);
+        return true;
+      };
       placing.current = placing.current.then(() => file.arrayBuffer()).then(async (buf) => {
+        if (gone()) return;
         const raw = new Uint8Array(buf);
         const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
         setImportNotes(null);
@@ -10311,7 +10447,11 @@ export function App() {
           let id: number;
           if (kind === "svg") id = session.place_svg(raw, file.name || "Pasted drawing");
           else if (kind === "psd") id = session.place_psd(raw, name);
-          else id = session.place_image(await enginePicture(raw, file.type), name);
+          else {
+            const picture = await enginePicture(raw, file.type);
+            if (gone()) return;
+            id = session.place_image(picture, name);
+          }
           placed(id, was);
           if (kind === "psd") {
             const notes = JSON.parse(session.import_notes()) as string[];
@@ -10409,6 +10549,23 @@ export function App() {
     await nextPaint();
     try {
       const packed = await readRaw(next.bytes);
+      // The develop window waits its turn behind a window already up —
+      // it came up under Preferences with the keys, and an arrow meant
+      // for a preference changed the white balance unseen — and opens
+      // only on the document it was asked for.
+      setImporting(null);
+      while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      if (liveSession.current !== session) {
+        const dropped = [next.name, ...rawQueue.current.map((q) => q.name)];
+        rawQueue.current = [];
+        setRawWaiting(0);
+        rawBusy.current = false;
+        rawDone.current = 0;
+        alert(`${dropped.join(", ")} not opened: the document ${dropped.length > 1 ? "they were" : "it was"} going into was closed while ${dropped.length > 1 ? "they were" : "it was"} read.`);
+        return;
+      }
       await giveLensProfiles(session);
       const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
       rawPacked.current = packed;
@@ -11049,7 +11206,7 @@ export function App() {
           () => {
             if (mayDiscard()) setNewDocOpen(true);
           },
-          isTauri() ? hint("new") : undefined,
+          isTauri() || !browserKeeps(chords.of["new"]) ? hint("new") : undefined,
         ),
         SEP,
         item(
@@ -11057,7 +11214,7 @@ export function App() {
           "open",
           "Open…",
           openDocument,
-          isTauri() ? hint("open") : undefined,
+          isTauri() || !browserKeeps(chords.of["open"]) ? hint("open") : undefined,
         ),
         // Only where there are paths to remember: a browser is never
         // told where a file it was handed came from.
@@ -11521,6 +11678,10 @@ export function App() {
   markMenuKeys(
     menus.flatMap((m) => m.entries),
     chords.menuOf,
+  );
+  markNeedsALayer(
+    menus.flatMap((m) => m.entries),
+    selectionSet.length === 0,
   );
   const menusRef = useRef(menus);
   menusRef.current = menus;
@@ -12571,7 +12732,12 @@ export function App() {
                         aria-label="More ways to select"
                         aria-expanded={selectsOpen}
                         title="The other ways to pick a region"
-                        onClick={() => setSelectsOpen((open) => !open)}
+                        data-flyout
+                        onClick={() => {
+                          setShapesOpen(false);
+                          setMoreOpen(false);
+                          setSelectsOpen((open) => !open);
+                        }}
                       />
                     )}
                     {selectsOpen && (
@@ -12627,7 +12793,12 @@ export function App() {
                         aria-label="More shapes"
                         aria-expanded={shapesOpen}
                         title="The other shapes"
-                        onClick={() => setShapesOpen((open) => !open)}
+                        data-flyout
+                        onClick={() => {
+                          setSelectsOpen(false);
+                          setMoreOpen(false);
+                          setShapesOpen((open) => !open);
+                        }}
                       />
                     )}
                     {shapesOpen && (
@@ -12681,7 +12852,12 @@ export function App() {
                   className={
                     hiddenTools.includes(tool) ? "tool active" : "tool"
                   }
-                  onClick={() => setMoreOpen((open) => !open)}
+                  data-flyout
+                  onClick={() => {
+                    setShapesOpen(false);
+                    setSelectsOpen(false);
+                    setMoreOpen((open) => !open);
+                  }}
                   aria-expanded={moreOpen}
                   title="The tools put away from the rail"
                   aria-label="More tools"
@@ -14114,9 +14290,14 @@ export function App() {
                     </>
                   );
                 }
-                const { center, radius, focus } = g.Radial;
+                const { center, radius, focus, axes } = g.Radial;
                 const c = at(center[0], center[1]);
-                const rim = at(center[0] + radius, center[1]);
+                // Where the rings reach the radius: through the axes, the
+                // box's point that measures (radius, 0).
+                const det = axes ? axes[0] * axes[3] - axes[1] * axes[2] : 1;
+                const [ru, rv] =
+                  axes && Math.abs(det) > 1e-9 ? [(axes[3] * radius) / det, (-axes[2] * radius) / det] : [radius, 0];
+                const rim = at(center[0] + ru, center[1] + rv);
                 // A focus being dragged keeps its knob even while it sits
                 // on the centre: taken away under the pointer, it would take
                 // the drag's capture with it and the gesture would never end.
@@ -14212,14 +14393,15 @@ export function App() {
               in its own colour, because it is not the layer's outline
               and confusing the two makes both useless. */}
           {(() => {
-            const box = maskBox(selectedMask);
-            if (!box || !maskParent) return null;
-            const p = maskParent;
+            const held = maskBox(selectedMask);
+            if (!held || !maskParent) return null;
+            // The mask's own space all the way to the page.
+            const p = composeT(maskParent, held.transform);
             const at = (x: number, y: number): [number, number] => [
               view.x + (p.a * x + p.c * y + p.e) * view.zoom,
               view.y + (p.b * x + p.d * y + p.f) * view.zoom,
             ];
-            const [x0, y0, x1, y1] = box;
+            const [x0, y0, x1, y1] = held.box;
             const quad: [number, number][] = [
               at(x0, y0),
               at(x1, y0),
@@ -14753,6 +14935,9 @@ export function App() {
                     className="rename"
                     value={renaming.value}
                     autoFocus
+                    // The name ready to be typed over, as everywhere
+                    // else: typing "Box" after F2 gave "Rect 1Box".
+                    onFocus={(e) => e.currentTarget.select()}
                     onChange={(e) =>
                       setRenaming({ id: l.id, value: e.target.value })
                     }
@@ -15508,7 +15693,9 @@ export function App() {
                     className={history.past.length === 0 ? "current" : undefined}
                     aria-current={history.past.length === 0 ? "step" : undefined}
                     onClick={() => jumpHistory(-history.past.length)}
-                    disabled={history.past.length === 0}
+                    // Said rather than switched off, so the focus can
+                    // stay on it: switched off, it dropped to the page.
+                    aria-disabled={history.past.length === 0}
                   >
                     As it began
                   </button>
@@ -15694,7 +15881,11 @@ const keyHelp = (
       // something that does not happen.
       ...(isTauri()
         ? ([[cs("new", "open"), "New document, open one"]] as [string, string][])
-        : []),
+        : ([
+            ...(browserKeeps(chordOf.new) ? [] : [[c("new"), "New document"]]),
+            ...(browserKeeps(chordOf.open) ? [] : [[c("open"), "Open a file"]]),
+          ] as [string, string][])),
+      [c("find-replace"), "Find and replace across the text layers"],
       [c("keys-sheet"), "This sheet"],
     ],
   ],
@@ -18058,6 +18249,7 @@ function MenuSheet({ menus, onClose }: { menus: MenuSpec[]; onClose: () => void 
             e.run();
           }}
           hint={e.hint}
+          disabled={e.disabled}
         >
           {e.label}
         </MenuItem>
@@ -18103,7 +18295,7 @@ function MenuRows({ entries }: { entries: MenuEntry[] }) {
         ) : e.kind === "sub" ? (
           <SubMenu key={e.id} entry={e} />
         ) : (
-          <MenuItem key={e.id} icon={e.icon as IconName} onClick={e.run} hint={e.hint}>
+          <MenuItem key={e.id} icon={e.icon as IconName} onClick={e.run} hint={e.hint} disabled={e.disabled}>
             {e.label}
           </MenuItem>
         ),
@@ -18225,15 +18417,17 @@ function MenuItem({
   icon,
   onClick,
   hint,
+  disabled,
   children,
 }: {
   icon: IconName;
   onClick: () => void;
   hint?: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <button className="menu-item" role="menuitem" onClick={onClick}>
+    <button className="menu-item" role="menuitem" onClick={onClick} disabled={disabled}>
       <Icon name={icon} size={16} />
       <span className="menu-item-label">{children}</span>
       {hint && <span className="menu-item-hint">{hint}</span>}

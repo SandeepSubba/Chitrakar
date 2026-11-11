@@ -60,7 +60,14 @@ without reading anything else.*
      the fixes missed — all fixed. The nineteenth checked those nine
      and made a second broad pass; it found eighteen, none losing work
      — the closest, a discarded draft that left the page writing none
-     until the next edit — all fixed. ⬜ until a broad pass finds nothing.
+     until the next edit — all fixed. The twentieth checked those and
+     made a third broad pass; it was quieter in kind than any before —
+     no lost work, no crash, undo and save exact across 2,200 random
+     edits — but not quiet: the fixes' own edges (a chord at Straighten
+     did nothing, palette TIFFs under a byte still refused), Merge
+     layers on a blended, clipped or adjustment-holding layer, and a
+     run of interface rough edges. All fixed. ⬜ until a broad pass
+     finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11435,6 +11442,44 @@ without reading anything else.*
   one left out is named, smoke 9dc); and a palette TIFF was refused —
   the `tiff` crate has no colour type for one, so it is read through a
   copy whose directory says grey and the indices looked up here.
+  **A twentieth audit, of the nineteenth's fixes and the whole editor
+  again (November 2026).** Four auditors; nothing lost work or threw.
+  Held windows: a chord pressed while Straighten or Feather stood open
+  let the window go and then stood down, since the window was still on
+  the page when the editor's keys asked (it is taken off at once now,
+  `flushSync`, and the command runs), and the browser's own shortcut ran
+  instead — a chord the editor knows is kept from the browser under any
+  window; panning (middle button, space, the hand, a finger) let the
+  window go and lost the angle. Palette and grey TIFFs of 1, 2 or 4 bits
+  were still refused — the `tiff` crate reads a narrow sample as a byte
+  and runs off its strip — so they are read through a copy saying 8-bit
+  grey, as many columns as a row has bytes, and unpacked here (checked
+  against 28 files ImageMagick decodes). A turned ellipse mask had its
+  outline and knobs elsewhere and a nudge dropped its turn (they work in
+  the mask's own space now); a region off the page that only its
+  softening reached was written as an empty file; a file still being
+  read when New document replaced the page went into the document
+  thrown away (it is dropped, and said), and the develop window opened
+  under Preferences with the keys (it waits for any window to close).
+  Editing: Merge layers on one layer lost its blend and its clip (both
+  are carried to the picture); a group holding an adjustment or a filter
+  was "everything" — the whole page to the size fields, no handles,
+  aligned to the page, and nothing of its own to merge (its box is what
+  its other layers draw, `drawn_bounds_in_parent_space`); the Gradient
+  tool's radial ring was squashed to the shape (it has axes, a circle
+  on the page); offset's history named the distance after the group's
+  scale. Interface: Escape on a flyout also deselected, "More tools"
+  would not close from its button and two flyouts could stand open;
+  hidden guides still caught drags and a guide drawn out while hidden
+  was unseen ("1 guides" too); fifty menu rows needing a picked layer
+  did nothing with none (greyed out now, in the bar, the drawer and the
+  system's menu); the keys sheet left out Find and replace, and in a
+  tab chords a browser keeps are said to be kept; the zoom chords and a
+  Ctrl+wheel over the panels zoomed the browser; Enter on a history row
+  moved the focus to another step, F2 did not take the name, and the
+  Preferences window changed height page by page. Cancelling Straighten
+  still leaves float noise (a turn back by the opposite angle, about
+  2e-4 px after thirty) — the one inexact inverse, written down above.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

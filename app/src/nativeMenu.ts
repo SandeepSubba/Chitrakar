@@ -18,6 +18,8 @@ export type MenuEntry =
       icon: string;
       label: string;
       hint?: string;
+      /** Greyed out: nothing it could act on now. */
+      disabled?: boolean;
       run: () => void;
     }
   | {
@@ -51,7 +53,7 @@ const entriesSignature = (entries: MenuEntry[]): string =>
         ? "-"
         : e.kind === "sub"
           ? `${e.id}|${e.label}[${entriesSignature(e.entries)}]`
-          : `${e.id}|${e.label}|${e.hint ?? ""}`,
+          : `${e.id}|${e.label}|${e.hint ?? ""}|${e.disabled ? 0 : 1}`,
     )
     .join(",");
 
@@ -138,6 +140,7 @@ export async function setNativeMenu(
                 // puts on its right; a native row has one column, so it
                 // rides along in the text.
                 text: e.hint && e.hint !== "✓" ? `${e.label} (${e.hint})` : e.hint ? `✓ ${e.label}` : e.label,
+                enabled: !e.disabled,
                 action: () => dispatch(e.id),
               }),
       ),

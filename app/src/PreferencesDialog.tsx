@@ -33,6 +33,7 @@ import {
   boundChords,
   chordFromEvent,
   chordLabel,
+  browserKeeps,
   claimable,
   giveChord,
   restoreChord,
@@ -399,6 +400,9 @@ export function PreferencesDialog({
       <span>
         {label}
         {path && <span className="prefs-path"> · {path}</span>}
+        {!isTauri() && browserKeeps(chord) && (
+          <span className="prefs-path"> · a browser keeps this chord for itself; give it another to use it here</span>
+        )}
       </span>
       <button
         type="button"

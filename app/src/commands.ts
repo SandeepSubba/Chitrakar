@@ -52,6 +52,13 @@ export const COMMANDS = [
 ] as const;
 
 export type CommandId = (typeof COMMANDS)[number]["id"];
+
+/** Chords a browser keeps for itself — a new window, a new tab, closing
+ * one, opening a file — and never passes on to a page, whatever it
+ * asks. Bound all the same (the desktop shell hears them); a tab just
+ * cannot promise them. */
+const BROWSER_KEEPS = new Set(["mod+n", "mod+shift+n", "mod+t", "mod+shift+t", "mod+w", "mod+shift+w", "mod+o"]);
+export const browserKeeps = (chord: string | undefined): boolean => !!chord && BROWSER_KEEPS.has(chord);
 export type CommandGroup = (typeof COMMANDS)[number]["group"];
 
 export const COMMAND_GROUPS: readonly CommandGroup[] = ["File", "Edit", "Select", "Layer", "View", "Help"];

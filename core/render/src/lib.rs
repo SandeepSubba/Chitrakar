@@ -600,6 +600,18 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
         NodeKind::Group => {
             let mut acc = Bounds::None;
             for &child in doc.children_of(id)? {
+                // A group holding an adjustment or a filter is drawn on a
+                // surface of its own, so what they change is only what
+                // the group's other layers draw: they add nothing to its
+                // box. Taken as "everything", such a group was the whole
+                // page to the size fields, the handles and alignment, and
+                // could not be sized at all.
+                if matches!(
+                    doc.node(child)?.kind,
+                    NodeKind::Adjustment(_) | NodeKind::Filter(_)
+                ) {
+                    continue;
+                }
                 acc = acc.union(visual_box(doc, child, t)?);
                 if acc == Bounds::Everything {
                     break;
@@ -686,6 +698,42 @@ fn ancestors_have_effects(doc: &Document, id: NodeId) -> bool {
 /// recursive form and `node_bounds` is the one that finishes the job.
 pub fn bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
     bounds_in_parent_space_inner(doc, id, true)
+}
+
+/// What a layer draws, in its parent's space, effects and all: as
+/// [`bounds_in_parent_space`], except that a group holding an adjustment
+/// or a filter — drawn on a surface of its own, where they change only
+/// what its other layers draw — is the box of those layers rather than
+/// "everything". What a merge is drawn over: taken as everything, such a
+/// group had nothing of its own to merge, and beside a small layer it was
+/// cut down to that layer's box.
+pub fn drawn_bounds_in_parent_space(doc: &Document, id: NodeId) -> Result<Bounds, DocError> {
+    let node = doc.node(id)?;
+    if !matches!(node.kind, NodeKind::Group) {
+        return bounds_in_parent_space(doc, id);
+    }
+    let mut acc = Bounds::None;
+    for &child in doc.children_of(id)? {
+        if matches!(
+            doc.node(child)?.kind,
+            NodeKind::Adjustment(_) | NodeKind::Filter(_)
+        ) {
+            continue;
+        }
+        acc = acc.union(drawn_bounds_in_parent_space(doc, child)?);
+    }
+    let pad = Effect::reach_of(&node.effects);
+    Ok(match acc {
+        Bounds::Rect(x0, y0, x1, y1) => {
+            match transformed_local_bounds(node.transform, (x0, y0, x1, y1)) {
+                Bounds::Rect(x0, y0, x1, y1) => {
+                    Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad)
+                }
+                other => other,
+            }
+        }
+        other => other,
+    })
 }
 
 fn bounds_in_parent_space_inner(
