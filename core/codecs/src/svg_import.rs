@@ -327,6 +327,19 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
         return Err(why);
     }
     let mut opt = usvg::Options::default();
+    // A picture the file holds that is stored on its side (a camera's
+    // JPEG with Orientation 5 to 8) is handed to the reader upright:
+    // it sizes the picture by its stored grid, and placed upright in a
+    // box worked out for the grid turned, a 17×33 picture in a 17×33
+    // box was drawn 8.8×17, and stretched one spilled far past its box.
+    opt.image_href_resolver.resolve_data = Box::new(|mime, data, opts| {
+        if mime.starts_with("image/") {
+            if let Some(upright) = upright_if_turned(&data) {
+                return Some(usvg::ImageKind::PNG(std::sync::Arc::new(upright)));
+            }
+        }
+        (usvg::ImageHrefResolver::default_data_resolver())(mime, data, opts)
+    });
     {
         let fonts = opt.fontdb_mut();
         fonts.load_font_data(FACE.to_vec());
@@ -2495,6 +2508,21 @@ fn sample_wrapped(tile: &chitrakar_render::Surface, x: f32, y: f32) -> chitrakar
     )
 }
 
+/// A picture's bytes as an upright PNG, where it is stored turned on
+/// its side — its upright size is not its stored one; `None` otherwise.
+fn upright_if_turned(bytes: &[u8]) -> Option<Vec<u8>> {
+    let stored = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()?;
+    let decoded = crate::decode(bytes).ok()?;
+    if (decoded.width, decoded.height) == stored {
+        return None;
+    }
+    crate::encode_png(decoded.width, decoded.height, &decoded.rgba8).ok()
+}
+
 /// One embedded picture, decoded and placed.
 ///
 /// usvg hands the bytes over as the file stored them and says what
@@ -3456,6 +3484,54 @@ mod tests {
     /// usvg gives the rectangle and the picture's own grid is whatever
     /// the bytes were, so the scale between them is the importer's to
     /// get right.
+    /// A camera's JPEG stored on its side, held in an SVG: it comes in
+    /// upright and fills the box the file gives it, as a browser draws
+    /// it, rather than shrunk to the box worked out for its stored grid.
+    #[test]
+    fn a_picture_stored_on_its_side_fills_its_box_upright() {
+        let (w, h) = (32u32, 16u32);
+        let px = [200u8, 40, 40].repeat((w * h) as usize);
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .encode(&px, w, h, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let mut exif = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+        exif.extend_from_slice(&[6, 0, 0, 0, 0, 0, 0, 0]);
+        let mut file = jpeg[..2].to_vec();
+        file.extend_from_slice(&[0xff, 0xe1]);
+        file.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        file.extend_from_slice(&exif);
+        file.extend_from_slice(&jpeg[2..]);
+        const ABC: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut b64 = String::new();
+        for chunk in file.chunks(3) {
+            let n = (chunk[0] as u32) << 16
+                | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+                | *chunk.get(2).unwrap_or(&0) as u32;
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    b64.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+                } else {
+                    b64.push('=');
+                }
+            }
+        }
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="100" height="100">
+                 <rect width="10" height="10" fill="#00ffff"/>
+                 <image x="10" y="10" width="16" height="32" xlink:href="data:image/jpeg;base64,{b64}"/>
+               </svg>"##
+        );
+        let imported = import_svg(svg.as_bytes()).unwrap();
+        let pic = &imported.images[0];
+        assert_eq!((pic.width, pic.height), (16, 32), "upright");
+        let t = pic.transform;
+        assert!(
+            (t.a - 1.0).abs() < 1e-3 && (t.d - 1.0).abs() < 1e-3 && (t.e - 10.0).abs() < 1e-3,
+            "filling its 16×32 box: {t:?}"
+        );
+    }
+
     #[test]
     fn a_picture_inside_the_file_comes_in_as_a_picture() {
         // Two by two: red, green over blue, white. Drawn into a box

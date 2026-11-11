@@ -18388,7 +18388,7 @@ assert(
   await page.click('.modal-actions .primary:text-is("Done")');
   await page.waitForTimeout(200);
   assert((await onRail("Crop").count()) === 0, "a tool unticked leaves the rail");
-  const more = rail.locator('button[aria-label="More tools"]');
+  const more = rail.locator('button[aria-label^="More tools"]');
   assert((await more.count()) === 1, "and a slot appears at the end to hold it");
   await more.click();
   await page.waitForTimeout(120);
@@ -21479,7 +21479,7 @@ assert(
   // A palm lands, then the pen paints: the stroke is the pen's.
   await ph.keyboard.press("Escape");
   await ph.locator('.toolbar button[aria-label="Paint"]').click().catch(async () => {
-    await ph.click('button[aria-label="More tools"]');
+    await ph.click('button[aria-label^="More tools"]');
     await ph.locator('.tool-flyout button[aria-label="Paint"]').click();
   });
   await ph.waitForTimeout(150);
@@ -22000,6 +22000,135 @@ assert(
   await ctx.close();
 }
 
+// 9de. The twenty-fourth audit's interface pass. Ctrl+Z with a number
+// typed into the panel and not yet taken undid the step before, and the
+// typing was then settled over it, losing that step's redo; Space no
+// longer panned after a window opened by its chord had closed; a layer
+// picked on the canvas kept its row out of sight; Space had no name in
+// a chord; and Offset path asked for a distance before refusing text.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  const said = [];
+  p.on("dialog", (d) => {
+    said.push(d.type() + ":" + d.message());
+    d.type() === "prompt" ? d.accept("8") : d.accept();
+  });
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  const rect = async (x, y) => {
+    await p.locator("#engine-canvas").hover();
+    await p.keyboard.press("r");
+    await p.mouse.move(r.x + x, r.y + y);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x + 60, r.y + y + 50, { steps: 4 });
+    await p.mouse.up();
+    await p.waitForTimeout(250);
+  };
+  await rect(20, 20);
+  await rect(120, 60);
+  await p.keyboard.press("v");
+  await p.locator(".panel ul li .layer-name").first().click();
+  await p.waitForTimeout(200);
+  const steps = () => p.locator(".history li:not(.history-start):not(.future)").count();
+  const before = await steps();
+  // Ctrl+Z with "300" typed in X drops the typing, and nothing else.
+  const X = p.locator('input[aria-label="X position"]');
+  await X.click();
+  await p.keyboard.press("Control+a");
+  await p.keyboard.type("300");
+  await p.keyboard.press("Control+z");
+  await p.waitForTimeout(250);
+  assert((await steps()) === before, `Ctrl+Z in a typed box takes back the typing, not a step (${before} → ${await steps()})`);
+  assert((await X.inputValue()) !== "300", "and the box shows what the layer is");
+  await p.keyboard.press("Tab");
+  await p.waitForTimeout(250);
+  assert((await steps()) === before, "Tab after it settles nothing");
+  // Space pans after Preferences was opened by its chord over a clicked tool.
+  await p.keyboard.press("v");
+  await p.locator('.toolbar button[aria-label="Move"], .tool-group > button[aria-label="Move"]').first().click();
+  await p.keyboard.press("Control+,");
+  await p.waitForTimeout(400);
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(300);
+  const had = await steps();
+  const c = await p.locator("#engine-canvas").boundingBox();
+  await p.keyboard.down("Space");
+  await p.mouse.move(r.x + 40, r.y + 40);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 140, r.y + 140, { steps: 5 });
+  await p.mouse.up();
+  await p.keyboard.up("Space");
+  await p.waitForTimeout(250);
+  assert((await steps()) === had, "Space held after a window by its chord pans rather than moving the layer");
+  await p.keyboard.press("Control+0");
+  // A layer picked on the canvas has its row brought into sight: forty
+  // copies of the top square, so the lower one's row is far down.
+  await p.locator(".panel ul li .layer-name").first().click();
+  await p.click('.menu-label:text-is("Layer")');
+  await p.locator(".menu-pop .menu-item", { hasText: /^Repeat/ }).first().click();
+  await p.waitForTimeout(300);
+  const win = p.locator('[role="dialog"][aria-label="Repeat"]');
+  await win.locator('input[aria-label="Repeat copies"]').fill("40");
+  await win.locator('input[aria-label="Repeat move across"]').fill("2");
+  await win.locator('input[aria-label="Repeat move down"]').fill("2");
+  await win.locator("button.primary").click();
+  await p.waitForTimeout(600);
+  const rows = await p.locator(".panel ul li").count();
+  if (rows > 20) {
+    // The lowest layer on the page is the last row.
+    await p.keyboard.press("v");
+    await p.locator(".panel ul li").first().click();
+    await p.waitForTimeout(200);
+    await p.mouse.click(r.x + 21, r.y + 21);
+    await p.waitForTimeout(400);
+    const seen = await p.evaluate(() => {
+      const row = document.querySelector(".panel ul li.selected");
+      if (!row) return "none";
+      let box = row.parentElement;
+      while (box && !(box.scrollHeight > box.clientHeight && /auto|scroll/.test(getComputedStyle(box).overflowY))) box = box.parentElement;
+      if (!box) return "no box";
+      const a = row.getBoundingClientRect(), b = box.getBoundingClientRect();
+      return a.top >= b.top - 1 && a.bottom <= b.bottom + 1 ? "in sight" : `out of sight ${a.top} ${b.top}-${b.bottom}`;
+    });
+    assert(seen === "in sight", `a layer picked on the page has its row in sight (${seen})`);
+  }
+  await ctx.close();
+}
+{
+  // The path rows refuse text before asking for a number.
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  const asked = [];
+  p.on("dialog", (d) => {
+    asked.push(d.type());
+    d.accept();
+  });
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  await p.click('.menu-label:text-is("Layer")');
+  await p.locator('.menu-pop:not(.sub) .menu-item.has-sub', { hasText: "Add" }).first().hover();
+  const addText = p.locator('.menu-pop.sub[aria-label="Add"] .menu-item', { hasText: "Text" }).first();
+  await addText.waitFor({ timeout: 2000 });
+  await addText.click();
+  await p.waitForTimeout(400);
+  // Added, it is picked, and open for typing.
+  await p.keyboard.type("Hi");
+  await p.waitForTimeout(200);
+  {
+    asked.length = 0;
+    await p.click('.menu-label:text-is("Layer")');
+    await p.locator('.menu-pop:not(.sub) .menu-item.has-sub', { hasText: "Path" }).first().hover();
+    await p.locator('.menu-pop.sub[aria-label="Path"] .menu-item', { hasText: "Offset path" }).first().click();
+    await p.waitForTimeout(300);
+    assert(asked.length === 1 && asked[0] === "alert", `Offset path on text refuses without asking (${asked})`);
+  }
+  await ctx.close();
+}
+
 // 9dd. The twentieth audit. A chord pressed while Straighten stood open
 // let the window go and did nothing else (the browser's own shortcut ran
 // instead); panning with the middle button let it go too; Escape on a
@@ -22067,7 +22196,7 @@ assert(
       "Escape puts a flyout away and keeps the layer picked",
     );
   }
-  const away = p.locator('button[aria-label="More tools"]');
+  const away = p.locator('button[aria-label^="More tools"]');
   if (await away.count()) {
     await away.click();
     await p.waitForTimeout(200);

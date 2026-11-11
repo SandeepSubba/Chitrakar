@@ -52,6 +52,8 @@ check(importKind("logo.ai") === "pdf" && importKind("doc.PDF") === "pdf", "AI an
 check(importKind("photo.heic") === "picture" && importKind("x.avif") === "picture", "HEIC and AVIF by name");
 check(importKind("draft.chitra") === "document", "the editor's own document");
 check(importKind("3f2a-download", bytes("PK", [3, 4])) === "document", "and one whatever it is called");
+check(importKind("odd.chitra", bytes([0x89], "PNG")) === "picture", "a PNG named .chitra is the PNG");
+check(importKind("broken.chitra", bytes("junk")) === "document", "and junk named .chitra a damaged document");
 check(importKind("notes.txt") === null && importKind("song.mp3", undefined, "audio/mpeg") === null, "nothing else");
 check(importKind("unnamed", undefined, "image/png") === "picture", "a picture by its type");
 
@@ -90,6 +92,11 @@ check(
 check(said("manifest error: missing field `meta` at line 1 column 3091").includes("document inside"), "a manifest's field");
 check(said("SVG data parsing failed cause expected 'g' tag, not 'svg' at 1:152").includes("not well-formed"), "an SVG's XML");
 check(said("The image format Bmp is not supported").includes("could not be decoded"), "a format the engine leaves to the browser");
+check(
+  said("The Decoder does not support the image format `RGB with [8, 8, 8, 8, 8] bits per sample`").includes("more channels"),
+  "a TIFF with a selection beside its alpha is said in words",
+);
+check(said("The Decoder does not support the image format `CIELab with [8, 8, 8] bits per sample`").includes("Lab"), "a Lab TIFF too");
 
 if (fails.length) {
   console.error(`${fails.length} of ${ran} failed:\n  ` + fails.join("\n  "));

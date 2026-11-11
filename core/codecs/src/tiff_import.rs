@@ -96,11 +96,14 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         .flatten()
         .or_else(|| dec.get_tag_u8_vec(Tag::Unknown(34675)).ok());
     // ExtraSamples 1 is associated alpha: colour already multiplied by it.
-    let premultiplied = dec
+    // And 0 is "unspecified": not transparency at all but what Photoshop
+    // writes for a saved selection, which cut everything outside it away.
+    let extra = dec
         .find_tag_unsigned_vec::<u16>(Tag::ExtraSamples)
         .ok()
-        .flatten()
-        .is_some_and(|v| v.first() == Some(&1));
+        .flatten();
+    let premultiplied = extra.as_ref().is_some_and(|v| v.first() == Some(&1));
+    let not_alpha = extra.as_ref().is_some_and(|v| v.first() == Some(&0));
     let palette = if matches!(color, ColorType::Palette(_)) {
         Some(
             dec.find_tag_unsigned_vec::<u16>(Tag::ColorMap)
@@ -215,8 +218,10 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         let s = &samples[i * channels..i * channels + channels];
         let px: [u8; 4] = match color {
             ColorType::Gray(_) => [s[0] as u8, s[0] as u8, s[0] as u8, 255],
+            ColorType::GrayA(_) if not_alpha => [s[0] as u8, s[0] as u8, s[0] as u8, 255],
             ColorType::GrayA(_) => [s[0] as u8, s[0] as u8, s[0] as u8, s[1] as u8],
             ColorType::RGB(_) => [s[0] as u8, s[1] as u8, s[2] as u8, 255],
+            ColorType::RGBA(_) if not_alpha => [s[0] as u8, s[1] as u8, s[2] as u8, 255],
             ColorType::RGBA(_) => [s[0] as u8, s[1] as u8, s[2] as u8, s[3] as u8],
             ColorType::YCbCr(_) if jpeg_inside => [s[0] as u8, s[1] as u8, s[2] as u8, 255],
             ColorType::YCbCr(_) => ycbcr(s[0], s[1], s[2]),
@@ -718,6 +723,20 @@ mod tests {
         img.write_data(&[40, 255, 160, 129]).unwrap();
         let got = decode_tiff(&out.into_inner()).expect("differenced grey and alpha read");
         assert_eq!(got.rgba8, [40, 40, 40, 255, 200, 200, 200, 128]);
+    }
+
+    /// A fourth sample marked "unspecified" (ExtraSamples 0) is a saved
+    /// selection, as Photoshop writes one, not transparency: the picture
+    /// comes in whole, where everything outside the selection was cut.
+    #[test]
+    fn an_unspecified_extra_sample_is_not_transparency() {
+        let mut out = Cursor::new(Vec::new());
+        let mut tiff = TiffEncoder::new(&mut out).unwrap();
+        let mut img = tiff.new_image::<colortype::RGBA8>(2, 1).unwrap();
+        img.encoder().write_tag(Tag::ExtraSamples, 0u16).unwrap();
+        img.write_data(&[220, 30, 30, 255, 30, 30, 220, 0]).unwrap();
+        let got = decode_tiff(&out.into_inner()).expect("read");
+        assert_eq!(got.rgba8, [220, 30, 30, 255, 30, 30, 220, 255]);
     }
 
     #[test]

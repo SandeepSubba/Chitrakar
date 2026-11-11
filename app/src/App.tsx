@@ -10,7 +10,7 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, editOf, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
-import { onColour, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
+import { accentAsText, onColour, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
 import {
   DOCUMENTS,
   baseName,
@@ -813,27 +813,58 @@ if (typeof window !== "undefined") {
     true,
   );
 }
-/** Whether the last thing done was with the pointer rather than a key:
- * a button clicked keeps the focus, and Space there is the hand, where a
- * button reached with Tab is pressed by it. `:focus-visible` was read
- * for this, and Chromium sets it on the clicked button at the very Space
- * that asks — so Space undid again after a click on Undo, toggled an eye
- * back, and a drag meant to pan moved the picture. */
-let lastByPointer = false;
+/** The controls the focus last came to by a press of the pointer rather
+ * than by a key that moves it: a button clicked keeps the focus, and
+ * Space there is the hand, where a button reached with Tab is pressed by
+ * it. `:focus-visible` was read for this, and Chromium sets it on the
+ * clicked button at the very Space that asks — so Space undid again
+ * after a click on Undo, toggled an eye back, and a drag meant to pan
+ * moved the picture.
+ *
+ * Asked of the control rather than of the last key: a window opened by
+ * its chord and closed with Escape gives the focus back to the button
+ * clicked before, which was still clicked, not reached — and the panes
+ * stopped panning after Preferences or Export had been opened. So only
+ * the focus arriving decides: by a press, the control was clicked; by
+ * Tab, an arrow or Home/End, reached; given back by a window, it is
+ * what it was. */
+const clickedControls = new WeakSet<Element>();
+let pressedLast = false;
+let navigating = false;
+const MOVES_FOCUS = new Set(["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
 if (typeof window !== "undefined") {
-  window.addEventListener("pointerdown", () => (lastByPointer = true), true);
+  window.addEventListener(
+    "pointerdown",
+    (e) => {
+      pressedLast = true;
+      // A press on the control that has the focus already brings no
+      // focusin, and a control reached with Tab and then clicked is
+      // clicked.
+      setTimeout(() => {
+        const now = document.activeElement;
+        if (now && e.target instanceof Node && now.contains(e.target)) clickedControls.add(now);
+      }, 0);
+    },
+    true,
+  );
   window.addEventListener(
     "keydown",
     (e) => {
-      // Only a key that moves the focus: after a click, `]`, Ctrl+Z or
-      // an arrow nudging the layer leave it on the button clicked, and
-      // Space there is still the hand. Asked once the key has done its
-      // work, by whether the focus is somewhere else.
       if (e.code === "Space") return;
-      const before = document.activeElement;
-      setTimeout(() => {
-        if (document.activeElement !== before) lastByPointer = false;
-      }, 0);
+      pressedLast = false;
+      if (!MOVES_FOCUS.has(e.key)) return;
+      navigating = true;
+      setTimeout(() => (navigating = false), 0);
+    },
+    true,
+  );
+  window.addEventListener(
+    "focusin",
+    (e) => {
+      const el = e.target;
+      if (!(el instanceof Element)) return;
+      if (navigating) clickedControls.delete(el);
+      else if (pressedLast) clickedControls.add(el);
     },
     true,
   );
@@ -855,7 +886,23 @@ function aWindowIsUp(): boolean {
  * own "save page". Enter takes what was typed (the field's blur does)
  * and stays in the field — which is drawn afresh from the document, so
  * the focus is put back on the new one by its name. */
+/** The fields whose typing waits for the caret to leave (`fieldKeys`):
+ * an undo pressed in one with something typed drops what was typed,
+ * rather than undoing the step before and then, when the caret left,
+ * settling the typing over it and losing that step's redo. */
+const settlesOnLeave = new WeakSet<HTMLInputElement>();
+
+/** Drops what was typed into such a field and not yet settled. */
+function dropUnsettled(el: Element | null): boolean {
+  if (!(el instanceof HTMLInputElement) || !settlesOnLeave.has(el)) return false;
+  if (el.value === el.defaultValue) return false;
+  el.value = el.defaultValue;
+  el.select();
+  return true;
+}
+
 function fieldKeys(e: React.KeyboardEvent<HTMLInputElement>): void {
+  settlesOnLeave.add(e.currentTarget);
   if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
   // Escape puts back what the field said, as the text box's does: what
   // was typed is not taken when the field is let go of.
@@ -1633,8 +1680,21 @@ const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("st
  * and said nothing. */
 function typedNumber(answer: string): number | null {
   const t = answer.trim().replace(/\s*(?:px|pixels?)$/i, "").replace(/\s+/g, "");
-  const v = Number(/^[-+]?\d+,\d+$/.test(t) ? t.replace(",", ".") : t);
-  return t !== "" && Number.isFinite(v) ? v : null;
+  // Written as a person writes a number: digits, a sign, one decimal
+  // point or comma. "1,000" is a thousand to some and one to others, so
+  // it is not taken as either; "0x10" and "1e3" were read as 16 and
+  // 1000 by `Number`.
+  if (!/^[-+]?(\d+([.,]\d+)?|[.,]\d+)$/.test(t) || /^[-+]?\d{1,3},\d{3}$/.test(t)) return null;
+  const v = Number(t.replace(",", "."));
+  return Number.isFinite(v) ? v : null;
+}
+
+/** A chip in the rail shows four letters before it clips: names that
+ * only part further in ("Left eye", "Left ear") read the same there, so
+ * those are said by their first letter and their place instead. */
+function fitChips(out: string[]): string[] {
+  const short = out.map((o, i) => ([...o].length <= 4 ? o : `${[...o][0] ?? "#"}${i + 1}`));
+  return new Set(short).size === short.length ? short : short.map((_, i) => `#${i + 1}`);
 }
 
 /** Kept regions' names as their chips in the rail can hold them: the
@@ -1647,7 +1707,7 @@ function typedNumber(answer: string): number | null {
 function chipNames(names: string[]): string[] {
   const parts = names.map((name) => {
     const t = name.trim();
-    const m = /^(.*?\S)\s*(\d{1,2})$/u.exec(t);
+    const m = /^(.*?\S)\s*(\d{1,3})$/u.exec(t);
     return m ? { stem: [...m[1]], num: m[2] } : { stem: [...t], num: "" };
   });
   const take = parts.map((p) => (p.num ? 1 : 3));
@@ -1667,9 +1727,9 @@ function chipNames(names: string[]): string[] {
         }
       }
     }
-    if (!grew) return out;
+    if (!grew) return fitChips(out);
   }
-  return say();
+  return fitChips(say());
 }
 
 /** Rows that act on the picked layers and on nothing else: with none
@@ -2230,9 +2290,10 @@ export function App() {
     if (prefs.accent) {
       root.setProperty("--accent", prefs.accent);
       root.setProperty("--on-accent", onColour(prefs.accent));
+      root.setProperty("--accent-on-dark", accentAsText(prefs.accent, "#2a2a30"));
+      root.setProperty("--accent-on-light", accentAsText(prefs.accent, "#ffffff"));
     } else {
-      root.removeProperty("--accent");
-      root.removeProperty("--on-accent");
+      for (const name of ["--accent", "--on-accent", "--accent-on-dark", "--accent-on-light"]) root.removeProperty(name);
     }
     if (prefs.sliderColor) root.setProperty("--slider", prefs.sliderColor);
     else root.removeProperty("--slider");
@@ -3746,7 +3807,7 @@ export function App() {
                     : {
                         // In a CMYK document, an ink: an sRGB stroke took
                         // another road to the press than the inks did.
-                        color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                        color: inkOf(fill),
                         width: 4,
                         widths: [],
                         dash: [],
@@ -3795,6 +3856,23 @@ export function App() {
         if (bar) {
           e.preventDefault();
           bar.focus();
+        }
+        return;
+      }
+      // Shift+F10 or the menu key with nothing in particular focused is
+      // the canvas's menu for what is picked, opened in the middle of the
+      // view, as a right-click on it would. A row, a field or a button
+      // has its own (or the browser's).
+      if (
+        ((e.key === "F10" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) || e.key === "ContextMenu") &&
+        (e.target === document.body || hostRef.current?.contains(e.target as Node)) &&
+        selected !== null &&
+        !aWindowIsUp()
+      ) {
+        const r = hostRef.current?.getBoundingClientRect();
+        if (r) {
+          e.preventDefault();
+          setContextAt([r.left + r.width / 2, r.top + r.height / 2]);
         }
         return;
       }
@@ -3861,8 +3939,16 @@ export function App() {
         e.preventDefault();
         setPenPoints((pts) => pts.slice(0, -1));
         setPenHandles((hs) => hs.slice(0, -1));
+      } else if (
+        (fired === "undo" || fired === "redo") &&
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement.dataset.ownUndo !== undefined
+      ) {
+        // The document's name is not a step in its history: the box's
+        // own undo takes back what was typed there.
       } else if (fired === "undo" || fired === "redo") {
         e.preventDefault();
+        if (fired === "undo" && dropUnsettled(document.activeElement)) return;
         if (undoMidGesture()) return;
         if (fired === "redo") redo();
         else undo();
@@ -3959,9 +4045,10 @@ export function App() {
       // keyboard, where it presses the button or opens the list as it
       // does everywhere. A button only clicked keeps the focus without
       // showing it, and Space there still pans, so picking a tool and
-      // then holding Space to look around works (`lastByPointer`).
+      // then holding Space to look around works (`clickedControls`).
       const pressing =
-        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement) && !lastByPointer;
+        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement) &&
+        !clickedControls.has(e.target);
       if (e.code === "Space" && !(e.target instanceof HTMLInputElement) && !pressing && !typing) {
         spaceRef.current = true;
         e.preventDefault();
@@ -3995,6 +4082,7 @@ export function App() {
     fitView,
     keys,
     chords,
+    selected,
   ]);
 
   // Keep the viewport measurement in step with the element it describes.
@@ -4800,7 +4888,16 @@ export function App() {
     // A gesture the system took back is taken back: a finger's drag of a
     // handle cancelled half way left its size on the layer with no step
     // in the history, folded into whatever was done next.
-    if (!ignoredRef.current.has(e.pointerId)) cancelGesture();
+    //
+    // Only a drag that pointer was driving: the one pointer down, with a
+    // drag in flight. A second finger taken back wiped the Pen's anchors
+    // put down before it, and the crop frame and the knife's line with them.
+    if (
+      !ignoredRef.current.has(e.pointerId) &&
+      (handleHeld() || zoomBoxRef.current !== null) &&
+      [...pointersDown.current.keys()].every((id) => id === e.pointerId)
+    )
+      cancelGesture();
     onHostPointerUp(e);
   };
 
@@ -7664,6 +7761,16 @@ export function App() {
               ? "above"
               : "below";
       }
+      // A group cannot go inside itself: over one of its own layers no
+      // line is drawn, where one used to promise a drop that did nothing.
+      let up = over === null ? undefined : layers.find((l) => l.id === over)?.parent;
+      for (let hops = 0; up !== undefined && hops < 256; hops++) {
+        if (up === drag.id) {
+          over = null;
+          break;
+        }
+        up = layers.find((l) => l.id === up)?.parent;
+      }
       drag.over = over;
       drag.where = where;
       setLayerDrag({ id: drag.id, over, where });
@@ -8479,13 +8586,22 @@ export function App() {
    * after it. */
   const offsetPath = () => {
     if (!session || selected === null) return;
+    // Refused before the question, not after an answer it cannot use.
+    if (!(typeof selectedKind === "object" && selectedKind !== null && "Vector" in selectedKind)) {
+      alert("Offset path: only a shape has an outline to move.");
+      return;
+    }
     const answer = window.prompt(
       "Move the outline out by how many pixels? (A negative number moves it in.)",
       "8",
     );
     if (answer === null) return;
     const by = typedNumber(answer);
-    if (by === null || by === 0) {
+    if (by === 0) {
+      alert("Offset path: an outline moved by nothing is the outline it was — type a number of pixels, such as 8 or -4.");
+      return;
+    }
+    if (by === null) {
       alert(`Offset path: “${answer}” is not a distance — type a number of pixels, such as 8 or -4.`);
       return;
     }
@@ -8538,6 +8654,10 @@ export function App() {
    * leave hundreds of short steps nobody can reshape by hand. */
   const simplifyPath = () => {
     if (!session || selected === null) return;
+    if (!(typeof selectedKind === "object" && selectedKind !== null && "Vector" in selectedKind && "Path" in selectedKind.Vector.shape)) {
+      alert("Simplify path: only a path has anchors to spare.");
+      return;
+    }
     const answer = window.prompt(
       "How far may the simpler outline stray from this one, in pixels?",
       "0.5",
@@ -8830,6 +8950,8 @@ export function App() {
   ) => {
     if (!session || selected === null || !selectedKind) return;
     if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    // Middle button, Space and the Hand pan from here, as from any handle.
+    if (handleRefuses(e)) return;
     e.stopPropagation();
     if (selectedLocked()) return;
     curveDragRef.current = {
@@ -9249,6 +9371,7 @@ export function App() {
   } | null>(null);
   const onGradMaskDown = (e: React.PointerEvent, end: "from" | "to" | "both") => {
     if (!session || selected === null || !selectedMask || !("Gradient" in selectedMask.kind)) return;
+    if (handleRefuses(e)) return;
     e.stopPropagation();
     gradMaskRef.current = { end, mask: JSON.parse(JSON.stringify(selectedMask)), start: layerPoint(e) };
     (e.target as Element).setPointerCapture(e.pointerId);
@@ -9587,8 +9710,20 @@ export function App() {
 
   /** The colour to draw in: what the colour well says, standing for the
    * palette entry it came out of when it came out of one. */
+  /** A colour from the well or the palette as the document holds one.
+   * In a CMYK document with a press profile, the inks the profile
+   * separates it into: the plain formula is not the profile's way, so
+   * #20a040 picked in the well was drawn as #0f836a, and an eyedropped
+   * colour kept in the palette became another ink. */
+  const inkOf = (hex: string): AuthoredColor => {
+    if (!cmyk) return hexColor(hex);
+    const n = parseInt(hex.slice(1, 7), 16);
+    const sep = session ? session.separate(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255) : [];
+    return sep.length === 4 ? { Cmyk: { c: sep[0], m: sep[1], y: sep[2], k: sep[3], a: 1 } } : hexToCmykColor(hex);
+  };
+
   const currentInk = (): AuthoredColor => {
-    const flat = cmyk ? hexToCmykColor(fill) : hexColor(fill);
+    const flat = inkOf(fill);
     return inkFrom ? { Named: { name: inkFrom, means: flat } } : flat;
   };
 
@@ -9632,7 +9767,7 @@ export function App() {
     usedColour(hex);
     setFill(hex);
     setInkFrom(named ?? null);
-    const flat = ink ?? (cmyk ? hexToCmykColor(hex) : hexColor(hex));
+    const flat = ink ?? inkOf(hex);
     const colour: AuthoredColor = named
       ? { Named: { name: named, means: flat } }
       : flat;
@@ -9970,6 +10105,25 @@ export function App() {
     if (top < box.scrollTop) box.scrollTop = top;
     else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
   }, [history.past.length, history.future.length]);
+
+  // A layer picked on the canvas has its row brought into sight, as the
+  // history keeps its step: with sixty layers, the row of one clicked on
+  // the page sat far below the list's end and nothing said which it was.
+  // The box that scrolls is moved, and nothing round it.
+  useEffect(() => {
+    const list = layerListRef.current;
+    if (selected === null || !list) return;
+    const row = list.querySelector<HTMLElement>(`li[data-id="${selected}"]`);
+    let box: HTMLElement | null = list;
+    while (box && !(box.scrollHeight > box.clientHeight && /auto|scroll/.test(getComputedStyle(box).overflowY))) {
+      box = box.parentElement;
+    }
+    if (!row || !box) return;
+    const top = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    const bottom = top + row.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+  }, [selected]);
 
   const setKind = (kind: NodeKind, gesture: boolean) => {
     if (!selectedLayer) return;
@@ -10406,7 +10560,10 @@ export function App() {
       fitSession(s, s.width, s.height);
       // Faces the file carried are registered by the open; offer them.
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
-      if (name) setDocName(name.replace(/\.chitra$/i, ""));
+      // Its name without what it was called by: a document named .png
+      // (it is one whatever it is called) kept ".png", and was saved as
+      // "….png.chitra".
+      if (name) setDocName(name.replace(/\.[a-z0-9]{1,8}$/i, ""));
       setDocDpi(s.dpi);
       setSession(s);
       setDocumentSize(s.width, s.height);
@@ -11025,54 +11182,59 @@ export function App() {
    * app, opened with it from a phone's files: a document opens, and
    * every picture is placed. */
   const takeFiles = (files: File[]) => {
-    const doc = files.find((f) => f.name.toLowerCase().endsWith(".chitra"));
-    if (doc) {
-      // Opening by dropping is still opening: what has not been saved
-      // is asked about the same as by any other way in.
-      if (!mayDiscard()) return;
-      doc
-        .arrayBuffer()
-        .then((buf) => openDocumentBytes(new Uint8Array(buf), doc.name));
-      // What came with it is not placed into it unasked — a document is
-      // opened onto a page of its own — but it is said, where it was left
-      // behind without a word.
-      const rest = files.filter((f) => f !== doc);
-      const docs = rest.filter((f) => f.name.toLowerCase().endsWith(".chitra")).map((f) => f.name);
-      const pictures = rest.filter((f) => !f.name.toLowerCase().endsWith(".chitra")).map((f) => f.name || "a file");
-      const said: string[] = [];
-      if (pictures.length > 0) {
-        const many = pictures.length > 1;
-        said.push(
-          `${pictures.join(", ")} ${many ? "were" : "was"} not placed: drop ${many ? "them" : "it"} again onto the document to place ${many ? "them" : "it"}.`,
-        );
-      }
-      // A document is opened one at a time: a second dropped beside it
-      // was told to be dropped again "to place it", which opens it.
-      if (docs.length > 0) {
-        said.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
-      }
-      if (said.length > 0) alert(`Opened ${doc.name}. ${said.join(" ")}`);
-      return;
-    }
     // A file whose name says nothing — no extension, no type, as a share
     // or a download often leaves it — is asked by its first bytes, as
     // File › Open asks; one the editor cannot read is said, where it
     // used to be dropped without a word.
     void (async () => {
-      const unread: string[] = [];
+      const kinds: (string | null)[] = [];
       for (const file of files) {
-        let kind = importKind(file.name, undefined, file.type);
+        let kind: string | null = importKind(file.name, undefined, file.type);
         if (!kind) {
           const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
           kind = importKind(file.name, head, file.type);
         }
-        if (kind === "document") {
-          if (mayDiscard()) openDocumentBytes(new Uint8Array(await file.arrayBuffer()), file.name);
-          return;
-        }
-        if (kind) placeImageFile(file);
-        else unread.push(file.name || "a file");
+        kinds.push(kind);
       }
+      const named = (f: File) => f.name || "a file";
+      const at = kinds.indexOf("document");
+      if (at >= 0) {
+        const doc = files[at];
+        // Opening by dropping is still opening: what has not been saved
+        // is asked about the same as by any other way in.
+        if (!mayDiscard()) return;
+        openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
+        // What came with it is not placed into it unasked — a document
+        // is opened onto a page of its own — but it is said, where it
+        // was left behind without a word. A document found by its bytes
+        // as much as one by its name.
+        const rest = files.map((f, i) => [f, kinds[i]] as const).filter(([f]) => f !== doc);
+        const docs = rest.filter(([, k]) => k === "document").map(([f]) => named(f));
+        const pictures = rest.filter(([, k]) => k && k !== "document").map(([f]) => named(f));
+        const unread = rest.filter(([, k]) => !k).map(([f]) => named(f));
+        const told: string[] = [];
+        if (pictures.length > 0) {
+          const many = pictures.length > 1;
+          told.push(
+            `${pictures.join(", ")} ${many ? "were" : "was"} not placed: drop ${many ? "them" : "it"} again onto the document to place ${many ? "them" : "it"}.`,
+          );
+        }
+        // A document is opened one at a time: a second dropped beside it
+        // was told to be dropped again "to place it", which opens it.
+        if (docs.length > 0) {
+          told.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+        }
+        if (unread.length > 0) {
+          told.push(`${unread.join(", ")} ${unread.length > 1 ? "are" : "is"} not something the editor can read.`);
+        }
+        if (told.length > 0) alert(`Opened ${named(doc)}. ${told.join(" ")}`);
+        return;
+      }
+      const unread: string[] = [];
+      files.forEach((file, i) => {
+        if (kinds[i]) placeImageFile(file);
+        else unread.push(named(file));
+      });
       if (unread.length > 0) {
         alert(
           `${unread.length === 1 ? `${unread[0]} is not` : `${unread.join(", ")} are not`} a picture, a drawing or a document the editor can read.`,
@@ -11089,7 +11251,15 @@ export function App() {
   const onShellDrop = async (paths: string[]) => {
     const doc = paths.find((p) => p.toLowerCase().endsWith(".chitra"));
     if (doc) {
-      if (mayDiscard()) await openPath(doc);
+      if (!mayDiscard()) return;
+      await openPath(doc);
+      // What came with it is said, as a drop on the page says it.
+      const rest = paths.filter((p) => p !== doc).map(baseName);
+      if (rest.length > 0) {
+        alert(
+          `Opened ${baseName(doc)}. ${rest.join(", ")} ${rest.length > 1 ? "were" : "was"} not placed or opened: a document opens on its own — drop pictures again onto it to place them.`,
+        );
+      }
       return;
     }
     for (const path of paths) {
@@ -12097,6 +12267,7 @@ export function App() {
             if (e.key === "Enter") e.currentTarget.blur();
           }}
           spellCheck={false}
+          data-own-undo=""
           title="What this document is called; every save and export is named after it"
           aria-label="Document name"
         />
@@ -13100,8 +13271,14 @@ export function App() {
                     setMoreOpen((open) => !open);
                   }}
                   aria-expanded={moreOpen}
-                  title="The tools put away from the rail"
-                  aria-label="More tools"
+                  // A tool put away and in hand is said as the one in hand.
+                  title={
+                    hiddenTools.includes(tool)
+                      ? `${tool}, put away from the rail — the others are here too`
+                      : "The tools put away from the rail"
+                  }
+                  aria-label={hiddenTools.includes(tool) ? `More tools: ${tool}` : "More tools"}
+                  aria-pressed={hiddenTools.includes(tool)}
                 >
                   <Icon name={hiddenTools.includes(tool) ? TOOL_ICONS[tool] : "more"} size={20} />
                 </button>
@@ -13412,9 +13589,7 @@ export function App() {
                         j === i
                           ? {
                               name: other.name,
-                              color: cmyk
-                                ? hexToCmykColor(fill)
-                                : hexColor(fill),
+                              color: inkOf(fill),
                             }
                           : other,
                       ),
@@ -13446,7 +13621,7 @@ export function App() {
                   ...swatches,
                   {
                     name: `Swatch ${n}`,
-                    color: cmyk ? hexToCmykColor(fill) : hexColor(fill),
+                    color: inkOf(fill),
                   },
                 ]);
               }}
@@ -20278,16 +20453,21 @@ function KindProps({
                 aria-label={name}
                 aria-pressed={on}
                 disabled={!range}
-                onClick={() =>
+                onClick={() => {
+                  // Smaller than the size the picked text is set in, its
+                  // own where it has one: 0.6 of the block's took a run
+                  // set at 60 down to 29, and back off it lost the 60.
+                  const own = Number(rangeSays(t.text, t.runs ?? [], range![0], range![1], "size", t.size) ?? t.size);
+                  const back = Math.round(own / 0.6);
                   onEdit(
                     styled(
                       on
-                        ? { baseline: null, size: null }
-                        : { baseline: rise, size: Math.round(t.size * 0.6) },
+                        ? { baseline: null, size: back === Math.round(t.size) ? null : back }
+                        : { baseline: rise, size: Math.round(own * 0.6) },
                     ),
                     false,
-                  )
-                }
+                  );
+                }}
               >
                 {glyph}
               </button>

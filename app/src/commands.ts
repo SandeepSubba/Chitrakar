@@ -153,7 +153,8 @@ export function chordLabel(chord: string, mac = onAMac()): string {
   const parts = chord.split("+");
   const key = parts.pop() ?? "";
   const named: Record<string, string> = { mod: mac ? "Cmd" : "Ctrl", alt: mac ? "Opt" : "Alt", shift: "Shift" };
-  return [...parts.map((p) => named[p] ?? p), key.toUpperCase()].join("+");
+  // Space is a key with a name, not a blank ("Ctrl+ ").
+  return [...parts.map((p) => named[p] ?? p), key === " " ? "Space" : key.toUpperCase()].join("+");
 }
 
 export function onAMac(): boolean {

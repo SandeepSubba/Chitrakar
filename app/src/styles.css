@@ -14,6 +14,10 @@
   /* 4.9:1 on the panel; #8a8a94 was 4.2, under what small text needs. */
   --muted: #96969f;
   --accent: #6c8cff;
+  /* The accent as text on the panel: a person's own accent is laid on
+     the root with a version of it for each theme that reads at 4.5:1
+     (`accentAsText`). */
+  --accent-text: var(--accent-on-dark, var(--accent));
   /* What sits on the accent: a button's label. */
   --on-accent: #10101a;
   /* A hairline where a border would be too much. */
@@ -53,6 +57,7 @@
   --text: #1b1b22;
   --muted: #6b6b78;
   --accent: #3b5bdb;
+  --accent-text: var(--accent-on-light, var(--accent));
   --on-accent: #ffffff;
   --line: rgb(0 0 0 / 0.08);
   --rule: #e9e9ee;
@@ -319,7 +324,7 @@ body {
 
 .brand {
   font-weight: 700;
-  color: var(--accent);
+  color: var(--accent-text);
   letter-spacing: -0.01em;
   padding-right: 0.35rem;
 }
@@ -347,7 +352,7 @@ body {
 /* Work that has not been saved, said where the name is and no louder
    than that. */
 .unsaved-dot {
-  color: var(--accent);
+  color: var(--accent-text);
   font-size: 1rem;
   line-height: 1;
   margin-left: -0.15rem;
@@ -366,7 +371,7 @@ body {
 .icc-badge {
   border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
   border-radius: 999px;
-  color: var(--accent);
+  color: var(--accent-text);
   padding: 0.05rem 0.45rem;
   font-size: 0.7rem;
 }
@@ -549,7 +554,7 @@ body {
 .chrome-button.toggled {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .fill-swatch {
@@ -800,7 +805,7 @@ body {
 .align-bar button.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* What the buttons line layers up with: a row of its own under them. */
@@ -976,7 +981,7 @@ body {
 }
 
 .history button.current {
-  color: var(--accent);
+  color: var(--accent-text);
   font-weight: 600;
 }
 
@@ -987,7 +992,7 @@ body {
 }
 
 .history li.history-start button.current {
-  color: var(--accent);
+  color: var(--accent-text);
   font-style: normal;
 }
 
@@ -1004,7 +1009,7 @@ body {
   display: grid;
   place-items: center;
   margin-left: auto;
-  color: var(--accent);
+  color: var(--accent-text);
   flex: none;
 }
 
@@ -1486,7 +1491,7 @@ body {
 }
 
 .ratio-lock.on {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
@@ -2088,7 +2093,7 @@ body {
 }
 
 .palette.shape-library .shape-chip.active {
-  color: var(--accent);
+  color: var(--accent-text);
   border-color: var(--accent);
 }
 
@@ -2173,7 +2178,7 @@ body {
 
 .palette.comps .comp-chip.active {
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* A kept brush, drawn as itself: a dot the brush's width, blurred by
@@ -2282,7 +2287,7 @@ body {
 .tool.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .canvas-host.handing {
@@ -2525,7 +2530,7 @@ body {
 }
 
 .sheet-menu.open .sheet-menu-label {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .sheet-rows {
@@ -2547,7 +2552,7 @@ body {
 }
 
 .sheet-sub[open] > summary {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* A phone. The rail goes along the bottom, where the hand already is.
@@ -2637,7 +2642,7 @@ body {
 
 .panel-toggle.on {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* A hand's width of grab on the panel's own edge, sitting over the
@@ -3146,7 +3151,7 @@ button.fold:hover {
 .layer-props .font-row > button.active {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .layer-props .font-row > button:disabled {
@@ -3189,13 +3194,13 @@ button.fold:hover {
 .layer-props button.auto-levels.on {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* Waiting for the click that answers it. */
 .auto-levels.on {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .levels-histogram {
@@ -3250,13 +3255,13 @@ button.fold:hover {
 .clip-mark {
   display: grid;
   place-items: center;
-  color: var(--accent);
+  color: var(--accent-text);
   width: 0.9rem;
   flex: none;
 }
 
 .lock-toggle[aria-pressed="true"] {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* The band dragged over the canvas to pick several layers at once. */
@@ -3363,7 +3368,7 @@ button.fold:hover {
 }
 
 .about-facts a {
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* The sheet of keys and gestures: two columns of definition lists, the

@@ -64,7 +64,9 @@ export function heifBrand(b: Uint8Array): "heic" | "avif" | null {
  * bytes (a few dozen are enough). `null` for nothing the editor takes. */
 export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportKind | null {
   const ext = extension(name);
-  if (ext === "chitra") return "document";
+  // By name alone a .chitra is a document; with its bytes, what they are
+  // decides — a PNG named .chitra was refused as a damaged document.
+  if (ext === "chitra" && !bytes) return "document";
   if (bytes) {
     // A .chitra is a ZIP, and is one whatever it is called — a download
     // is often named by the browser rather than by its maker.
@@ -92,6 +94,9 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
       return "picture";
     if (/^\s*(<\?xml|<svg|<!--)/i.test(head) && /<svg[\s>]/i.test(head)) return "svg";
   }
+  // Bytes that are none of those, under the document's name: a damaged
+  // document, and said to be one.
+  if (ext === "chitra") return "document";
   if (ext === "psd" || ext === "psb") return "psd";
   if (ext === "pdf" || ext === "ai") return "pdf";
   if (ext === "svg" || type === "image/svg+xml") return "svg";
@@ -127,6 +132,16 @@ export function said(err: unknown): string {
     [/svg data parsing failed|xml|unexpected .* tag|expected '.*' tag/i, "the SVG is not well-formed (an unclosed or mismatched tag)"],
     [/invalid zip|zip archive|could not find central directory/i, "the file is damaged: it is not a whole .chitra"],
     [/image format \w+ is not supported/i, "the picture could not be decoded here (it may be damaged)"],
+    // A TIFF's reader on a kind it does not take: Lab, or more channels
+    // than colour and one transparency (a saved selection beside them).
+    [
+      /does not support the image format `CIELab/i,
+      "it is a Lab TIFF, which the editor does not read — save it as RGB first",
+    ],
+    [
+      /does not support the image format `\w+ with \[[\d, ]+\] bits per sample/i,
+      "the TIFF has more channels than colour and transparency (a saved selection, perhaps) — save it without them first",
+    ],
     [/image format could not be determined/i, "it is not a picture this editor can read"],
     [/^InvalidFont$/i, "it is not a font file this editor can read"],
     // A colour profile's reader's own words.

@@ -606,10 +606,7 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
                 // box. Taken as "everything", such a group was the whole
                 // page to the size fields, the handles and alignment, and
                 // could not be sized at all.
-                if matches!(
-                    doc.node(child)?.kind,
-                    NodeKind::Adjustment(_) | NodeKind::Filter(_)
-                ) {
+                if rewrites_what_is_under_it(doc, child) {
                     continue;
                 }
                 acc = acc.union(visual_box(doc, child, t)?);
@@ -756,10 +753,7 @@ fn drawn_bounds_inner(doc: &Document, id: NodeId, effects: bool) -> Result<Bound
     }
     let mut acc = Bounds::None;
     for &child in doc.children_of(id)? {
-        if matches!(
-            doc.node(child)?.kind,
-            NodeKind::Adjustment(_) | NodeKind::Filter(_)
-        ) {
+        if rewrites_what_is_under_it(doc, child) {
             continue;
         }
         acc = acc.union(drawn_bounds_inner(doc, child, effects)?);
@@ -966,37 +960,19 @@ fn copy_reaches_out(doc: &Document, instance: NodeId, of: NodeId) -> bool {
             .unwrap_or(false)
 }
 
-/// Whether a group holds an adjustment or a filter, at any depth.
+/// Whether a group holds an adjustment or a filter (or a live copy of
+/// one), at any depth.
 fn holds_a_change(doc: &Document, id: NodeId) -> bool {
     match doc.node(id).map(|n| &n.kind) {
         Ok(NodeKind::Group) => doc
             .children_of(id)
             .map(|kids| {
-                kids.iter().any(|&c| {
-                    matches!(
-                        doc.node(c).map(|n| &n.kind),
-                        Ok(NodeKind::Adjustment(_) | NodeKind::Filter(_))
-                    ) || holds_a_change(doc, c)
-                })
+                kids.iter()
+                    .any(|&c| rewrites_what_is_under_it(doc, c) || holds_a_change(doc, c))
             })
             .unwrap_or(false),
         _ => false,
     }
-}
-
-/// Whether a layer is an adjustment or a filter, or a live copy of one:
-/// it changes what is under it rather than drawing anything of its own.
-fn acts_on_what_is_under(doc: &Document, mut id: NodeId) -> bool {
-    // A copy's chain is short and never loops; the bound only guards a
-    // damaged document.
-    for _ in 0..64 {
-        match doc.node(id).map(|n| &n.kind) {
-            Ok(NodeKind::Adjustment(_) | NodeKind::Filter(_)) => return true,
-            Ok(NodeKind::Instance { of, .. }) => id = *of,
-            _ => return false,
-        }
-    }
-    false
 }
 
 pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, DocError> {
@@ -1027,7 +1003,7 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
                 for part in stand_ins {
                     // As for a group below: an adjustment or a filter
                     // among the parts changes only what the others draw.
-                    if acts_on_what_is_under(doc, part) {
+                    if rewrites_what_is_under_it(doc, part) {
                         continue;
                     }
                     acc = acc.union(bounds_in_parent_space_inner(doc, part, false)?);
@@ -1053,10 +1029,9 @@ pub fn local_bounds_of(doc: &Document, id: NodeId) -> Result<Option<[f32; 4]>, D
                     // (the group is drawn on its own), so it adds nothing:
                     // taken as everything, such a group had no box, no
                     // handles, and its width could not be typed.
-                    if matches!(
-                        doc.node(child)?.kind,
-                        NodeKind::Adjustment(_) | NodeKind::Filter(_)
-                    ) {
+                    // A live copy of one is the same: it changes what is
+                    // under it too.
+                    if rewrites_what_is_under_it(doc, child) {
                         continue;
                     }
                     acc = acc.union(drawn_bounds_inner(doc, child, false)?);
@@ -3126,6 +3101,25 @@ fn draw_layer(
     }
 }
 
+/// How many pixels a page widened for its layers' effects may hold, or
+/// twice the page where that is more (a large export still has room):
+/// the widened page, and each surface made over it, is that or smaller.
+const ROOM_PIXELS: u64 = 1 << 23;
+
+/// The widest margin `m` for which a `width`×`height` page grown by `m`
+/// on every side holds no more than `budget` pixels — none, for a page
+/// that holds that many already.
+fn room_within(width: u32, height: u32, budget: u64) -> u32 {
+    let (w, h) = (width as f64, height as f64);
+    let spare = budget as f64 - w * h;
+    if spare <= 0.0 {
+        return 0;
+    }
+    // (w + 2m)(h + 2m) = wh + 2m(w + h) + 4m², at most the budget.
+    let m = (-(w + h) + ((w + h) * (w + h) + 4.0 * spare).sqrt()) / 4.0;
+    m.max(0.0).floor() as u32
+}
+
 /// [`draw_effected`] on a page widened by `m` pixels all round, so a layer
 /// running past the page is on the surface its effects are grown from as
 /// far as they reach (see there). The page's pixels under the region are
@@ -3335,6 +3329,20 @@ fn draw_effected(
             // nobody could mean, and a margin is room for an effect's
             // tail, not a second page.
             let m = ((drawn * scale).ceil() as u32).min(dst.width.max(dst.height));
+            // And no wider than a surface can be held: the widened page is
+            // drawn on, and the layer's surface, its silhouette and an
+            // outline's distances are each as large again. A shadow at
+            // the slider's top inside a group scaled up twenty-five times,
+            // with an outline, asked four gigabytes of a page at 2.5×
+            // and stopped the engine — on every opening of the file. Past
+            // the budget the margin is narrower, and the tail of a shadow
+            // that long is cut a little sooner.
+            let page = dst.width as u64 * dst.height as u64;
+            let m = m.min(room_within(
+                dst.width,
+                dst.height,
+                ROOM_PIXELS.max(2 * page),
+            ));
             if past && m > 0 {
                 return draw_with_room(doc, child, dst, clip, parent, cover, capture, bare, m);
             }
@@ -14982,6 +14990,19 @@ mod tests {
     /// paths that cross themselves and have holes, moved, scaled and
     /// flipped. And it is fast: a selection traced back from a large
     /// page's pixels has thousands of edges, and was minutes to read.
+    /// The page widened for effects stays within its budget, and a page
+    /// already that large is not widened at all.
+    #[test]
+    fn room_round_the_page_is_held_to_a_budget() {
+        let (w, h) = (3162u32, 1778u32);
+        let m = room_within(w, h, ROOM_PIXELS);
+        let held = (w as u64 + 2 * m as u64) * (h as u64 + 2 * m as u64);
+        assert!(held <= ROOM_PIXELS && m > 0, "{m}: {held}");
+        let more = (w as u64 + 2 * m as u64 + 2) * (h as u64 + 2 * m as u64 + 2);
+        assert!(more > ROOM_PIXELS, "and as wide as the budget lets it be");
+        assert_eq!(room_within(4000, 3000, ROOM_PIXELS), 0);
+    }
+
     #[test]
     fn a_path_mask_read_by_rows_is_read_as_by_pixels() {
         let mut seed = 0x2545_f491_4f6c_dd1du64;

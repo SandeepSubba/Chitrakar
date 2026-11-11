@@ -246,10 +246,17 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
     let mut lm = r.sub(n)?;
     let mut lost: Vec<String> = Vec::new();
     let mut items = Vec::new();
+    // Whether Photoshop's picture of the whole file is transparent: said
+    // by a layer count below nought. A flat file's channels past the
+    // colour are saved selections, and taken as transparency they cut
+    // the picture away outside the selection.
+    let mut merged_alpha = false;
+    let says_alpha = |r: &R| r.left() >= 2 && i16::from_be_bytes([r.b[r.p], r.b[r.p + 1]]) < 0;
     if lm.left() > 0 {
         let n = lm.len(big)?;
         let mut info = lm.sub(n)?;
         if info.left() > 0 {
+            merged_alpha |= says_alpha(&info);
             items = read_layers(&mut info, &h, &colour, &mut lost)?;
         }
         // 16- and 32-bit files keep their layers in a block at the end of
@@ -290,6 +297,7 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
                 lm.p += 1;
             }
             if matches!(&key, b"Lr16" | b"Lr32" | b"Layr") {
+                merged_alpha |= says_alpha(&block);
                 let mut said = Vec::new();
                 items = read_layers(&mut block, &h, &colour, &mut said)?;
                 lost = said;
@@ -298,7 +306,7 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
     }
 
     // Photoshop's own picture of the whole file.
-    let composite = read_merged(&mut r, &h, &colour).ok();
+    let composite = read_merged(&mut r, &h, &colour, merged_alpha).ok();
     if items.is_empty() {
         if let Some(px) = &composite {
             items.push(PsdItem::Pixels(PsdPixels {
@@ -972,7 +980,7 @@ fn samples(raw: &[u8], w: usize, h: usize, depth: u16) -> Result<Vec<f32>, Codec
 
 /// Photoshop's picture of the whole file: every channel's plane, one
 /// after another, under one compression.
-fn read_merged(r: &mut R, h: &Header, colour: &Colour) -> Result<Vec<u8>, CodecError> {
+fn read_merged(r: &mut R, h: &Header, colour: &Colour, alpha: bool) -> Result<Vec<u8>, CodecError> {
     let compression = r.u16()?;
     let (w, hh) = (h.width as usize, h.height as usize);
     let n = h.channels.min(5);
@@ -1022,6 +1030,7 @@ fn read_merged(r: &mut R, h: &Header, colour: &Colour) -> Result<Vec<u8>, CodecE
         }
     }
     let alpha_index = match h.mode {
+        _ if !alpha => usize::MAX,
         Mode::Rgb | Mode::Lab => 3,
         Mode::Cmyk => 4,
         Mode::Grey | Mode::Duotone => 1,
@@ -1713,6 +1722,19 @@ mod tests {
             (p.width, p.height, &p.rgba[..4]),
             (3, 2, &[40u8, 50, 60, 255][..])
         );
+    }
+
+    /// A flat file's fourth channel is a saved selection ("Alpha 1"), not
+    /// transparency: the picture comes in whole.
+    #[test]
+    fn a_flat_files_saved_selection_does_not_cut_it() {
+        let mut px = solid(2, 1, [40, 50, 60, 255]);
+        px[7] = 0;
+        let f = read_psd(&write(2, 1, &[], &px)).unwrap();
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        assert_eq!(p.rgba, [40, 50, 60, 255, 40, 50, 60, 255]);
     }
 
     #[test]

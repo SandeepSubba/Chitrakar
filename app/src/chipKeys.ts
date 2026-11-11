@@ -10,7 +10,18 @@ export function chipKeys(forget: () => void, rename?: () => void) {
       // Not the picked layer: the chip had the focus.
       e.preventDefault();
       e.stopPropagation();
+      // The focus goes to the chip beside it, or the row's add button:
+      // left on a chip that is gone, it fell to the page's body.
+      const chip = e.currentTarget;
+      const row = chip.parentElement;
+      const at = row ? [...row.querySelectorAll<HTMLElement>("button")].indexOf(chip as HTMLElement) : -1;
       forget();
+      setTimeout(() => {
+        if (chip.isConnected) return;
+        if (!row?.isConnected) return;
+        const buttons = [...row.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+        (buttons[Math.min(at, buttons.length - 1)] ?? buttons[0])?.focus();
+      }, 0);
     } else if (e.key === "F2" && rename) {
       e.preventDefault();
       e.stopPropagation();

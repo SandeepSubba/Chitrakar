@@ -79,8 +79,12 @@ without reading anything else.*
      a document, a palm on a tablet. The twenty-third: one finding that
      could lose work, and only across two tabs and a crash (a draft's
      pictures deleted by another tab's draft while still being written);
-     the rest edges and words, and two live-copy slips in editing. ⬜
-     until a broad pass finds nothing.
+     the rest edges and words, and two live-copy slips in editing.
+     The twenty-fourth: nothing lost and nothing thrown, every long
+     run undone, redone and reopened exactly; an undo in a typed box
+     that could lose a redo, Space-pan after a window, a merge fix
+     gone too far, CMYK well colours off the profile. ⬜ until a broad
+     pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11614,6 +11618,69 @@ without reading anything else.*
   — 30 runs of 300 steps, RGB and CMYK, pictures, gradients, copies,
   frames, styles, comps — found nothing else, and undo and save were
   exact at the end of every run.
+  **A twenty-fourth audit (November 2026).** Round 23's edges: the fix
+  that kept a live copy's blend on merge went too far — a copy wearing
+  an effect of its own is drawn on a surface of its own, where the
+  copied blend is spent, and it now merges Normal as it drew; a group
+  holding a live copy of an adjustment had no box, as a copy's own
+  parts had had (`rewrites_what_is_under_it` now decides both);
+  gradient-mask knobs and a path's curve handles answered the middle
+  button, Space and the Hand; a second finger taken back by the system
+  wiped the Pen's anchors (only the drag the pointer drove is taken
+  back); kept regions' chips still read alike past four letters
+  ("Left eye", "Left ear"; now "L1", "L2"); "1,000" was taken as one
+  pixel and "0x10" as sixteen (neither is a number now); and a
+  document found by its bytes, dropped with others, said nothing of
+  them, nor did the shell's drop. The broad pass: Ctrl+Z with a
+  number typed into the panel undid the step before, and the typing
+  was then settled over it, losing that step's redo (it drops the
+  typing); Space stopped panning after a window opened by its chord
+  had closed (a control's being clicked is now kept per control); a
+  layer picked on the canvas kept its row out of sight; accent
+  colours as text fell to 2.2:1 on the light theme and labels on
+  them chose white at 3.7:1 (text takes a version of the accent that
+  reads, labels whichever reads better); Space had no name in a
+  chord; Offset and Simplify path asked for a number before refusing
+  text; a focused chip deleted, or Preferences reset, dropped the
+  focus to the page; the Tools page took Ctrl+B as B; superscript was
+  sized from the block, not the text picked, and lost a run's size
+  coming off; in a CMYK document with a press profile, colours from
+  the well, the palette's "+" and a redefined swatch went through the
+  plain formula rather than the profile (#20a040 drew as #0f836a, an
+  eyedropped colour kept became another ink); and a comp kept before
+  its layers were grouped did not put back the group's later move
+  (the group joins the comps that keep its layers). Smaller: the "More
+  tools" slot names the put-away tool in hand; dragging a group over
+  its own layers shows no drop line; Shift+F10 on the page opens the
+  canvas's menu. Limits written down: a superscript keeps its pixel
+  size when the block's size changes later; Ctrl+Z in the panel's
+  text box takes back all the typing since it took the focus, with no
+  redo; the font drop-down sets the whole block though part is
+  picked, and the panel's text styling reaches one block of several
+  picked; a lock stops the canvas but not Delete or Bring to front;
+  the first Escape in Straighten's zoom box leaves the box; Ctrl+Shift
+  with a digit is written with the digit's shifted symbol.
+  Its files pass: a shadow at the slider's top with an outline, in a
+  group scaled up twenty-five times, stopped the engine at 2.5× — and on
+  every opening of the file after — for the page widened round it for
+  the effects' tails (three of them, four gigabytes; the widening is held
+  to a budget of pixels now, twice the page's where that is more, and
+  the same frame takes a gigabyte); a TIFF's fourth sample marked
+  "unspecified", and a flat PSD's fourth channel, were taken as
+  transparency where they are saved selections (only ExtraSamples 1 or
+  2, or a layer count below nought, says transparency); a JPEG stored
+  on its side inside an SVG came in the wrong size (handed to the reader
+  upright); offline a raw developed on one thread, the threaded engine
+  being off the build's list (it is on it now, and fetched with the
+  readers); a TIFF with a selection beside its alpha, or a Lab one, was
+  refused in the library's words; a PNG named .chitra was refused as a
+  damaged document, and a document named .png kept ".png" in its name.
+  Limits written down: bold in an SVG from elsewhere comes in regular,
+  as italic comes in upright (only the regular face is bundled with the
+  reader); a `<use>` of a `<symbol>` under a turn is clipped by the
+  symbol's viewport unturned; a shadow blurred a thousand pixels past
+  the slider takes half a minute to export.
+
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -263,12 +263,40 @@ const HEX = /^#[0-9a-fA-F]{6}$/;
  * one, by its relative luminance — so a yellow accent's buttons do not
  * carry white labels nobody can read. */
 export function onColour(hex: string): string {
+  // Whichever of the two reads better: a fixed switch at a luminance of
+  // 0.25 gave white labels at 3.7:1 on mid blues and reds, where the
+  // dark one read at 5.
+  const lum = luminance(hex);
+  return contrast(lum, luminance("#10101a")) >= contrast(lum, 1) ? "#10101a" : "#ffffff";
+}
+
+/** A colour's relative luminance, as WCAG measures it. */
+function luminance(hex: string): number {
   const c = [1, 3, 5].map((i) => {
     const v = parseInt(hex.slice(i, i + 2), 16) / 255;
     return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
   });
-  const lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-  return lum > 0.25 ? "#10101a" : "#ffffff";
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+}
+
+function contrast(a: number, b: number): number {
+  return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+}
+
+/** The accent as text on a panel of the given colour: the accent itself
+ * where it reads (4.5:1, what small text needs), or as little of it
+ * mixed toward white on a dark panel, black on a light one, as gets it
+ * there. Amber as text on the light theme's white read at 2.2:1. */
+export function accentAsText(hex: string, panel: string): string {
+  const ground = luminance(panel);
+  const toward = ground < 0.5 ? 255 : 0;
+  const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  for (let k = 0; k <= 20; k++) {
+    const t = k / 20;
+    const mixed = "#" + rgb.map((v) => Math.round(v + (toward - v) * t).toString(16).padStart(2, "0")).join("");
+    if (contrast(luminance(mixed), ground) >= 4.5) return mixed;
+  }
+  return toward ? "#ffffff" : "#000000";
 }
 
 /** The sizes the chrome can be drawn at: compact, standard, large, larger. */

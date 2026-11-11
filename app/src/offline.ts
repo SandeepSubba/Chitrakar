@@ -49,7 +49,7 @@ export function keepForOffline() {
           window.setTimeout(() => {
             void built.then((build) => {
               const readers = build.filter((u) =>
-                /chitrakar_(pdf|raw)_in|rawWorker|rawThread|developWorker/.test(u),
+                /chitrakar_(pdf|raw)_in|rawWorker|rawThread|developWorker|wasm-threads\//.test(u),
               );
               if (readers.length > 0) reg.active?.postMessage({ keep: [new URL("./", location.href).href, ...readers], build });
             });

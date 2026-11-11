@@ -1817,11 +1817,36 @@ impl Session {
             .unwrap();
 
         let group_id = self.doc.peek_next_id();
+        // A comp that keeps any of these layers keeps the group too, as
+        // it is made — in place, shown, whole — so a later move of the
+        // group is undone by showing the comp, as a move of its layers
+        // was before they were grouped.
+        let comps: Vec<chitrakar_doc::LayerComp> = self
+            .doc
+            .comps()
+            .iter()
+            .map(|comp| {
+                let mut out = comp.clone();
+                if out.layers.iter().any(|k| ordered.contains(&k.id)) {
+                    out.layers.push(chitrakar_doc::CompLayer {
+                        id: group_id,
+                        visible: true,
+                        opacity: 1.0,
+                        transform: Transform::default(),
+                    });
+                }
+                out
+            })
+            .collect();
+        let carries = comps.as_slice() != self.doc.comps();
         let mut cmds = vec![Command::AddNode {
             parent,
             index: top_index + 1,
             node: Box::new(Node::group(name)),
         }];
+        if carries {
+            cmds.push(Command::SetComps { comps });
+        }
         cmds.extend(
             ordered
                 .drain(..)
@@ -1958,22 +1983,21 @@ impl Session {
             [only] => {
                 let node = scratch.node(*only)?;
                 // A live copy left at Normal draws with its original's
-                // blend, so that is the blend its picture must keep.
+                // blend, so that is the blend its picture must keep —
+                // unless a copy on the way wears effects of its own: it
+                // is drawn on a surface of its own, where the copied
+                // blend is spent, and what it drew was Normal.
                 let mut blend = node.blend;
-                let mut of = match &node.kind {
-                    NodeKind::Instance { of, .. } => Some(*of),
-                    _ => None,
-                };
+                let mut at = node;
                 for _ in 0..64 {
-                    let (true, Some(o)) = (blend == chitrakar_doc::BlendMode::Normal, of) else {
+                    let NodeKind::Instance { of, .. } = &at.kind else {
                         break;
                     };
-                    let original = scratch.node(o)?;
-                    blend = original.blend;
-                    of = match &original.kind {
-                        NodeKind::Instance { of, .. } => Some(*of),
-                        _ => None,
-                    };
+                    if blend != chitrakar_doc::BlendMode::Normal || !at.effects.is_empty() {
+                        break;
+                    }
+                    at = scratch.node(*of)?;
+                    blend = at.blend;
                 }
                 let kept = (blend, node.clipped);
                 gather.push(Command::SetBlendMode {
@@ -14145,6 +14169,58 @@ mod tests {
             "the original's blend, which the copy drew with"
         );
         assert!(page(&s) == drawn, "and the page is unchanged");
+        s.undo().unwrap();
+        // A copy wearing an effect of its own is drawn on a surface of
+        // its own, where the copied blend is spent: it drew Normal.
+        s.apply(Command::SetEffects {
+            id: copy,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 3.0,
+                dy: 3.0,
+                blur: 1.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.5,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        let merged = s.merge_layers(&[copy]).unwrap();
+        assert_eq!(
+            s.document().node(merged).unwrap().blend,
+            chitrakar_doc::BlendMode::Normal,
+            "a copy wearing an effect drew Normal"
+        );
+        s.undo().unwrap();
+
+        // A group holding a live copy of an adjustment has the box of
+        // what it draws, as one holding the adjustment itself does.
+        let root = s.document().root();
+        let index = s.document().children_of(root).unwrap().len();
+        s.apply(Command::AddNode {
+            parent: root,
+            index,
+            node: Box::new(chitrakar_doc::Node::adjustment(
+                "negative",
+                chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+            )),
+        })
+        .unwrap();
+        let invert = *s.document().children_of(root).unwrap().last().unwrap();
+        let negative = s.make_instance(invert).unwrap();
+        let box_of_top = s.bounds_of(top).expect("the square has a box");
+        let held = s.group_nodes(&[top, negative], "Held").unwrap();
+        let got = s.bounds_of(held).expect("the group has a box");
+        for k in 0..4 {
+            assert!(
+                (got[k] - box_of_top[k]).abs() < 0.5,
+                "the square's box: {got:?} {box_of_top:?}"
+            );
+        }
 
         let frame = s.add_artboard("Frame", 0.0, 0.0, 80.0, 60.0, None).unwrap();
         let json = s.artboard_resize(frame, 120.0, 90.0, 0.0, 0.0).unwrap();
@@ -14722,6 +14798,46 @@ mod tests {
     /// carried the same way, or showing it afterwards puts the layer's
     /// old numbers in the new parent's space; and dissolving a group
     /// hands each child the group's placement as each comp kept it.
+    /// A comp kept before its layers were grouped: the group moved after
+    /// is put back by showing the comp, as the layers' own move was.
+    #[test]
+    fn a_comp_puts_back_a_group_made_after_it() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: a,
+                transform: Transform::translation(50.0, 50.0),
+            })
+            .unwrap();
+        session.keep_comp("A").unwrap();
+        let g = session.group_nodes(&[a], "g").unwrap();
+        assert!(
+            session.comp_showing("A"),
+            "grouping changes nothing a comp shows"
+        );
+        session
+            .apply(Command::SetTransform {
+                id: g,
+                transform: Transform::translation(150.0, 0.0),
+            })
+            .unwrap();
+        session.apply_comp("A").unwrap();
+        let [x, y, _, _] = session.bounds_of(a).unwrap();
+        assert!(
+            (x - 50.0).abs() < 0.5 && (y - 50.0).abs() < 0.5,
+            "back at 50,50: {x} {y}"
+        );
+        session.undo().unwrap();
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(
+            session.document().node(g).is_err(),
+            "one undo takes the group and its comp entry"
+        );
+        assert!(session.comp_showing("A"));
+    }
+
     #[test]
     fn a_comp_follows_a_layer_into_another_group_and_out_of_one() {
         let mut session = Session::new(100, 80, ColorMode::Rgb);

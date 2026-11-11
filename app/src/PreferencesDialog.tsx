@@ -81,8 +81,10 @@ const GROUPS: { id: Group; label: string; icon: IconName }[] = [
   { id: "raw", label: "Camera raw", icon: "image" },
 ];
 
-/** Colours to reach for as an accent or for the sliders: chosen to
- * read on both themes' panels. */
+/** Colours to reach for as an accent or for the sliders. Where one is
+ * text on a panel it is lightened or darkened until it reads
+ * (`accentAsText`), and a label on it is whichever of dark or white
+ * reads better (`onColour`). */
 const ACCENTS: [string, string][] = [
   ["Blue", "#5b7cfa"],
   ["Violet", "#9b72f2"],
@@ -279,7 +281,7 @@ export function PreferencesDialog({
         for (const t of Object.keys(next) as Tool[]) {
           if (next[t] === shipped) delete next[t];
         }
-      } else if (/^[a-z0-9]$/.test(pressed)) {
+      } else if (/^[a-z0-9]$/.test(pressed) && !e.ctrlKey && !e.metaKey && !e.altKey) {
         // A key another tool holds changes hands: that tool gets the
         // key this one had, so nothing is left unreachable by the
         // swap. A key nobody holds is simply taken.
@@ -291,7 +293,8 @@ export function PreferencesDialog({
         }
         next[tool] = pressed;
       } else {
-        // A modifier or an arrow is not a tool key; keep listening.
+        // A modifier or an arrow is not a tool key, and nor is a chord
+        // (Ctrl+B was taken as a plain B); keep listening.
         return;
       }
       // A rebinding that only says the default again is not kept.
@@ -1001,13 +1004,19 @@ export function PreferencesDialog({
         <div className="modal-actions">
           <button
             className="mask-button"
-            onClick={() => {
+            onClick={(e) => {
               if (
                 window.confirm(
                   "Put every setting back as it came? Your kept brushes, export setups, develop presets, recent files and colours and the watermark stay.",
                 )
-              )
+              ) {
                 resetPrefs();
+                // The button greys itself out, having nothing left to put
+                // back, and the focus would fall out of the window: it
+                // goes to Done beside it.
+                const done = e.currentTarget.nextElementSibling;
+                if (done instanceof HTMLElement) done.focus();
+              }
             }}
             disabled={
               JSON.stringify(prefs) === JSON.stringify(withSettingsReset(prefs))

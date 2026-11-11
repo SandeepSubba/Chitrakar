@@ -32,7 +32,24 @@ function listAssets(): Plugin {
     closeBundle() {
       const dir = `${out}/assets`;
       if (!existsSync(dir)) return;
-      writeFileSync(`${out}/build-assets.json`, JSON.stringify(readdirSync(dir).map((f) => `assets/${f}`)));
+      // And the threaded engine a raw file is developed with, which is
+      // served as it is rather than bundled: left off the list, offline
+      // a raw developed on one thread, seven times slower, and nothing
+      // said why.
+      const threads: string[] = [];
+      const walk = (sub: string) => {
+        const at = `${out}/${sub}`;
+        if (!existsSync(at)) return;
+        for (const e of readdirSync(at, { withFileTypes: true })) {
+          if (e.isDirectory()) walk(`${sub}/${e.name}`);
+          else if (/\.(js|wasm)$/.test(e.name)) threads.push(`${sub}/${e.name}`);
+        }
+      };
+      walk("wasm-threads");
+      writeFileSync(
+        `${out}/build-assets.json`,
+        JSON.stringify([...readdirSync(dir).map((f) => `assets/${f}`), ...threads]),
+      );
     },
   };
 }
