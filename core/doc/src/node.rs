@@ -2258,15 +2258,17 @@ impl Mask {
                     |p: [f32; 2]| [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
                 if *radial {
                     // An upright ellipse, its radii how far `to` is each
-                    // way: the middle goes where it is carried, and each
-                    // radius as far as the carry stretches its own axis.
+                    // way: the middle goes where it is carried, and the
+                    // radii are the upright box round the carried ellipse.
                     // Turned as a point, a circle's radius fell onto one
                     // axis and the other came to nothing — a sliver where
                     // a soft circle had been. A circle comes through any
-                    // turn whole; an ellipse keeps its proportions upright.
-                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
-                    let rx = (m.a * dx).hypot(m.b * dx);
-                    let ry = (m.c * dy).hypot(m.d * dy);
+                    // turn whole, and a quarter turn swaps an ellipse's
+                    // radii exactly (stretched along its own axes, a wide
+                    // ellipse stayed wide on a page turned on its side).
+                    let (dx, dy) = ((to[0] - from[0]).abs(), (to[1] - from[1]).abs());
+                    let rx = (m.a * dx).hypot(m.c * dy);
+                    let ry = (m.b * dx).hypot(m.d * dy);
                     let middle = at(*from);
                     *from = middle;
                     *to = [middle[0] + rx, middle[1] + ry];
@@ -2979,6 +2981,52 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// A radial gradient mask carried through a turn stays the ellipse it
+    /// was: a circle whole at any angle, and an ellipse's radii swapped
+    /// by a quarter turn — turned as two points, a circle became a sliver
+    /// and a wide ellipse stayed wide on a page turned on its side.
+    #[test]
+    fn a_radial_gradient_mask_turns_whole() {
+        let radii = |from: [f32; 2], to: [f32; 2], deg: f32| {
+            let (c, s) = (deg.to_radians().cos(), deg.to_radians().sin());
+            let m = Transform {
+                a: c,
+                b: s,
+                c: -s,
+                d: c,
+                e: 7.0,
+                f: 3.0,
+            };
+            let mask = Mask {
+                kind: MaskKind::Gradient {
+                    radial: true,
+                    from,
+                    to,
+                },
+                invert: false,
+                feather: 0.0,
+            };
+            match mask.carried_through(m).kind {
+                MaskKind::Gradient { from, to, .. } => {
+                    ((to[0] - from[0]).abs(), (to[1] - from[1]).abs())
+                }
+                _ => unreachable!(),
+            }
+        };
+        for deg in [0.0, 30.0, 45.0, 90.0, 200.0] {
+            let (rx, ry) = radii([0.0, 0.0], [40.0, 40.0], deg);
+            assert!(
+                (rx - 40.0).abs() < 1e-3 && (ry - 40.0).abs() < 1e-3,
+                "circle at {deg}: {rx} by {ry}"
+            );
+        }
+        let (rx, ry) = radii([10.0, 10.0], [70.0, 25.0], 90.0);
+        assert!(
+            (rx - 15.0).abs() < 1e-3 && (ry - 60.0).abs() < 1e-3,
+            "quarter turn: {rx} by {ry}"
+        );
+    }
     /// Settings written before the lens's fringes, Defringe and a slider
     /// of its own for the colour's noise load as they developed then: no
     /// fringes measured, nothing greyed, and the colour smoothed by the

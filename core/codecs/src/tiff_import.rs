@@ -11,6 +11,11 @@
 //! one through the press transform — and associated (premultiplied) alpha
 //! is undone, since the engine keeps straight alpha at this edge. Only the
 //! first picture of a many-page TIFF is read.
+//!
+//! The `tiff` crate refuses a palette picture outright (it has no colour
+//! type for one), so a palette TIFF is read through a copy that says it is
+//! grey: the decoder hands back the indices, and the palette is looked up
+//! here.
 
 use crate::{CodecError, SourceImage};
 use std::io::Cursor;
@@ -31,7 +36,21 @@ fn bad(what: impl std::fmt::Display) -> CodecError {
 pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     let mut dec = Decoder::new(Cursor::new(bytes)).map_err(bad)?;
     let (width, height) = dec.dimensions().map_err(bad)?;
-    let color = dec.colortype().map_err(bad)?;
+    let as_grey;
+    let color = match dec.colortype() {
+        Ok(c) => c,
+        Err(err) => match palette_as_grey(bytes) {
+            Some(copy) => {
+                as_grey = copy;
+                dec = Decoder::new(Cursor::new(&as_grey[..])).map_err(bad)?;
+                match dec.colortype().map_err(bad)? {
+                    ColorType::Gray(b) => ColorType::Palette(b),
+                    _ => return Err(bad(err)),
+                }
+            }
+            None => return Err(bad(err)),
+        },
+    };
     // Which way up the picture is meant to be seen (a camera turned on
     // its side writes 6 or 8 here and leaves the pixels as they fell).
     let orientation = dec
@@ -177,6 +196,50 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     ))
 }
 
+/// A palette picture's bytes with its first directory saying grey
+/// (PhotometricInterpretation 3 made 1, black is zero), so the decoder
+/// hands back each pixel's index unchanged. `None` when the first
+/// picture is not a palette one, or the directory cannot be read.
+fn palette_as_grey(bytes: &[u8]) -> Option<Vec<u8>> {
+    let little = match bytes.get(..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let int = |at: usize, n: usize| -> Option<u64> {
+        let b = bytes.get(at..at.checked_add(n)?)?;
+        Some(if little {
+            b.iter().rev().fold(0, |v, &x| v << 8 | x as u64)
+        } else {
+            b.iter().fold(0, |v, &x| v << 8 | x as u64)
+        })
+    };
+    let big = int(2, 2)? == 43;
+    // Where the first directory is, how many entries it has, and how
+    // long each is, classic or big.
+    let (first, count, entry, head) = if big {
+        let first = usize::try_from(int(8, 8)?).ok()?;
+        (first, int(first, 8)?, 20, 8)
+    } else {
+        let first = usize::try_from(int(4, 4)?).ok()?;
+        (first, int(first, 2)?, 12, 2)
+    };
+    for i in 0..usize::try_from(count).ok()?.min(4096) {
+        let at = first + head + i * entry;
+        // Tag 262, a SHORT, whose value sits in the entry itself.
+        if int(at, 2)? == 262 && int(at + 2, 2)? == 3 {
+            let value = at + if big { 12 } else { 8 };
+            if int(value, 2)? != 3 {
+                return None;
+            }
+            let mut copy = bytes.to_vec();
+            copy[value..value + 2].copy_from_slice(&if little { [1, 0] } else { [0, 1] });
+            return Some(copy);
+        }
+    }
+    None
+}
+
 /// Samples narrower than a byte, packed along each row (a row starts on a
 /// byte), spread out one to a sample, unscaled: a palette's are indices,
 /// and the caller scales anything else to 0..=255.
@@ -314,6 +377,41 @@ mod tests {
         assert_eq!(
             unpack(&[0b1010_0000, 0b0110_0000], 3, 2, 1, 1),
             vec![1, 0, 1, 0, 1, 1]
+        );
+    }
+
+    #[test]
+    fn a_palette_tiff_reads_through_its_palette() {
+        // Four pixels indexing a palette of 256 (16-bit per channel, all
+        // reds, then all greens, then all blues): index 0 is black, 1 is
+        // pure red, 2 pure green, 3 a mid grey.
+        let mut map = vec![0u16; 768];
+        for (i, rgb) in [[0, 0, 0], [255, 0, 0], [0, 255, 0], [128, 128, 128]]
+            .iter()
+            .enumerate()
+        {
+            for c in 0..3 {
+                map[c * 256 + i] = rgb[c] * 257;
+            }
+        }
+        let mut out = Cursor::new(Vec::new());
+        let mut tiff = TiffEncoder::new(&mut out).unwrap();
+        let mut img = tiff.new_image::<colortype::Gray8>(2, 2).unwrap();
+        img.encoder()
+            .write_tag(Tag::PhotometricInterpretation, 3u16)
+            .unwrap();
+        img.encoder().write_tag(Tag::ColorMap, &map[..]).unwrap();
+        img.write_data(&[0u8, 1, 2, 3]).unwrap();
+        let bytes = out.into_inner();
+        // The crate alone refuses it, which is why it goes through grey.
+        assert!(Decoder::new(Cursor::new(&bytes[..]))
+            .unwrap()
+            .colortype()
+            .is_err());
+        let got = decode_tiff(&bytes).expect("a palette TIFF reads");
+        assert_eq!(
+            got.rgba8,
+            [0, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 128, 128, 128, 255]
         );
     }
 

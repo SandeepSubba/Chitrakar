@@ -57,7 +57,10 @@ without reading anything else.*
      plainly as limits. The eighteenth, over the seventeenth's fixes,
      found nine more — one losing work (a file that failed to open
      wrote the empty page over the offered draft) and the rest edges
-     the fixes missed — all fixed. ⬜ until a broad pass finds nothing.
+     the fixes missed — all fixed. The nineteenth checked those nine
+     and made a second broad pass; it found eighteen, none losing work
+     — the closest, a discarded draft that left the page writing none
+     until the next edit — all fixed. ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
      so no installer has ever been built by it, and CI never builds on
@@ -11405,6 +11408,33 @@ without reading anything else.*
   it go); and a whole-page export, unlike a part of one, was drawn with
   no room past the page's edge, so a softened edge crossing it came out
   unlike the screen.
+  **A nineteenth audit, of the eighteenth's fixes and the whole editor
+  again (November 2026).** Eighteen findings, none of them losing work.
+  A layer in a locked group still took handles and its anchors the knife
+  (`heldByLock` asks every group above it, and the knife reads
+  `unlocked`); a number past any page typed into X put an infinity in
+  the file (the box refuses past ten million, and `SetTransform` refuses
+  anything not finite or past a billion, `PlacedPastReason`); Enter in
+  Straighten's box applied the last number in range on the way rather
+  than the one typed, Escape there did not cancel, and a press on the
+  menus or the panel was worked out against the turned page (a number
+  box settles and redraws before its window acts on Enter, and Escape
+  and Enter reach the Straighten and Feather panels as a modal's; a
+  press or key outside either lets it go first, and so do Save and
+  Quick export); a flyout stayed over the canvas; a shape added in view
+  went to the frame its corner was in; a mask's ellipse outline was
+  drawn upright on a turned layer; the keys sheet would not close on
+  its own chord; a discarded draft left the page writing none until the
+  next edit; Quick export, PNG and JPEG and the CMYK TIFF and the PSD's
+  composite, had the whole-page export's missing room past the edge; a
+  radial mask carried through a sheared group took its radii from two
+  points rather than the box (each is the length its axis is stretched
+  to); `URL(DATA:` in an SVG was not read as a data address; "Each kept
+  region" with one region off the page stopped at that file, unnamed,
+  and wrote none after it (the regions on the page are written and the
+  one left out is named, smoke 9dc); and a palette TIFF was refused —
+  the `tiff` crate has no colour type for one, so it is read through a
+  copy whose directory says grey and the indices looked up here.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -119,6 +119,8 @@ pub enum DocError {
     NotATree(NodeId),
     #[error("layers cannot be nested more than {limit} deep")]
     TooDeep { limit: usize },
+    #[error("a layer cannot be placed that far out, or that large")]
+    PlacedPastReason,
 }
 
 /// How large a page may be. The renderer's surface is sixteen bytes a
@@ -1252,6 +1254,17 @@ impl Document {
                 Ok(Command::SetBlendMode { id, blend: prev })
             }
             Command::SetTransform { id, transform } => {
+                // Not a number a file can hold: past what an f32 holds a
+                // place became infinity, a document saved after it said
+                // null where a number belonged, and would not open again.
+                // A billion pixels out is past any drawing as well.
+                let t = transform;
+                let fits = [t.a, t.b, t.c, t.d, t.e, t.f]
+                    .iter()
+                    .all(|v| v.is_finite() && v.abs() <= 1e9);
+                if !fits {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = node.transform;
                 node.transform = transform;

@@ -211,23 +211,32 @@ export function ExportDialog({
   /** The names a file each is written for, when the area is one of the
    * two that write several: the regions, or the comps. */
   const many: string[] = area === "regions" ? keptRegions : area === "comps" ? keptComps : [];
-  /** Every slice that will be written, or one file with no name of its
-   * own. `null` is the whole page or what is picked out. */
-  const slices: (string | null)[] = many.length > 0 ? many : [null];
+  /** A kept region's box, worked out by encoding nothing: the engine
+   * knows where it is, and the window only needs its size. Nothing for
+   * a region that is not on the page. */
+  const regionBox = (at: number): [number, number, number, number] | null => {
+    // The box the engine exports the region in, whichever the format.
+    const b = session.region_export_box(at);
+    return b.length === 4 ? [0, 0, b[2], b[3]] : null;
+  };
+  /** Which of `many` are written: every comp, and every region that is
+   * on the page. One off it used to stop the whole write at the first
+   * file, so a region that was there was never written either. */
+  const ats: number[] = many.map((_, i) => i).filter((i) => area !== "regions" || regionBox(i) !== null);
+  /** The regions left out for being off the page, said by name. */
+  const offPage: string[] = area === "regions" ? many.filter((_, i) => !ats.includes(i)) : [];
+  /** Every slice that will be written, with where it is among `many`,
+   * or one file with no name of its own. `null` is the whole page or
+   * what is picked out. */
+  const slices: [string | null, number | null][] = many.length > 0 ? ats.map((i) => [many[i], i]) : [[null, null]];
+  /** The first slice, which stands for the rest in what is shown. */
+  const first: number | null = many.length > 0 ? (ats[0] ?? null) : null;
   /** Whether the set is asked for rather than one size. */
   const set = spec.scales && prefs.exportScale === 0;
   /** A long edge asked for in pixels, which stands in for the scale. */
   const longEdge = spec.scales && !set ? prefs.exportLongEdge : 0;
   /** The page's own size, which everything shown is worked out from. */
   const [pageW, pageH] = [session.width, session.height];
-
-  /** A kept region's box, worked out by encoding nothing: the engine
-   * knows where it is, and the window only needs its size. */
-  const regionBox = (at: number): [number, number, number, number] | null => {
-    // The box the engine exports the region in, whichever the format.
-    const b = session.region_export_box(at);
-    return b.length === 4 ? [0, 0, b[2], b[3]] : null;
-  };
 
   /** What is exported at its own size: the page, or the box a picked
    * region sits in, since a region is exported in the shape it was
@@ -237,7 +246,7 @@ export function ExportDialog({
       // The first slice stands for the set here, as the first of the
       // `@1x` set does: they are different sizes and the window has one
       // line to say it in.
-      const box = regionBox(0);
+      const box = first === null ? null : regionBox(first);
       if (box) return [box[2] - box[0], box[3] - box[1]];
     }
     if (area === "selection") {
@@ -288,6 +297,11 @@ export function ExportDialog({
 
   /** Whether this combination can be exported at all, and why not. */
   const refuses = (): string | null => {
+    if (many.length > 0 && ats.length === 0) {
+      return many.length === 1
+        ? `The region “${many[0]}” is not on the page.`
+        : "None of the kept regions is on the page.";
+    }
     if (format === "tiff" && !hasIcc) {
       return "A press profile has to be loaded before a CMYK TIFF can be written.";
     }
@@ -427,9 +441,9 @@ export function ExportDialog({
   /** The bytes at the one scale shown — the set's first, or the first
    * slice when a slice each is what is being written. */
   const encode = useCallback(
-    () => encodeAt(scale, many.length > 0 ? 0 : null),
+    () => encodeAt(scale, first),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [encodeAt, scale, area, many.length],
+    [encodeAt, scale, area, first],
   );
 
   /** How big the file comes out. `null` while it is being worked out,
@@ -474,7 +488,7 @@ export function ExportDialog({
         const bytes = encode();
         // Every file that will be written: each scale of the set, and
         // within it each slice, at the scale that slice is written at.
-        const at: (number | null)[] = many.length > 0 ? slices.map((_, i) => i) : [null];
+        const at: (number | null)[] = slices.map(([, i]) => i);
         let total = 0;
         for (const s of set ? SET : [null]) {
           for (const i of at) {
@@ -524,11 +538,12 @@ export function ExportDialog({
     fileSafe(`${fileName()}${slice !== null ? `-${slice}` : area === "selection" ? "-selection" : ""}${
       longEdge > 0 && !set ? `-${edgeOf(at)}` : s !== 1 || set ? `@${s}x` : ""
     }.${spec.ext}`);
-  const more = many.length > 1 ? `, and ${many.length - 1} more` : "";
+  const more = slices.length > 1 ? `, and ${slices.length - 1} more` : "";
+  const [firstName] = slices[0] ?? [null];
   const name = set
-    ? `${nameAt(1, many[0] ?? null)}, @2x, @3x${more}`
-    : many.length > 0
-      ? `${nameAt(scale, many[0], 0)}${more}`
+    ? `${nameAt(1, firstName)}, @2x, @3x${more}`
+    : first !== null
+      ? `${nameAt(scale, firstName, first)}${more}`
       : nameAt(scale);
 
   const run = useCallback(async (via: "write" | "share" = "write") => {
@@ -538,10 +553,10 @@ export function ExportDialog({
     // other, which is what an asset pipeline wanting three sizes of
     // four slices means by it.
     const files: Outgoing[] = scales.flatMap((s) =>
-      slices.map((slice, at) => ({
-        name: nameAt(s, slice, slice === null ? null : at),
+      slices.map(([slice, at]) => ({
+        name: nameAt(s, slice, at),
         type: spec.mime,
-        make: () => encodeAt(set ? s : scaleFor(slice === null ? null : at), slice === null ? null : at),
+        make: () => encodeAt(set ? s : scaleFor(at), at),
       })),
     );
     try {
@@ -553,7 +568,7 @@ export function ExportDialog({
     }
     // `scales` and `nameAt` are made afresh each render from what the
     // dependencies below say.
-  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, write, share, onClose]);
+  }, [encodeAt, set, scale, area, format, fileName, spec.mime, spec.ext, refusal, write, share, onClose, ats.join(",")]);
 
   const runRef = useRef(run);
   runRef.current = run;
@@ -914,6 +929,11 @@ export function ExportDialog({
             </>
           )}
         </p>
+        {!refusal && offPage.length > 0 && (
+          <p className="export-size export-left-out">
+            Left out, not on the page: {offPage.map((n) => `“${n}”`).join(", ")}
+          </p>
+        )}
 
         <div className="modal-actions">
           <button className="mask-button" onClick={onClose}>

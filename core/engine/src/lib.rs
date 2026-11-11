@@ -2827,7 +2827,9 @@ impl Session {
             self.doc
                 .nodes()
                 .filter(|(id, n)| {
-                    matches!(n.kind, NodeKind::Vector { .. }) && !n.locked && shown(**id)
+                    matches!(n.kind, NodeKind::Vector { .. })
+                        && self.unlocked(**id).is_ok()
+                        && shown(**id)
                 })
                 .map(|(id, _)| *id)
                 .collect()
@@ -2924,8 +2926,9 @@ impl Session {
                 continue;
             };
             // A shape live copies follow is left whole: cut, it is taken
-            // away, and every copy of it would show nothing.
-            if node.locked
+            // away, and every copy of it would show nothing. Nor is a
+            // locked one, or one in a locked group, cut.
+            if self.unlocked(id).is_err()
                 || matches!(
                     shape,
                     chitrakar_doc::VectorShape::Path { closed: false, .. }
@@ -9652,7 +9655,7 @@ impl Session {
         }
         let mut notes = Vec::new();
         let items = self.psd_items(self.doc.root(), &mut notes, 0)?;
-        let composite = self.render()?.to_srgb8();
+        let composite = self.drawn_with_room(1.0, None)?.to_srgb8();
         let bytes =
             chitrakar_codecs::psd_export::write_psd(w, h, self.doc.meta.dpi, &items, &composite)
                 .map_err(|e| EngineError::BadCommand(e.to_string()))?;
@@ -9871,7 +9874,7 @@ impl Session {
                 "CMYK TIFF export needs a press profile: load an ICC first".into(),
             ));
         };
-        let surface = self.render()?;
+        let surface = self.drawn_with_room(1.0, None)?;
         chitrakar_codecs::export_cmyk_tiff(
             &surface.pixels,
             surface.width,
@@ -9939,8 +9942,12 @@ impl Session {
     }
 
     /// Render and encode as PNG — used by export and tests.
+    /// The page as a PNG, drawn as the canvas and the Export window draw
+    /// it — with room past the page's edge, as every whole-page file now
+    /// is (Quick export, the JPEG, the press TIFF and a PSD's composite
+    /// were the edge's softness short of the screen).
     pub fn render_png(&self) -> Result<Vec<u8>, EngineError> {
-        let surface = self.render()?;
+        let surface = self.drawn_with_room(1.0, None)?;
         chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
@@ -10176,7 +10183,7 @@ impl Session {
     /// Render and encode as JPEG. Transparency flattens onto white, since
     /// JPEG carries no alpha.
     pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, EngineError> {
-        let surface = self.render()?;
+        let surface = self.drawn_with_room(1.0, None)?;
         chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
@@ -23467,6 +23474,14 @@ mod tests {
             session.insert_anchor(id, 50.0, 0.0, 5.0).is_err(),
             "nor in a locked group"
         );
+        // Nor does the knife cut it, whether nothing is picked, the
+        // group is, or the shape inside it is.
+        let before = session.document().node(id).unwrap().kind.clone();
+        for picked in [vec![], vec![group], vec![id]] {
+            let _ = session.knife(&picked, [-10.0, 50.0], [210.0, 50.0]);
+            assert!(session.document().node(id).is_ok(), "not cut away");
+            assert_eq!(session.document().node(id).unwrap().kind, before, "nor cut");
+        }
     }
 
     /// A layer turned back upright inside a turned group is boxed as what
@@ -23682,6 +23697,13 @@ mod tests {
                 );
             }
         }
+        // Quick export is the Export window's PNG, edge and all.
+        let quick = chitrakar_codecs::decode(&session.render_png().unwrap()).unwrap();
+        let window = chitrakar_codecs::decode(&session.render_png_at(1.0, None).unwrap()).unwrap();
+        assert_eq!(
+            quick.rgba8, window.rgba8,
+            "Quick export and the window agree"
+        );
     }
 
     /// The eyedropper picks what the page shows where a stroke painted

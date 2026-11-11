@@ -1699,6 +1699,45 @@ export function App() {
     useState<(typeof SELECT_TOOLS)[number]>("Select");
   const [selectsOpen, setSelectsOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  // A flyout is a moment's choice beside its button, pinned to the
+  // window where it opened: anything else done lets it go — a press
+  // elsewhere, Escape, another tool, the window resized or the rail
+  // scrolled or moved. It stayed over the canvas, and stayed put while
+  // the rail moved out from under it.
+  const anyFlyout = shapesOpen || selectsOpen || moreOpen;
+  useEffect(() => {
+    if (!anyFlyout) return;
+    const close = () => {
+      setShapesOpen(false);
+      setSelectsOpen(false);
+      setMoreOpen(false);
+    };
+    const onDown = (e: PointerEvent) => {
+      if (e.target instanceof Element && e.target.closest(".tool-flyout, .tool-more")) return;
+      close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Element && e.target.closest(".toolbar")) close();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [anyFlyout]);
+  useEffect(() => {
+    setShapesOpen(false);
+    setSelectsOpen(false);
+    setMoreOpen(false);
+  }, [tool]);
   useEffect(() => {
     if (SELECT_TOOLS.includes(tool as never)) {
       setSelectTool(tool as (typeof SELECT_TOOLS)[number]);
@@ -3064,6 +3103,76 @@ export function App() {
     featherWas.current = selectionFeather;
     setFeatherOpen(true);
   };
+  /** Feather let go of: its preview taken back, and the softness the
+   * next region is given put back too — set as the window was typed in,
+   * a cancelled window left it for the next marquee. */
+  const cancelFeather = () => {
+    setFeatherOpen(false);
+    setSelectionFeather(featherWas.current);
+    session?.cancel_preview();
+    if (session) refresh(session);
+  };
+  /** Straighten let go of: the page as it was. */
+  const cancelStraighten = () => {
+    setStraightenOpen(false);
+    setLevelling(false);
+    previewStraighten(0);
+  };
+  // Straighten and Feather stand open beside the editor with their
+  // preview in place, so anything done elsewhere — a press outside the
+  // window, a key, a chord — lets the window go as its Cancel would,
+  // *before* it is done: worked out from the previewed page, a layer
+  // moved or flipped beside Straighten kept the turn, a Save wrote it
+  // down, and the two windows open at once shared one preview. A press
+  // on the canvas while the level line is being drawn is the window's.
+  const heldWindows = useRef({ cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling });
+  heldWindows.current = { cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling };
+  /** Let a standing Straighten or Feather go before what writes the
+   * document down: a save asked for from the system's own menu bar comes
+   * with no press on the page, and wrote down a turn not applied, then
+   * counted it saved. */
+  const letHeldGo = () => {
+    const h = heldWindows.current;
+    if (h.straightenOpen) h.cancelStraighten();
+    if (h.featherOpen) h.cancelFeather();
+  };
+  useEffect(() => {
+    if (!straightenOpen && !featherOpen) return;
+    const panelOf = (t: EventTarget | null) =>
+      t instanceof Element ? t.closest(".straighten-panel") : null;
+    const letGo = (keep: Element | null) => {
+      const h = heldWindows.current;
+      const label = keep?.getAttribute("aria-label");
+      if (h.straightenOpen && label !== "Straighten") h.cancelStraighten();
+      if (h.featherOpen && label !== "Feather") h.cancelFeather();
+    };
+    const onDown = (e: PointerEvent) => {
+      const panel = panelOf(e.target);
+      if (panel) {
+        // In one window: the other, if it is open too, goes.
+        letGo(panel);
+        return;
+      }
+      const host = document.getElementById("engine-canvas")?.parentElement;
+      if (heldWindows.current.levelling && host && e.target instanceof Node && host.contains(e.target)) return;
+      letGo(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (["Shift", "Control", "Alt", "Meta", " ", "Escape", "Tab"].includes(e.key)) return;
+      const panel = panelOf(e.target);
+      const chord = e.ctrlKey || e.metaKey;
+      // Typing in the window's own box, its text keys included, is the
+      // window's.
+      if (panel && (!chord || ["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase()))) return;
+      letGo(null);
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [straightenOpen, featherOpen]);
   const previewFeather = (radius: number) => {
     if (!session) return;
     try {
@@ -3329,7 +3438,8 @@ export function App() {
     const seen = Math.min(r.width, r.height) / view.zoom;
     const side = Math.max(MIN_SIZE, Math.round(Math.min(seen, docSize[0], docSize[1]) / 4));
     const [x0, y0] = [cx - side / 2, cy - side / 2];
-    const place = placeAt(x0, y0);
+    // The frame the view is on, as the middle of the view says.
+    const place = placeAt(x0, y0, [cx, cy]);
     const [w, h] = [side, side];
     const ink = currentInk();
     const shape =
@@ -7845,9 +7955,20 @@ export function App() {
   /** Whether the picked layers can be grouped: they share a parent. */
   const groupable =
     new Set(withoutNested(selectionSet).map((id) => layers.find((l) => l.id === id)?.parent)).size <= 1;
-  const movableSelection = withoutNested(selectionSet).filter(
-    (id) => !layers.find((l) => l.id === id)?.locked,
-  );
+  /** Whether a layer is held still: locked itself, or inside a locked
+   * group or frame, whose lock holds what is in it. Read off the layer's
+   * own lock alone, a child of a locked group still took handles,
+   * nudges, flips and alignment. */
+  const heldByLock = (id: NodeId | null): boolean => {
+    let at = layers.find((l) => l.id === id);
+    for (let depth = 0; at && depth < 256; depth++) {
+      if (at.locked) return true;
+      const up = at.parent;
+      at = layers.find((l) => l.id === up);
+    }
+    return false;
+  };
+  const movableSelection = withoutNested(selectionSet).filter((id) => !heldByLock(id));
 
   /** What one layer's alignment is measured against: the frame it sits
    * in, or the page. Only the word, for what the buttons say — the
@@ -8548,17 +8669,7 @@ export function App() {
    * the knob, so typing an angle turns it where it stands. */
   /** Whether the layer the panel shows is locked: nothing moves it, as
    * nothing nudges, flips or aligns it. */
-  const selectedLocked = () => {
-    // Locked itself, or inside a locked group: a group's lock holds what
-    // is in it, and a path in one still had its anchors dragged.
-    let at = layers.find((l) => l.id === selected);
-    for (let depth = 0; at && depth < 256; depth++) {
-      if (at.locked) return true;
-      const up = at.parent;
-      at = layers.find((l) => l.id === up);
-    }
-    return false;
-  };
+  const selectedLocked = () => heldByLock(selected);
   const setAngle = (degrees: number) => {
     if (!session || selected === null || !selBounds || selBounds.length !== 4 || selectedLocked()) {
       return;
@@ -8957,7 +9068,7 @@ export function App() {
     selectedLayer.kind !== "filter";
   /** A locked layer keeps its outline — it is still the picked layer —
    * but offers nothing to grab: it is not to be moved from the canvas. */
-  const movable = resizable && !selectedLayer.locked;
+  const movable = resizable && !heldByLock(selectedLayer.id);
   /** Handles sit over the layer they belong to, which is exactly where a
    * brush wants to paint, so the brush takes them off the canvas while it
    * is the tool in hand. The outline stays: it still says what is picked. */
@@ -9787,6 +9898,7 @@ export function App() {
    * panel says. Only the desktop shell has paths. */
   const saveToPath = async (path: string | null) => {
     if (!session || saving.current) return;
+    letHeldGo();
     saving.current = true;
     try {
       // What is saved is the document as it is now, so it is now that
@@ -9813,6 +9925,7 @@ export function App() {
 
   const saveFile = async () => {
     if (!session) return;
+    letHeldGo();
     if (isTauri()) return saveToPath(docPath);
     const at = session.history_mark();
     const written = await saveAs(
@@ -9829,6 +9942,7 @@ export function App() {
 
   const exportPng = () => {
     if (!session) return;
+    letHeldGo();
     saveAs("PNG export", `${exportName()}.png`, "image/png", () =>
       session.export_png(),
     );
@@ -11512,7 +11626,15 @@ export function App() {
               setRecoverable(null);
               // The pictures are left for the next draft written to
               // sort out: one this tab is about to write may share them.
-              void clearDraft(slot, true).then(() => offerNextDraft(slot));
+              // The draft let go of was this tab's own last session's, and
+              // the slot by now holds what has been done since the page
+              // opened: cleared, a crash took that too, since nothing
+              // wrote it again until the next change. So it is kept again
+              // at once (unless nothing has been done on this page).
+              void clearDraft(slot, true).then(() => {
+                offerNextDraft(slot);
+                if (slot === draftSlot) setSaveTick((n) => n + 1);
+              });
             }}
           >
             Discard
@@ -12127,15 +12249,7 @@ export function App() {
             setSelectionFeather(r);
             previewFeather(r);
           }}
-          onCancel={() => {
-            setFeatherOpen(false);
-            // The softness the next region is given goes back too: it
-            // was set as the window was typed in, and a cancelled window
-            // left it for the next marquee.
-            setSelectionFeather(featherWas.current);
-            session?.cancel_preview();
-            refresh(session!);
-          }}
+          onCancel={cancelFeather}
           onApply={() => {
             setFeatherOpen(false);
             session?.commit_preview();
@@ -12256,11 +12370,7 @@ export function App() {
             previewStraighten(d);
           }}
           onLevel={() => setLevelling((on) => !on)}
-          onCancel={() => {
-            setStraightenOpen(false);
-            setLevelling(false);
-            previewStraighten(0);
-          }}
+          onCancel={cancelStraighten}
           onApply={() => {
             setStraightenOpen(false);
             setLevelling(false);
@@ -14135,12 +14245,18 @@ export function App() {
             return (
               <>
                 <svg className="sel-outline" aria-hidden="true">
+                  {/* Drawn in the mask's own space and carried onto the
+                      screen whole: worked out from the corners as an
+                      upright ellipse, one in a turned group came out a
+                      sliver. */}
                   <ellipse
                     className="mask-outline"
-                    cx={(quad[0][0] + quad[2][0]) / 2}
-                    cy={(quad[0][1] + quad[2][1]) / 2}
-                    rx={Math.abs(quad[1][0] - quad[0][0]) / 2}
-                    ry={Math.abs(quad[3][1] - quad[0][1]) / 2}
+                    vectorEffect="non-scaling-stroke"
+                    transform={`matrix(${p.a * view.zoom} ${p.b * view.zoom} ${p.c * view.zoom} ${p.d * view.zoom} ${view.x + p.e * view.zoom} ${view.y + p.f * view.zoom})`}
+                    cx={(x0 + x1) / 2}
+                    cy={(y0 + y1) / 2}
+                    rx={Math.abs(x1 - x0) / 2}
+                    ry={Math.abs(y1 - y0) / 2}
                   />
                 </svg>
                 {knob("move", centre, "move")}
@@ -14185,12 +14301,17 @@ export function App() {
               <>
                 <svg className="sel-outline" aria-hidden="true">
                   {g.radial ? (
+                    // In the mask's own space, carried onto the screen
+                    // whole: from the ends' screen places, one in a
+                    // turned group came out a sliver, or a line.
                     <ellipse
                       className="mask-outline"
-                      cx={a[0]}
-                      cy={a[1]}
-                      rx={Math.abs(b[0] - a[0])}
-                      ry={Math.abs(b[1] - a[1])}
+                      vectorEffect="non-scaling-stroke"
+                      transform={`matrix(${p.a * view.zoom} ${p.b * view.zoom} ${p.c * view.zoom} ${p.d * view.zoom} ${view.x + p.e * view.zoom} ${view.y + p.f * view.zoom})`}
+                      cx={g.from[0]}
+                      cy={g.from[1]}
+                      rx={Math.abs(g.to[0] - g.from[0])}
+                      ry={Math.abs(g.to[1] - g.from[1])}
                     />
                   ) : (
                     <>
@@ -14913,8 +15034,13 @@ export function App() {
                           const el = e.currentTarget;
                           const text = el.value;
                           const v = Number(text);
-                          if (text.trim() !== "" && Number.isFinite(v))
-                            setGeometry(field, v / perPixel(units, docDpi));
+                          // Nor is a number past any page a place or a
+                          // size: past what the engine holds it became
+                          // infinity, and a file saved after it would not
+                          // open again.
+                          const px = v / perPixel(units, docDpi);
+                          if (text.trim() !== "" && Number.isFinite(px) && Math.abs(px) <= 1e7)
+                            setGeometry(field, px);
                           // A number the layer would not take (nought, less,
                           // or what it already is) leaves the field: it
                           // stays the same element, so it is put back to
@@ -15660,14 +15786,17 @@ function KeysDialog({
   // handler stands down while a window is up, so it only ever opened it.
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
-      if (e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      // Whatever key it is given, as the editor reads it to open it.
+      const own = chordOf["keys-sheet"];
+      const pressed = chordFromEvent(e);
+      if (pressed === own || (own === "shift+/" && e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey)) {
         e.preventDefault();
         onClose();
       }
     };
     document.addEventListener("keydown", key);
     return () => document.removeEventListener("keydown", key);
-  }, [onClose]);
+  }, [onClose, chordOf]);
   return (
     <div className="modal-scrim" onPointerDown={onClose}>
       <div

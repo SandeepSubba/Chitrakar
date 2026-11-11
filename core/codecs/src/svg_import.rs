@@ -408,9 +408,13 @@ const IMAGE_SHAPE_MOST: f64 = 1e6;
 /// let `/* url( */ … /* ) */` hide a number past any drawing from the
 /// check, the comment's own `)` taken as the address's end.
 fn data_urls(text: &str) -> Vec<(std::ops::Range<usize>, &str, &str)> {
+    // CSS spells its functions in any case — `URL(` is `url(` — and the
+    // same goes for the address's `data:`. Looked for in a lower-cased
+    // copy, which has every byte where the text has it.
+    let lower = text.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut from = 0;
-    while let Some(found) = text[from..].find("url(") {
+    while let Some(found) = lower[from..].find("url(") {
         let at = from + found;
         from = at + 4;
         let rest = &text[at + 4..];
@@ -423,7 +427,11 @@ fn data_urls(text: &str) -> Vec<(std::ops::Range<usize>, &str, &str)> {
             .and_then(|i| i.strip_suffix('"'))
             .or_else(|| inner.strip_prefix('\'').and_then(|i| i.strip_suffix('\'')))
             .unwrap_or(inner);
-        let Some(address) = inner.strip_prefix("data:") else {
+        let Some(address) = inner
+            .get(..5)
+            .filter(|head| head.eq_ignore_ascii_case("data:"))
+            .map(|_| &inner[5..])
+        else {
             continue;
         };
         let Some(comma) = address.find(',') else {
@@ -5713,6 +5721,14 @@ mod tests {
         assert!(
             import_svg(sheet("/* url( */ rect{stroke-width:1e30} /* ) */").as_bytes()).is_err(),
             "nor one hidden between a comment's url( and another's )"
+        );
+        assert!(
+            import_svg(
+                sheet("@font-face{font-family:F;src:URL(DATA:font/ttf;base64,AAEAAA/40E9+1e300/AA==)}")
+                    .as_bytes()
+            )
+            .is_ok(),
+            "URL( and DATA: in capitals, as CSS allows"
         );
     }
 

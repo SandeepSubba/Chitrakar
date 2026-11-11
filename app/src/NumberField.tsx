@@ -15,6 +15,7 @@
  * typed and not yet a number.
  */
 import { useEffect, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 
 type Props = {
   value: number;
@@ -45,6 +46,11 @@ export function NumberField({ value, onValue, min, max, integer, blankAs, show, 
       setDraft(null);
     }
   }, [value]);
+  /** The window's own key handler as it stands after the latest render:
+   * Enter settles what was typed first, and the window has to act on the
+   * settled number, not the one before it. */
+  const latestKeyDown = useRef(onKeyDown);
+  latestKeyDown.current = onKeyDown;
   const give = (v: number) => {
     handed.current = v;
     onValue(v);
@@ -95,16 +101,27 @@ export function NumberField({ value, onValue, min, max, integer, blankAs, show, 
         onBlur?.(e);
       }}
       onKeyDown={(e) => {
-        onKeyDown?.(e);
+        const inWindow = !!e.currentTarget.closest(".modal, .straighten-panel");
         if (e.key === "Enter") {
-          settle(e.currentTarget.value);
+          // What was typed is settled — held to the box's range — and the
+          // window drawn with it before the window acts: acting first, it
+          // used the last number in range on the way (a PDF placed at 200
+          // dpi for 2000 typed, a stroke the old width), and the settled
+          // one came after as a stray preview of its own.
+          const text = e.currentTarget.value;
+          flushSync(() => settle(text));
+          latestKeyDown.current?.(e);
           // In a window that answers Enter itself (New document, Export)
           // it goes on to the window, unless the box's own handler took
           // it: held here, no box of New document could finish it.
-          if (!e.defaultPrevented && e.currentTarget.closest(".modal")) return;
+          if (!e.defaultPrevented && inWindow) return;
+        } else {
+          onKeyDown?.(e);
         }
         if (e.key === "Escape") {
-          if (e.currentTarget.closest(".modal")) return;
+          // A window round the box hears it, the panels Straighten and
+          // Feather stand in as much as a modal one.
+          if (inWindow) return;
           dropping.current = true;
           e.currentTarget.blur();
         }

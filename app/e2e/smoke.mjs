@@ -21895,6 +21895,172 @@ assert(
   await ctx.close();
 }
 
+// 9db. The nineteenth audit. A child of a locked group still took handles;
+// a number past any page typed into X put an infinity in the file; Enter
+// in Straighten's box applied the last number in range on the way rather
+// than the one typed, and Escape there did not cancel; a press outside it
+// was worked out from the turned page; and a flyout stayed over the canvas.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  const draw = async (x0, y0, x1, y1) => {
+    await p.click('.toolbar > button[aria-label="Rect"], .tool-group > button[aria-label="Rect"]');
+    await p.mouse.move(r.x + x0, r.y + y0);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x1, r.y + y1, { steps: 4 });
+    await p.mouse.up();
+    await p.waitForTimeout(200);
+  };
+  await draw(40, 40, 120, 100);
+  await draw(160, 40, 240, 100);
+  // Both picked and grouped, the group locked: its children take no
+  // handles.
+  await p.click(".panel ul li .layer-name >> nth=0");
+  await p.click(".panel ul li .layer-name >> nth=1", { modifiers: ["Shift"] });
+  await p.keyboard.press("Control+g");
+  await p.waitForTimeout(300);
+  const rows = p.locator(".panel ul li .layer-name");
+  await p.locator(".panel ul li").nth(0).locator(".lock-toggle").click();
+  await p.waitForTimeout(300);
+  await rows.nth(1).click();
+  await p.waitForTimeout(300);
+  assert((await p.locator(".handle").count()) === 0, "a child of a locked group takes no handles");
+  // Unlocked again for the rest; X refuses a number past any page.
+  await p.locator(".panel ul li").nth(0).locator(".lock-toggle").click();
+  await p.waitForTimeout(200);
+  await rows.nth(1).click();
+  await p.waitForTimeout(300);
+  const x = p.locator('input[aria-label="X position"]');
+  const wasX = await x.inputValue();
+  await x.fill("1e39");
+  await x.press("Tab");
+  await p.waitForTimeout(400);
+  assert((await x.inputValue()) === wasX, `X refuses a number past any page (${await x.inputValue()})`);
+  // Straighten: 60 typed and Enter applies 45, the most it takes.
+  const history = () => p.locator(".history li").allTextContents();
+  await p.click('.menu-label:text-is("Page")');
+  await p.locator(".menu-pop .menu-item", { hasText: "Straighten" }).first().click();
+  await p.waitForTimeout(300);
+  const deg = p.locator('input[aria-label="Straighten degrees"]');
+  await deg.fill("60");
+  await deg.press("Enter");
+  await p.waitForTimeout(400);
+  const said = (await history()).join(" | ");
+  assert(/45\.0°/.test(said) && !/6\.0°/.test(said), `Enter applies what was typed, held to the range (${said})`);
+  await p.keyboard.press("Control+z");
+  await p.waitForTimeout(300);
+  // Escape in its box cancels it.
+  const pageW = async () => (await p.locator("#engine-page").boundingBox()).width;
+  const wasW = await pageW();
+  await p.click('.menu-label:text-is("Page")');
+  await p.locator(".menu-pop .menu-item", { hasText: "Straighten" }).first().click();
+  await p.waitForTimeout(300);
+  await deg.fill("12");
+  await deg.press("Tab");
+  await p.waitForTimeout(300);
+  await deg.focus();
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(400);
+  assert(
+    (await p.locator('[role="dialog"][aria-label="Straighten"]').count()) === 0 && Math.abs((await pageW()) - wasW) < 1,
+    "Escape in Straighten's box cancels it",
+  );
+  // A press outside it lets it go before anything is worked out from the
+  // turned page: a layer flipped from the menu stays upright.
+  await p.click('.menu-label:text-is("Page")');
+  await p.locator(".menu-pop .menu-item", { hasText: "Straighten" }).first().click();
+  await p.waitForTimeout(300);
+  await deg.fill("10");
+  await deg.press("Tab");
+  await p.waitForTimeout(300);
+  await p.click('.menu-label:text-is("Layer")');
+  await p.waitForTimeout(200);
+  assert(
+    (await p.locator('[role="dialog"][aria-label="Straighten"]').count()) === 0 && Math.abs((await pageW()) - wasW) < 1,
+    "a press on the menus lets Straighten go first",
+  );
+  await p.keyboard.press("Escape");
+  // A flyout goes with Escape.
+  const more = p.locator('button[aria-label="More shapes"]');
+  if (await more.count()) {
+    await more.click();
+    await p.waitForTimeout(200);
+    const open = await p.locator(".tool-flyout").count();
+    await p.keyboard.press("Escape");
+    await p.waitForTimeout(200);
+    assert(open === 1 && (await p.locator(".tool-flyout").count()) === 0, "Escape puts a flyout away");
+  }
+  await ctx.close();
+}
+
+// 9dc. Each kept region with one of them off the page: the export stopped
+// at the first file it could not make, said so without naming the region,
+// and the region that was on the page was never written. Now the regions
+// on the page are written and the window names the one left out.
+{
+  await newDocument(400, 300, "rgb");
+  await pickTool("Rect");
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 400) * b.width, b.y + (y / 300) * b.height];
+  await page.mouse.move(...at(10, 10));
+  await page.mouse.down();
+  await page.mouse.move(...at(390, 290), { steps: 6 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  await pickTool("Select");
+  for (const [name, x0, y0, x1, y1] of [
+    ["near", 20, 20, 120, 100],
+    ["far", 260, 180, 380, 280],
+  ]) {
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 5 });
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    promptAnswer = name;
+    await page.click('button[aria-label="Keep what is picked"]');
+    await page.waitForTimeout(250);
+  }
+  await page.keyboard.press("Escape");
+  // A smaller page from the top left leaves "far" past its edge.
+  await menuClick("Page", "Canvas size…");
+  await page.waitForTimeout(200);
+  await page.locator('input[aria-label="Canvas width"]').fill("200");
+  await page.locator('input[aria-label="Canvas height"]').fill("150");
+  await page.click('button[aria-label="Anchor left top"]');
+  await page.click('button[aria-label="Resize the page"]');
+  await page.waitForTimeout(400);
+
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.selectOption('select[aria-label="Area"]', "regions");
+  await page.waitForTimeout(700);
+  const said = await page.textContent('[role=dialog][aria-label="Export"]');
+  assert(
+    /Left out, not on the page: \u201cfar\u201d/.test(said) && !/Could not be made/.test(said),
+    `the window names the region left out rather than failing (${said.slice(-160)})`,
+  );
+  const landed = [];
+  const gather = (d) => landed.push(d);
+  page.on("download", gather);
+  await page.click(".modal-actions .primary");
+  for (let i = 0; i < 40 && landed.length < 1; i++) await page.waitForTimeout(100);
+  await page.waitForTimeout(400);
+  page.off("download", gather);
+  assert(
+    landed.length === 1 && landed[0].suggestedFilename().endsWith("-near.png"),
+    `the region on the page is written, and only it (${landed.map((d) => d.suggestedFilename())})`,
+  );
+  await page.keyboard.press("Escape");
+}
+
 await page.screenshot({ path: join(OUT, "editor-final.png") });
 assert(errors.length === 0, "no page errors: " + JSON.stringify(errors));
 
