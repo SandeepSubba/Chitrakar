@@ -2212,6 +2212,111 @@ impl Adjustment {
 }
 
 impl Filter {
+    /// This filter, written for a page that `m` carries into another —
+    /// a crop, a page grown about its middle, scaled, turned or
+    /// mirrored — so that it does to the picture what it did before.
+    /// `top` is whether it sits on the page itself, where its lengths are
+    /// read in the page's own pixels; one inside a group is read through
+    /// the group's scale, which the map already reaches.
+    ///
+    /// A centre is a share of the page's width and height, and a twirl's
+    /// radius a share of half its shorter side: left as they were, a page
+    /// grown to the right moved a twirl to the new middle, off the face it
+    /// was turning. Lengths go by the map's scale (a blur on a page
+    /// scaled to twice its size was half as strong), and a direction —
+    /// a smear's, a light's, a screen's — turns with it. (A page turned
+    /// or mirrored does not ask this: see `Document::map_page_carrying`.)
+    pub fn carried_on_page(
+        &self,
+        m: Transform,
+        (ow, oh): (f32, f32),
+        (nw, nh): (f32, f32),
+        top: bool,
+    ) -> Filter {
+        let k = if top { m.max_scale() } else { 1.0 };
+        let mirrored = m.a * m.d - m.b * m.c < 0.0;
+        let centre = |c: [f32; 2]| -> [f32; 2] {
+            let (x, y) = (c[0] * ow, c[1] * oh);
+            let (x, y) = (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
+            [
+                if nw > 0.0 { x / nw } else { c[0] },
+                if nh > 0.0 { y / nh } else { c[1] },
+            ]
+        };
+        let reach = |r: f32| -> f32 {
+            let (was, now) = (ow.min(oh), nw.min(nh));
+            if now > 0.0 {
+                r * was * m.max_scale() / now
+            } else {
+                r
+            }
+        };
+        let turned = |deg: f32| -> f32 {
+            if !top {
+                return deg;
+            }
+            let (s, c) = deg.to_radians().sin_cos();
+            let (x, y) = (m.a * c + m.c * s, m.b * c + m.d * s);
+            if x == 0.0 && y == 0.0 {
+                deg
+            } else {
+                let d = y.atan2(x).to_degrees();
+                // Kept in the turn the slider reads, 0..360.
+                (d + 360.0) % 360.0
+            }
+        };
+        let mut out = self.clone();
+        match &mut out {
+            Filter::GaussianBlur { sigma }
+            | Filter::Sharpen { sigma, .. }
+            | Filter::HighPass { sigma } => *sigma *= k,
+            Filter::Halftone { size, degrees } => {
+                *size *= k;
+                *degrees = turned(*degrees);
+            }
+            Filter::Emboss {
+                degrees, height, ..
+            } => {
+                *height *= k;
+                *degrees = turned(*degrees);
+            }
+            Filter::MotionBlur { distance, degrees } => {
+                *distance *= k;
+                *degrees = turned(*degrees);
+            }
+            Filter::RadialBlur { center, .. } => *center = centre(*center),
+            Filter::Twirl {
+                degrees,
+                radius,
+                center,
+            } => {
+                *center = centre(*center);
+                *radius = reach(*radius);
+                if mirrored {
+                    *degrees = -*degrees;
+                }
+            }
+            Filter::Pinch { radius, center, .. } => {
+                *center = centre(*center);
+                *radius = reach(*radius);
+            }
+            Filter::Ripple {
+                amplitude,
+                wavelength,
+            } => {
+                *amplitude *= k;
+                *wavelength *= k;
+            }
+            Filter::OilPaint { radius }
+            | Filter::Median { radius }
+            | Filter::SurfaceBlur { radius, .. } => *radius *= k,
+            Filter::Pixelate { size } => *size *= k,
+            Filter::Noise { grain, .. } => *grain *= k,
+            Filter::FindEdges { .. } | Filter::LensCorrection { .. } | Filter::Vignette { .. } => {}
+        }
+        out
+    }
+
     /// Every colour written inside a filter, of which there are none —
     /// said kind by kind rather than assumed, for the reason above.
     pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
@@ -2599,12 +2704,16 @@ pub enum Effect {
 
 impl Effect {
     /// The longest blur, border, bevel or softening an effect is drawn
-    /// with on the way in from a file: two and a half times what the
-    /// panel offers. At 250 a damaged file's shadow still held a small
-    /// page for ten seconds; at 100 it is a second or two.
-    pub const LONGEST: f32 = 100.0;
+    /// with on the way in from a file. Far past what the panel offers on
+    /// purpose: the editor's own steps carry an effect's lengths past it
+    /// — Resize page to 400% makes a shadow's blur of 40 one of 160, and
+    /// again one of 640 — and a file the editor wrote has to open as it
+    /// was saved. Held at a hundred, such a file reopened with its
+    /// shadows a third as soft. What this holds is only a damaged file's
+    /// ten thousand.
+    pub const LONGEST: f32 = 4000.0;
     /// The farthest a shadow is set off its layer, either way.
-    pub const FARTHEST: f32 = 2000.0;
+    pub const FARTHEST: f32 = 100_000.0;
 
     /// Hold this effect's numbers to what can be drawn (see
     /// `Document::hold_effects_in_range`); whether any had to change.
@@ -2660,8 +2769,12 @@ impl Effect {
             } => {
                 let a = hold(size, 0.0, long);
                 let b = hold(depth, 0.0, 100.0);
-                let c = hold(lx, -1.0, 1.0);
-                let d = hold(ly, -1.0, 1.0);
+                // The light's direction is a vector whose length says
+                // nothing, and which a stretched group's ungrouping makes
+                // longer than one: held to a unit box, it turned. Only a
+                // number that is no number is held.
+                let c = hold(lx, -far, far);
+                let d = hold(ly, -far, far);
                 let e = hold(altitude, 0.0, 90.0);
                 let f = hold(opacity, 0.0, 1.0);
                 a || b || c || d || e || f

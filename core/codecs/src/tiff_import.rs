@@ -407,8 +407,13 @@ fn as_plain_grey(bytes: &[u8]) -> Option<PlainGrey> {
     let size = |kind: u64| if kind == 3 { 2 } else { 4 };
     put(photometric.value_at, 2, 1);
     if narrow {
-        let b = bits.as_ref()?;
-        put(b.value_at, 2, 8);
+        // A file that does not say how many bits a sample takes means one,
+        // the format's own default (Pillow writes a black-and-white TIFF
+        // so). The reader takes no word to mean eight, which is what it
+        // is to be told here anyway.
+        if let Some(b) = bits.as_ref() {
+            put(b.value_at, 2, 8);
+        }
         put(
             width.value_at,
             size(width.kind),
@@ -476,6 +481,51 @@ fn ycbcr(y: u16, cb: u16, cr: u16) -> [u8; 4] {
 
 #[cfg(test)]
 mod tests {
+    /// A black-and-white TIFF that does not say how many bits a sample
+    /// takes — Pillow writes them so — means one, the format's default.
+    /// It was refused as damaged.
+    #[test]
+    fn a_one_bit_tiff_that_does_not_say_so_opens() {
+        // Sixteen wide, two tall: the first row white then black, the
+        // second the other way.
+        let pixels = [0xFFu8, 0x00, 0x00, 0xFF];
+        let entries: [(u16, u16, u32, u32); 8] = [
+            (256, 3, 1, 16), // width
+            (257, 3, 1, 2),  // height
+            (259, 3, 1, 1),  // no compression
+            (262, 3, 1, 1),  // black is zero
+            (273, 4, 1, 0),  // where the strip is, filled in below
+            (277, 3, 1, 1),  // one sample
+            (278, 3, 1, 2),  // rows a strip
+            (279, 4, 1, 4),  // the strip's bytes
+        ];
+        let ifd_at = 8u32;
+        let data_at = ifd_at + 2 + entries.len() as u32 * 12 + 4;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II");
+        b.extend_from_slice(&42u16.to_le_bytes());
+        b.extend_from_slice(&ifd_at.to_le_bytes());
+        b.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            let value = if tag == 273 { data_at } else { value };
+            b.extend_from_slice(&tag.to_le_bytes());
+            b.extend_from_slice(&kind.to_le_bytes());
+            b.extend_from_slice(&count.to_le_bytes());
+            if kind == 3 {
+                b.extend_from_slice(&(value as u16).to_le_bytes());
+                b.extend_from_slice(&[0, 0]);
+            } else {
+                b.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&pixels);
+        let img = decode_tiff(&b).unwrap();
+        assert_eq!((img.width, img.height), (16, 2));
+        let at = |x: usize, y: usize| img.rgba8[(y * 16 + x) * 4];
+        assert_eq!((at(0, 0), at(15, 0), at(0, 1), at(15, 1)), (255, 0, 0, 255));
+    }
+
     use super::*;
     use tiff::encoder::{colortype, TiffEncoder};
 

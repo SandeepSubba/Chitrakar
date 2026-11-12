@@ -949,14 +949,14 @@ export function PreferencesDialog({
               <>
                 {num("Width", prefs.newWidth, (v) => setPrefs({ newWidth: v }), {
                   min: 1,
-                  max: 8192,
+                  max: 30000,
                   hint: "px",
                 })}
                 {num(
                   "Height",
                   prefs.newHeight,
                   (v) => setPrefs({ newHeight: v }),
-                  { min: 1, max: 8192, hint: "px" },
+                  { min: 1, max: 30000, hint: "px" },
                 )}
                 {num("Resolution", prefs.newDpi, (v) => setPrefs({ newDpi: v }), {
                   min: 1,

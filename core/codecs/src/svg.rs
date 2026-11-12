@@ -1164,11 +1164,13 @@ fn write_node(
                 let _ = write!(
                     out,
                     r#"{pad}<text font-family="{}, sans-serif" font-size="{:.2}"{spacing}{style}{weight}{decoration}{common} fill="{}" xml:space="preserve">"#,
-                    if spec.font.is_empty() {
+                    // A family's name is a file's, and can hold "&" or a
+                    // quote: written as it is, the SVG was no XML at all.
+                    escape_xml(&css_family(if spec.font.is_empty() {
                         "DejaVu Sans"
                     } else {
                         spec.font.as_str()
-                    },
+                    })),
                     block.em,
                     color_hex(doc, &spec.fill),
                 );
@@ -2426,7 +2428,11 @@ fn run_look(doc: &Document, spec: &chitrakar_doc::TextSpec, run: Option<usize>) 
         );
     }
     if let Some(font) = &run.font {
-        let _ = write!(out, r#" font-family="{}, sans-serif""#, escape_xml(font));
+        let _ = write!(
+            out,
+            r#" font-family="{}, sans-serif""#,
+            escape_xml(&css_family(font))
+        );
     }
     // A size of its own, said as the em its face is scaled to, which is
     // what `font-size` means — and what the block's own is written as.
@@ -2531,6 +2537,21 @@ fn layer_id(layer: NodeId, name: &str) -> String {
 /// what it copies as plain text — made the whole file one no reader
 /// would open. It and a form feed stand as the line break they are; the
 /// rest go.
+/// A family's name as CSS reads one in a list: as it is when it is
+/// words, and quoted when it holds anything a bare name may not — "Tom
+/// & Jerry" unquoted is no name, and the text fell back to sans-serif.
+fn css_family(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == ' ' || c == '-' || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit())
+    {
+        name.to_string()
+    } else {
+        format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+}
+
 fn escape_xml(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -5851,6 +5872,34 @@ mod tests {
             e.0.abs_diff(r.0) <= 1 && e.1.abs_diff(r.1) <= 1 && e.2.abs_diff(r.2) <= 1,
             "top, foot and right edge: the engine {e:?}, a reader {r:?}"
         );
+    }
+
+    /// A font named after its file can hold "&" and quotes: the SVG is
+    /// still XML, and the name still names the face carried with it.
+    #[test]
+    fn a_font_name_with_markup_in_it_leaves_the_svg_whole() {
+        let mut doc = Document::new(200, 60, ColorMode::Rgb);
+        let root = doc.root();
+        let mut spec = chitrakar_doc::TextSpec::new(
+            "Hi",
+            20.0,
+            chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        );
+        spec.font = r#"Tom & "Jerry" <1>"#.to_string();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(chitrakar_doc::Node::text("Words", spec)),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        roxmltree::Document::parse(&svg).unwrap_or_else(|e| panic!("{e}\n{svg}"));
+        assert!(svg.contains("Tom &amp;"), "{svg}");
     }
 
     /// A line whose paragraph starts in Hebrew is ordered right to left

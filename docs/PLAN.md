@@ -107,7 +107,9 @@ without reading anything else.*
      to one of the same name, ramps slanted off their drag, Repeat in
      the wrong space. The thirty-second: softness carried into a
      stretched group, a file's renamed font taking another of its
-     names, right-to-left text in SVG and justified.
+     names, right-to-left text in SVG and justified. The thirty-third:
+     filters left behind by the page's own changes, a file of the
+     editor's own reopened changed.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12153,7 +12155,10 @@ without reading anything else.*
   into set a Hebrew line left to right, so the caret and a selection
   stood over other letters (each paragraph reads by its first strong
   letter); a damaged file's effects were held to 250, which still held a
-  small page for ten seconds (100 now); a marquee, a fill, a crop begun
+  small page for ten seconds (100, then — when the thirty-third found
+  the editor's own Resize page and ungrouping made files that reopened
+  changed — 4000, and a bevel's light no longer held to a unit box: a
+  file the editor wrote opens as it was saved); a marquee, a fill, a crop begun
   on the picked path's dots moved its anchor (only Move and Node take
   them); forgetting the last kept region handed the focus to the bar's
   next button, where Delete took the picked layer (the row holds it);
@@ -12187,7 +12192,60 @@ without reading anything else.*
   Angle and Skew fields read the layer's own turn, where X, Y, W and H
   read the page's box; a wheel or a two-finger swipe zooms and never
   pans; an SVG's right-to-left text along a path is ordered left to
-  right by a reader.
+  right by a reader. Its files pass (SVG, PDF, PSD, raw and odd imports
+  compared with the canvas, and found matching): a font named after a
+  file with "&" in it made an SVG that was no XML (the name is escaped,
+  and quoted where CSS needs it); an SVG larger than a page can be
+  opened on the page there was, mostly off it (it is taken down to the
+  largest page that holds it, and the open says so); a black-and-white
+  TIFF that does not say how many bits a sample takes, as Pillow writes
+  one, was refused as damaged (one, the format's default). Limit
+  written down: an italic block's SVG opens again upright here, since
+  the SVG carries the upright face and this reader does not lean it.
+  **A thirty-third audit (November 2026).** Its check of round 32: a
+  tall picture's preview in the Export window spilled out of its frame
+  over the window (sized by the frame's own height now); a justified
+  right-to-left paragraph's last line sat at the right of the box the
+  text is typed into, where the page sets it at the left; W typed for a
+  flipped layer kept its far edge, where a turned one keeps the box's
+  corner. Its editing pass (six fuzz runs, two in CMYK): the holding of
+  a damaged file's effects, at 100 and a unit box for a bevel's light,
+  changed files the editor wrote itself — a shadow Resize page had
+  scaled to 160 reopened at 100, and a bevel lit from a direction an
+  ungrouping had lengthened turned (held at 4000 now, and the light only
+  where it is no number); a twirl, a pinch or a radial blur stayed on
+  the old page's middle when the page was cropped, grown or
+  straightened, and Resize page left a filter on the page at its old
+  strength (a filter is carried with the page, `Filter::carried_on_page`,
+  and the way back sets each to exactly what it was, since a share of a
+  page carried there and back comes back a rounding off);
+  Canvas size by an odd number about the middle moved everything half a
+  pixel (whole pixels now). Its interface pass: a row chosen from the
+  menu bar by keyboard left the focus on the bar (it goes back where the
+  keyboard came from; Escape still leaves it on the label); Enter in the
+  Export window, which opens on a drop-down, exported nothing (Enter on
+  a closed drop-down is the window's); a wide panel kept at a large
+  interface size left a narrow window a canvas 145 pixels across (two
+  fifths of the window at most); Undo and Redo, Fill, Stroke and Crop to
+  the selection, Zoom to selection, Clear guides and Paste style stayed
+  pressable with nothing to act on; Preferences held a new document to
+  8192 where the window takes 30000; the keys sheet did not say F10,
+  Shift+F10 or Ctrl+Enter; the New document window's presets did not say
+  which was chosen. Limits written down: a page turned or mirrored leaves
+  a filter's centre and direction as they were (a page turned there and
+  back has to be the same file to the byte, and a share of a page does
+  not come back exactly); a shadow's tail inside a group
+  squashed one way is cut short along the squashed side; a
+  right-to-left line with letter spacing sits half a space off in a
+  browser's drawing of its SVG; the box the canvas's text is typed into
+  is a size wider than the text, so a centred or right-set line stands
+  off its letters while typed; a small page opened at a great zoom with
+  a large shadow takes seconds over its first frame; a clone or heal
+  whose source a crop leaves off the page lays nothing there; ripple,
+  halftone and noise patterns are anchored to the page's corner and
+  move under a crop; the Curves editor is the mouse's alone; on a
+  focused layer row the arrows nudge the layer rather than walk the
+  rows; an unticked toggle in a menu reads as a plain action.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

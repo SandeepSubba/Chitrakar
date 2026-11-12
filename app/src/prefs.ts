@@ -380,8 +380,8 @@ export function clamp(p: Prefs): Prefs {
     paintSoftness: n(p.paintSoftness, 0, 1, 0.5),
     nudge: n(p.nudge, 0.1, 100, 1),
     nudgeBig: n(p.nudgeBig, 0.1, 1000, 10),
-    newWidth: n(Math.round(p.newWidth), 1, 8192, 1024),
-    newHeight: n(Math.round(p.newHeight), 1, 8192, 768),
+    newWidth: n(Math.round(p.newWidth), 1, 30000, 1024),
+    newHeight: n(Math.round(p.newHeight), 1, 30000, 768),
     newDpi: n(Math.round(p.newDpi), 1, 2400, 72),
     // Zero is not a scale but the set — 1×, 2× and 3× in one press —
     // and the window never hands it to the engine as one.

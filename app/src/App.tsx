@@ -1907,6 +1907,16 @@ function markNeedsALayer(entries: MenuEntry[], nonePicked: boolean) {
   }
 }
 
+/** Grey out the rows that have nothing to act on now: Undo with nothing
+ * done, a row about the region picked out with none, Clear guides with
+ * none. They were pressable and answered with nothing, or an alert. */
+function markNothingToDo(entries: MenuEntry[], idle: Record<string, boolean>) {
+  for (const e of entries) {
+    if (e.kind === "item" && idle[e.id]) e.disabled = true;
+    else if (e.kind === "sub") markNothingToDo(e.entries, idle);
+  }
+}
+
 /** Write each row's own chord, the one a person gave it, beside it —
  * after whatever the row already says (a tick, "Del"). */
 function markMenuKeys(entries: MenuEntry[], menuOf: Record<string, string>) {
@@ -10456,7 +10466,9 @@ export function App() {
     const parent = toTransform(session.parent_space_of(selected));
     const placed = composeT(parent, t0);
     const back = invertT(parent);
-    if ((Math.abs(placed.b) > 1e-9 || Math.abs(placed.c) > 1e-9) && back) {
+    // So too flipped or turned half round: along its own sides, its far
+    // edge stayed put and X jumped.
+    if ((Math.abs(placed.b) > 1e-9 || Math.abs(placed.c) > 1e-9 || placed.a < 0 || placed.d < 0) && back) {
       const stretch: Transform = { a: sx, b: 0, c: 0, d: sy, e: (1 - sx) * x, f: (1 - sy) * y };
       run({ SetTransform: { id: selected, transform: composeT(back, composeT(stretch, placed)) } });
       return;
@@ -11387,7 +11399,7 @@ export function App() {
             id = session.place_image(picture, name);
           }
           placed(id, was);
-          if (kind === "psd" || kind === "picture") {
+          if (kind === "psd" || kind === "picture" || kind === "svg") {
             const notes = JSON.parse(session.import_notes()) as string[];
             setImportNotes(notes.length > 0 ? { name, notes } : null);
           }
@@ -12844,6 +12856,19 @@ export function App() {
     menus.flatMap((m) => m.entries),
     selectionSet.length === 0,
   );
+  {
+    const noRegion = antRings.length === 0;
+    markNothingToDo(menus.flatMap((m) => m.entries), {
+      undo: history.past.length === 0,
+      redo: history.future.length === 0,
+      "fill-picked": noRegion,
+      "stroke-picked": noRegion,
+      "crop-to-picked": noRegion,
+      "zoom-selection": noRegion && selectionSet.length === 0,
+      "clear-guides": docGuides.length === 0,
+      "paste-style": styleClip.current === null,
+    });
+  }
   const menusRef = useRef(menus);
   menusRef.current = menus;
   // A chord a person gave a menu row runs that row, from wherever the
@@ -13292,6 +13317,7 @@ export function App() {
             className="chrome-button icon-only"
             onClick={undo}
             title={tip("Undo", "undo")}
+            disabled={history.past.length === 0}
           >
             <Icon name="undo" />
           </button>
@@ -13299,6 +13325,7 @@ export function App() {
             className="chrome-button icon-only"
             onClick={redo}
             title={tip("Redo", "redo")}
+            disabled={history.future.length === 0}
           >
             <Icon name="redo" />
           </button>
@@ -15200,6 +15227,10 @@ export function App() {
                     // starting in Hebrew was set left to right here, and
                     // the caret and a selection stood over other letters.
                     unicodeBidi: "plaintext",
+                    // A justified paragraph's last line is set at the
+                    // left on the page, whichever way it reads; read
+                    // right to left here it went to the right.
+                    textAlignLast: spec.align === "Justify" && spec.width > 0 ? "left" : undefined,
                     fontStyle: spec.italic ? "italic" : "normal",
                     fontWeight: spec.bold ? "bold" : "normal",
                     caretColor: caret,
@@ -15749,7 +15780,10 @@ export function App() {
           style={{
             // Drawn at the interface's size, so a larger interface does
             // not squeeze the same text into the same pixels.
-            width: Math.round(panelWidth * prefs.uiScale),
+            // Never more than two fifths of the window: kept wide at a
+            // large interface size, a narrow window was left a canvas
+            // a hundred and fifty pixels across.
+            width: Math.round(Math.min(panelWidth * prefs.uiScale, Math.max(200, window.innerWidth * 0.4))),
             // Only ever down: a sheet pulled up past its edge would come
             // away from the bottom of the screen.
             transform: sheetPull !== null && sheetPull > 0 ? `translateY(${sheetPull}px)` : undefined,
@@ -17114,6 +17148,10 @@ const keyHelp = (
       ["Alt-click a swatch", "Take that colour out of the palette"],
       ["Delete on a chip", "Forget it — a colour, style, comp, brush, region or setup (F2 renames a comp)"],
       ["Delete", "Delete the picked layers"],
+      // The ways in for a person with no mouse.
+      ["F10", "The menu bar; the arrows walk it, Enter chooses, Escape leaves"],
+      ["Shift+F10 or the menu key", "The menu for what is picked, or for the focused row"],
+      ["Ctrl+Enter in text", "Finish typing, keeping what is typed"],
       // Named only where they arrive: a browser keeps these two and
       // never passes them on, so in a tab this sheet would be promising
       // something that does not happen.
@@ -17342,6 +17380,7 @@ function NewDocDialog({
                   ? "preset active"
                   : "preset"
               }
+              aria-pressed={w === pw && h === ph && dpi === pdpi}
               onClick={() => {
                 setW(pw);
                 setH(ph);
@@ -19180,11 +19219,14 @@ function CanvasSizeDialog({
     const [nw, nh] = [px(w), px(h)];
     // The anchor point of the old page has to land on the same point of
     // the new one, and every top-level layer carries that shift.
+    // On whole pixels, as every editor puts it: a page grown by one
+    // about its middle moved everything half a pixel, and a photograph
+    // came out resampled soft with its edges half there.
     onResize(
       nw,
       nh,
-      anchor[0] * (nw - width),
-      anchor[1] * (nh - height),
+      Math.round(anchor[0] * (nw - width)),
+      Math.round(anchor[1] * (nh - height)),
     );
   };
 
@@ -19291,6 +19333,10 @@ function CanvasSizeDialog({
  * moving across the bar switches to its neighbour without another click —
  * so opening is a click but switching is a hover, which is what `onHover`
  * is for. Escape and any click outside close it. */
+/** What had the focus before the keyboard came to the menu bar: where
+ * a row chosen gives it back (`MenuButton`). `null` for the page itself. */
+let menusEnteredFrom: HTMLElement | null = null;
+
 function MenuButton({
   label,
   open,
@@ -19311,6 +19357,8 @@ function MenuButton({
   const pop = () => ref.current?.querySelector(":scope > [role=menu]");
   /** Whether the open menu has been walked with the keys. */
   const keyed = useRef(false);
+  /** Whether it was closed by Escape rather than by a row chosen. */
+  const escaped = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -19318,11 +19366,31 @@ function MenuButton({
     // row, so the arrows walk it rather than nudging the layer behind.
     if (labelRef.current?.matches(":focus-visible")) focusFirstRow(pop);
     keyed.current = false;
+    escaped.current = false;
     return () => {
-      // A row chosen from the keyboard leaves the focus on the menu's
-      // label, where it came from, rather than on the page's body.
+      // A row chosen from the keyboard gives the focus back to where the
+      // keyboard came to the menus from — the canvas, a row of the
+      // panel. Left on the menu's label, the arrows walked the bar
+      // rather than nudging the shape just made, Escape let go of it,
+      // and the way back was sixty Tabs round. Where the menus were
+      // come to from nothing in particular, the focus goes back to
+      // nothing in particular, which is where the editor's keys are.
       const lost = document.activeElement === null || document.activeElement === document.body;
-      if (keyed.current && lost) labelRef.current?.focus({ preventScroll: true });
+      if (!(keyed.current && lost)) return;
+      // Closed with Escape, nothing was chosen: the label keeps the
+      // focus, where a second Escape or the arrows go on from.
+      if (escaped.current) {
+        labelRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      const back = menusEnteredFrom;
+      if (back && back.isConnected && !(back as HTMLButtonElement).disabled) {
+        back.focus({ preventScroll: true });
+      } else if (back === null) {
+        // Already nothing in particular: stays so.
+      } else {
+        labelRef.current?.focus({ preventScroll: true });
+      }
     };
   }, [open]);
 
@@ -19331,7 +19399,11 @@ function MenuButton({
     const away = (e: PointerEvent) => {
       if (!ref.current?.contains(e.target as Node)) onClose();
     };
-    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      escaped.current = true;
+      onClose();
+    };
     document.addEventListener("pointerdown", away);
     document.addEventListener("keydown", key);
     return () => {
@@ -19361,6 +19433,14 @@ function MenuButton({
         className={open ? "menu-label open" : "menu-label"}
         onClick={onOpen}
         onPointerEnter={onHover}
+        onFocus={(e) => {
+          // Where the keyboard came to the menus from (F10, Tab): a row
+          // chosen gives it back there.
+          const from = e.relatedTarget;
+          if (!(from instanceof Element && from.closest(".menubar, [role=menu]"))) {
+            menusEnteredFrom = from instanceof HTMLElement ? from : null;
+          }
+        }}
         onKeyDown={(e) => {
           if (e.key === "ArrowDown" || e.key === "ArrowUp") {
             e.preventDefault();

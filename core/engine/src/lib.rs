@@ -11575,14 +11575,46 @@ impl Session {
         let mut cmds = Vec::new();
         // Into an empty document it is the file being opened, and the page
         // takes the drawing's size, as a picture's or a Photoshop file's.
+        self.import_notes.clear();
         let (width, height) = (
             imported.width.round() as u32,
             imported.height.round() as u32,
         );
-        if index == 0
-            && self.undo.is_empty()
-            && width > 0
-            && height > 0
+        let opening = index == 0 && self.undo.is_empty() && width > 0 && height > 0;
+        // A drawing larger than a page can be is taken down to the
+        // largest page that holds it, as a picture is, and the open says
+        // so: it opened on the page there was, mostly off it, without a
+        // word.
+        let mut shrink = 1.0f32;
+        if opening && !chitrakar_doc::canvas_fits(width, height) {
+            let (w, h) = (imported.width, imported.height);
+            let side = chitrakar_doc::MAX_CANVAS_SIDE as f32;
+            shrink = (side / w)
+                .min(side / h)
+                .min((chitrakar_doc::MAX_CANVAS_PIXELS as f32 / (w * h)).sqrt())
+                .min(1.0);
+            while shrink > 0.0
+                && !chitrakar_doc::canvas_fits(
+                    (w * shrink).floor() as u32,
+                    (h * shrink).floor() as u32,
+                )
+            {
+                shrink *= 0.99;
+            }
+            self.import_notes.push(format!(
+                "at {width} × {height} it is larger than a page can be, so it is taken down to {}%",
+                ((shrink * 1000.0).round() / 10.0)
+            ));
+        }
+        let (width, height) = if shrink < 1.0 {
+            (
+                (imported.width * shrink).floor() as u32,
+                (imported.height * shrink).floor() as u32,
+            )
+        } else {
+            (width, height)
+        };
+        if opening
             && chitrakar_doc::canvas_fits(width, height)
             && (width, height) != (self.doc.meta.width, self.doc.meta.height)
         {
@@ -11593,10 +11625,18 @@ impl Session {
                 dy: 0.0,
             });
         }
+        let mut holder = Node::group(name);
+        if shrink < 1.0 {
+            holder.transform = Transform {
+                a: shrink,
+                d: shrink,
+                ..Default::default()
+            };
+        }
         cmds.push(Command::AddNode {
             parent: root,
             index,
-            node: Box::new(Node::group(name)),
+            node: Box::new(holder),
         });
         // The file's own layers, in the groups it keeps (a group seen
         // through a mask with grey in it), numbered on from the group
@@ -29695,6 +29735,35 @@ mod tests {
             .all(|i| matches!(i, PsdItem::Pixels(p) if p.visible)));
     }
 
+    /// An SVG larger than a page can be opens on the largest page that
+    /// holds it, the drawing taken down to it, and says so: it opened on
+    /// the page there was, mostly off it.
+    #[test]
+    fn an_svg_too_big_for_a_page_is_taken_down_to_one() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40000" height="100">
+            <rect x="0" y="0" width="40000" height="100" fill="#ff0000"/></svg>"##;
+        let mut session = Session::new(1280, 720, ColorMode::Rgb);
+        let group = session.place_svg(svg, "long.svg").unwrap();
+        let meta = &session.document().meta;
+        assert!(chitrakar_doc::canvas_fits(meta.width, meta.height));
+        assert!(
+            meta.width > 1280 && meta.height < 100,
+            "{} × {}",
+            meta.width,
+            meta.height
+        );
+        let Ok(chitrakar_render::Bounds::Rect(x0, _, x1, _)) =
+            chitrakar_render::node_visual_bounds(session.document(), group)
+        else {
+            panic!("a box")
+        };
+        assert!(
+            x0.abs() < 1.0 && (x1 - meta.width as f32).abs() < 2.0,
+            "{x0}..{x1}"
+        );
+        assert!(session.import_notes()[0].contains("larger than a page"));
+    }
+
     /// A picture inside an SVG comes in with the shapes, in its place.
     ///
     /// The importer cannot finish this one on its own: a raster layer is
@@ -31365,6 +31434,133 @@ mod tests {
             bytes.len(),
             without.len()
         );
+    }
+
+    /// A filter goes where the page goes: a twirl's centre stays on the
+    /// same point of the picture when the page grows to the right, and a
+    /// blur is as strong after the page is scaled to twice its size.
+    /// Each was left as it was. Undo comes back to exactly where it was.
+    #[test]
+    fn a_filter_is_carried_with_the_page() {
+        use chitrakar_doc::Filter;
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        add_rect(&mut s, "Photo", 400.0, 300.0);
+        let root = s.document().root();
+        for (i, f) in [
+            Filter::Twirl {
+                degrees: 90.0,
+                radius: 0.5,
+                center: [0.5, 0.5],
+            },
+            Filter::GaussianBlur { sigma: 8.0 },
+            Filter::MotionBlur {
+                distance: 10.0,
+                degrees: 0.0,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.apply(Command::AddNode {
+                parent: root,
+                index: 1 + i,
+                node: Box::new(Node::filter("F", f)),
+            })
+            .unwrap();
+        }
+        let filters = |s: &Session| -> Vec<Filter> {
+            s.document()
+                .children_of(s.document().root())
+                .unwrap()
+                .iter()
+                .filter_map(|id| match &s.document().node(*id).unwrap().kind {
+                    NodeKind::Filter(f) => Some(f.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let start = filters(&s);
+        s.apply(Command::ResizeCanvas {
+            width: 600,
+            height: 450,
+            dx: 0.0,
+            dy: 0.0,
+        })
+        .unwrap();
+        let Filter::Twirl { center, radius, .. } = filters(&s)[0] else {
+            panic!("a twirl")
+        };
+        assert!(
+            (center[0] - 200.0 / 600.0).abs() < 1e-5 && (center[1] - 150.0 / 450.0).abs() < 1e-5
+        );
+        assert!((radius - 0.5 * 300.0 / 450.0).abs() < 1e-5, "{radius}");
+        assert!(s.undo().unwrap());
+        assert_eq!(filters(&s), start, "and back exactly");
+        s.apply(Command::ScaleCanvas {
+            factor: 2.0,
+            width: 800,
+            height: 600,
+        })
+        .unwrap();
+        assert!(
+            matches!(filters(&s)[1], Filter::GaussianBlur { sigma } if (sigma - 16.0).abs() < 1e-5)
+        );
+        assert!(s.undo().unwrap());
+        assert_eq!(filters(&s), start, "and back exactly");
+        assert!(s.redo().unwrap());
+        assert!(
+            matches!(filters(&s)[1], Filter::GaussianBlur { sigma } if (sigma - 16.0).abs() < 1e-5)
+        );
+    }
+
+    /// What the editor itself makes of an effect opens again as it was
+    /// saved: a shadow scaled by Resize page past the panel's reach, a
+    /// bevel lit from a direction longer than one by an ungrouping. The
+    /// holding meant for damaged files changed both.
+    #[test]
+    fn the_editors_own_effects_reopen_as_saved() {
+        use chitrakar_doc::Effect;
+        let mut s = Session::new(100, 80, ColorMode::Rgb);
+        let id = add_rect(&mut s, "Card", 40.0, 30.0);
+        let black = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let effects = vec![
+            Effect::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                blur: 160.0,
+                color: black.clone(),
+                opacity: 0.5,
+                spread: 0.0,
+            },
+            Effect::Outline {
+                width: 120.0,
+                color: black.clone(),
+                opacity: 1.0,
+            },
+            Effect::Bevel {
+                size: 6.0,
+                depth: 1.0,
+                lx: -1.0,
+                ly: -2.5,
+                altitude: 30.0,
+                highlight: black.clone(),
+                shadow: black,
+                opacity: 0.5,
+            },
+        ];
+        s.apply(Command::SetEffects {
+            id,
+            effects: effects.clone(),
+        })
+        .unwrap();
+        let back = Session::load(&s.save().unwrap()).unwrap();
+        assert_eq!(back.document().node(id).unwrap().effects, effects);
+        assert!(back.import_notes().is_empty(), "{:?}", back.import_notes());
     }
 
     /// A file carrying "Brand" and a "Brand 2" of its own, opened where

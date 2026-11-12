@@ -928,11 +928,59 @@ impl Document {
     /// map like these either moves a guide or stands it on its end,
     /// which falls out of where two of the guide's own points land
     /// rather than out of a table of which becomes which.
-    fn map_page(&mut self, m: Transform) {
+    /// Every filter layer's kind as it stands, for a page change's way
+    /// back to set exactly (`with_filters_back`).
+    fn filter_kinds(&self) -> Vec<(NodeId, NodeKind)> {
+        self.nodes
+            .iter()
+            .filter(|(_, n)| matches!(n.kind, NodeKind::Filter(_)))
+            .map(|(id, n)| (*id, n.kind.clone()))
+            .collect()
+    }
+
+    /// A page change's way back, with the filters it carried set back to
+    /// exactly what they were: carried there and back by the arithmetic
+    /// a share of a page takes, a twirl's centre came back a rounding
+    /// off, and undo was not where it started.
+    fn with_filters_back(back: Command, filters: Vec<(NodeId, NodeKind)>) -> Command {
+        if filters.is_empty() {
+            return back;
+        }
+        let mut cmds = vec![back];
+        cmds.extend(filters.into_iter().map(|(id, kind)| Command::SetKind {
+            id,
+            kind: Box::new(kind),
+        }));
+        Command::Batch(cmds)
+    }
+
+    fn map_page(&mut self, m: Transform, was: (u32, u32)) {
+        self.map_page_carrying(m, was, true)
+    }
+
+    /// `map_page`, with filters carried or not: a page turned or mirrored
+    /// leaves them as they are, since there and back has to come to the
+    /// same file to the byte and a share of a page mirrored twice comes
+    /// back a rounding off.
+    fn map_page_carrying(&mut self, m: Transform, was: (u32, u32), filters: bool) {
         // A vector rather than a point: how far a thing reaches, not
         // where it is, so the map's shift is no part of it.
         let along = |dx: f32, dy: f32| (m.a * dx + m.c * dy, m.b * dx + m.d * dy);
         let top: Vec<NodeId> = self.children.get(&self.root).cloned().unwrap_or_default();
+        // A filter's centre and reach are shares of the page, and one on
+        // the page itself reads its lengths in the page's pixels: each is
+        // carried as the picture under it is (`Filter::carried_on_page`).
+        let (old, new) = (
+            (was.0 as f32, was.1 as f32),
+            (self.meta.width as f32, self.meta.height as f32),
+        );
+        if filters {
+            for (id, node) in self.nodes.iter_mut() {
+                if let NodeKind::Filter(filter) = &mut node.kind {
+                    *filter = filter.carried_on_page(m, old, new, top.contains(id));
+                }
+            }
+        }
         for id in top {
             let Some(node) = self.nodes.get_mut(&id) else {
                 continue;
@@ -1400,6 +1448,7 @@ impl Document {
                     return Err(DocError::BadCanvasSize(width, height));
                 }
                 let prev = (self.meta.width, self.meta.height);
+                let filters = self.filter_kinds();
                 self.meta.width = width;
                 self.meta.height = height;
                 // The shift is a transform of the page's space like any
@@ -1408,29 +1457,37 @@ impl Document {
                 // masks them, what they cast, and the guides. A crop that
                 // left any of those behind would detach it from the
                 // artwork it was placed against.
-                self.map_page(Transform::translation(dx, dy));
-                Ok(Command::ResizeCanvas {
-                    width: prev.0,
-                    height: prev.1,
-                    dx: -dx,
-                    dy: -dy,
-                })
+                self.map_page(Transform::translation(dx, dy), prev);
+                Ok(Self::with_filters_back(
+                    Command::ResizeCanvas {
+                        width: prev.0,
+                        height: prev.1,
+                        dx: -dx,
+                        dy: -dy,
+                    },
+                    filters,
+                ))
             }
             Command::MirrorCanvas { across_x } => {
                 let (w, h) = (self.meta.width as f32, self.meta.height as f32);
-                self.map_page(if across_x {
-                    Transform {
-                        a: -1.0,
-                        e: w,
-                        ..Default::default()
-                    }
-                } else {
-                    Transform {
-                        d: -1.0,
-                        f: h,
-                        ..Default::default()
-                    }
-                });
+                let same = (self.meta.width, self.meta.height);
+                self.map_page_carrying(
+                    if across_x {
+                        Transform {
+                            a: -1.0,
+                            e: w,
+                            ..Default::default()
+                        }
+                    } else {
+                        Transform {
+                            d: -1.0,
+                            f: h,
+                            ..Default::default()
+                        }
+                    },
+                    same,
+                    false,
+                );
                 Ok(Command::MirrorCanvas { across_x })
             }
             Command::StraightenCanvas {
@@ -1471,18 +1528,22 @@ impl Document {
                 };
                 self.meta.width = width;
                 self.meta.height = height;
-                self.map_page(turn);
+                let filters = self.filter_kinds();
+                self.map_page(turn, prev);
                 for (id, mask) in keep {
                     if let Some(node) = self.nodes.get_mut(&id) {
                         node.mask = Some(mask);
                     }
                 }
-                Ok(Command::StraightenCanvas {
-                    degrees: -degrees,
-                    width: prev.0,
-                    height: prev.1,
-                    keep: was,
-                })
+                Ok(Self::with_filters_back(
+                    Command::StraightenCanvas {
+                        degrees: -degrees,
+                        width: prev.0,
+                        height: prev.1,
+                        keep: was,
+                    },
+                    filters,
+                ))
             }
             Command::TurnCanvas { quarters } => {
                 let turns = quarters % 4;
@@ -1521,10 +1582,11 @@ impl Document {
                         f: w,
                     },
                 };
+                let was = (self.meta.width, self.meta.height);
                 if turns % 2 == 1 {
                     std::mem::swap(&mut self.meta.width, &mut self.meta.height);
                 }
-                self.map_page(turn);
+                self.map_page_carrying(turn, was, false);
                 Ok(Command::TurnCanvas {
                     quarters: 4 - turns,
                 })
@@ -1541,18 +1603,25 @@ impl Document {
                     return Err(DocError::BadCanvasSize(width, height));
                 }
                 let prev = (self.meta.width, self.meta.height);
+                let filters = self.filter_kinds();
                 self.meta.width = width;
                 self.meta.height = height;
-                self.map_page(Transform {
-                    a: factor,
-                    d: factor,
-                    ..Default::default()
-                });
-                Ok(Command::ScaleCanvas {
-                    factor: 1.0 / factor,
-                    width: prev.0,
-                    height: prev.1,
-                })
+                self.map_page(
+                    Transform {
+                        a: factor,
+                        d: factor,
+                        ..Default::default()
+                    },
+                    prev,
+                );
+                Ok(Self::with_filters_back(
+                    Command::ScaleCanvas {
+                        factor: 1.0 / factor,
+                        width: prev.0,
+                        height: prev.1,
+                    },
+                    filters,
+                ))
             }
             Command::SetGuides { guides } => {
                 let prev = std::mem::replace(&mut self.guides, guides);

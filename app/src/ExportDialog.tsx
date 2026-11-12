@@ -654,8 +654,11 @@ export function ExportDialog({
                   previewShape === null
                     ? undefined
                     : previewShape >= 1
-                      ? { width: "100%", height: "auto", aspectRatio: `${previewShape}` }
-                      : { height: "100%", width: "auto", aspectRatio: `${previewShape}` }
+                      ? { width: "13rem", height: "auto", aspectRatio: `${previewShape}` }
+                      : // The frame's own size, not a share of it: a
+                        // share of a grid cell's height came to nothing,
+                        // and a tall picture spilled out over the window.
+                        { height: "13rem", width: "auto", aspectRatio: `${previewShape}` }
                 }
               />
             </div>

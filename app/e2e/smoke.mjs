@@ -21657,6 +21657,78 @@ assert(
   );
 }
 
+// 9dl. The thirty-third audit's interface pass. A row chosen from the
+// menu bar by keyboard left the focus on the bar's label; Enter in the
+// Export window, which opens on its Area, exported nothing; Undo was
+// never greyed out; and the panel kept a width that left a narrow window
+// almost no canvas.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const undoButton = p.locator('.chrome-group[aria-label="History"] button').first();
+  assert(await undoButton.isDisabled(), "Undo is greyed out with nothing done");
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 40, r.y + 40);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 140, r.y + 120, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  assert(!(await undoButton.isDisabled()), "and not once something is");
+  await p.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+  const rows = () => p.locator(".panel ul li .layer-name").count();
+  const before = await rows();
+  // F10, along to Edit, down to Duplicate, Enter.
+  await p.keyboard.press("F10");
+  for (let i = 0; i < 8; i++) {
+    const label = await p.evaluate(() => document.activeElement?.textContent ?? "");
+    if (label.trim() === "Edit") break;
+    await p.keyboard.press("ArrowRight");
+  }
+  await p.keyboard.press("ArrowDown");
+  for (let i = 0; i < 40; i++) {
+    const row = await p.evaluate(() => document.activeElement?.textContent ?? "");
+    if (/^Duplicate/.test(row.trim())) break;
+    await p.keyboard.press("ArrowDown");
+  }
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(400);
+  assert((await rows()) === before + 1, "Edit › Duplicate chosen by keyboard duplicates");
+  const where = await p.evaluate(() => (document.activeElement?.closest(".menubar") ? "bar" : document.activeElement?.tagName));
+  assert(where !== "bar", `and gives the focus back rather than leaving it on the bar (${where})`);
+  // Enter in the Export window exports.
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("Control+Shift+e");
+  await p.waitForSelector('[role="dialog"][aria-label="Export"]');
+  await p.waitForTimeout(800);
+  const download = p.waitForEvent("download", { timeout: 8000 }).catch(() => null);
+  await p.keyboard.press("Enter");
+  assert((await download) !== null, "Enter in the Export window exports");
+  await ctx.close();
+}
+{
+  // A wide panel kept at a large interface size leaves a narrow window a canvas.
+  const ctx = await browser.newContext({ viewport: { width: 910, height: 700 } });
+  await ctx.addInitScript(() => {
+    try {
+      localStorage.setItem("chitrakar:panel", "560");
+      localStorage.setItem("chitrakar:prefs", JSON.stringify({ uiScale: 1.25 }));
+    } catch {}
+  });
+  const p = await ctx.newPage();
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const panel = await p.locator("aside.panel").boundingBox();
+  assert(panel && panel.width <= 910 * 0.4 + 1, `the panel keeps to two fifths of the window (${panel?.width})`);
+  await ctx.close();
+}
+
 // 9dk. The thirty-second audit's interface pass. Ctrl+Z typed in the
 // layer search undid the document; the Export window's preview showed a
 // wide picture as a square; Preferences opened a page at the last one's
