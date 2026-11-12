@@ -414,7 +414,7 @@ fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped
     let mut pen = 0f32;
     // A block with no runs is one piece: the common case pays nothing
     // for the machinery and shapes exactly as it always did.
-    for (from, to, run) in pieces_in(spec, at, line.len()) {
+    for (from, to, run, rtl) in in_reading_order(line, at, spec) {
         let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
         let first = glyphs.len();
         shape_piece(
@@ -423,6 +423,7 @@ fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped
             &styling,
             scale,
             run,
+            rtl,
             &mut pen,
             &mut glyphs,
         );
@@ -442,6 +443,73 @@ fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped
         pen -= track;
     }
     (glyphs, pen.max(0.0))
+}
+
+/// Whether a character reads right to left, or opens a stretch that
+/// does: Hebrew, Arabic and their kin, and the marks that say so.
+fn reads_leftward(c: char) -> bool {
+    use unicode_bidi::BidiClass::*;
+    matches!(unicode_bidi::bidi_class(c), R | AL | RLE | RLO | RLI)
+}
+
+/// The line's pieces in the order they stand on the page, left to
+/// right, each with whether it reads right to left: `(from, to, run,
+/// rtl)`, offsets into the line as [`pieces_in`] gives them.
+///
+/// A line all one way is its pieces as they are. One that mixes the two
+/// is cut into the stretches the Unicode bidirectional algorithm finds
+/// (UAX #9), laid out the way it orders them — so "שלום abc 2026" keeps
+/// its Latin and its number reading left to right inside the Hebrew,
+/// as every browser draws it. Which way the line's own paragraph reads
+/// is decided by its first strong letter, so a line wrapped out of a
+/// Hebrew paragraph is ordered as Hebrew even when it holds none.
+fn in_reading_order(
+    line: &str,
+    at: usize,
+    spec: &TextSpec,
+) -> Vec<(usize, usize, Option<usize>, bool)> {
+    let pieces = pieces_in(spec, at, line.len());
+    let text = spec.text.as_str();
+    let paragraph = if text.get(at..at + line.len()) == Some(line) {
+        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+        &text[start..end.max(at + line.len())]
+    } else {
+        line
+    };
+    if !paragraph.chars().any(reads_leftward) && !line.chars().any(reads_leftward) {
+        return pieces
+            .into_iter()
+            .map(|(f, t, r)| (f, t, r, false))
+            .collect();
+    }
+    let base = match unicode_bidi::get_base_direction(paragraph) {
+        unicode_bidi::Direction::Rtl => unicode_bidi::Level::rtl(),
+        _ => unicode_bidi::Level::ltr(),
+    };
+    let info = unicode_bidi::BidiInfo::new(line, Some(base));
+    let mut out = Vec::new();
+    for para in &info.paragraphs {
+        let (levels, runs) = info.visual_runs(para, para.range.clone());
+        for range in runs {
+            let rtl = levels.get(range.start).is_some_and(|l| l.is_rtl());
+            // The pieces of the style runs inside this stretch, in the
+            // order they stand: a stretch read leftward has its first
+            // piece rightmost.
+            let mut inside: Vec<_> = pieces
+                .iter()
+                .filter_map(|&(f, t, r)| {
+                    let (f, t) = (f.max(range.start), t.min(range.end));
+                    (f < t).then_some((f, t, r, rtl))
+                })
+                .collect();
+            if rtl {
+                inside.reverse();
+            }
+            out.extend(inside);
+        }
+    }
+    out
 }
 
 /// How far a run sits above the baseline, in raster pixels: its shift in
@@ -488,6 +556,7 @@ fn shape_piece(
     spec: &TextSpec,
     scale: f32,
     run: Option<usize>,
+    rtl: bool,
     pen: &mut f32,
     glyphs: &mut Vec<Shaped>,
 ) {
@@ -507,7 +576,7 @@ fn shape_piece(
     // Spaced out, a line sets its letters one by one, as a browser and
     // every type tool do: a ligature tracked as one glyph left the page
     // narrower than the same text anywhere else, an SVG of it included.
-    let out = shaped(fonts, face, piece, spec.letter_spacing == 0.0);
+    let out = shaped(fonts, face, piece, spec.letter_spacing == 0.0, rtl);
     glyphs.reserve(out.len());
     for g in out.iter() {
         glyphs.push(Shaped {
@@ -544,12 +613,18 @@ fn shaped(
     face: &rustybuzz::Face<'static>,
     piece: &str,
     ligatures: bool,
+    rtl: bool,
 ) -> std::sync::Arc<Vec<Placed>> {
     use std::sync::{Arc, Mutex};
-    type Kept = HashMap<(usize, String, bool), Arc<Vec<Placed>>>;
+    type Kept = HashMap<(usize, String, bool, bool), Arc<Vec<Placed>>>;
     static KEPT: Mutex<Option<Kept>> = Mutex::new(None);
     const MOST: usize = 4096;
-    let key = (fonts as *const Fonts as usize, piece.to_string(), ligatures);
+    let key = (
+        fonts as *const Fonts as usize,
+        piece.to_string(),
+        ligatures,
+        rtl,
+    );
     if let Some(found) = KEPT
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -563,6 +638,13 @@ fn shaped(
     // drawn as the box a missing glyph is. One byte for one, so every
     // cluster still points where it did.
     buffer.push_str(&piece.replace('\t', " "));
+    // A stretch the bidirectional algorithm reads leftward is shaped
+    // that way, whatever its letters: a Latin word inside one is not cut
+    // out of it, and its brackets are mirrored. Anything else is left to
+    // the shaper's own guess, which is how it always was.
+    if rtl {
+        buffer.set_direction(rustybuzz::Direction::RightToLeft);
+    }
     let off =
         |tag: &[u8; 4]| rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..);
     let features = if ligatures {
@@ -816,7 +898,7 @@ fn list_marks(spec: &TextSpec, scale: f32) -> (Vec<Option<Mark>>, f32) {
             let run = pieces_in(spec, at, 1).first().and_then(|p| p.2);
             let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
             let (mut pen, mut glyphs) = (0f32, Vec::new());
-            shape_piece(&text, 0, &styling, scale, run, &mut pen, &mut glyphs);
+            shape_piece(&text, 0, &styling, scale, run, false, &mut pen, &mut glyphs);
             for g in &mut glyphs {
                 g.marker = true;
             }
@@ -1286,18 +1368,24 @@ fn fonts_named(name: &str) -> &'static Fonts {
 /// The text each glyph of a shaped run stands for: from its cluster to
 /// the next that differs, so a ligature keeps both its letters and the
 /// pieces of a decomposed character share one (the later ones get none).
+///
+/// A stretch read right to left comes out of the shaper last letter
+/// first, so "the next that differs" is the next cluster up the line,
+/// wherever its glyph stands.
 fn cluster_texts(line: &str, clusters: &[usize]) -> Vec<String> {
+    let mut starts: Vec<usize> = clusters.to_vec();
+    starts.sort_unstable();
+    starts.dedup();
+    let mut told = std::collections::HashSet::new();
     clusters
         .iter()
-        .enumerate()
-        .map(|(i, &c)| {
-            if i > 0 && clusters[i - 1] == c {
+        .map(|&c| {
+            if !told.insert(c) {
                 return String::new();
             }
-            let end = clusters[i..]
-                .iter()
+            let end = starts
+                .get(starts.partition_point(|&d| d <= c))
                 .copied()
-                .find(|&d| d != c)
                 .unwrap_or(line.len())
                 .max(c);
             line.get(c..end).unwrap_or("").to_string()
@@ -2134,6 +2222,47 @@ mod tests {
     }
     use chitrakar_color::AuthoredColor;
 
+    #[test]
+    fn a_line_mixing_the_two_directions_reads_as_a_browser_draws_it() {
+        // Hebrew first: the line reads right to left, and the Latin and
+        // the number inside it keep reading left to right.
+        let text = "שלום abc 2026";
+        let (glyphs, _) = shape_line(text, 0, &spec(text, 40.0), 1.0);
+        let mut by_x: Vec<(f32, usize)> = glyphs.iter().map(|g| (g.x, g.cluster)).collect();
+        by_x.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let at = |needle: &str| text.find(needle).unwrap();
+        let x_of = |c: usize| by_x.iter().find(|g| g.1 == c).unwrap().0;
+        assert_eq!(by_x[0].1, at("abc"), "the Latin starts the line's left");
+        assert!(x_of(at("a")) < x_of(at("b")) && x_of(at("b")) < x_of(at("c")));
+        assert!(x_of(at("2")) < x_of(at("6")), "the number reads forward");
+        assert!(x_of(at("6")) < x_of(0), "and stands left of the Hebrew");
+        assert_eq!(
+            by_x.last().unwrap().1,
+            0,
+            "the first Hebrew letter is rightmost"
+        );
+        // Latin first: the Hebrew inside reads leftward, in its place.
+        let text = "abc שלום def";
+        let (glyphs, _) = shape_line(text, 0, &spec(text, 40.0), 1.0);
+        let x_of = |c: usize| glyphs.iter().find(|g| g.cluster == c).unwrap().x;
+        let hebrew = text.find('ש').unwrap();
+        let last = text.find('ם').unwrap();
+        assert!(x_of(0) < x_of(last) && x_of(last) < x_of(hebrew));
+        assert!(x_of(hebrew) < x_of(text.find("def").unwrap()));
+        // What an exporter is told each glyph stands for says every
+        // letter once, whichever way it reads.
+        let placed = placed(&spec(text, 40.0));
+        let mut said: Vec<char> = placed
+            .runs
+            .iter()
+            .flat_map(|r| r.glyphs.iter().flat_map(|g| g.text.chars()))
+            .collect();
+        said.sort_unstable();
+        let mut all: Vec<char> = text.chars().collect();
+        all.sort_unstable();
+        assert_eq!(said, all);
+    }
+
     fn spec(text: &str, size: f32) -> TextSpec {
         TextSpec::new(
             text,
@@ -2753,8 +2882,8 @@ mod tests {
     #[test]
     fn a_tab_is_set_as_a_space() {
         let fonts = bundled();
-        let tab = shaped(fonts, &fonts.face, "a\tb", true);
-        let space = shaped(fonts, &fonts.face, "a b", true);
+        let tab = shaped(fonts, &fonts.face, "a\tb", true, false);
+        let space = shaped(fonts, &fonts.face, "a b", true, false);
         assert!(tab.iter().all(|g| g.glyph != 0), "no missing glyph");
         assert_eq!(
             tab.iter().map(|g| (g.glyph, g.cluster)).collect::<Vec<_>>(),

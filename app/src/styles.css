@@ -3559,6 +3559,16 @@ button.fold:hover {
     min-width: 40px;
   }
 
+  /* And the rows are as tall as what they hold: a row set at its usual
+     2.4rem was 35 pixels at nine tenths' size, and the 40-pixel targets
+     stood out of it above and below, the zoom field over the ruler. */
+  .topbar-menus,
+  .topbar-tools,
+  .topbar.one-row {
+    height: auto;
+    min-height: calc(40px + 0.5rem);
+  }
+
   /* The two fields in the bar are typed into rather than pressed, but a
      field has to be got into first, and a nineteen-pixel line is a poor
      place to aim. */
@@ -4655,6 +4665,22 @@ button.fold:hover {
    page's paper and edge went with it. These are the colours themselves,
    so they keep what they are. */
 @media (forced-colors: active) {
+  /* A picked row is told apart by its tint, which high contrast takes
+     away: there it is set in the system's own highlight, and a row
+     picked alongside it is outlined. */
+  .panel li.selected {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+  .panel li.selected .layer-name,
+  .panel li.selected button {
+    color: HighlightText;
+  }
+  .panel li.multi {
+    outline: 2px dashed Highlight;
+    outline-offset: -2px;
+  }
   .swatch,
   .prefs-swatch,
   .style-chip,

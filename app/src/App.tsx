@@ -216,6 +216,54 @@ function throughAxes(axes: [number, number, number, number] | null | undefined, 
   return axes ? [axes[0] * du + axes[1] * dv, axes[2] * du + axes[3] * dv] : [du, dv];
 }
 
+/** A linear ramp's `to - from`, in the shape's box units, for a ramp
+ * that runs `seen` (also in box units) as it is seen on the page, where
+ * `axes` carries the box onto the page (as `throughAxes` reads it).
+ *
+ * A ramp is stored in the box, and its bands lie square to `to - from`
+ * there: in a box that is not square on the page, the bands of a ramp
+ * dragged at an angle came out slanted to the drag, the red running
+ * 228 to 32 along a line that should have been one colour. The ramp a
+ * person drags is square on the page, so what is stored is the box's
+ * ramp that makes it so: one whose colour changes, step by step across
+ * the box, as the page's does — `G·seen / (seenᵀ·G·seen)`, with `G` the
+ * page's measure of the box — written as its end. */
+function rampStored(axes: [number, number, number, number], seen: [number, number]): [number, number] {
+  const [a, b, c, d] = axes;
+  const [g00, g01, g11] = [a * a + c * c, a * b + c * d, b * b + d * d];
+  const [x, y] = seen;
+  const len = x * (g00 * x + g01 * y) + y * (g01 * x + g11 * y);
+  if (!(len > 1e-12)) return seen;
+  const w = [(g00 * x + g01 * y) / len, (g01 * x + g11 * y) / len];
+  const w2 = w[0] * w[0] + w[1] * w[1];
+  return w2 > 1e-12 ? [w[0] / w2, w[1] / w2] : seen;
+}
+
+/** How a box's units lie on the screen, for `rampStored` and `rampSeen`:
+ * where its two sides go, read off the function that places a point of
+ * the box. */
+function boxAxes(at: (u: number, v: number) => [number, number]): [number, number, number, number] {
+  const o = at(0, 0);
+  const x = at(1, 0);
+  const y = at(0, 1);
+  return [x[0] - o[0], y[0] - o[0], x[1] - o[1], y[1] - o[1]];
+}
+
+/** The other way: where a stored ramp's end is seen, square to its bands
+ * on the page — the knob the ramp is dragged by. `rampStored` of what
+ * this gives is the ramp given. */
+function rampSeen(axes: [number, number, number, number], stored: [number, number]): [number, number] {
+  const [a, b, c, d] = axes;
+  const [g00, g01, g11] = [a * a + c * c, a * b + c * d, b * b + d * d];
+  const det = g00 * g11 - g01 * g01;
+  const v2 = stored[0] * stored[0] + stored[1] * stored[1];
+  if (!(Math.abs(det) > 1e-12) || !(v2 > 1e-12)) return stored;
+  const w = [stored[0] / v2, stored[1] / v2];
+  const q = [(g11 * w[0] - g01 * w[1]) / det, (-g01 * w[0] + g00 * w[1]) / det];
+  const len = w[0] * q[0] + w[1] * q[1];
+  return len > 1e-12 ? [q[0] / len, q[1] / len] : stored;
+}
+
 /** The transform that undoes `t`, or null where it collapses a dimension
  * and nothing can. */
 function invertT(t: Transform): Transform | null {
@@ -2144,6 +2192,13 @@ export function App() {
   }, []);
   /** The modifier keys the screen is holding down. */
   const [held, setHeld] = useState<Held>(NONE_HELD);
+  // Held by buttons that are only there on a touch screen: when the
+  // screen stops being one (a tablet docked to a keyboard), the buttons
+  // go and nothing is left to let the keys up, so they are let up with
+  // them — a Ctrl latched before the dock made every click a Ctrl-click.
+  useEffect(() => {
+    if (!coarse) setHeld(NONE_HELD);
+  }, [coarse]);
   // Every pointer and mouse event is told about them before any handler
   // reads it, in the capture phase on the window — which runs ahead of
   // React's own listener on the root — so the canvas, the handles and
@@ -2373,6 +2428,13 @@ export function App() {
   const [openMenu, setOpenMenu] = useState<MenuId | null>(
     null,
   );
+  // The bar and the phone's drawer are different menus: one open in the
+  // bar when the window narrows has no bar to be shown in, and stayed
+  // open unseen, to come back over the page on its own when it widened
+  // and take the tools' letters. A change of layout closes them.
+  useEffect(() => {
+    setOpenMenu(null);
+  }, [compact]);
   const openInputRef = useRef<HTMLInputElement>(null);
   const placeInputRef = useRef<HTMLInputElement>(null);
   /** Raw files chosen to be developed and exported together. */
@@ -6430,7 +6492,10 @@ export function App() {
               stops,
             },
           } as Gradient)
-        : ({ Linear: { ...same("Linear"), from: [su, sv], to: [u, v], stops } } as Gradient);
+        : (() => {
+            const [du, dv] = rampStored(gradTool.axes, [u - su, v - sv]);
+            return { Linear: { ...same("Linear"), from: [su, sv], to: [su + du, sv + dv], stops } } as Gradient;
+          })();
       preview({
         SetKind: {
           id: gradTool.id,
@@ -8675,6 +8740,15 @@ export function App() {
           setPenHandles((hs) => hs.slice(0, -1));
           return;
         }
+        // Pressed on one of the panel's controls for the picked layer —
+        // its blend, its opacity, its fill — the control goes with the
+        // layer and the focus fell to the page. It is handed to the
+        // layer's row first, which the panel keeps the focus near when
+        // a row goes (keepPanelFocus).
+        const from = e.target instanceof HTMLElement ? e.target : null;
+        if (from?.closest("aside.panel") && !from.closest(".layer-list")) {
+          document.querySelector<HTMLElement>("aside.panel .layer-list li.selected")?.focus();
+        }
         deleteSelected();
       }
     };
@@ -9601,8 +9675,20 @@ export function App() {
     let next = g;
     if ("Linear" in g) {
       const lin = g.Linear;
-      if (drag.part === "from") next = { Linear: { ...lin, from: [u, v] } };
-      else if (drag.part === "to") next = { Linear: { ...lin, to: [u, v] } };
+      // Each end is dragged where it is seen, and the other stays where
+      // it is seen; what is stored is the box's ramp for that (`rampStored`).
+      const axes = selLocal && selToScreen ? boxAxes((a, b) => selToScreen!(selLocal![0] + a * (selLocal![2] - selLocal![0]), selLocal![1] + b * (selLocal![3] - selLocal![1]))) : null;
+      const seenEnd = (): [number, number] => {
+        const [d0, d1] = axes ? rampSeen(axes, [lin.to[0] - lin.from[0], lin.to[1] - lin.from[1]]) : [lin.to[0] - lin.from[0], lin.to[1] - lin.from[1]];
+        return [lin.from[0] + d0, lin.from[1] + d1];
+      };
+      const aimed = (from: [number, number], end: [number, number]) => {
+        const seen: [number, number] = [end[0] - from[0], end[1] - from[1]];
+        const [d0, d1] = axes ? rampStored(axes, seen) : seen;
+        return { Linear: { ...lin, from, to: [from[0] + d0, from[1] + d1] as [number, number] } };
+      };
+      if (drag.part === "from") next = aimed([u, v], seenEnd());
+      else if (drag.part === "to") next = aimed(lin.from, [u, v]);
       else if (typeof drag.part === "number") {
         // Project the cursor onto the ramp's line: a stop only has a
         // position along it, not a position in the plane.
@@ -10982,15 +11068,14 @@ export function App() {
       setDocPath(null);
       // A picture the file names and does not hold is said, rather than
       // opening as a blank layer that saving then writes down for good.
+      // And a font of the file's kept under a name of its own, because
+      // another face here already answers to its name.
       const missing = JSON.parse(s.missing_pictures()) as string[];
-      setImportNotes(
-        missing.length > 0
-          ? {
-              name: name ?? "This document",
-              notes: missing.map((part) => `${part}, which the file names but does not hold`),
-            }
-          : null,
-      );
+      const notes = [
+        ...missing.map((part) => `${part}, which the file names but does not hold`),
+        ...(JSON.parse(s.import_notes()) as string[]),
+      ];
+      setImportNotes(notes.length > 0 ? { name: name ?? "This document", notes } : null);
       refresh(s);
       fitView();
       return true;
@@ -14928,10 +15013,19 @@ export function App() {
               );
               const path = selectedKind.Vector.shape.Path;
               const handles = withHandles(path);
+              // With a tool that draws in hand, a press on the picked
+              // path's dots is the tool's: the Pen's click there was
+              // swallowed (three clicks made two points) and its drag
+              // moved the old path's anchor.
+              const drawing =
+                tool === "Pen" ||
+                (SHAPE_TOOLS as readonly string[]).includes(tool) ||
+                ["Frame", "Brush", "Paint", "Eraser", "Clone", "Heal", "Text", "Knife", "Gradient"].includes(tool);
               const screen = (x: number, y: number) => ({
                 left: view.x + (t.a * x + t.c * y + t.e) * view.zoom,
                 top: view.y + (t.b * x + t.d * y + t.f) * view.zoom,
               });
+              const reach = drawing ? ("none" as const) : undefined;
               return path.points.flatMap((p, i) => {
                 const at = screen(p[0], p[1]);
                 const dots = [
@@ -14939,7 +15033,7 @@ export function App() {
                     key={`a${i}`}
                     className="anchor"
                     data-anchor={i}
-                    style={{ left: at.left, top: at.top }}
+                    style={{ left: at.left, top: at.top, pointerEvents: reach }}
                     onPointerDown={(e) => onAnchorPointerDown(e, i)}
                     onPointerMove={onAnchorPointerMove}
                     onPointerUp={onAnchorPointerUp}
@@ -14959,7 +15053,7 @@ export function App() {
                       key={`h${i}-${side}`}
                       className="curve-handle"
                       data-handle={`${i}-${side}`}
-                      style={{ left: h.left, top: h.top }}
+                      style={{ left: h.left, top: h.top, pointerEvents: reach }}
                       onPointerDown={(e) => onCurveHandleDown(e, i, side)}
                       onPointerMove={onCurveHandleMove}
                       onPointerUp={onCurveHandleUp}
@@ -15287,7 +15381,11 @@ export function App() {
                   />
                 );
                 if ("Linear" in g) {
-                  const { from, to, stops } = g.Linear;
+                  const { from, stops } = g.Linear;
+                  // The end is shown square to the bands on the page,
+                  // which is where the ramp runs (`rampSeen`).
+                  const [d0, d1] = rampSeen(boxAxes(at), [g.Linear.to[0] - from[0], g.Linear.to[1] - from[1]]);
+                  const to: [number, number] = [from[0] + d0, from[1] + d1];
                   const [a, b] = [at(from[0], from[1]), at(to[0], to[1])];
                   return (
                     <>

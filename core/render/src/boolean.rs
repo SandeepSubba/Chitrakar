@@ -249,6 +249,24 @@ fn chain(fragments: Vec<(Point, Point)>) -> Option<Vec<Ring>> {
 /// to leave a selection of one such sliver: invisible, and every brush
 /// confined to it painted nowhere.
 pub fn combine_or_nudge(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
+    // A shape and an exact copy of it — Ctrl+J and the copy typed back
+    // into place — is the case every edge overlaps, and nudged, a curve
+    // meets its copy at a grazing angle all the way round, which the
+    // arithmetic refused about one time in thirty. The answer needs no
+    // arithmetic: the shape itself, or nothing.
+    let same = a.len() == b.len()
+        && a.iter().zip(b).all(|(r, q)| {
+            r.len() == q.len()
+                && r.iter()
+                    .zip(q)
+                    .all(|(p, q)| (p[0] - q[0]).abs() <= 1e-3 && (p[1] - q[1]).abs() <= 1e-3)
+        });
+    if same {
+        return Some(match op {
+            BoolOp::Union | BoolOp::Intersect => a.to_vec(),
+            _ => Vec::new(),
+        });
+    }
     if let Some(rings) = combine(a, b, op) {
         return Some(rings);
     }
@@ -706,6 +724,22 @@ mod tests {
     /// of it leaves nothing, not the sliver the nudge left along the
     /// shared edge; and a box sharing an edge that covers only part of it
     /// still leaves the rest.
+    #[test]
+    fn a_shape_and_its_exact_copy_combine() {
+        // An ellipse laid over itself: every edge on an edge.
+        let ring: Ring = (0..96)
+            .map(|i| {
+                let t = i as f32 / 96.0 * std::f32::consts::TAU;
+                [200.0 + 100.0 * t.cos(), 150.0 + 60.0 * t.sin()]
+            })
+            .collect();
+        let a = vec![ring];
+        assert_eq!(combine_or_nudge(&a, &a, BoolOp::Union), Some(a.clone()));
+        assert_eq!(combine_or_nudge(&a, &a, BoolOp::Intersect), Some(a.clone()));
+        assert_eq!(combine_or_nudge(&a, &a, BoolOp::Subtract), Some(Vec::new()));
+        assert_eq!(combine_or_nudge(&a, &a, BoolOp::Exclude), Some(Vec::new()));
+    }
+
     #[test]
     fn a_nudge_leaves_no_sliver_of_its_own() {
         let a = vec![square(10.0, 10.0, 20.0)];

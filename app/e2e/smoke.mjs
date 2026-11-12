@@ -21657,6 +21657,154 @@ assert(
   );
 }
 
+// 9dj. The thirty-first audit's editing pass. The Pen's press on the
+// picked path's anchor moved that anchor rather than starting a path;
+// and a ramp dragged at an angle across a wide shape had its bands
+// slanted to the drag rather than square to it.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  const rows = () => p.locator(".panel ul li .layer-name").count();
+  const labels = () => p.locator(".history li:not(.history-start)").allTextContents();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("p");
+  for (const [x, y] of [[40, 200], [120, 240], [220, 210]]) {
+    await p.mouse.click(r.x + x, r.y + y);
+    await p.waitForTimeout(80);
+  }
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(300);
+  // Pressed and dragged from that path's last anchor, as a curve begins.
+  await p.mouse.move(r.x + 220, r.y + 210);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 250, r.y + 180, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(100);
+  for (const [x, y] of [[300, 120], [340, 60]]) {
+    await p.mouse.click(r.x + x, r.y + y);
+    await p.waitForTimeout(80);
+  }
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(300);
+  assert((await rows()) === 2, `a second path begun on the first's anchor (${await rows()} rows)`);
+  assert(!(await labels()).some((l) => /Multiple edits|anchor/i.test(l)), `and the first path's anchor stayed put (${await labels()})`);
+  // A wide bar, its ramp dragged at 45°: a line square to the drag is one colour.
+  await p.keyboard.press("Control+a");
+  await p.keyboard.press("Delete");
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 50, r.y + 100);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 350, r.y + 160, { steps: 5 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  await p.keyboard.press("g");
+  await p.mouse.move(r.x + 170, r.y + 100);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 230, r.y + 160, { steps: 6 });
+  await p.mouse.up();
+  await p.waitForTimeout(500);
+  const seen = await p.evaluate(([x0, y0, pts]) => {
+    const el = document.getElementById("engine-canvas");
+    const ctx2 = el.getContext("2d");
+    const box = el.getBoundingClientRect();
+    const k = el.width / box.width;
+    return pts.map(([x, y]) => [...ctx2.getImageData(Math.round((x0 + x - box.x) * k), Math.round((y0 + y - box.y) * k), 1, 1).data]);
+  }, [r.x, r.y, [[200, 130], [220, 110], [180, 150], [175, 105], [225, 155]]]);
+  const across = seen.slice(0, 3);
+  const spread = Math.max(...across.map((c) => c[0])) - Math.min(...across.map((c) => c[0]));
+  assert(spread <= 16, `a ramp dragged at 45° is one colour square to the drag (${JSON.stringify(seen)})`);
+  const along = Math.abs(seen[3][0] - seen[4][0]) + Math.abs(seen[3][1] - seen[4][1]) + Math.abs(seen[3][2] - seen[4][2]);
+  assert(along > 60, `and changes along it (${JSON.stringify(seen)})`);
+  await ctx.close();
+}
+
+// 9di. The thirty-first audit's interface pass. A key an input method
+// was using (Escape taking back a Japanese candidate) threw away the
+// whole text block; a bar menu open when the window narrowed came back
+// by itself when it widened; Delete pressed on the blend drop-down
+// dropped the focus to the page; and a picked row was not told apart in
+// high contrast.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("t");
+  await p.mouse.click(r.x + 60, r.y + 60);
+  await p.waitForTimeout(300);
+  await p.keyboard.type("Tokyo ");
+  await p.evaluate(() => {
+    for (const key of ["Escape", "Enter"]) {
+      document.activeElement?.dispatchEvent(
+        new KeyboardEvent("keydown", { key, isComposing: true, bubbles: true, cancelable: true }),
+      );
+    }
+  });
+  await p.waitForTimeout(300);
+  assert(
+    (await p.locator("textarea.inline-text").count()) === 1 &&
+      (await p.locator("textarea.inline-text").inputValue()).startsWith("Tokyo"),
+    "an Escape and an Enter an input method is using leave the text block open and its words",
+  );
+  await p.locator('.toolbar button[aria-label="Move"], .tool-group > button[aria-label="Move"]').first().click();
+  await p.waitForTimeout(300);
+  // Layer menu open; the window narrowed to a phone's and widened again.
+  await p.click('.menu-label:text-is("Layer")');
+  await p.waitForTimeout(200);
+  await p.setViewportSize({ width: 600, height: 800 });
+  await p.waitForTimeout(400);
+  await p.setViewportSize({ width: 1200, height: 800 });
+  await p.waitForTimeout(400);
+  await p.mouse.move(400, 15);
+  await p.waitForTimeout(200);
+  assert((await p.locator(".menu-pop").count()) === 0, "a menu open when the window narrowed does not come back");
+  // A rectangle, picked; Delete on its blend drop-down keeps the focus in the panel.
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 200, r.y + 200);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 280, r.y + 260, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  await p.locator('select[aria-label="Blend mode"]').focus();
+  const rows = await p.locator(".panel ul li .layer-name").count();
+  await p.keyboard.press("Delete");
+  await p.waitForTimeout(400);
+  const where = await p.evaluate(() => {
+    const a = document.activeElement;
+    return a && a !== document.body && !!a.closest("aside.panel") ? "" : `${a?.tagName}`;
+  });
+  assert((await p.locator(".panel ul li .layer-name").count()) === rows - 1, "Delete on the blend takes the layer");
+  assert(where === "", `and the focus stays in the panel (${where})`);
+  // In high contrast, the picked row is set apart from the others.
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 200, r.y + 200);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 280, r.y + 260, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  await p.emulateMedia({ forcedColors: "active" });
+  await p.waitForTimeout(200);
+  const looks = await p.evaluate(() => {
+    const rows = [...document.querySelectorAll(".panel ul li")];
+    const picked = rows.find((r) => r.classList.contains("selected"));
+    const plain = rows.find((r) => !r.classList.contains("selected"));
+    return picked && plain ? [getComputedStyle(picked).backgroundColor, getComputedStyle(plain).backgroundColor] : null;
+  });
+  assert(looks && looks[0] !== looks[1], `a picked row stands out in high contrast (${looks})`);
+  await ctx.close();
+}
+
 // 9dh. A draft offered and not yet answered was written over by the
 // tab's first change: the new tab took the closed tab's slot, and that
 // slot's draft with it, and five layers came back as one. A context of

@@ -800,6 +800,53 @@ impl Document {
         &self.swatches
     }
 
+    /// Every font name in the document that is `from` set as `to`: the
+    /// faces text blocks, their runs and the kept styles name. For a file
+    /// opened where another face already answers to its font's name — the
+    /// file's own face is kept under a name of its own, and the text that
+    /// asked for it follows. Not a step: it is done to a document before
+    /// it is anybody's to undo.
+    pub fn rename_font(&mut self, from: &str, to: &str) {
+        for node in self.nodes.values_mut() {
+            if let NodeKind::Text(spec) = &mut node.kind {
+                if spec.font == from {
+                    spec.font = to.to_string();
+                }
+                for run in &mut spec.runs {
+                    if run.font.as_deref() == Some(from) {
+                        run.font = Some(to.to_string());
+                    }
+                }
+            }
+        }
+        for style in &mut self.styles {
+            if let Some(text) = &mut style.look.text {
+                if text.font == from {
+                    text.font = to.to_string();
+                }
+            }
+        }
+    }
+
+    /// Every layer effect held to what the editor draws: lengths to
+    /// [`Effect::LONGEST`] and offsets to [`Effect::FARTHEST`] either way,
+    /// strengths and the like to their own ranges, and a number that is
+    /// no number to nothing. For a file opened from outside — damaged, or
+    /// written by hand — whose shadow asked for a blur of ten thousand
+    /// and froze the page for minutes drawing it. Says how many effects
+    /// it had to change. Not a step, as `rename_font` is not.
+    pub fn hold_effects_in_range(&mut self) -> usize {
+        let mut held = 0;
+        for node in self.nodes.values_mut() {
+            for effect in &mut node.effects {
+                if effect.hold_in_range() {
+                    held += 1;
+                }
+            }
+        }
+        held
+    }
+
     /// The looks kept by name.
     pub fn styles(&self) -> &[KeptStyle] {
         &self.styles

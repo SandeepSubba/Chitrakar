@@ -365,6 +365,7 @@ dependencies = [
  "chitrakar-color",
  "chitrakar-doc",
  "rustybuzz",
+ "unicode-bidi",
 ]
 
 [[package]]

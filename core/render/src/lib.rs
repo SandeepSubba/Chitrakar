@@ -619,7 +619,33 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
         NodeKind::Vector { shape, stroke, .. } => {
             let flat = flatten_shape(shape);
             let (x0, y0, x1, y1) = local_bounds(flat.as_ref());
-            let mut bounds = boxed([x0, y0, x1, y1]);
+            let turned = t.b.abs() > 1e-6 || t.c.abs() > 1e-6;
+            // Turned, a curve's box is round what it draws, not round its
+            // own box's turned corners: an ellipse turned 45° was said to
+            // be 184 wide where it drew 148, and aligned 18 off its edge.
+            let mut bounds = match (flat.as_ref(), turned) {
+                (VectorShape::Ellipse { rx, ry }, true) => {
+                    let (rx, ry) = (rx.abs(), ry.abs());
+                    let (cx, cy) = (t.a * rx + t.c * ry + t.e, t.b * rx + t.d * ry + t.f);
+                    let hx = ((t.a * rx).powi(2) + (t.c * ry).powi(2)).sqrt();
+                    let hy = ((t.b * rx).powi(2) + (t.d * ry).powi(2)).sqrt();
+                    Bounds::Rect(cx - hx, cy - hy, cx + hx, cy + hy)
+                }
+                (
+                    VectorShape::Path {
+                        points, subpaths, ..
+                    },
+                    true,
+                ) if !points.is_empty() => {
+                    let (mut a, mut b, mut c, mut d) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                    for p in points.iter().chain(subpaths.iter().flatten()) {
+                        let (x, y) = (t.a * p[0] + t.c * p[1] + t.e, t.b * p[0] + t.d * p[1] + t.f);
+                        (a, b, c, d) = (a.min(x), b.min(y), c.max(x), d.max(y));
+                    }
+                    Bounds::Rect(a, b, c, d)
+                }
+                _ => boxed([x0, y0, x1, y1]),
+            };
             if let Some(stroke) = stroke {
                 let pad = stroke_pad(shape, stroke) * max_scale(t);
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
@@ -26506,6 +26532,44 @@ mod tests {
             Bounds::Rect(20.0, 20.0, 40.0, 40.0),
             "the layer itself is not one pixel wider for having a shadow"
         );
+    }
+
+    /// A turned ellipse's box is round the oval it draws, not round its
+    /// own box's turned corners: 200 × 60 turned 45° draws about 148
+    /// across, and was said to be 184.
+    #[test]
+    fn a_turned_ellipses_box_is_round_what_it_draws() {
+        let mut doc = Document::new(400, 400, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "Oval",
+            VectorShape::Ellipse {
+                rx: 100.0,
+                ry: 30.0,
+            },
+        );
+        let (sin, cos) = std::f32::consts::FRAC_PI_4.sin_cos();
+        node.transform = Transform {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            e: 200.0,
+            f: 100.0,
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let Bounds::Rect(x0, y0, x1, y1) = node_visual_bounds(&doc, id).unwrap() else {
+            panic!("a box")
+        };
+        let half = (100.0f32 * 100.0 / 2.0 + 30.0 * 30.0 / 2.0).sqrt();
+        assert!(((x1 - x0) - 2.0 * half).abs() < 0.01, "{}", x1 - x0);
+        assert!(((y1 - y0) - 2.0 * half).abs() < 0.01, "{}", y1 - y0);
     }
 
     /// A 20x20 red square at (20,20) on a 64x64 canvas, with `effects`.

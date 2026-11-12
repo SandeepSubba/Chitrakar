@@ -164,7 +164,7 @@ keys (bar, submenus, the canvas's menu); and `WINDOWS` in App.tsx is
 what makes the editor's own keys stand down. A drop-down whose options
 are actions is an `ActionSelect`, so its arrows browse rather than add.
 
-On a phone (under 640 wide or 500 tall) the menus are a drawer behind
+On a phone (640 wide or 500 tall, or less) the menus are a drawer behind
 one Menus button and the bar is one row (smoke 11a); the suite's
 `menuItem` goes through the drawer whenever there is no menubar. On a
 touch screen a long press opens the canvas's menu and a pen rejects the

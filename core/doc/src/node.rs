@@ -2546,6 +2546,80 @@ pub enum Effect {
     Blur { sigma: f32 },
 }
 
+impl Effect {
+    /// The longest blur, border, bevel or softening an effect is drawn
+    /// with: six times what the panel offers, and what Photoshop's own
+    /// effects reach.
+    pub const LONGEST: f32 = 250.0;
+    /// The farthest a shadow is set off its layer, either way.
+    pub const FARTHEST: f32 = 2000.0;
+
+    /// Hold this effect's numbers to what can be drawn (see
+    /// `Document::hold_effects_in_range`); whether any had to change.
+    pub fn hold_in_range(&mut self) -> bool {
+        fn hold(v: &mut f32, lo: f32, hi: f32) -> bool {
+            let to = if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                lo.max(0.0).min(hi)
+            };
+            let changed = to != *v;
+            *v = to;
+            changed
+        }
+        let (long, far) = (Self::LONGEST, Self::FARTHEST);
+        match self {
+            Effect::DropShadow {
+                dx,
+                dy,
+                blur,
+                opacity,
+                spread,
+                ..
+            }
+            | Effect::InnerShadow {
+                dx,
+                dy,
+                blur,
+                opacity,
+                spread,
+                ..
+            } => {
+                let a = hold(dx, -far, far);
+                let b = hold(dy, -far, far);
+                let c = hold(blur, 0.0, long);
+                let d = hold(opacity, 0.0, 1.0);
+                let e = hold(spread, 0.0, 1.0);
+                a || b || c || d || e
+            }
+            Effect::Outline { width, opacity, .. } => {
+                let a = hold(width, 0.0, long);
+                let b = hold(opacity, 0.0, 1.0);
+                a || b
+            }
+            Effect::Bevel {
+                size,
+                depth,
+                lx,
+                ly,
+                altitude,
+                opacity,
+                ..
+            } => {
+                let a = hold(size, 0.0, long);
+                let b = hold(depth, 0.0, 100.0);
+                let c = hold(lx, -1.0, 1.0);
+                let d = hold(ly, -1.0, 1.0);
+                let e = hold(altitude, 0.0, 90.0);
+                let f = hold(opacity, 0.0, 1.0);
+                a || b || c || d || e || f
+            }
+            Effect::ColorOverlay { opacity, .. } => hold(opacity, 0.0, 1.0),
+            Effect::Blur { sigma } => hold(sigma, 0.0, long),
+        }
+    }
+}
+
 /// What a bevel is lit by and how its heights are read, as every
 /// renderer takes them: the unit vector toward the light in device
 /// space with y down, and the surface scale of SVG's lighting — the

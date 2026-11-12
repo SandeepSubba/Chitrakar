@@ -11,6 +11,7 @@ chitrakar-doc.workspace = true
 chitrakar-color.workspace = true
 ab_glyph = "0.2"
 rustybuzz = "0.20"
+unicode-bidi = "0.3"
 
 # The shared fixture is a test dependency here for the same reason it is
 # one for the GPU backend: a claim about the renderer is worth most when

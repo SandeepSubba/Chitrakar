@@ -27,7 +27,13 @@ export function chipKeys(forget: () => void, rename?: () => void) {
           // Gone, or left with nothing to press (kept regions with no
           // "+" while nothing is picked out).
           for (const near of beside) {
-            const stop = near?.isConnected ? near.querySelector<HTMLElement>("button:not(:disabled)") : null;
+            // The neighbour may be a button itself (the Select tool's
+            // bar sets its buttons straight beside the row).
+            const stop = !near?.isConnected
+              ? null
+              : near.matches("button:not(:disabled)")
+                ? (near as HTMLElement)
+                : near.querySelector<HTMLElement>("button:not(:disabled)");
             if (stop) {
               stop.focus();
               return;

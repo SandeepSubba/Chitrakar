@@ -101,6 +101,11 @@ without reading anything else.*
      two of the twenty-eighth's fixes going too far (a resize growing
      blurs, a moved draft taken by a third tab), the page not starting
      with storage blocked, stale panels after a document went mid-run.
+     The thirtieth and thirty-first: a copy's own layers moved by steps
+     that did not say so, text typed with an input method thrown away,
+     mixed right-to-left lines drawn backwards, a document's font lost
+     to one of the same name, ramps slanted off their drag, Repeat in
+     the wrong space.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12067,6 +12072,71 @@ without reading anything else.*
   replace brings a phone's keyboard up; Ctrl+S while a layer's name is
   typed saves the name it had. Its editing pass stopped part way at a
   usage limit and is to be run again.
+  **A thirty-first audit (November 2026).** Its check of round 30:
+  the rule that keeps a copy's own layers in their places refused
+  Stroke to shape and Text to shapes on one, which put the layer back
+  in its own place as something else (a step that leaves every one of
+  them where it stood passes now); outlining the *original's* layer
+  left the copy standing in for a layer that had gone, so it drew both
+  (it follows the layer that took its place); forgetting the last kept
+  region still dropped the focus to the page, where the Select tool's
+  bar sets its buttons beside the row; the PSD refusal still spoke of
+  every layer at the page's full size. Its interface pass: a key an
+  input method was using — Escape taking back a Japanese or Chinese
+  candidate, Enter accepting one — reached the editor, which threw away
+  the text block, ran Replace all with the unconverted reading, or
+  closed the window (such keys are stopped before anything hears them,
+  `src/composing.ts`); a line mixing right-to-left and left-to-right
+  text was drawn in the wrong order — the Latin and the figures inside
+  Hebrew reversed (each line is laid out by the Unicode bidirectional
+  algorithm, its paragraph deciding which way it reads, and an exporter
+  is told each glyph's letters whichever way they run); a picked row
+  was not told apart in high contrast; a modifier latched on a touch
+  screen stayed held when the screen stopped being one; a bar menu
+  open when the window narrowed came back over the page when it
+  widened; Delete pressed on the blend drop-down or another of the
+  panel's controls dropped the focus to the page; the bar's rows were
+  shorter than their touch targets at nine tenths' size. Its files
+  pass: a document's font was drawn and saved in another face when one
+  of the same name was already loaded — another document's, or a file
+  added here of the same name — and the file's own face was lost on
+  the next save (the file's family is kept under a name of its own,
+  "Brand 2", its text follows, and the open says so); a faded shape
+  with a border over its fill went into a layered PSD faded once, over
+  both, where the page fades each (such a layer goes faded in its
+  pixels); a damaged or hand-written file's shadow with a blur of ten
+  thousand froze the page for minutes (effects are held on the way in
+  to what can be drawn — lengths to 250, offsets to 2000 — and the open
+  says how many). Limits written down: a layer wearing a hundred and
+  fifty effects at those limits still takes twenty seconds to draw; a
+  text box's own undo stays on Ctrl+Z when Undo is bound elsewhere; the
+  Delete key on one of the panel's controls for the picked layer still
+  deletes the layer, as it does anywhere outside a field.
+  Its editing pass (nine fuzz runs of 250 steps found no undo, redo or
+  reopen mismatch): a ramp dragged at an angle across a shape that is
+  not square had its bands square to the drag in the shape's own box,
+  not on the page (the tool stores the box's ramp that is square on the
+  page, and its knobs stand where the ramp runs, `rampStored`), and a
+  knife's pieces or a union carried a slanted ramp's two ends into the
+  new box, turning its bands (the ramp is carried exactly,
+  `rebox_gradient`); Repeat stepped in the group's own space, so a move
+  across went down inside a turned group and a turn sheared inside a
+  stretched one (the step is worked out on the page); a turned
+  ellipse's or curve's box was round its own box's turned corners, so
+  the size fields read 184 for an oval 148 across and alignment was 18
+  off (it is round what is drawn); the Pen's press on the picked path's
+  anchor moved that anchor (a tool that draws takes a press on the dots);
+  a shape united with an exact copy of itself was refused about one time
+  in thirty (a shape and its copy need no arithmetic). Limits written
+  down: a shape stretched by a side handle is stretched as a picture is —
+  its border is thicker on the stretched sides, its corners oval, and
+  Offset path measures by the stretch's average; a heal stroke over text
+  set along a path with runs of its own, in a group scaled to three
+  quarters, can draw differently on the canvas at some zooms (4.16,
+  3.3) from its export at the same scale, which matches the file
+  reopened (the cut-down file is kept with the audit's scripts); a
+  conic ramp carried into a box of another shape still turns a little
+  between its start and its end.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -139,12 +139,34 @@ pub(crate) fn rebox_gradient(
             to,
             stops,
             spread,
-        } => Gradient::Linear {
-            from: at(*from),
-            to: at(*to),
-            stops: stops.clone(),
-            spread: *spread,
-        },
+        } => {
+            // The ramp is the same where it lies, not its two ends: in a
+            // box of another shape the ends carried over turned the
+            // bands of a slanted ramp (a knife's piece, a union), and the
+            // pieces no longer matched what was cut. Its start stays its
+            // start; its direction and length are what make the colour
+            // change by the same amount per step across the new box —
+            // the old rate, carried through the boxes' ratio.
+            let start = at(*from);
+            let v = [to[0] - from[0], to[1] - from[1]];
+            let len2 = v[0] * v[0] + v[1] * v[1];
+            if len2 <= 1e-12 {
+                return Gradient::Linear {
+                    from: start,
+                    to: at(*to),
+                    stops: stops.clone(),
+                    spread: *spread,
+                };
+            }
+            let rate = [sx * v[0] / len2, sy * v[1] / len2];
+            let r2 = rate[0] * rate[0] + rate[1] * rate[1];
+            Gradient::Linear {
+                from: start,
+                to: [start[0] + rate[0] / r2, start[1] + rate[1] / r2],
+                stops: stops.clone(),
+                spread: *spread,
+            }
+        }
         Gradient::Radial {
             center,
             radius,
@@ -1577,6 +1599,30 @@ impl Session {
         if touched.iter().all(|c| told.contains(c)) {
             return Ok(());
         }
+        // A layer of the copy's own put back in its own place by what it
+        // becomes — Stroke to shape, Text to shapes: a removal and an
+        // addition at the same place — leaves every one where it stood,
+        // and so standing in for the one it did. Tried on a scratch copy
+        // of the document, which only a step touching a copy's own layers
+        // pays for.
+        let untold: Vec<NodeId> = touched.difference(&told).copied().collect();
+        let mut scratch = self.doc.clone();
+        if scratch.apply(cmd.clone()).is_ok()
+            && untold.iter().all(|copy| {
+                let (Ok(before), Ok(after)) =
+                    (self.doc.children_of(*copy), scratch.children_of(*copy))
+                else {
+                    return false;
+                };
+                before.len() == after.len()
+                    && before
+                        .iter()
+                        .zip(after)
+                        .all(|(b, a)| b == a || (!after.contains(b) && !before.contains(a)))
+            })
+        {
+            return Ok(());
+        }
         Err(EngineError::BadCommand(
             "a copy's own layers keep their places, since each stands in for one \
              of the original's: this would add to them, take from them or move \
@@ -2307,11 +2353,39 @@ impl Session {
             at += 1;
         }
         cmds.push(Command::RemoveNode { id });
+        cmds.extend(self.stand_ins_carried(id, group_id));
         self.apply_labeled(
             Command::Batch(cmds),
             Some("Turn the text into shapes".into()),
         )?;
         Ok(group_id)
+    }
+
+    /// A layer of an original put back in its place as something else —
+    /// its stroke outlined, its text turned to shapes — is the layer a
+    /// copy's own stood in for, and a copy that said "instead of `from`"
+    /// now says "instead of `to`". Left saying the layer that went, the
+    /// copy drew the original's new layer and its own beside it, and
+    /// offered to make it its own again.
+    fn stand_ins_carried(&self, from: NodeId, to: NodeId) -> Vec<Command> {
+        self.doc
+            .nodes()
+            .filter_map(|(id, n)| match &n.kind {
+                NodeKind::Instance { of, replaces } if replaces.contains(&from) => {
+                    Some(Command::SetKind {
+                        id: *id,
+                        kind: Box::new(NodeKind::Instance {
+                            of: *of,
+                            replaces: replaces
+                                .iter()
+                                .map(|r| if *r == from { to } else { *r })
+                                .collect(),
+                        }),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// A picture said again as flat shapes, in a group just above it:
@@ -2797,6 +2871,7 @@ impl Session {
             });
         }
         cmds.push(Command::RemoveNode { id });
+        cmds.extend(self.stand_ins_carried(id, new_id));
         self.apply_labeled(Command::Batch(cmds), Some("Outline the stroke".into()))?;
         Ok(new_id)
     }
@@ -5817,8 +5892,8 @@ impl Session {
     /// shell is a turn and a scale together. Each set of copies is laid
     /// above the last, so the repeat stacks the way it runs.
     ///
-    /// The layers have to share a group: the step is said in that
-    /// group's space. A copy's mask goes with it, since a mask is laid in
+    /// The layers have to share a group; the step is said on the page,
+    /// whatever that group's own turn, flip or stretch. A copy's mask goes with it, since a mask is laid in
     /// the same space; its effects do not turn, because the light a
     /// shadow falls from belongs to the page rather than the layer. One
     /// step in the history; the answer is every copy, in order.
@@ -5866,10 +5941,24 @@ impl Session {
                 (x0, y0, x1, y1) = (x0.min(a), y0.min(b), x1.max(c), y1.max(d));
             }
         }
-        let middle = if x0.is_finite() {
+        let in_group = if x0.is_finite() {
             [(x0 + x1) / 2.0, (y0 + y1) / 2.0]
         } else {
             [0.0, 0.0]
+        };
+        // The step is said on the page, as a nudge and a flip are: said
+        // in the group's own space, a move across went down inside a
+        // group turned a quarter, left inside a flipped one and twice as
+        // far inside one stretched, and a quarter turn there sheared.
+        // Worked out on the page and carried into the group.
+        let space = chitrakar_render::ancestor_space(&self.doc, ordered[0]);
+        let back = chitrakar_render::invert(space).unwrap_or_default();
+        let middle = {
+            let [x, y] = in_group;
+            [
+                space.a * x + space.c * y + space.e,
+                space.b * x + space.d * y + space.f,
+            ]
         };
         let about = |p: [f32; 2], m: Transform| {
             Transform::translation(p[0], p[1])
@@ -5905,6 +5994,7 @@ impl Session {
                     },
                 ))
         };
+        let step = |k: u32| back.compose(step(k)).compose(space);
         let mut index = siblings
             .iter()
             .position(|s| Some(s) == ordered.last())
@@ -10137,8 +10227,8 @@ impl Session {
         const PSD_BUDGET: u64 = 1_300_000_000;
         if need > PSD_BUDGET {
             return Err(EngineError::BadCommand(format!(
-                "a layered Photoshop file holds every layer at the page's full size at once: \
-                 {layers} layers of a {w} × {h} page need about {:.1} GB, more than the editor \
+                "a layered Photoshop file holds every layer's pixels at once: \
+                 {layers} layers over a {w} × {h} page need about {:.1} GB, more than the editor \
                  can hold. Merge some layers first, or export a flat TIFF or PNG.",
                 need as f64 / 1e9
             )));
@@ -10222,6 +10312,12 @@ impl Session {
                 }
                 (node.name.clone(), self.psd_alone(id, !own_mask)?)
             };
+            // The page fades a shape's fill and its border each as it
+            // paints, so where the border lies over the fill the fade is
+            // taken twice; Photoshop's opacity fades the layer once, over
+            // both together, and the fill showed through the border less
+            // than on the page. Such a layer comes faded in its pixels.
+            let faded_in = !applies && Self::fades_each_paint(node);
             if node.blend != chitrakar_doc::BlendMode::Normal {
                 note(
                     "Photoshop blends in its own colour space, so a blended layer can look a little different there",
@@ -10248,7 +10344,7 @@ impl Session {
             let mut layer =
                 PsdOutLayer::trimmed(&name, self.doc.meta.width, self.doc.meta.height, &rgba);
             if !applies {
-                layer.opacity = node.opacity;
+                layer.opacity = if faded_in { 1.0 } else { node.opacity };
                 layer.blend = node.blend;
                 layer.clipped = node.clipped;
                 if own_mask {
@@ -10268,9 +10364,13 @@ impl Session {
         if !with_mask {
             scratch.apply(Command::SetMask { id, mask: None })?;
         }
+        let opacity = match self.doc.node(id) {
+            Ok(node) if Self::fades_each_paint(node) => node.opacity,
+            _ => 1.0,
+        };
         scratch.apply(Command::Batch(vec![
             Command::SetVisible { id, visible: true },
-            Command::SetOpacity { id, opacity: 1.0 },
+            Command::SetOpacity { id, opacity },
             Command::SetBlendMode {
                 id,
                 blend: chitrakar_doc::BlendMode::Normal,
@@ -10285,6 +10385,18 @@ impl Session {
             chitrakar_render::ancestor_space(&scratch, id),
         )?;
         Ok(surface.to_srgb8())
+    }
+
+    /// A faded shape with both a fill and a border, whose fade the page
+    /// takes once a paint (see `export_psd`): a PSD layer's opacity cannot
+    /// say that, so its pixels carry it.
+    fn fades_each_paint(node: &Node) -> bool {
+        node.opacity < 1.0
+            && matches!(
+                &node.kind,
+                NodeKind::Vector { fill, gradient, stroke: Some(s), .. }
+                    if (fill.is_some() || gradient.is_some()) && s.width > 0.0
+            )
     }
 
     /// A layer's or a group's mask as Photoshop keeps one: what it lets
@@ -12210,18 +12322,113 @@ impl Session {
 
     /// Open a `.chitra` container. The loaded document starts with a fresh
     /// history (undo does not cross save boundaries for now). Fonts the
-    /// file carries are registered for names this process does not know
-    /// yet; a face already loaded keeps precedence, and one that will not
-    /// parse is passed over so the document still opens.
+    /// file carries are registered under their names, and one that will
+    /// not parse is passed over so the document still opens.
+    ///
+    /// A face this process already holds under the same name and other
+    /// bytes — another document's "Brand", or a font file added here that
+    /// happens to share the name — is not the file's: drawing the file in
+    /// it, and saving that face back into the file, lost the face the file
+    /// carried without a word. The file's family is kept under a name of
+    /// its own instead ("Brand 2"), its text follows, and the import notes
+    /// say so.
     pub fn load(bytes: &[u8]) -> Result<Self, EngineError> {
-        let opened = chitrakar_codecs::load_chitra_with_fonts(bytes)
+        use chitrakar_render::text::{font_bytes, has_font, register_font};
+        let mut opened = chitrakar_codecs::load_chitra_with_fonts(bytes)
             .map_err(|e| EngineError::BadCommand(e.to_string()))?;
-        for (name, bytes) in opened.fonts {
-            if !chitrakar_render::text::has_font(&name) {
-                let _ = chitrakar_render::text::register_font(&name, bytes);
+        let differs = |name: &str, bytes: &[u8]| {
+            has_font(name) && font_bytes(name).is_some_and(|held| held != bytes)
+        };
+        // The families the document names, longest first, so a face is
+        // counted under the most particular family it belongs to ("Brand
+        // Serif Italic" under "Brand Serif" rather than "Brand").
+        // Named, not worked out: an italic's twin ("Brand Oblique") is
+        // found from its family's name, so it moves with the family.
+        let mut families: Vec<String> = opened
+            .doc
+            .nodes()
+            .flat_map(|(_, n)| match &n.kind {
+                NodeKind::Text(spec) => std::iter::once(spec.font.clone())
+                    .chain(spec.runs.iter().filter_map(|r| r.font.clone()))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .chain(
+                opened
+                    .doc
+                    .styles()
+                    .iter()
+                    .filter_map(|s| s.look.text.as_ref().map(|t| t.font.clone())),
+            )
+            .filter(|f| !f.is_empty())
+            .collect();
+        families.sort();
+        families.dedup();
+        families.sort_by_key(|f| std::cmp::Reverse(f.len()));
+        let of_family = |face: &str, family: &str| {
+            face == family
+                || face
+                    .strip_prefix(family)
+                    .is_some_and(|r| r.starts_with(' '))
+        };
+        let mut renamed: Vec<(String, String)> = Vec::new();
+        for family in &families {
+            let faces: Vec<&(String, Vec<u8>)> = opened
+                .fonts
+                .iter()
+                .filter(|(name, _)| {
+                    of_family(name, family)
+                        && families.iter().find(|f| of_family(name, f)) == Some(family)
+                })
+                .collect();
+            if !faces.iter().any(|(name, bytes)| differs(name, bytes)) {
+                continue;
+            }
+            let Some(to) = (2..1000).map(|n| format!("{family} {n}")).find(|to| {
+                faces.iter().all(|(name, bytes)| {
+                    let name = format!("{to}{}", &name[family.len()..]);
+                    !differs(&name, bytes)
+                })
+            }) else {
+                continue;
+            };
+            renamed.push((family.clone(), to));
+        }
+        for (name, bytes) in std::mem::take(&mut opened.fonts) {
+            let name = families
+                .iter()
+                .find(|f| of_family(&name, f))
+                .and_then(|f| renamed.iter().find(|(from, _)| from == f))
+                .map_or(name.clone(), |(from, to)| {
+                    format!("{to}{}", &name[from.len()..])
+                });
+            if !has_font(&name) || !differs(&name, &bytes) {
+                let _ = register_font(&name, bytes);
             }
         }
+        for (from, to) in &renamed {
+            opened.doc.rename_font(from, to);
+        }
+        // A damaged or hand-written file's effects are held to what can
+        // be drawn, rather than freezing the page drawing them.
+        let held = opened.doc.hold_effects_in_range();
         let mut session = Self::from_document(opened.doc);
+        session.import_notes = renamed
+            .iter()
+            .map(|(from, to)| {
+                format!(
+                    "its font \"{from}\" is not the one already loaded under that name, \
+                     so it is kept as \"{to}\""
+                )
+            })
+            .collect();
+        if held > 0 {
+            session.import_notes.push(format!(
+                "{held} layer effect{} asked for more than can be drawn, and {} held to what can",
+                if held == 1 { "" } else { "s" },
+                if held == 1 { "is" } else { "are" },
+            ));
+        }
         // An opened file can already hold copies; the flag is only kept
         // in step by the commands that could change it.
         session.note_copies();
@@ -13829,6 +14036,81 @@ mod tests {
         );
     }
 
+    /// Repeat steps on the page whatever the group's own placing: inside
+    /// a group turned a quarter, a move across went down, and inside one
+    /// stretched twice across it went twice as far and a turn sheared.
+    #[test]
+    fn repeating_inside_a_turned_or_stretched_group_steps_on_the_page() {
+        for group_t in [
+            Transform {
+                a: 0.0,
+                b: 1.0,
+                c: -1.0,
+                d: 0.0,
+                e: 200.0,
+                f: 50.0,
+            },
+            Transform {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 10.0,
+                f: 10.0,
+            },
+            Transform {
+                a: -1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: 300.0,
+                f: 0.0,
+            },
+        ] {
+            let mut s = Session::new(400, 400, ColorMode::Rgb);
+            let bar = add_rect(&mut s, "Bar", 120.0, 20.0);
+            let other = add_rect(&mut s, "Other", 10.0, 10.0);
+            let group = s.group_nodes(&[bar, other], "G").unwrap();
+            s.apply(Command::SetTransform {
+                id: group,
+                transform: group_t,
+            })
+            .unwrap();
+            let page_box = |s: &Session, id: NodeId| match chitrakar_render::node_visual_bounds(
+                s.document(),
+                id,
+            )
+            .unwrap()
+            {
+                chitrakar_render::Bounds::Rect(a, b, c, d) => [a, b, c, d],
+                _ => panic!("a box"),
+            };
+            let was = page_box(&s, bar);
+            let made = s
+                .repeat_nodes(&[bar], 1, 50.0, 0.0, 0.0, 1.0, [0.0, 0.0])
+                .unwrap();
+            let now = page_box(&s, made[0]);
+            for k in 0..4 {
+                let want = was[k] + if k % 2 == 0 { 50.0 } else { 0.0 };
+                assert!(
+                    (now[k] - want).abs() < 0.01,
+                    "{group_t:?}: {was:?} → {now:?}"
+                );
+            }
+            // A quarter turn keeps the bar a bar on the page.
+            let made = s
+                .repeat_nodes(&[bar], 1, 0.0, 0.0, 90.0, 1.0, [0.0, 0.0])
+                .unwrap();
+            let turned = page_box(&s, made[0]);
+            let (w, h) = (was[2] - was[0], was[3] - was[1]);
+            assert!(
+                ((turned[2] - turned[0]) - h).abs() < 0.01
+                    && ((turned[3] - turned[1]) - w).abs() < 0.01,
+                "{group_t:?}: {was:?} turned is {turned:?}"
+            );
+        }
+    }
+
     /// A blend lays the shapes between two: a small red square and a
     /// large blue one become squares growing from one to the other and
     /// purpling on the way, in a group between the two, as one step.
@@ -14563,6 +14845,103 @@ mod tests {
         // Following again still lets one go.
         s.clear_override(copy, 0).unwrap();
         assert!(s.document().node(own_a).is_err() || s.document().parent_of(own_a) != Some(copy));
+    }
+
+    /// A copy's own layer, or the original's, outlined where it stands:
+    /// the copy's own was refused as a change to its places, and the
+    /// original's left the copy standing in for a layer that had gone.
+    /// A slanted ramp carried into a box of another shape keeps its
+    /// colour at every point of the page: carrying its two ends turned
+    /// its bands, and a knife's pieces no longer matched.
+    #[test]
+    fn a_slanted_ramp_reboxed_keeps_its_colour_everywhere() {
+        let g = chitrakar_doc::Gradient::Linear {
+            from: [0.2, 0.1],
+            to: [0.9, 0.8],
+            stops: Vec::new(),
+            spread: Default::default(),
+        };
+        let t = |g: &chitrakar_doc::Gradient, b: (f32, f32, f32, f32), p: [f32; 2]| {
+            let chitrakar_doc::Gradient::Linear { from, to, .. } = g else {
+                unreachable!()
+            };
+            let u = [(p[0] - b.0) / (b.2 - b.0), (p[1] - b.1) / (b.3 - b.1)];
+            let v = [to[0] - from[0], to[1] - from[1]];
+            ((u[0] - from[0]) * v[0] + (u[1] - from[1]) * v[1]) / (v[0] * v[0] + v[1] * v[1])
+        };
+        let was = (0.0, 0.0, 300.0, 60.0);
+        for now in [(0.0, 0.0, 150.0, 60.0), (40.0, 10.0, 90.0, 200.0)] {
+            let moved = rebox_gradient(&g, was, now);
+            for p in [[10.0, 5.0], [60.0, 40.0], [120.0, 20.0], [75.0, 55.0]] {
+                let (a, b) = (t(&g, was, p), t(&moved, now, p));
+                assert!((a - b).abs() < 1e-4, "at {p:?} in {now:?}: {a} against {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_layer_outlined_in_place_keeps_its_copys_stand_in() {
+        let stroked = |s: &mut Session, name: &str| {
+            let id = add_rect(s, name, 40.0, 40.0);
+            let mut kind = s.document().node(id).unwrap().kind.clone();
+            if let NodeKind::Vector { stroke, .. } = &mut kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 1.0,
+                        a: 1.0,
+                    },
+                    width: 4.0,
+                    widths: Vec::new(),
+                    cap: chitrakar_doc::StrokeCap::Butt,
+                    join: chitrakar_doc::StrokeJoin::Miter,
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    align: None,
+                    start_marker: chitrakar_doc::Marker::None,
+                    end_marker: chitrakar_doc::Marker::None,
+                });
+            }
+            s.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+            id
+        };
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let a = stroked(&mut s, "A");
+        let b = stroked(&mut s, "B");
+        let card = s.group_nodes(&[a, b], "Card").unwrap();
+        let copy = s.make_instance(card).unwrap();
+        let own_a = s.override_child(copy, 0).unwrap();
+        // The copy's own, outlined in its own place.
+        let outlined = s.outline_stroke(own_a).unwrap();
+        assert_eq!(s.document().children_of(copy).unwrap()[0], outlined);
+        // A swap of the copy's own is still refused.
+        let own_b = s.override_child(copy, 1).unwrap();
+        let swap = Command::MoveNode {
+            id: own_b,
+            parent: copy,
+            index: 0,
+        };
+        assert!(s.apply(swap).is_err(), "a reorder among them is refused");
+        // The original's, outlined: the copy now stands in for what took
+        // its place.
+        let new_b = s.outline_stroke(b).unwrap();
+        let NodeKind::Instance { replaces, .. } = &s.document().node(copy).unwrap().kind else {
+            panic!("a copy")
+        };
+        assert_eq!(replaces, &[a, new_b]);
+        let page = s.render().unwrap().pixels;
+        assert!(s.undo().unwrap());
+        let NodeKind::Instance { replaces, .. } = &s.document().node(copy).unwrap().kind else {
+            panic!("a copy")
+        };
+        assert_eq!(replaces, &[a, b], "and undo gives it back");
+        assert!(s.redo().unwrap());
+        assert_eq!(s.render().unwrap().pixels, page);
     }
 
     /// A frame resized takes its layers' masks along with them: a layer
@@ -29099,6 +29478,71 @@ mod tests {
         assert_eq!((meta.width, meta.height), (1280, 720), "placed, not opened");
     }
 
+    /// A faded shape with a border over its fill: the page fades each
+    /// paint, so the fill shows through the border, and a Photoshop
+    /// layer's opacity fades the two together. Such a layer goes out
+    /// faded in its pixels, and comes back in as the page drew it.
+    #[test]
+    fn a_faded_shapes_border_over_its_fill_goes_into_a_psd_as_drawn() {
+        let mut s = Session::new(60, 60, ColorMode::Rgb);
+        let mut node = filled_rect("Card", 40.0, 40.0);
+        node.transform = chitrakar_doc::Transform::translation(10.0, 10.0);
+        node.opacity = 0.5;
+        if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                width: 16.0,
+                widths: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Butt,
+                join: chitrakar_doc::StrokeJoin::Miter,
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                align: None,
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::None,
+            });
+        }
+        let root = s.document().root();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node,
+        })
+        .unwrap();
+        let page = s.render().unwrap().pixels;
+        let (bytes, _) = s.export_psd().unwrap();
+        let mut back = Session::new(60, 60, ColorMode::Rgb);
+        back.place_psd(&bytes, "card.psd").unwrap();
+        let again = back.render().unwrap().pixels;
+        // Where the border lies over the fill's edge.
+        let at = 10 * 60 + 30;
+        let (a, b) = (page[at], again[at]);
+        assert!(
+            (a.r - b.r).abs() < 0.02
+                && (a.g - b.g).abs() < 0.02
+                && (a.b - b.b).abs() < 0.02
+                && (a.a - b.a).abs() < 0.02,
+            "page {a:?}, from the PSD {b:?}"
+        );
+        // A faded shape with one paint keeps its opacity as the layer's.
+        let id = s.layers()[0].id;
+        s.apply(Command::SetKind {
+            id: NodeId(id),
+            kind: Box::new(filled_rect("Card", 40.0, 40.0).kind),
+        })
+        .unwrap();
+        let f = chitrakar_codecs::psd::read_psd(&s.export_psd().unwrap().0).unwrap();
+        assert!(f.items.iter().any(|i| matches!(
+            i,
+            chitrakar_codecs::psd::PsdItem::Pixels(p) if (p.opacity - 0.5).abs() < 0.01
+        )));
+    }
+
     /// An adjustment over a see-through layer comes into a Photoshop file
     /// as a picture of what it makes of it, and the layer under it is
     /// kept but hidden: shown, it would lay its half-strength pixels down
@@ -30833,6 +31277,146 @@ mod tests {
             bytes.len(),
             without.len()
         );
+    }
+
+    /// A file whose shadow asks for a blur of ten thousand, a border a
+    /// million wide and a strength that is no number opens drawn within
+    /// reach — it froze the page for minutes — and says so.
+    #[test]
+    fn a_damaged_files_effects_are_held_to_what_can_be_drawn() {
+        use chitrakar_doc::Effect;
+        let mut doc = chitrakar_doc::Document::new(48, 36, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = *filled_rect("Card", 20.0, 20.0);
+        let black = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        node.effects = vec![
+            Effect::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                blur: 10_000.0,
+                color: black.clone(),
+                opacity: 5.0,
+                spread: 0.0,
+            },
+            Effect::Outline {
+                width: 1e6,
+                color: black.clone(),
+                opacity: 1.0,
+            },
+            Effect::Outline {
+                width: 3.0,
+                color: black,
+                opacity: 1.0,
+            },
+        ];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let bytes = chitrakar_codecs::save_chitra(&doc).unwrap();
+        let started = std::time::Instant::now();
+        let session = Session::load(&bytes).unwrap();
+        session.render().unwrap();
+        assert!(
+            started.elapsed().as_secs_f32() < 5.0,
+            "{:?}",
+            started.elapsed()
+        );
+        let id = session.layers()[0].id;
+        let effects = &session.document().node(NodeId(id)).unwrap().effects;
+        assert!(matches!(
+            effects[0],
+            Effect::DropShadow { blur, opacity, .. } if blur == Effect::LONGEST && opacity == 1.0
+        ));
+        assert!(matches!(effects[1], Effect::Outline { width, .. } if width == Effect::LONGEST));
+        assert!(matches!(effects[2], Effect::Outline { width, .. } if width == 3.0));
+        assert!(
+            session
+                .import_notes()
+                .iter()
+                .any(|n| n.starts_with("2 layer effects")),
+            "{:?}",
+            session.import_notes()
+        );
+    }
+
+    #[test]
+    fn a_files_font_is_kept_when_another_holds_its_name() {
+        const SERIF: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSerif.ttf");
+        const MONO: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        const OBLIQUE: &[u8] =
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono-Oblique.ttf");
+        // A face of the same name, other bytes, already here: a font file
+        // added on this machine, or another document's.
+        Session::register_font("Clashing Brand", MONO.to_vec()).unwrap();
+        let mut doc = chitrakar_doc::Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        let mut italic = text_in("Clashing Brand");
+        if let NodeKind::Text(spec) = &mut italic.kind {
+            spec.italic = true;
+        }
+        for (i, node) in [text_in("Clashing Brand"), italic].into_iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(node),
+            })
+            .unwrap();
+        }
+        let bytes = chitrakar_codecs::save_chitra_with_fonts(
+            &doc,
+            &[
+                ("Clashing Brand", SERIF),
+                ("Clashing Brand Oblique", OBLIQUE),
+            ],
+        )
+        .unwrap();
+        let session = Session::load(&bytes).unwrap();
+        assert_eq!(
+            chitrakar_render::text::font_bytes("Clashing Brand"),
+            Some(MONO),
+            "the face already here is left as it was"
+        );
+        assert_eq!(
+            chitrakar_render::text::font_bytes("Clashing Brand 2"),
+            Some(SERIF),
+            "the file's own is kept beside it"
+        );
+        assert_eq!(
+            chitrakar_render::text::font_bytes("Clashing Brand 2 Oblique"),
+            Some(OBLIQUE),
+            "with its twin, under the family's new name"
+        );
+        assert_eq!(
+            session.fonts_used(),
+            ["Clashing Brand 2", "Clashing Brand 2 Oblique"],
+            "the text asks for the file's face"
+        );
+        assert_eq!(
+            session.import_notes().len(),
+            1,
+            "{:?}",
+            session.import_notes()
+        );
+        assert!(session.import_notes()[0].contains("Clashing Brand 2"));
+        // Saved again, the file carries the face it came with.
+        let again = chitrakar_codecs::load_chitra_with_fonts(&session.save().unwrap()).unwrap();
+        assert!(again
+            .fonts
+            .iter()
+            .any(|(n, b)| n == "Clashing Brand 2" && b.as_slice() == SERIF));
+        // Opened once more, nothing clashes: the same bytes under the same
+        // names are the same faces, and nothing is renamed again.
+        let twice = Session::load(&session.save().unwrap()).unwrap();
+        assert!(twice.import_notes().is_empty());
+        assert_eq!(twice.fonts_used(), session.fonts_used());
     }
 
     #[test]
