@@ -4370,10 +4370,12 @@ impl Session {
                     // the change: it grew leftward out of its holder.
                     let shift_x = if t.a < 0.0 { -t.a * (nw - cw) } else { 0.0 };
                     let shift_y = if t.d < 0.0 { -t.d * (nh - ch) } else { 0.0 };
+                    let shift = Transform::translation(tx + shift_x, ty + shift_y);
                     cmds.push(Command::SetTransform {
                         id: child,
-                        transform: Transform::translation(tx + shift_x, ty + shift_y).compose(t),
+                        transform: shift.compose(t),
                     });
+                    Self::carry_mask_and_effects(kid, child, shift, &mut cmds);
                     continue;
                 }
             }
@@ -4391,8 +4393,35 @@ impl Session {
                 id: child,
                 transform: outer.compose(kid.transform),
             });
+            Self::carry_mask_and_effects(kid, child, outer, &mut cmds);
         }
         Ok(cmds)
+    }
+
+    /// A layer's mask and its effects' offsets taken along by a move
+    /// written in its parent's space: both are in that space, not the
+    /// layer's own, so neither travels with its transform. A frame
+    /// resized moved its layers by their pins and left every mask where
+    /// it had been — a layer pinned to the far edge vanished out from
+    /// under its own mask, and an eraser's cut was left behind.
+    fn carry_mask_and_effects(
+        node: &chitrakar_doc::Node,
+        id: NodeId,
+        by: Transform,
+        cmds: &mut Vec<Command>,
+    ) {
+        if let Some(mask) = &node.mask {
+            cmds.push(Command::SetMask {
+                id,
+                mask: Some(Box::new(mask.carried_through(by))),
+            });
+        }
+        if !node.effects.is_empty() {
+            cmds.push(Command::SetEffects {
+                id,
+                effects: node.effects.iter().map(|e| e.carried_through(by)).collect(),
+            });
+        }
     }
 
     /// A frame's contents as a PNG, at the size the frame shows on the
@@ -14284,6 +14313,54 @@ mod tests {
             assert!(seen.insert(id.to_string()), "id {id} given twice:\n{svg}");
         }
         assert!(seen.len() >= 4, "{seen:?}");
+    }
+
+    /// A frame resized takes its layers' masks along with them: a layer
+    /// pinned to the far edge moved out from under its own mask and
+    /// vanished.
+    #[test]
+    fn a_frames_resize_carries_its_layers_masks() {
+        let mut s = Session::new(800, 600, ColorMode::Rgb);
+        let frame = s
+            .add_artboard("Frame", 0.0, 0.0, 300.0, 240.0, None)
+            .unwrap();
+        let mut rect = *filled_rect("Far", 60.0, 40.0);
+        rect.transform.e = 220.0;
+        rect.transform.f = 100.0;
+        rect.pinned.x = chitrakar_doc::Pin::End;
+        rect.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Gradient {
+                radial: false,
+                from: [220.0, 100.0],
+                to: [280.0, 100.0],
+            },
+            invert: false,
+            feather: 0.0,
+        });
+        s.apply(Command::AddNode {
+            parent: frame,
+            index: 0,
+            node: Box::new(rect),
+        })
+        .unwrap();
+        let far = s.document().children_of(frame).unwrap()[0];
+        let json = s.artboard_resize(frame, 500.0, 240.0, 0.0, 0.0).unwrap();
+        s.apply(serde_json::from_str(&json).unwrap()).unwrap();
+        let node = s.document().node(far).unwrap();
+        assert_eq!(
+            node.transform.e, 420.0,
+            "pinned to the far edge, it moved with it"
+        );
+        let Some(chitrakar_doc::MaskKind::Gradient { from, to, .. }) =
+            node.mask.as_ref().map(|m| m.kind.clone())
+        else {
+            panic!("the mask is kept")
+        };
+        assert_eq!(
+            (from, to),
+            ([420.0, 100.0], [480.0, 100.0]),
+            "and its mask with it"
+        );
     }
 
     /// A draft written while a drag is still in hand keeps where the

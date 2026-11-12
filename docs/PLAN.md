@@ -95,7 +95,9 @@ without reading anything else.*
      ids and a bleed's masks inside copies and frames. Its broad
      passes: nothing lost; a graduated mask off a stretched group, a
      document arriving under the Develop window, focus and phone
-     fitting.
+     fitting. The twenty-eighth: a draft overwritten by the next tab,
+     a dropped file opening over new work, a frame's resize leaving
+     masks behind, focus landing on "As it began".
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -11922,6 +11924,28 @@ without reading anything else.*
   Auto white balance is kept as the numbers it found, so a preset or a
   sync carries one photograph's light to the others; a JPEG-compressed
   TIFF with transparency is refused as damaged.
+  Its editing pass, four projects by the interface, about 1,300 checks
+  of every kind of layer through every container and page operation,
+  and twelve fuzz runs: every undo, redo, reopening and export exact,
+  but a frame resized moved its layers by their pins and left their
+  masks and shadows' offsets behind — a layer pinned to the far edge
+  vanished from under its own mask, an eraser's cut was left behind,
+  and it saved that way (they are carried with the move now).
+  Written down: ungrouping lets an adjustment, a filter or a blended
+  layer inside reach what is under the group again, as grouping had
+  confined it — the page changes both ways, by design; merging (or
+  turning into a picture) a layer in a group stretched one way or
+  skewed bakes its outline, softness and blur in its own space, so they
+  come out uneven; a CMYK colour pasted into an RGB document is drawn
+  by the plain formula, not the profile it came from; undoing and
+  redoing Straighten again and again drifts by a millionth each time
+  (pixel-level only after hundreds); the Text tool on existing text
+  starts a new block (a double-click with Move edits it); a rectangle
+  under two pixels a side is not drawn; letters made into shapes have
+  to be ungrouped before they can be combined; a live copy of a group
+  with effects offers no overrides and does not say why; a painted
+  mask's strokes thicken when its layer leaves a group stretched one
+  way.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot
