@@ -198,6 +198,9 @@ export function keepPanelFocus(doc: Document = document): void {
         where = [r.left + r.width / 2, r.top + r.height / 2];
         chain = [];
         for (let a = el.parentElement; a && a !== panel.parentElement; a = a.parentElement) chain.push(a);
+        // The panel itself last, whatever the depth: a button sitting
+        // straight in it (the align bar's) had the whole panel as its
+        // second-nearest part, and the history's "As it began" won.
       } else if (!inMenu(el)) {
         held = null;
       }
@@ -229,16 +232,32 @@ export function keepPanelFocus(doc: Document = document): void {
     // effect's left the focus on the comps' "+" or the proportion lock,
     // where the next Enter or Space did something nobody asked for —
     // and only then the panel's wider parts.
-    const list = doc.querySelector(`${KEPT_IN} .layer-list`);
-    const parts = [...chain.slice(0, 2), ...(list ? [list] : []), ...chain.slice(2)];
+    const list = doc.querySelector<HTMLElement>(`${KEPT_IN} .layer-list`);
+    const near = chain.slice(0, 2).filter((part) => !part.matches(KEPT_IN));
+    const wider = chain.slice(near.length).filter((part) => !near.includes(part));
+    const parts = [...near, ...(list ? [list] : []), ...wider];
     for (const part of parts) {
       if (!part.isConnected) continue;
       // A button or a row, never a field: put in X, the next Delete was
-      // typed there rather than taking the layer away.
+      // typed there rather than taking the layer away. Nor a step of the
+      // history or the comps' "+", where the next Enter or Space put
+      // the page back to its start or kept a comp nobody asked for.
       const stops = focusables(part).filter(
-        (el) => !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && !el.isContentEditable,
+        (el) =>
+          !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) &&
+          !el.isContentEditable &&
+          !el.closest(".history, .palette"),
       );
-      if (stops.length === 0) continue;
+      if (stops.length === 0) {
+        // The last layer gone: the list holds the place, empty, rather
+        // than handing it on to the panel's wider parts.
+        if (part === list && list.isConnected) {
+          if (!list.hasAttribute("tabindex")) list.setAttribute("tabindex", "-1");
+          list.focus({ preventScroll: true });
+          return;
+        }
+        continue;
+      }
       // The picked row if this part holds one, else the stop nearest
       // where the lost one was — the next effect's or stop's, the row
       // that took the deleted one's place — rather than the part's

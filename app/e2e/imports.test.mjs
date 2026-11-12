@@ -80,6 +80,7 @@ check(
 );
 check(said("InvalidProfile").includes("damaged"), "a profile's reader's own word is said in words");
 check(said("provided data has not an UTF-8 encoding").includes("UTF-16"), "an SVG in UTF-16 is said in words");
+check(said("camera raw: Offset is outside the bounds of the DataView").includes("damaged"), "a raw that loops on itself is said as damaged");
 check(said("profile device space is Gray, expected RGB").includes("grey profile"), "a grey profile for a screen is said");
 check(said(new TypeError("Failed to fetch")).includes("connection"), "a fetch that failed is said as the connection");
 check(

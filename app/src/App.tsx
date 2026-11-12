@@ -731,6 +731,31 @@ const THIS_TAB = Math.random().toString(36).slice(2);
  * copy that another tab's could have made stale. */
 let copiedHere = false;
 
+/** Move the draft kept in `from` to a slot no tab holds and no draft
+ * is in, and say which (or `null` where none is free). A tab takes a
+ * closed tab's slot, and with it the draft its bar is offering: the
+ * first change made before that was answered was written over it, and
+ * the closed tab's work was gone for good. */
+async function moveDraft(from: number): Promise<number | null> {
+  const db = await draftDb();
+  if (!db) return null;
+  const held = await slotsHeld();
+  const keys = ["current", "parts", "pending", "name", "path", "saved"];
+  for (let n = 0; n < DRAFT_SLOTS; n++) {
+    if (n === from || held.has(n)) continue;
+    const [there] = await draftRead<unknown>(db, [slotKey(n, "current")]);
+    if (there !== undefined) continue;
+    const got = await draftRead<unknown>(db, keys.map((k) => slotKey(from, k)));
+    const put: [string, unknown][] = [];
+    keys.forEach((k, i) => {
+      if (got[i] !== undefined) put.push([slotKey(n, k), got[i]]);
+    });
+    await draftWrite(db, put, keys.map((k) => slotKey(from, k)));
+    return n;
+  }
+  return null;
+}
+
 /** Let a slot's draft go: its records, and — unless the parts are being
  * taken over (a draft restored into this tab, whose next draft writes
  * the ones it needs) — the parts no other slot lists. */
@@ -891,8 +916,10 @@ const WINDOWS = ".modal-scrim, .sheet-scrim, .straighten-panel, .menu-pop";
  * shell's drop — wait for it to close. Opened under the Develop window,
  * a document took the session the raw was being developed on, and
  * Place then said "no raw file is open" and lost the settings. */
-async function windowsClosed(): Promise<void> {
-  while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+const mustWait = (busy: () => boolean = () => false) =>
+  document.querySelector(".modal-scrim, .sheet-scrim, .straighten-panel") !== null || busy();
+async function windowsClosed(busy: () => boolean = () => false): Promise<void> {
+  while (mustWait(busy)) {
     await new Promise((r) => setTimeout(r, 200));
   }
 }
@@ -1926,9 +1953,13 @@ export function App() {
       setSelectsOpen(false);
       setMoreOpen(false);
     };
+    // Closed by a press elsewhere, it was let go of by the pointer: the
+    // focus is not handed back then, or the next Enter opened it again.
+    let pressedAway = false;
     const onDown = (e: PointerEvent) => {
       // Its own button toggles it, on the click after this press.
       if (e.target instanceof Element && e.target.closest(".tool-flyout, [data-flyout]")) return;
+      pressedAway = true;
       close();
     };
     const onKey = (e: KeyboardEvent) => {
@@ -1958,7 +1989,8 @@ export function App() {
       window.removeEventListener("resize", close);
       requestAnimationFrame(() => {
         const lost = document.activeElement === null || document.activeElement === document.body;
-        if (lost && opener?.isConnected && opener.closest(".toolbar")) opener.focus({ preventScroll: true });
+        if (lost && !pressedAway && opener?.isConnected && opener.closest(".toolbar"))
+          opener.focus({ preventScroll: true });
       });
     };
   }, [anyFlyout]);
@@ -2537,6 +2569,19 @@ export function App() {
     const t = setTimeout(() => {
       const mine = ++draftRun.current;
       (slotReady.current ?? Promise.resolve(0))
+        .then(async () => {
+          // The draft the bar is still offering, if it is in this tab's
+          // own slot, is moved out of the way before this tab's work is
+          // written there; with nowhere to move it, nothing is written
+          // over it until it is answered.
+          const offered = recoverableRef.current;
+          if (offered && offered.slot === draftSlot) {
+            const to = await moveDraft(draftSlot);
+            if (to === null) throw new Error("the offered draft has nowhere to go");
+            offered.slot = to;
+            setRecoverable((d) => (d === offered ? { ...offered, slot: to } : d));
+          }
+        })
         .then(() => putDraft(session, () => draftRun.current === mine, recoverableRef.current?.parts ?? []))
         .then(() => {
           putDraftNote("name", docName);
@@ -4718,11 +4763,17 @@ export function App() {
       if (!contextRef.current?.contains(e.target as Node)) setContextAt(null);
     };
     const key = (e: KeyboardEvent) => e.key === "Escape" && setContextAt(null);
+    // A window resized or a phone turned puts it away, as it does the
+    // bar's menus: it stayed open where the old window had room, below
+    // the new one's edge, out of sight.
+    const resized = () => setContextAt(null);
     document.addEventListener("pointerdown", away);
     document.addEventListener("keydown", key);
+    window.addEventListener("resize", resized);
     return () => {
       document.removeEventListener("pointerdown", away);
       document.removeEventListener("keydown", key);
+      window.removeEventListener("resize", resized);
     };
   }, [contextAt]);
 
@@ -11177,6 +11228,18 @@ export function App() {
     try {
       const was: [number, number] = [session.width, session.height];
       const got = await developedElsewhere(rawPacked.current, d.name, json);
+      // Another document took the editor while this was developed (a
+      // file opened from elsewhere): said, rather than placed into a
+      // session nobody is looking at, or lost without a word.
+      if (liveSession.current !== session) {
+        setImporting(null);
+        rawQueue.current = [];
+        setRawWaiting(0);
+        rawBusy.current = false;
+        rawDone.current = 0;
+        alert(`${d.name} was not placed: the document it was going into was closed while it was developed.`);
+        return;
+      }
       if (d.layer === null) {
         placed(
           got
@@ -11386,7 +11449,19 @@ export function App() {
     // File › Open asks; one the editor cannot read is said, where it
     // used to be dropped without a word.
     void (async () => {
-      await windowsClosed();
+      // And for the raws in hand to be developed and placed: the window
+      // goes before the development is placed, and a document opened in
+      // that moment took the session it was going into. Having waited,
+      // it is handed to the editor as it is *now*: this one was made
+      // when the file arrived, and asked whether there was unsaved work
+      // as the page was then — a photograph placed meanwhile was thrown
+      // away without the question.
+      if (mustWait(() => rawBusy.current)) {
+        await windowsClosed(() => rawBusy.current);
+        await nextPaint();
+        takeFilesRef.current(files);
+        return;
+      }
       const kinds: (string | null)[] = [];
       // By its bytes always, as File › Open goes: a document named .png
       // was refused as no picture, and a PNG named .chitra as a damaged
@@ -11468,8 +11543,12 @@ export function App() {
    * otherwise never see it at all — and says where they are, so a
    * document dropped on the window has its file the way one opened from
    * the panel does, and Save writes back to it. */
-  const onShellDrop = async (paths: string[]) => {
-    await windowsClosed();
+  const onShellDrop = async (paths: string[]): Promise<void> => {
+    if (mustWait(() => rawBusy.current)) {
+      await windowsClosed(() => rawBusy.current);
+      await nextPaint();
+      return onShellDropRef.current(paths);
+    }
     // As a drop on the page goes: the bytes decide where the name would
     // mislead (a document named .png, a file named nothing at all), one
     // document opens and what came with it is said, and a file nobody can

@@ -21657,6 +21657,59 @@ assert(
   );
 }
 
+// 9dh. A draft offered and not yet answered was written over by the
+// tab's first change: the new tab took the closed tab's slot, and that
+// slot's draft with it, and five layers came back as one. A context of
+// its own, so this storage is not the suite's.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const tab = async () => {
+    const p = await ctx.newPage();
+    p.on("dialog", (d) => d.accept());
+    await p.goto("http://localhost:8123/");
+    await p.waitForSelector("#engine-canvas");
+    await p.waitForTimeout(1600);
+    return p;
+  };
+  const rects = async (p, n, at) => {
+    const r = await p.locator("#engine-page").boundingBox();
+    await p.locator("#engine-canvas").hover();
+    await p.keyboard.press("r");
+    for (let i = 0; i < n; i++) {
+      await p.mouse.move(r.x + at + i * 30, r.y + 20 + i * 20);
+      await p.mouse.down();
+      await p.mouse.move(r.x + at + 20 + i * 30, r.y + 40 + i * 20, { steps: 3 });
+      await p.mouse.up();
+      await p.waitForTimeout(120);
+    }
+  };
+  const count = (p) => p.locator(".panel ul li .layer-name").count();
+  const a = await tab();
+  await rects(a, 5, 20);
+  await a.waitForTimeout(2600);
+  await a.close();
+  // The next tab is offered the five, and makes a change of its own
+  // before answering.
+  const b = await tab();
+  await b.waitForTimeout(600);
+  assert(await b.isVisible(".recover"), "the closed tab's draft is offered");
+  await rects(b, 1, 300);
+  await b.waitForTimeout(2600);
+  await b.close();
+  // Both are still to be had: the five, and the one.
+  const c = await tab();
+  await c.waitForTimeout(600);
+  const seen = [];
+  for (let i = 0; i < 3 && (await c.isVisible(".recover")); i++) {
+    await c.click(".recover >> text=Restore");
+    await c.waitForTimeout(900);
+    seen.push(await count(c));
+  }
+  assert(seen.includes(5), `the five layers are not lost to the next tab's first change (${JSON.stringify(seen)})`);
+  assert(seen.includes(1), `and the next tab's own change is kept too (${JSON.stringify(seen)})`);
+  await ctx.close();
+}
+
 // 9cv. Two tabs each keep a draft of their own: both wrote one draft,
 // and only the last one's work came back after a crash. A context of its
 // own, so this storage is not the suite's.

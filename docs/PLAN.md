@@ -11872,6 +11872,56 @@ without reading anything else.*
   frame, and at a hundred thousand runs the engine out of memory
   (realistic paths of that length are quick); an RGB document has no
   TIFF to export, only a press profile's CMYK one.
+  **A twenty-eighth audit (November 2026).** Its interface pass,
+  eighteen seeded monkey runs with turns of the phone, long presses and
+  many-finger taps, and every workflow by keyboard alone: Escape on an
+  align button sent the focus to the history's "As it began", where the
+  next Enter put the page back to its start (the panel itself is the
+  keeper's last resort, and never lands on a history step or a
+  palette's chip); deleting the last layer left the focus on the comps'
+  "+" (the empty list holds it); the watermark's text box swallowed
+  Escape and Enter in Export and Batch; the canvas's menu stayed open,
+  out of sight, after the window was resized or the phone turned; a
+  flyout closed by a press elsewhere had its button take the focus
+  back, so the next Enter opened it again. Limits written down: a tone
+  curve's points are moved by the pointer only (Auto and Reset are
+  keys); nothing the editor does is announced to a screen reader
+  beyond the windows' own status lines; files are taken only when
+  dropped on the canvas, not on the panel or the rail.
+  Its check of round 27: fourteen of fifteen held — typing kept in the
+  crash draft and every held press set aside, the Pen's pinch, ids in
+  copies, the bleed's masks, knobs, drops, phones' focus and fitting,
+  flyouts, the focus keeper, a graduated mask through a skew, the
+  Knife's word, the wording — but a file arriving while a raw was being
+  developed still opened the moment the Develop window went, before the
+  development was placed, and the photograph was lost without a word
+  (arrivals wait for every raw in hand, and a development whose
+  document has gone says so); a layer named like the writer's own ids
+  ("effects2", "frame3") could share one in an SVG. Limits written
+  down: removing a gradient's last stop by keyboard leaves the focus on
+  "Add stop"; the Knife's word names every reason, not the one that
+  held; several damaged documents dropped at once are said one alert
+  at a time; a gradient knob on a corner is reached by its rim only;
+  the shell's drop reads a raw twice (once to know it, once to place
+  it).
+  Its files pass found two ways to lose work. A file arriving while a
+  window was up waited for it, as round 27 made it, and then went on
+  as the editor had been when it arrived: asked whether there was
+  unsaved work as the page was then, it opened over a photograph or a
+  PDF page placed in the meantime without the question (having waited,
+  it is handed to the editor as it is now; Straighten and Feather are
+  waited for too). And a draft offered by the bar and not yet answered
+  was written over by the tab's first change, since the new tab had
+  taken the closed tab's slot with its draft (the offered draft is
+  moved to a free slot first, and smoke 9dh holds it). Also: an
+  inside-out mask box in a PSD was "too large to hold"; a raw whose
+  directories point back at themselves was refused in the browser's
+  words. Limits written down: CSS variables in an SVG come in black,
+  and a `foreignObject` is left out, without a note; a hidden frame
+  exports as a clear picture, and a frame with no name as "untitled -";
+  Auto white balance is kept as the numbers it found, so a preset or a
+  sync carries one photograph's light to the others; a JPEG-compressed
+  TIFF with transparency is refused as damaged.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

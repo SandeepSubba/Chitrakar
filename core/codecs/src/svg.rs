@@ -2449,15 +2449,22 @@ fn layer_id(layer: NodeId, name: &str) -> String {
     if name.is_empty() {
         return String::new();
     }
+    // Digits, or digits and a writing's own `_k` (`effects4_1`, which
+    // `fresh_def_id` gives a second writing of the same layer).
+    let numbered = |rest: &str| {
+        let mut parts = rest.splitn(2, '_');
+        let n = parts.next().unwrap_or("");
+        let k = parts.next();
+        !n.is_empty()
+            && n.chars().all(|c| c.is_ascii_digit())
+            && k.is_none_or(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
+    };
     let ours = name.starts_with("chitrakar-")
         || [
-            "soft", "guide", "fx", "mask", "pattern", "marker", "clip", "band",
+            "soft", "guide", "fx", "mask", "pattern", "marker", "clip", "band", "effects", "frame",
         ]
         .iter()
-        .any(|p| {
-            name.strip_prefix(p)
-                .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()))
-        });
+        .any(|p| name.strip_prefix(p).is_some_and(numbered));
     let base = if ours {
         format!("{name}_")
     } else {

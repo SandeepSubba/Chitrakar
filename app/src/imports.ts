@@ -122,14 +122,16 @@ export function said(err: unknown): string {
   const plain: [RegExp, string][] = [
     [/out of memory|memory limit exceeded|capacity overflow|allocation/i, "it is larger than the editor can hold in memory"],
     [
-      /crc error|format error decoding|unexpected ?eof|unexpected end|failed to fill whole buffer|invalid (?:png|jpeg|signature)|corrupt/i,
+      // The last, the browser's words for a reader that ran off its own
+      // memory: a raw whose directories point back at themselves.
+      /crc error|format error decoding|unexpected ?eof|unexpected end|failed to fill whole buffer|invalid (?:png|jpeg|signature)|corrupt|outside the bounds of the DataView/i,
       "the file is damaged or cut short",
     ],
     [/manifest error|missing field|invalid type: .* expected/i, "the document inside the file is damaged, or from a version that wrote it differently"],
     // Before "not well-formed": a drawing whose uses of one another fan
     // out past the reader's count is whole, only too big to read.
     // usvg's words for a drawing saved as UTF-16, ahead of the rest.
-    [/has not an? UTF-8 encoding|not valid utf-8|invalid utf-8/i, "the SVG is not written in UTF-8 (it may be saved as UTF-16) — save it again as UTF-8 first"],
+    [/has not an? UTF-8 encoding|not valid utf-8|invalid utf-8/i, "the SVG is not written in UTF-8 (it may be saved as UTF-16, or in an older encoding such as Latin-1) — save it again as UTF-8 first"],
     [/nodes limit reached|elements limit/i, "the drawing has more parts than can be read (its uses of one another multiply too far)"],
     [/svg data parsing failed|xml|unexpected .* tag|expected '.*' tag/i, "the SVG is not well-formed (an unclosed or mismatched tag)"],
     [/invalid zip|zip archive|could not find central directory|invalid checksum/i, "the file is damaged: it is not a whole .chitra"],

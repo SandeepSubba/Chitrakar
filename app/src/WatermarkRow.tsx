@@ -49,7 +49,12 @@ export function WatermarkRow({
         placeholder="© Your name"
         disabled={disabled}
         onChange={(e) => set({ text: e.target.value, on: mark.on || e.target.value.trim() !== "" })}
-        onKeyDown={(e) => e.stopPropagation()}
+        // Typed letters stay in the box, but Escape and Enter go on to
+        // the window: stopped here, the Export window neither closed nor
+        // exported from this one field.
+        onKeyDown={(e) => {
+          if (e.key !== "Escape" && e.key !== "Enter") e.stopPropagation();
+        }}
         aria-label="Watermark text"
       />
       {mark.on && (

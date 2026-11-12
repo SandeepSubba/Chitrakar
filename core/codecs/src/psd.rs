@@ -362,7 +362,7 @@ struct Record {
     /// The second box, for channel -3, when the layer has a vector mask too.
     real_mask: Option<(i32, i32, i32, i32, u8, bool)>,
     /// A mask whose box was too large to hold, and so was let go of.
-    mask_lost: bool,
+    mask_lost: Option<&'static str>,
     adjustment: bool,
     effects: bool,
     /// A shape or a fill: kept as a drawing, its pixels possibly not at all.
@@ -388,8 +388,8 @@ fn read_layers(
             (rec.right as i64 - rec.left as i64).max(0) as usize,
             (rec.bottom as i64 - rec.top as i64).max(0) as usize,
         );
-        if rec.mask_lost {
-            lost.push(format!("the mask of \"{}\" (too large to hold)", rec.name));
+        if let Some(why) = rec.mask_lost {
+            lost.push(format!("the mask of \"{}\" ({why})", rec.name));
         }
         let mut planes: Vec<(i16, Vec<f32>)> = Vec::new();
         for &(id, len) in &rec.channels {
@@ -729,9 +729,17 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
         }
         None => true,
     };
-    let mask_lost = !holdable(&mask) || !holdable(&real_mask);
-    let mask = mask.filter(|_| !mask_lost);
-    let real_mask = real_mask.filter(|_| !mask_lost);
+    // Said as what it is: a box inside out was "too large to hold".
+    let inside_out = |m: &Option<(i32, i32, i32, i32, u8, bool)>| matches!(m, Some((t, l, b, rr, _, _)) if *b < *t || *rr < *l);
+    let mask_lost = if inside_out(&mask) || inside_out(&real_mask) {
+        Some("its box is inside out")
+    } else if !holdable(&mask) || !holdable(&real_mask) {
+        Some("too large to hold")
+    } else {
+        None
+    };
+    let mask = mask.filter(|_| mask_lost.is_none());
+    let real_mask = real_mask.filter(|_| mask_lost.is_none());
     // Blending ranges: not carried.
     let n = extra.u32()? as usize;
     extra.take(n)?;
