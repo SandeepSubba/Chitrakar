@@ -22,7 +22,10 @@ export function chipKeys(forget: () => void, rename?: () => void) {
       forget();
       setTimeout(() => {
         if (chip.isConnected) return;
-        if (!row?.isConnected) {
+        const left = row?.isConnected ? row.querySelectorAll("button:not(:disabled)").length : 0;
+        if (!row?.isConnected || left === 0) {
+          // Gone, or left with nothing to press (kept regions with no
+          // "+" while nothing is picked out).
           for (const near of beside) {
             const stop = near?.isConnected ? near.querySelector<HTMLElement>("button:not(:disabled)") : null;
             if (stop) {

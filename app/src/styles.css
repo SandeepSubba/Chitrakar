@@ -4658,6 +4658,7 @@ button.fold:hover {
   .swatch,
   .prefs-swatch,
   .style-chip,
+  .ramp-preview,
   #engine-page,
   #engine-canvas {
     forced-color-adjust: none;

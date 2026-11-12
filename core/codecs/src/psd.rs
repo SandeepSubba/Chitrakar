@@ -363,6 +363,8 @@ struct Record {
     real_mask: Option<(i32, i32, i32, i32, u8, bool)>,
     /// A mask whose box was too large to hold, and so was let go of.
     mask_lost: Option<&'static str>,
+    /// Whether its "Blend If" ranges hide any of it (not carried).
+    blend_if: bool,
     adjustment: bool,
     effects: bool,
     /// A shape or a fill: kept as a drawing, its pixels possibly not at all.
@@ -390,6 +392,9 @@ fn read_layers(
         );
         if let Some(why) = rec.mask_lost {
             lost.push(format!("the mask of \"{}\" ({why})", rec.name));
+        }
+        if rec.blend_if {
+            lost.push(format!("the Blend If ranges of \"{}\"", rec.name));
         }
         let mut planes: Vec<(i16, Vec<f32>)> = Vec::new();
         for &(id, len) in &rec.channels {
@@ -434,8 +439,19 @@ fn read_layers(
             Some((t, l, b, rr, default, false)) if get(mask_id).is_some() => {
                 // Over the union of the layer and the mask's own box, the
                 // mask's default where it says nothing.
-                let (x0, y0) = (rec.left.min(l), rec.top.min(t));
-                let (x1, y1) = (rec.right.max(rr), rec.bottom.max(b));
+                let (mut x0, mut y0) = (rec.left.min(l), rec.top.min(t));
+                let (mut x1, mut y1) = (rec.right.max(rr), rec.bottom.max(b));
+                // A group's record has no box of its own, and Photoshop
+                // trims a mask to where it was painted: a group's mask
+                // whose default is to show (white) reaches the whole page,
+                // or the group was hidden everywhere outside its brushed
+                // box. Over the page, then, where the default shows.
+                if !matches!(rec.section, Section::Pixels) && default > 0 {
+                    x0 = x0.min(0);
+                    y0 = y0.min(0);
+                    x1 = x1.max(h.width as i32);
+                    y1 = y1.max(h.height as i32);
+                }
                 let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
                 let plane = get(mask_id).unwrap_or(&[]);
                 let (pw, _) = ((rr - l) as usize, (b - t) as usize);
@@ -740,9 +756,13 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     };
     let mask = mask.filter(|_| mask_lost.is_none());
     let real_mask = real_mask.filter(|_| mask_lost.is_none());
-    // Blending ranges: not carried.
+    // Blending ranges ("Blend If"): not carried, but said where they do
+    // something — a range other than all of it hides part of the layer
+    // in Photoshop, and it came in whole without a word. Each range is
+    // black low, black high, white low, white high: 0, 0, 255, 255 is all.
     let n = extra.u32()? as usize;
-    extra.take(n)?;
+    let ranges = extra.take(n)?;
+    let blend_if = ranges.chunks_exact(4).any(|c| c != [0, 0, 255, 255]);
     let n = extra.u8()? as usize;
     let mut name = String::from_utf8_lossy(extra.take(n)?).into_owned();
     let pad = (4 - (n + 1) % 4) % 4;
@@ -816,6 +836,7 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
         mask,
         real_mask,
         mask_lost,
+        blend_if,
         adjustment,
         effects,
         drawn,

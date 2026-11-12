@@ -34,6 +34,7 @@ import type { WasmSession } from "./engine";
 import { watermarkJson, type ExportArea, type ExportFormat, type ExportSetup, type Prefs } from "./prefs";
 import { WatermarkRow } from "./WatermarkRow";
 import { NumberField } from "./NumberField";
+import { said } from "./imports";
 import { enterMeansGo } from "./dialogKeys";
 
 /** As far as the engine scales a page going out (`render_scaled`). */
@@ -297,6 +298,25 @@ export function ExportDialog({
     Math.max(1, Math.round(baseH * scale)),
   ];
 
+  /** Every file's size, for the regions each its own: judged by the
+   * first region alone, a page-sized second region at 3× was refused only
+   * once it was pressed, and at 2× encoded 48 megapixels unasked. */
+  const slicesOut: [number, number][] =
+    area === "regions" && ats.length > 0
+      ? ats.map((i) => {
+          const b = regionBox(i);
+          const k = scaleFor(i);
+          return b
+            ? [Math.max(1, Math.round((b[2] - b[0]) * k)), Math.max(1, Math.round((b[3] - b[1]) * k))]
+            : [outW, outH];
+        })
+      : [[outW, outH]];
+  const [largestW, largestH] = slicesOut.reduce<[number, number]>(
+    ([a, b], [c, d]) => [Math.max(a, c), Math.max(b, d)],
+    [1, 1],
+  );
+  const allPixels = slicesOut.reduce((n, [w, h]) => n + w * h, 0);
+
   /** Whether this combination can be exported at all, and why not. */
   const refuses = (): string | null => {
     if (many.length > 0 && ats.length === 0) {
@@ -318,8 +338,8 @@ export function ExportDialog({
     // all from here, though Quick export wrote it.
     const most = set ? 3 : 1;
     const side = format === "webp" ? 16383 : 30000;
-    if (outW * most > side || outH * most > side || outW * most * outH * most > 100_000_000) {
-      return `That comes to ${outW * most} × ${outH * most}, which is past what can be held at once (${side.toLocaleString("en")} a side${
+    if (largestW * most > side || largestH * most > side || largestW * most * largestH * most > 100_000_000) {
+      return `That comes to ${largestW * most} × ${largestH * most}, which is past what can be held at once (${side.toLocaleString("en")} a side${
         format === "webp" ? " in a WebP" : ""
       }, 100 megapixels).`;
     }
@@ -495,7 +515,7 @@ export function ExportDialog({
     // it costs the page once a layer: two thousand small shapes froze
     // the window for a minute and a half before it said a size.
     const layers = format === "psd" ? Math.max(1, layerCount) : 1;
-    const big = outW * outH * layers * (set ? SET.reduce((n, s) => n + s * s, 0) : 1) > AUTO_LIMIT;
+    const big = allPixels * layers * (set ? SET.reduce((n, s) => n + s * s, 0) : 1) > AUTO_LIMIT;
     if (big && measure === 0) {
       setSize(-1);
       setFailed(null);
@@ -540,7 +560,7 @@ export function ExportDialog({
       } catch (err) {
         setSize(null);
         setPreview(null);
-        setFailed(String(err));
+        setFailed(said(err));
       }
     }, 350);
     return () => clearTimeout(timer);
@@ -586,7 +606,7 @@ export function ExportDialog({
       // nobody who cancels a save panel meant to start again.
       if (await (via === "share" && share ? share : write)(files)) onClose();
     } catch (err) {
-      setFailed(String(err));
+      setFailed(said(err));
     }
     // `scales` and `nameAt` are made afresh each render from what the
     // dependencies below say.

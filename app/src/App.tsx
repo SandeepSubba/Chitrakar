@@ -991,8 +991,17 @@ function dropUnsettled(el: Element | null): boolean {
  * undo, redo). Kept in the box, Ctrl+S was the browser's "save page" and
  * Ctrl+= zoomed the whole window rather than the page. */
 function passesChord(e: React.KeyboardEvent): boolean {
-  return (e.ctrlKey || e.metaKey) && !["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase());
+  if (!(e.ctrlKey || e.metaKey)) return false;
+  if (["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase())) return false;
+  // Nor whatever chord the person has given those same commands: Undo
+  // moved to Ctrl+U and pressed in the box undid the document instead
+  // of the typing, and what had been typed was lost.
+  return !textChords.has(chordFromEvent(e.nativeEvent));
 }
+/** The chords bound now to the commands a text box answers itself:
+ * undo, redo, select all, cut, copy, paste. Kept by the editor as the
+ * person's bindings change. */
+let textChords = new Set<string>();
 
 function fieldKeys(e: React.KeyboardEvent<HTMLInputElement>): void {
   settlesOnLeave.add(e.currentTarget);
@@ -2400,6 +2409,11 @@ export function App() {
     () => boundChords(prefs.commandKeys, prefs.menuKeys),
     [prefs.commandKeys, prefs.menuKeys],
   );
+  textChords = new Set(
+    (["undo", "redo", "select-all", "cut", "copy", "paste"] as CommandId[])
+      .map((id) => chords.of[id])
+      .filter((c): c is string => !!c),
+  );
   const hint = useCallback(
     (id: CommandId) => {
       const chord = chords.of[id];
@@ -2486,6 +2500,17 @@ export function App() {
    * screenful of pixels to show, not nine megapixels. */
   const [viewport, setViewport] = useState<[number, number]>([1, 1]);
   const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+  // A window carried to a screen of another density keeps its size, so
+  // nothing else redraws it: the canvas stayed at the old resolution,
+  // blurred, until the next click.
+  const [, setDensity] = useState(dpr);
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return;
+    const mq = matchMedia(`(resolution: ${dpr}dppx)`);
+    const moved = () => setDensity(window.devicePixelRatio || 1);
+    mq.addEventListener?.("change", moved);
+    return () => mq.removeEventListener?.("change", moved);
+  }, [dpr]);
   const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
   /** Whether a paste event followed the last Ctrl+V; see the keydown. */
   const pasteSeen = useRef(false);
@@ -4110,7 +4135,13 @@ export function App() {
         // or its family, which the Tools page says is shift+5, could not
         // be walked at all.
         const pressed =
-          e.shiftKey && /^Digit[0-9]$/.test(e.code) ? e.code.slice(5) : e.key.toLowerCase();
+          e.shiftKey && /^Digit[0-9]$/.test(e.code)
+            ? e.code.slice(5)
+            : // A tool's letter on a Cyrillic or Greek keyboard is the key
+              // where that letter would be.
+              /^Key[A-Z]$/.test(e.code) && e.key.length === 1 && !/^[\x20-\x7e]$/.test(e.key)
+              ? e.code.slice(3).toLowerCase()
+              : e.key.toLowerCase();
         const shortcut = keys.byKey[pressed];
         if (shortcut) {
           e.preventDefault();
@@ -10710,6 +10741,14 @@ export function App() {
     setOpacityDraft(null);
   };
 
+  const dropOpacity = () => {
+    if (opacityDraft !== null && session) {
+      session.cancel_preview();
+      refresh(session);
+    }
+    setOpacityDraft(null);
+  };
+
   const setBlendOfSelection = (blend: BlendMode) => {
     if (!session || selectionSet.length === 0) return;
     session.set_blend_of(new Float64Array(selectionSet), blend);
@@ -11146,6 +11185,11 @@ export function App() {
             const pdf = await pdfReader();
             const sizes = JSON.parse(pdf.page_sizes(raw)) as [number, number][];
             setImporting(null);
+            // Its question waits behind a window already up: asked under
+            // Preferences, the first Escape cancelled it unseen.
+            while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+              await new Promise((r) => setTimeout(r, 200));
+            }
             // The files after it wait for its answer: two PDFs dropped
             // together each ask in turn, where the second's question
             // used to replace the first's and the first was lost.
@@ -11169,9 +11213,9 @@ export function App() {
         // A camera's raw file goes to the develop window, one at a time:
         // several dropped together wait their turn.
         if (kind === "raw") {
-          rawQueue.current.push({ name, bytes: raw, undoOpen });
+          rawQueue.current.push({ name, bytes: raw, undoOpen, into: liveSession.current });
           setRawWaiting(rawQueue.current.length);
-          if (!rawBusy.current) void openNextRaw();
+          if (!rawBusy.current) void openNextRawRef.current();
           return;
         }
         const slow = kind === "psd" || raw.length > 24e6;
@@ -11255,7 +11299,12 @@ export function App() {
   /** Raw files waiting for the develop window, in the order they came,
    * and whether it is in use — a ref, since several files arrive before
    * any state has been set. */
-  const rawQueue = useRef<{ name: string; bytes: Uint8Array; undoOpen?: () => void }[]>([]);
+  /** The raws waiting, each with the document it was asked into: a raw
+   * placed after File › New while another developed was dropped with the
+   * old document's queue. */
+  const rawQueue = useRef<
+    { name: string; bytes: Uint8Array; undoOpen?: () => void; into: WasmSession | null }[]
+  >([]);
   /** The raw file in the develop window was an Open: what puts back the
    * document it was opened over, if the window is put away. */
   const rawUndoOpen = useRef<(() => void) | null>(null);
@@ -11274,6 +11323,15 @@ export function App() {
 
   /** The next raw file waiting, read and shown in the develop window. */
   const openNextRaw = async () => {
+    // Those asked into a document that has since gone are let go of, and
+    // said; the rest are this document's, opened in turn.
+    const stale = rawQueue.current.filter((q) => q.into !== session);
+    if (stale.length > 0) {
+      rawQueue.current = rawQueue.current.filter((q) => q.into === session);
+      alert(
+        `${stale.map((q) => q.name).join(", ")} not opened: the document ${stale.length > 1 ? "they were" : "it was"} going into was closed.`,
+      );
+    }
     const next = rawQueue.current.shift();
     setRawWaiting(rawQueue.current.length);
     if (!session || !next) {
@@ -11295,12 +11353,15 @@ export function App() {
         await new Promise((r) => setTimeout(r, 200));
       }
       if (liveSession.current !== session) {
-        const dropped = [next.name, ...rawQueue.current.map((q) => q.name)];
-        rawQueue.current = [];
-        setRawWaiting(0);
+        // This one, and any others asked into the same document; those
+        // asked into the new one go on, there.
+        const dropped = [next.name, ...rawQueue.current.filter((q) => q.into === session).map((q) => q.name)];
+        rawQueue.current = rawQueue.current.filter((q) => q.into !== session);
+        setRawWaiting(rawQueue.current.length);
         rawBusy.current = false;
         rawDone.current = 0;
         alert(`${dropped.join(", ")} not opened: the document ${dropped.length > 1 ? "they were" : "it was"} going into was closed while ${dropped.length > 1 ? "they were" : "it was"} read.`);
+        if (rawQueue.current.length > 0) void openNextRawRef.current();
         return;
       }
       await giveLensProfiles(session);
@@ -11326,7 +11387,7 @@ export function App() {
       );
       next.undoOpen?.();
       rawDone.current += 1;
-      void openNextRaw();
+      void openNextRawRef.current();
     } finally {
       setImporting(null);
     }
@@ -11339,6 +11400,10 @@ export function App() {
   /** Whether a Develop again is under way, from its window to its
    * development landing (`rawBusy` is a first development's). */
   const againBusy = useRef(false);
+  /** The newest `openNextRaw`, which reads the document in hand: one
+   * kept from before File › New read the old one. */
+  const openNextRawRef = useRef(openNextRaw);
+  openNextRawRef.current = openNextRaw;
   const finishDevelop = async (given: RawSettings, all = false) => {
     const d = developing;
     setDeveloping(null);
@@ -11365,11 +11430,12 @@ export function App() {
       // session nobody is looking at, or lost without a word.
       if (liveSession.current !== session) {
         setImporting(null);
-        rawQueue.current = [];
-        setRawWaiting(0);
+        rawQueue.current = rawQueue.current.filter((q) => q.into !== session);
+        setRawWaiting(rawQueue.current.length);
         rawBusy.current = false;
         rawDone.current = 0;
         againBusy.current = false;
+        if (rawQueue.current.length > 0) void openNextRawRef.current();
         alert(
           d.layer === null
             ? `${d.name} was not placed: the document it was going into was closed while it was developed.`
@@ -11435,7 +11501,7 @@ export function App() {
     againBusy.current = false;
     // Developed and placed: the Open is done, nothing to go back to.
     rawUndoOpen.current = null;
-    if (d.layer === null) void openNextRaw();
+    if (d.layer === null) void openNextRawRef.current();
   };
   const cancelDevelop = () => {
     const d = developing;
@@ -11449,7 +11515,7 @@ export function App() {
       rawUndoOpen.current?.();
       rawUndoOpen.current = null;
       rawDone.current += 1;
-      void openNextRaw();
+      void openNextRawRef.current();
     }
   };
   /** Open the picked layer's raw file in the develop window again, with
@@ -11467,6 +11533,13 @@ export function App() {
     try {
       const file = session.raw_original(layer.id);
       const packed = await readRaw(file);
+      // Behind a window already up (Preferences, New document) it waits,
+      // as a first development does: opened under one, its arrow keys
+      // turned the white balance unseen.
+      setImporting(null);
+      while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
       // Another document came while the file was read: the window would
       // open on a layer that is not in it.
       if (liveSession.current !== session) {
@@ -15946,6 +16019,10 @@ export function App() {
                 ) : (
                   <span
                     className={l.visible ? "layer-name" : "layer-name muted"}
+                    // A name in Hebrew or Arabic is laid out (and cut) from
+                    // its own start, and a cut one is shown whole on hover.
+                    dir="auto"
+                    title={l.name}
                     onDoubleClick={() =>
                       setRenaming({ id: l.id, value: l.name })
                     }
@@ -16353,6 +16430,10 @@ export function App() {
                     }
                   }}
                   onPointerUp={commitOpacity}
+                  // A touch the system takes back is no change: the
+                  // preview goes and nothing is left pending, where the
+                  // value stayed and a later Tab past the slider set it.
+                  onPointerCancel={dropOpacity}
                   onKeyUp={commitOpacity}
                   onBlur={commitOpacity}
                   aria-label="Layer opacity"

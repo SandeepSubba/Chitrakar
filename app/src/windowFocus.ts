@@ -55,6 +55,9 @@ function firstStop(win: Element): HTMLElement | null {
         el instanceof HTMLTextAreaElement ||
         (el instanceof HTMLInputElement && el.type !== "checkbox" && el.type !== "radio"),
     ) ??
+    // A window of buttons opens on its first button, as said, and not on
+    // a tick box before it ("Don't ask again", ticked by the next Space).
+    all.find((el) => el instanceof HTMLButtonElement) ??
     all[0] ??
     null
   );

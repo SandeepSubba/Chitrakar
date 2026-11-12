@@ -121,6 +121,10 @@ export function said(err: unknown): string {
     .replace(/\s*\((?:InvalidProfile|UnsupportedProfileConnection|InvalidFont)\)/g, "");
   const plain: [RegExp, string][] = [
     [/out of memory|memory limit exceeded|capacity overflow|allocation/i, "it is larger than the editor can hold in memory"],
+    // The raw reader's words for a camera it does not know, or a file
+    // that ends where its parts say they go on.
+    [/no decoder found/i, "the raw reader does not know this camera, or the file is damaged"],
+    [/behind EOF|is behind eof/i, "the file is damaged or cut short"],
     [
       // The last, the browser's words for a reader that ran off its own
       // memory: a raw whose directories point back at themselves.

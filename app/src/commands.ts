@@ -151,7 +151,13 @@ export function chordFromEvent(e: KeyboardEvent): string {
       : e.code === "NumpadSubtract" || e.key === "-"
         ? "-"
         : null;
-  const key = sign ?? printed[e.code] ?? (e.key.length === 1 ? e.key.toLowerCase() : "");
+  // A letter on a keyboard that does not write Latin ones (Cyrillic,
+  // Greek) is read by where it is: Ctrl+Я is the key Ctrl+Z is, and on
+  // those layouts no chord answered at all.
+  const latin = /^Key([A-Z])$/.exec(e.code);
+  const typed = e.key.length === 1 ? e.key.toLowerCase() : "";
+  const letter = latin && typed && !/^[\x20-\x7e]$/.test(typed) ? latin[1].toLowerCase() : typed;
+  const key = sign ?? printed[e.code] ?? letter;
   if (!key) return "";
   parts.push(key);
   return parts.join("+");

@@ -12039,6 +12039,34 @@ without reading anything else.*
   pinned to stretch does not grow with it; a frame inside a frame
   keeps its mask's size when stretched with its holder; Ctrl+F, Ctrl+G
   and Ctrl+D in a text box are still the browser's.
+  Its interface pass: Undo bound to another chord and pressed in the
+  canvas's text box or a layer's name undid the document, and the
+  typing was lost (the chords bound to a box's own commands stay in the
+  box); no chord and no tool's letter answered on a Cyrillic or Greek
+  keyboard (a letter is read by where it is when it is not a Latin
+  one); the last chip of a row with nothing else to press left the
+  focus on the page; a touch the system took back on the opacity slider
+  left its value to be set by a later Tab; a window carried to a screen
+  of another density stayed blurred; the gradient strip was blank in
+  high contrast; a Hebrew or Arabic layer name was cut at its start
+  (and a cut name had no tooltip); a window of buttons and a tick box
+  opened on the tick box. Its files pass: a raw placed or opened after
+  File › New, while another developed, went with the old document's
+  queue (each waits for the document it was asked into); Develop again
+  and Place PDF opened under a window already up and took its keys
+  (they wait behind it); a PSD group's mask that shows by default hid
+  the group outside its painted box (it reaches the page); a PSD's
+  Blend If ranges were dropped without a word (said); Each kept region
+  was judged by the first region, and froze or failed on a later one
+  (every region is counted); the Export window and the raw reader spoke
+  in their own words. Limits written down: a PDF's non-isolated
+  transparency group (Illustrator's kind) is drawn as an isolated one,
+  so a blend inside it meets only the group; an SVG's paint-order is not
+  read; a PSD blend mode the editor lacks is named by its code; a
+  window whose first stop is a page of its rail opens there; Find and
+  replace brings a phone's keyboard up; Ctrl+S while a layer's name is
+  typed saves the name it had. Its editing pass stopped part way at a
+  usage limit and is to be run again.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot
