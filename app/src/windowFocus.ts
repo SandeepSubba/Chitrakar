@@ -242,11 +242,18 @@ export function keepPanelFocus(doc: Document = document): void {
       // typed there rather than taking the layer away. Nor a step of the
       // history or the comps' "+", where the next Enter or Space put
       // the page back to its start or kept a comp nobody asked for.
+      // A palette's chips are passed over unless the lost stop was one
+      // of that palette's own (a style forgotten goes to the next style).
+      // In the layer list, a row and not its eye or lock: Escape and then
+      // Enter there hid or locked a layer.
+      const ownPalette = chain.find((p) => p.matches(".palette")) ?? null;
       const stops = focusables(part).filter(
         (el) =>
           !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) &&
           !el.isContentEditable &&
-          !el.closest(".history, .palette"),
+          !el.closest(".history") &&
+          (!el.closest(".palette") || el.closest(".palette") === ownPalette) &&
+          !(part === list && /^(Show|Hide|Lock|Unlock) layer/.test(el.getAttribute("aria-label") ?? "")),
       );
       if (stops.length === 0) {
         // The last layer gone: the list holds the place, empty, rather

@@ -736,15 +736,46 @@ let copiedHere = false;
  * closed tab's slot, and with it the draft its bar is offering: the
  * first change made before that was answered was written over it, and
  * the closed tab's work was gone for good. */
+/** Locks this tab holds on slots it moved an offered draft into, by
+ * slot: held until the draft is answered, so another tab opening meanwhile
+ * cannot take the slot for its own and write over the draft — or have
+ * this tab's Discard clear that tab's work instead. */
+const movedSlotLocks = new Map<number, () => void>();
+function holdSlot(n: number): Promise<(() => void) | null> {
+  const locks = webLocks();
+  if (!locks) return Promise.resolve(() => {});
+  return new Promise((resolve) => {
+    locks
+      .request(`chitrakar-draft-${n}`, { ifAvailable: true }, (lock) => {
+        if (!lock) {
+          resolve(null);
+          return;
+        }
+        return new Promise<void>((release) => resolve(() => release()));
+      })
+      .catch(() => resolve(null));
+  });
+}
+/** Let go of a slot held for a moved draft, once it has been answered. */
+function releaseMovedSlot(n: number) {
+  movedSlotLocks.get(n)?.();
+  movedSlotLocks.delete(n);
+}
+
 async function moveDraft(from: number): Promise<number | null> {
   const db = await draftDb();
   if (!db) return null;
-  const held = await slotsHeld();
   const keys = ["current", "parts", "pending", "name", "path", "saved"];
   for (let n = 0; n < DRAFT_SLOTS; n++) {
-    if (n === from || held.has(n)) continue;
+    if (n === from) continue;
+    const release = await holdSlot(n);
+    if (!release) continue;
     const [there] = await draftRead<unknown>(db, [slotKey(n, "current")]);
-    if (there !== undefined) continue;
+    if (there !== undefined) {
+      release();
+      continue;
+    }
+    movedSlotLocks.set(n, release);
     const got = await draftRead<unknown>(db, keys.map((k) => slotKey(from, k)));
     const put: [string, unknown][] = [];
     keys.forEach((k, i) => {
@@ -4766,7 +4797,11 @@ export function App() {
     // A window resized or a phone turned puts it away, as it does the
     // bar's menus: it stayed open where the old window had room, below
     // the new one's edge, out of sight.
-    const resized = () => setContextAt(null);
+    // Only a change of width: a phone's keyboard going away changes the
+    // height alone, and the menu a long press had just opened over it
+    // closed at once.
+    const wide = window.innerWidth;
+    const resized = () => window.innerWidth !== wide && setContextAt(null);
     document.addEventListener("pointerdown", away);
     document.addEventListener("keydown", key);
     window.addEventListener("resize", resized);
@@ -11193,10 +11228,15 @@ export function App() {
       // The reader is fetched the first time a raw file is opened; with
       // no network and no copy kept, it is the reader that is missing,
       // not the file that is wrong.
+      // A file whose parts point outside it (or back at themselves) is
+      // damaged, said as such: it was "a camera this editor does not
+      // know yet", and the browser's own words after it.
       alert(
         navigator.onLine === false
           ? `Could not open ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
-          : `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
+          : /outside the bounds/i.test(String(err))
+            ? `Could not open ${next.name}: the file is damaged (its parts point outside it).`
+            : `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
       );
       next.undoOpen?.();
       rawDone.current += 1;
@@ -11210,10 +11250,16 @@ export function App() {
    * layer as its new picture in one step of history. With `all`, every
    * raw file still waiting is placed with the same settings too — the
    * same light and exposure for a run of photographs taken together. */
+  /** Whether a Develop again is under way, from its window to its
+   * development landing (`rawBusy` is a first development's). */
+  const againBusy = useRef(false);
   const finishDevelop = async (given: RawSettings, all = false) => {
     const d = developing;
     setDeveloping(null);
-    if (!session || !d) return;
+    if (!session || !d) {
+      againBusy.current = false;
+      return;
+    }
     // The lens profile it is developed with, written down beside the
     // settings (or taken off, where there is none now).
     const { lens_profile: _, ...unprofiled } = given;
@@ -11237,7 +11283,12 @@ export function App() {
         setRawWaiting(0);
         rawBusy.current = false;
         rawDone.current = 0;
-        alert(`${d.name} was not placed: the document it was going into was closed while it was developed.`);
+        againBusy.current = false;
+        alert(
+          d.layer === null
+            ? `${d.name} was not placed: the document it was going into was closed while it was developed.`
+            : `${d.name} was not developed again: its document was closed while it was developed.`,
+        );
         return;
       }
       if (d.layer === null) {
@@ -11287,6 +11338,7 @@ export function App() {
       }
     }
     setImporting(null);
+    againBusy.current = false;
     // Developed and placed: the Open is done, nothing to go back to.
     rawUndoOpen.current = null;
     if (d.layer === null) void openNextRaw();
@@ -11294,6 +11346,7 @@ export function App() {
   const cancelDevelop = () => {
     const d = developing;
     setDeveloping(null);
+    againBusy.current = false;
     session?.raw_close();
     rawPacked.current = null;
     if (d?.layer === null) {
@@ -11310,6 +11363,10 @@ export function App() {
   const developAgain = async () => {
     const layer = layers.find((l) => l.id === selected);
     if (!session || !layer?.developed) return;
+    // Busy as a first development is, until it lands or is put away: a
+    // document dropped meanwhile opened the moment the window went, and
+    // the new development was lost.
+    againBusy.current = true;
     // The file the document kept is read again by the raw module: the
     // engine develops, it does not read raw files.
     setImporting(`Reading ${layer.name}…`);
@@ -11333,6 +11390,7 @@ export function App() {
         layer: layer.id,
       });
     } catch (err) {
+      againBusy.current = false;
       alert(`${said(err)}`);
     } finally {
       setImporting(null);
@@ -11456,8 +11514,8 @@ export function App() {
       // when the file arrived, and asked whether there was unsaved work
       // as the page was then — a photograph placed meanwhile was thrown
       // away without the question.
-      if (mustWait(() => rawBusy.current)) {
-        await windowsClosed(() => rawBusy.current);
+      if (mustWait(() => rawBusy.current || againBusy.current)) {
+        await windowsClosed(() => rawBusy.current || againBusy.current);
         await nextPaint();
         takeFilesRef.current(files);
         return;
@@ -11544,8 +11602,8 @@ export function App() {
    * document dropped on the window has its file the way one opened from
    * the panel does, and Save writes back to it. */
   const onShellDrop = async (paths: string[]): Promise<void> => {
-    if (mustWait(() => rawBusy.current)) {
-      await windowsClosed(() => rawBusy.current);
+    if (mustWait(() => rawBusy.current || againBusy.current)) {
+      await windowsClosed(() => rawBusy.current || againBusy.current);
       await nextPaint();
       return onShellDropRef.current(paths);
     }
@@ -12536,7 +12594,8 @@ export function App() {
               // A closed tab's draft is this tab's now, kept in its slot
               // from the next change; the old slot lets it go, leaving
               // the pictures for this tab's draft to take over.
-              if (draft.slot !== draftSlot) void clearDraft(draft.slot, true);
+              if (draft.slot !== draftSlot)
+                void clearDraft(draft.slot, true).then(() => releaseMovedSlot(draft.slot));
               offerNextDraft(draft.slot);
             }}
           >
@@ -12555,6 +12614,7 @@ export function App() {
               // wrote it again until the next change. So it is kept again
               // at once (unless nothing has been done on this page).
               void clearDraft(slot, true).then(() => {
+                releaseMovedSlot(slot);
                 offerNextDraft(slot);
                 if (slot === draftSlot) setSaveTick((n) => n + 1);
               });

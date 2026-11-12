@@ -2248,6 +2248,29 @@ impl Mask {
     /// and every region kept by name; and a group being dissolved,
     /// which hands its own transform to each child and so has to hand
     /// it to each child's mask too.
+    /// The same carry for a *move* a layer is given in that space — a
+    /// frame resized shifting or stretching what is pinned in it — rather
+    /// than a change of space: where things are goes with it, but how
+    /// soft an edge is and how wide a brush was stay as they were. Carried
+    /// as lengths, a stretch one way grew them by its larger scale and a
+    /// squeeze back left them grown, so each resize to and fro made an
+    /// eraser's cut wider until it took the whole layer.
+    pub fn moved_through(&self, m: Transform) -> Mask {
+        let mut out = self.carried_through(m);
+        out.feather = self.feather;
+        if let (MaskKind::Painted { strokes }, MaskKind::Painted { strokes: was }) =
+            (&mut out.kind, &self.kind)
+        {
+            for (stroke, old) in strokes.iter_mut().zip(was) {
+                stroke.radii.clone_from(&old.radii);
+                if let (Some(held), Some(old_held)) = (&mut stroke.clip, &old.clip) {
+                    **held = old_held.moved_through(m);
+                }
+            }
+        }
+        out
+    }
+
     pub fn carried_through(&self, m: Transform) -> Mask {
         let mut out = self.clone();
         // How far the edge is softened over is a length in that space
@@ -2682,6 +2705,24 @@ impl Effect {
     /// round with the light left where it was would light every layer
     /// from a new direction; so would a group dissolved after being
     /// turned.
+    /// The same for a move given to the layer in that space (a frame's
+    /// resize): an offset and a light's direction go with it, and the
+    /// lengths — a blur, an outline's width, a bevel's size — stay.
+    pub fn moved_through(&self, m: Transform) -> Effect {
+        let mut out = self.carried_through(m);
+        match (&mut out, self) {
+            (
+                Effect::DropShadow { blur, .. } | Effect::InnerShadow { blur, .. },
+                Effect::DropShadow { blur: was, .. } | Effect::InnerShadow { blur: was, .. },
+            ) => *blur = *was,
+            (Effect::Outline { width, .. }, Effect::Outline { width: was, .. }) => *width = *was,
+            (Effect::Bevel { size, .. }, Effect::Bevel { size: was, .. }) => *size = *was,
+            (Effect::Blur { sigma }, Effect::Blur { sigma: was }) => *sigma = *was,
+            _ => {}
+        }
+        out
+    }
+
     pub fn carried_through(&self, m: Transform) -> Effect {
         let mut out = self.clone();
         // An offset has a direction and goes through the transform as a

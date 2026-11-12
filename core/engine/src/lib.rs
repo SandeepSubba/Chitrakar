@@ -4410,16 +4410,19 @@ impl Session {
         by: Transform,
         cmds: &mut Vec<Command>,
     ) {
+        // Moved, not carried into another space: positions and directions
+        // follow, lengths stay (`moved_through`). Carried as lengths, a
+        // stretch to and fro grew a shadow's blur six times a round.
         if let Some(mask) = &node.mask {
             cmds.push(Command::SetMask {
                 id,
-                mask: Some(Box::new(mask.carried_through(by))),
+                mask: Some(Box::new(mask.moved_through(by))),
             });
         }
         if !node.effects.is_empty() {
             cmds.push(Command::SetEffects {
                 id,
-                effects: node.effects.iter().map(|e| e.carried_through(by)).collect(),
+                effects: node.effects.iter().map(|e| e.moved_through(by)).collect(),
             });
         }
     }
@@ -14361,6 +14364,44 @@ mod tests {
             ([420.0, 100.0], [480.0, 100.0]),
             "and its mask with it"
         );
+
+        // A layer stretched with the frame keeps its shadow's blur however
+        // often the frame is resized to and fro.
+        let mut wide = *filled_rect("Wide", 60.0, 40.0);
+        wide.transform.e = 20.0;
+        wide.transform.f = 20.0;
+        wide.pinned.x = chitrakar_doc::Pin::Stretch;
+        wide.effects = vec![chitrakar_doc::Effect::DropShadow {
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.5,
+            dx: 4.0,
+            dy: 4.0,
+            blur: 8.0,
+            spread: 0.0,
+        }];
+        s.apply(Command::AddNode {
+            parent: frame,
+            index: 1,
+            node: Box::new(wide),
+        })
+        .unwrap();
+        let wide = s.document().children_of(frame).unwrap()[1];
+        let was = s.document().node(wide).unwrap().effects.clone();
+        for w in [250.0, 500.0, 300.0, 700.0, 500.0] {
+            let json = s.artboard_resize(frame, w, 240.0, 0.0, 0.0).unwrap();
+            s.apply(serde_json::from_str(&json).unwrap()).unwrap();
+        }
+        let now = s.document().node(wide).unwrap().effects.clone();
+        let blur = |e: &chitrakar_doc::Effect| match e {
+            chitrakar_doc::Effect::DropShadow { blur, .. } => *blur,
+            _ => panic!(),
+        };
+        assert_eq!(blur(&was[0]), blur(&now[0]), "the blur stays as it was");
     }
 
     /// A draft written while a drag is still in hand keeps where the

@@ -11946,6 +11946,31 @@ without reading anything else.*
   with effects offers no overrides and does not say why; a painted
   mask's strokes thicken when its layer leaves a group stretched one
   way.
+  **A twenty-ninth audit (November 2026).** Its check of round 28
+  found two of round 28's own fixes going too far. A frame's resize,
+  now carrying its layers' masks and effects, carried them as into
+  another space — a blur, an outline's width, a brush's radius grown by
+  the larger scale — so a layer stretched with its frame had its shadow
+  blurred six times more each time the frame went narrower and back,
+  and an eraser's cut grew over the whole layer (a resize is a move:
+  positions and directions follow it, lengths stay, `moved_through`).
+  And an offered draft moved to a free slot could be taken by a third
+  tab opening, whose work the first tab's Discard then cleared (the
+  slot it is moved to is held until the draft is answered). Also: the
+  focus keeper's fall to the layer list landed on a row's eye or lock,
+  where Escape and Enter hid a layer (a row now), and passed over the
+  next chip of a palette a chip was forgotten from (its own palette's
+  chips are taken); a document dropped during Develop again opened as
+  its window went and the development was lost (Develop again is
+  waited for as a first one is); a raw whose parts point outside it
+  was still "a camera this editor does not know yet" on Place, Open
+  and in Batch; the canvas's menu closed when a phone's keyboard went
+  away (only a change of width closes it). Limits written down: a
+  layer pinned to Stretch in a frame narrowed past its own width is
+  left a sliver, and widening the frame does not give it back; with
+  all eight draft slots in use, a tab offered a draft keeps none of its
+  own work until it answers, and says nothing of it; a flyout stays
+  open under Preferences opened by its chord.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

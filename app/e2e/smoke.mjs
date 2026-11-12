@@ -21709,6 +21709,64 @@ assert(
   assert(seen.includes(1), `and the next tab's own change is kept too (${JSON.stringify(seen)})`);
   await ctx.close();
 }
+{
+  // A third tab opening while the second still offers the moved draft
+  // cannot take its slot; and the second's Discard clears only that
+  // draft, not the third tab's work.
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const tab = async () => {
+    const p = await ctx.newPage();
+    p.on("dialog", (d) => d.accept());
+    await p.goto("http://localhost:8123/");
+    await p.waitForSelector("#engine-canvas");
+    await p.waitForTimeout(1600);
+    return p;
+  };
+  const rects = async (p, n, at) => {
+    const r = await p.locator("#engine-page").boundingBox();
+    await p.locator("#engine-canvas").hover();
+    await p.keyboard.press("r");
+    for (let i = 0; i < n; i++) {
+      await p.mouse.move(r.x + at + i * 30, r.y + 20 + i * 20);
+      await p.mouse.down();
+      await p.mouse.move(r.x + at + 20 + i * 30, r.y + 40 + i * 20, { steps: 3 });
+      await p.mouse.up();
+      await p.waitForTimeout(120);
+    }
+  };
+  const count = (p) => p.locator(".panel ul li .layer-name").count();
+  const a = await tab();
+  await rects(a, 5, 20);
+  await a.waitForTimeout(2600);
+  await a.close();
+  const b = await tab();
+  await b.waitForTimeout(600);
+  await rects(b, 1, 300);
+  await b.waitForTimeout(2600);
+  // B still open, offering the five. C opens and works.
+  const c = await tab();
+  await c.waitForTimeout(600);
+  if (await c.isVisible(".recover")) await c.click(".recover >> text=Discard").catch(() => {});
+  await c.waitForTimeout(300);
+  await rects(c, 3, 200);
+  await c.waitForTimeout(2600);
+  // B lets the five go.
+  if (await b.isVisible(".recover")) await b.click(".recover >> text=Discard");
+  await b.waitForTimeout(800);
+  await b.close();
+  await c.close();
+  const d = await tab();
+  await d.waitForTimeout(600);
+  const seen = [];
+  for (let i = 0; i < 4 && (await d.isVisible(".recover")); i++) {
+    await d.click(".recover >> text=Restore");
+    await d.waitForTimeout(900);
+    seen.push(await count(d));
+  }
+  assert(seen.includes(3), `the third tab's work survives the second's Discard (${JSON.stringify(seen)})`);
+  assert(!seen.includes(5), `and the draft discarded is not offered again (${JSON.stringify(seen)})`);
+  await ctx.close();
+}
 
 // 9cv. Two tabs each keep a draft of their own: both wrote one draft,
 // and only the last one's work came back after a crash. A context of its

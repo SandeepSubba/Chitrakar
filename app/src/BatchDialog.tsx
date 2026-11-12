@@ -124,9 +124,11 @@ export function BatchDialog({
         // As Place says it: the reader's own words only after ours.
         const text = String(err);
         failed.push(
-          /camera raw|decode|EOF|corrupt/i.test(text)
-            ? `${f.name}: it may be damaged, or from a camera this editor does not know yet (${text})`
-            : `${f.name}: ${text}`,
+          /outside the bounds/i.test(text)
+            ? `${f.name}: the file is damaged (its parts point outside it)`
+            : /camera raw|decode|EOF|corrupt/i.test(text)
+              ? `${f.name}: it may be damaged, or from a camera this editor does not know yet (${text})`
+              : `${f.name}: ${text}`,
         );
       }
     }
