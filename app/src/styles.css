@@ -4649,3 +4649,17 @@ button.fold:hover {
   flex: 1;
   min-width: 8em;
 }
+
+/* In a forced-colours (high contrast) mode the system repaints every
+   background in its own few colours: a colour chip turned white, and the
+   page's paper and edge went with it. These are the colours themselves,
+   so they keep what they are. */
+@media (forced-colors: active) {
+  .swatch,
+  .prefs-swatch,
+  .style-chip,
+  #engine-page,
+  #engine-canvas {
+    forced-color-adjust: none;
+  }
+}

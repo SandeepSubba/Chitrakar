@@ -1442,7 +1442,13 @@ impl Session {
                 [Command::SetKind { id, kind }, rest @ ..]
                     if matches!(**kind, NodeKind::Artboard { .. })
                         && rest.iter().all(|c| {
-                            matches!(c, Command::SetKind { .. } | Command::SetTransform { .. })
+                            matches!(
+                                c,
+                                Command::SetKind { .. }
+                                    | Command::SetTransform { .. }
+                                    | Command::SetMask { .. }
+                                    | Command::SetEffects { .. }
+                            )
                         }) =>
                 {
                     format!("Resize {}", name(id))
@@ -1504,7 +1510,47 @@ impl Session {
         self.undo.last().map_or(0, |e| e.serial)
     }
 
+    /// Whether a layer is one a live copy has made its own: it stands in
+    /// for one of the original's layers by its place among the copy's
+    /// children (`copy_children`).
+    fn is_a_copys_own(&self, id: NodeId) -> bool {
+        self.doc
+            .parent_of(id)
+            .and_then(|p| self.doc.node(p).ok())
+            .is_some_and(|p| matches!(p.kind, NodeKind::Instance { .. }))
+    }
+
+    /// A copy's own layers keep their places: which of the original's
+    /// layers each stands in for is read by its place among the copy's
+    /// children, so one raised, or dragged out, or one dragged in, left
+    /// another standing in the wrong place — the copy's panel drew
+    /// nothing, and "Follow again" took away the wrong layer.
+    fn refuse_moving_a_copys_own(&self, cmd: &Command) -> Result<(), EngineError> {
+        match cmd {
+            Command::Batch(cmds) => cmds
+                .iter()
+                .try_for_each(|c| self.refuse_moving_a_copys_own(c)),
+            Command::MoveNode { id, parent, .. } => {
+                let into_copy = self
+                    .doc
+                    .node(*parent)
+                    .is_ok_and(|p| matches!(p.kind, NodeKind::Instance { .. }));
+                if self.is_a_copys_own(*id) || into_copy {
+                    return Err(EngineError::BadCommand(
+                        "a copy's own layers keep their places, since each stands in for one \
+                         of the original's: to let one go, choose \u{201c}Follow the original \
+                         again\u{201d} for it; to change the order, change the original's."
+                            .into(),
+                    ));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
+        self.refuse_moving_a_copys_own(&cmd)?;
         self.settle_stray_preview(); // a stray preview must not leak into this edit
         let label = label.unwrap_or_else(|| self.describe(&cmd));
         // A value set to what it already is — a shape filled with its own
@@ -3884,6 +3930,7 @@ impl Session {
         parent: NodeId,
         index: usize,
     ) -> Result<(), EngineError> {
+        self.refuse_moving_a_copys_own(&Command::MoveNode { id, parent, index })?;
         let label = format!("Move {}", self.doc.node(id)?.name);
         let move_it = Command::MoveNode { id, parent, index };
         if self.doc.parent_of(id) == Some(parent) {
@@ -4341,13 +4388,59 @@ impl Session {
                 chitrakar_render::occupied_bounds_in_parent_space(&self.doc, child)?
             else {
                 // An adjustment or a filter fills whatever it is in and
-                // has no box to pin by; it needs no moving either.
+                // has no box to pin by; it needs no moving either. Its
+                // mask does — a graduated filter's fade is somewhere on
+                // the page, and the panel offers it pins — so the mask is
+                // pinned by the frame's own box and moved as a layer
+                // there would be.
+                if kid.mask.is_some() {
+                    let (sx, tx) = Self::axis(kid.pinned.x, 0.0, *w0, dw);
+                    let (sy, ty) = Self::axis(kid.pinned.y, 0.0, *h0, dh);
+                    if sx != 1.0 || sy != 1.0 || tx != 0.0 || ty != 0.0 {
+                        let by = Transform {
+                            a: sx,
+                            b: 0.0,
+                            c: 0.0,
+                            d: sy,
+                            e: tx,
+                            f: ty,
+                        };
+                        if let Some(mask) = &kid.mask {
+                            cmds.push(Command::SetMask {
+                                id: child,
+                                mask: Some(Box::new(mask.moved_through(by))),
+                            });
+                        }
+                    }
+                }
                 continue;
             };
             let (sx, tx) = Self::axis(kid.pinned.x, x0, x1, dw);
             let (sy, ty) = Self::axis(kid.pinned.y, y0, y1, dh);
             if sx == 1.0 && sy == 1.0 && tx == 0.0 && ty == 0.0 {
                 continue;
+            }
+            // A live copy of a frame that is itself in this frame: that
+            // frame is resized by this same step, and the copy draws it at
+            // its new size — scaled as well, it grew twice and its circle
+            // came out an oval. It is only moved by its pin.
+            if let NodeKind::Instance { of, .. } = &kid.kind {
+                // Resized here only where its own pins stretch it.
+                let resized_here = self.doc.children_of(id)?.contains(of)
+                    && self.doc.node(*of).is_ok_and(|n| {
+                        matches!(n.kind, NodeKind::Artboard { .. })
+                            && (n.pinned.x == chitrakar_doc::Pin::Stretch
+                                || n.pinned.y == chitrakar_doc::Pin::Stretch)
+                    });
+                if resized_here && (sx != 1.0 || sy != 1.0) {
+                    let shift = Transform::translation(tx, ty);
+                    cmds.push(Command::SetTransform {
+                        id: child,
+                        transform: shift.compose(kid.transform),
+                    });
+                    Self::carry_mask_and_effects(kid, child, shift, &mut cmds);
+                    continue;
+                }
             }
             // A frame inside, stretched with this one, is resized — as a
             // frame is everywhere — and what is in it follows its own
@@ -5603,6 +5696,14 @@ impl Session {
         if ids.is_empty() {
             return Err(EngineError::BadCommand("nothing to duplicate".into()));
         }
+        if let Some(&own) = ids.iter().find(|&&id| self.is_a_copys_own(id)) {
+            return Err(EngineError::BadCommand(format!(
+                "\u{201c}{}\u{201d} is a copy's own version of one of its original's layers, \
+                 and stands in that one's place: a second of it would stand in another's. \
+                 Duplicate the copy instead.",
+                self.doc.node(own)?.name
+            )));
+        }
         let style = if offset {
             CopyStyle::Duplicate
         } else {
@@ -6093,11 +6194,21 @@ impl Session {
         // A layer following a style this document does not keep follows
         // nothing here: left linked, the first style kept under that name
         // would restyle it.
+        // And one from another document follows nothing here either: the
+        // style it followed there is that document's, and a style kept
+        // here under the same name (every document numbers its styles
+        // alike) is another look — left linked, the next time it was kept
+        // again the pasted layers were restyled without a word.
+        let foreign = clip.from != self.origin;
         let kept: std::collections::HashSet<&str> =
             self.doc.styles().iter().map(|s| s.name.as_str()).collect();
         for cmd in &mut cmds {
             if let Command::AddNode { node, .. } = cmd {
-                if node.style.as_deref().is_some_and(|s| !kept.contains(s)) {
+                if node
+                    .style
+                    .as_deref()
+                    .is_some_and(|s| foreign || !kept.contains(s))
+                {
                     node.style = None;
                 }
             }
@@ -9919,6 +10030,23 @@ impl Session {
             return Err(EngineError::BadCommand(format!(
                 "a Photoshop file holds pages up to {} pixels a side",
                 chitrakar_codecs::psd_export::PSD_SIDE_MOST
+            )));
+        }
+        // Every layer is drawn at the page's size and all are held at once
+        // with the composite while the file is written: four layers of a
+        // 61-megapixel photograph ran the engine out of memory and the page
+        // reloaded. Refused in words before anything is drawn.
+        let layers = self.doc.nodes().count().saturating_sub(1) as u64;
+        let need = (layers + 2) * u64::from(w) * u64::from(h) * 4;
+        // Set between what was measured to write (eight layers of 24
+        // megapixels, one of 100) and what ran out (four of 61).
+        const PSD_BUDGET: u64 = 1_300_000_000;
+        if need > PSD_BUDGET {
+            return Err(EngineError::BadCommand(format!(
+                "a layered Photoshop file holds every layer at the page's full size at once: \
+                 {layers} layers of a {w} × {h} page need about {:.1} GB, more than the editor \
+                 can hold. Merge some layers first, or export a flat TIFF or PNG.",
+                need as f64 / 1e9
             )));
         }
         let mut notes = Vec::new();

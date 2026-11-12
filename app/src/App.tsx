@@ -544,7 +544,10 @@ async function claimDraftSlot(): Promise<number> {
     await new Promise((r) => setTimeout(r, 200));
   }
   for (let n = 1; n < DRAFT_SLOTS; n++) if (await take(n)) return n;
-  return 0;
+  // Every slot held by a tab still open: this one keeps no draft rather
+  // than share slot 0 with a live tab, whose work it was then offered as
+  // "your last session", and whose draft its Discard deleted.
+  return -1;
 }
 /** The slots another open tab holds. */
 async function slotsHeld(): Promise<Set<number>> {
@@ -617,6 +620,7 @@ async function putDraft(
    * answered, whose pictures were deleted from under it as stale. */
   spare: string[] = [],
 ): Promise<void> {
+  if (draftSlot < 0) return;
   const db = await draftDb();
   if (!db) return;
   const names = JSON.parse(session.draft_parts()) as string[];
@@ -716,6 +720,7 @@ async function getDraftParts(names: string[]): Promise<Map<string, Uint8Array>> 
  * it; `saved`, whether that file already held it. */
 type DraftNote = "name" | "path" | "saved";
 async function putDraftNote(key: DraftNote, value: string): Promise<void> {
+  if (draftSlot < 0) return;
   const db = await draftDb();
   if (!db) return;
   db.transaction(DRAFT_STORE, "readwrite")
@@ -791,6 +796,7 @@ async function moveDraft(from: number): Promise<number | null> {
  * taken over (a draft restored into this tab, whose next draft writes
  * the ones it needs) — the parts no other slot lists. */
 async function clearDraft(slot: number = draftSlot, keepParts = false): Promise<void> {
+  if (slot < 0) return;
   const db = await draftDb();
   if (!db) return;
   const keys = ["current", "parts", "pending", "name", "path", "saved"].map((k) => slotKey(slot, k));
@@ -978,6 +984,14 @@ function dropUnsettled(el: Element | null): boolean {
   el.value = el.defaultValue;
   el.select();
   return true;
+}
+
+/** Whether a key pressed in a text box goes on to the editor: a chord
+ * with Ctrl or ⌘, but not the box's own (select all, cut, copy, paste,
+ * undo, redo). Kept in the box, Ctrl+S was the browser's "save page" and
+ * Ctrl+= zoomed the whole window rather than the page. */
+function passesChord(e: React.KeyboardEvent): boolean {
+  return (e.ctrlKey || e.metaKey) && !["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase());
 }
 
 function fieldKeys(e: React.KeyboardEvent<HTMLInputElement>): void {
@@ -2041,7 +2055,12 @@ export function App() {
   const [floating, setFloating] = useState<[number, number] | null>(() => {
     try {
       const at = localStorage.getItem("chitrakar:toolbar");
-      return at ? (JSON.parse(at) as [number, number]) : null;
+      const got: unknown = at ? JSON.parse(at) : null;
+      // Two numbers, or nothing: a damaged value ran the rail past the
+      // window ("NaNpx" for its top).
+      return Array.isArray(got) && got.length === 2 && got.every((v) => typeof v === "number" && Number.isFinite(v))
+        ? (got as [number, number])
+        : null;
     } catch {
       return null;
     }
@@ -2136,7 +2155,14 @@ export function App() {
   const [panelOpen, setPanelOpen] = useState(false);
 
   const [panelWidth, setPanelWidth] = useState(() => {
-    const kept = Number(localStorage.getItem("chitrakar:panel"));
+    // Read as every other kept setting is, or the page never started
+    // where the browser keeps nothing for a site (it throws on reading).
+    let kept = NaN;
+    try {
+      kept = Number(localStorage.getItem("chitrakar:panel"));
+    } catch {
+      /* nothing kept: the default */
+    }
     return Number.isFinite(kept) && kept >= 180 ? Math.min(kept, 560) : 240;
   });
   useEffect(() => {
@@ -2160,12 +2186,17 @@ export function App() {
       ];
       setFloating(at[0] < 40 ? null : at);
     };
+    // A cancelled touch (a system gesture, a call) lets go as a lift
+    // does: listening for the lift alone, the next finger anywhere went
+    // on carrying it.
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   };
 
   /** On a phone held upright the panel is a sheet from the bottom edge,
@@ -2218,12 +2249,17 @@ export function App() {
       setPanelWidth(
         Math.max(180, Math.min(560, from + (startX - m.clientX) / prefs.uiScale)),
       );
+    // A cancelled touch (a system gesture, a call) lets go as a lift
+    // does: listening for the lift alone, the next finger anywhere went
+    // on carrying it.
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
   };
   const [paintSoftness, setPaintSoftness] = useState(0.5);
   /** Rubbing out is the eraser tool rather than a switch on the paint
@@ -2560,7 +2596,17 @@ export function App() {
    * nothing yet done to it. */
   const untouchedStart = useRef(false);
   useEffect(() => {
-    slotReady.current = claimDraftSlot().then((n) => (draftSlot = n));
+    slotReady.current = claimDraftSlot().then((n) => {
+      draftSlot = n;
+      if (n < 0)
+        setImportNotes({
+          name: "This tab",
+          notes: [
+            "no crash draft is kept here: the editor is open in eight other tabs, which keep theirs. Save this work, or close another tab and reload this one.",
+          ],
+        });
+      return n;
+    });
     // Not offered where it would not have been kept.
     if (!prefs.keepDraft) return;
     void slotReady.current.then(() => offeredDraft()).then((draft) => draft && setRecoverable(draft));
@@ -2579,7 +2625,18 @@ export function App() {
     // before goes — a setting that stops writing but leaves the last
     // draft behind is not the setting it says it is.
     if (!prefs.keepDraft) {
-      void slotReady.current?.then(() => clearDraft());
+      // This tab's own, and every draft no open tab is keeping — a closed
+      // tab's was left and offered again once the setting came back. And
+      // the bar offering one goes with it: answered after the draft was
+      // cleared, Restore brought back a document missing its pictures.
+      setRecoverable(null);
+      void slotReady.current?.then(async () => {
+        const held = await slotsHeld();
+        for (let n = 0; n < DRAFT_SLOTS; n++) {
+          if (n === draftSlot || !held.has(n) || movedSlotLocks.has(n)) await clearDraft(n);
+        }
+        for (const n of [...movedSlotLocks.keys()]) releaseMovedSlot(n);
+      });
       return;
     }
     // Nothing to keep until something is done: the empty document every
@@ -5211,9 +5268,16 @@ export function App() {
     setGuideDrag({ vertical, index, at: positionOf(e) });
     const onMove = (ev: PointerEvent) =>
       setGuideDrag((g) => (g ? { ...g, at: positionOf(ev) } : g));
+    const onCancel = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      setGuideDrag(null);
+    };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
       setGuideDrag(null);
       const at = Math.round(positionOf(ev) * 100) / 100;
       const limit = vertical ? docSizeRef.current[0] : docSizeRef.current[1];
@@ -5228,6 +5292,8 @@ export function App() {
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    // Cancelled, the guide is left where it was (or not made at all).
+    window.addEventListener("pointercancel", onCancel);
   };
 
   /** A double-click on a picked text block opens it for typing in place. */
@@ -8559,6 +8625,16 @@ export function App() {
         applyCrop();
         return;
       }
+      // On a palette's chip or its "+", Delete is the chip's to answer
+      // (or nobody's): it went on to delete the picked layer, which the
+      // keys sheet's "Delete on a chip: forget it" does not say.
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        e.target instanceof Element &&
+        e.target.closest(".palette")
+      ) {
+        return;
+      }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
         // With a path half drawn, the key takes back its last anchor —
@@ -11324,6 +11400,14 @@ export function App() {
         await giveLensProfiles(session);
         session.raw_open(packed, next.bytes, next.name);
         const got = await developedElsewhere(packed, next.name, json);
+        // The document went while this one was developed (File › New, an
+        // Open): what is left is not placed into a page nobody can see,
+        // whose layers then came back over the new one.
+        if (liveSession.current !== session) {
+          const lost = [next.name, ...left.slice(left.indexOf(next) + 1).map((q) => q.name)];
+          alert(`${lost.join(", ")} not placed: the document ${lost.length > 1 ? "they were" : "it was"} going into was closed while ${lost.length > 1 ? "they were" : "it was"} developed.`);
+          break;
+        }
         placed(
           got
             ? session.place_raw_pixels(got.rgba, got.width, got.height, json)
@@ -11373,6 +11457,12 @@ export function App() {
     try {
       const file = session.raw_original(layer.id);
       const packed = await readRaw(file);
+      // Another document came while the file was read: the window would
+      // open on a layer that is not in it.
+      if (liveSession.current !== session) {
+        againBusy.current = false;
+        return;
+      }
       await giveLensProfiles(session);
       session.raw_open(packed, file, layer.name);
       rawPacked.current = packed;
@@ -11412,8 +11502,16 @@ export function App() {
     if (!session || !source?.developed || developedOthers.length === 0) return;
     const settings = session.developed_settings(source.id);
     const others = developedOthers;
+    // Busy as a development is, so a file that arrives meanwhile waits:
+    // opened at once, it took the editor, and the panel then showed this
+    // document's layers over it — one deleted there was some other layer.
+    againBusy.current = true;
+    const gone = () => liveSession.current !== session;
     try {
       for (const [i, t] of others.entries()) {
+        if (gone()) break;
+        // A layer deleted meanwhile is passed over, not the end of the run.
+        if (!(JSON.parse(session.layers_json()) as LayerInfo[]).some((l) => l.id === t.id)) continue;
         setImporting(`Developing ${t.name} (${i + 1} of ${others.length})…`);
         await nextPaint();
         const file = session.raw_original(t.id);
@@ -11436,11 +11534,13 @@ export function App() {
     } finally {
       // What was developed before anything failed still goes in, as one step.
       try {
-        session.commit_staged_develop();
+        if (!gone()) session.commit_staged_develop();
       } finally {
         session.raw_close();
         setImporting(null);
-        refresh(session);
+        againBusy.current = false;
+        // Drawn only if it is still the document in hand.
+        if (!gone()) refresh(session);
       }
     }
   };
@@ -14074,6 +14174,9 @@ export function App() {
                   style={{ background: hex }}
                   title={`${hex} — used lately`}
                   aria-label={`Recent colour ${hex}`}
+                  onKeyDown={chipKeys(() =>
+                    setPrefs((p) => ({ recentColors: p.recentColors.filter((c) => c !== hex) })),
+                  )}
                   onClick={() => applyColour(hex)}
                 />
               ))}
@@ -14879,7 +14982,7 @@ export function App() {
                       e.preventDefault();
                       closeInlineText(true);
                     }
-                    e.stopPropagation();
+                    if (!passesChord(e)) e.stopPropagation();
                   }}
                 />
               );
@@ -15398,6 +15501,19 @@ export function App() {
               className="sheet-grip"
               role="button"
               aria-label={sheetTall ? "Lower the layers" : "Raise the layers"}
+              // A button that can be pressed as one: by the keyboard, and
+              // by a screen reader's activation (a click), not only by a
+              // finger's drag.
+              tabIndex={0}
+              onClick={(e) => {
+                if (e.detail === 0) setSheetTall((t) => !t);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSheetTall((t) => !t);
+                }
+              }}
               onPointerDown={onSheetGrip}
               onPointerMove={onSheetGripMove}
               onPointerUp={onSheetGripUp}
@@ -15798,7 +15914,7 @@ export function App() {
                     }
                     onBlur={commitRename}
                     onKeyDown={(e) => {
-                      e.stopPropagation();
+                      if (!passesChord(e)) e.stopPropagation();
                       if (e.key !== "Enter" && e.key !== "Escape") return;
                       if (e.key === "Enter") commitRename();
                       else setRenaming(null);

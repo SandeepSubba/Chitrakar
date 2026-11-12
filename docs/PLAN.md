@@ -97,7 +97,10 @@ without reading anything else.*
      document arriving under the Develop window, focus and phone
      fitting. The twenty-eighth: a draft overwritten by the next tab,
      a dropped file opening over new work, a frame's resize leaving
-     masks behind, focus landing on "As it began".
+     masks behind, focus landing on "As it began". The twenty-ninth:
+     two of the twenty-eighth's fixes going too far (a resize growing
+     blurs, a moved draft taken by a third tab), the page not starting
+     with storage blocked, stale panels after a document went mid-run.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -11971,6 +11974,53 @@ without reading anything else.*
   all eight draft slots in use, a tab offered a draft keeps none of its
   own work until it answers, and says nothing of it; a flyout stays
   open under Preferences opened by its chord.
+  Its broad passes. Interface (four half-hour monkeys, 7,212 steps, no
+  growth in nodes, listeners or memory): with site data blocked the
+  page never started (one stored width read unguarded); a cancelled
+  touch left the rail's grip, the panel's edge or a guide being dragged
+  by the next finger; chords typed in the canvas's text box or a
+  layer's name went to the browser (Ctrl+S its "save page", Ctrl+= its
+  zoom); the zoom keys on the number pad and on German and Swedish
+  keyboards zoomed the browser, or the page the wrong way (plus and
+  minus are read by what they print); in high contrast the colour
+  chips and the page lost their colours; Delete on a recent colour, or
+  on a palette's "+", deleted the picked layer; the phone's sheet grip
+  could not be pressed by keys or a screen reader; a damaged stored
+  rail position ran the rail off the window. Editing: a copy's own
+  layers, raised, duplicated or dragged out, stood in for the wrong
+  layers of the original (they keep their places now, and say why); a
+  live copy of a frame stretched with its holder grew twice; an
+  adjustment's mask in a frame stayed put on a resize; a resize with
+  masks was "Multiple edits"; a layer pasted from another document
+  kept following a style of the same name here, and was restyled the
+  next time it was kept. Files: a document opened during Place all or
+  a sync of develop settings left the panel showing the document that
+  had gone — and a row deleted there deleted another layer — and
+  Develop again could open on a layer the new document did not have
+  (each says so and stops); a ninth tab shared slot 0 with a live tab,
+  was offered its work and could discard it (it keeps no draft, and
+  says so); turning "Remember the open document" off left the bar
+  offering a draft it had cleared, and closed tabs' drafts behind; a
+  layered PSD of four 61-megapixel layers ran the engine out of memory
+  (refused in words past what was measured to fit). Limits written
+  down: a JPEG of what is picked carries the camera data of the
+  photograph at the bottom of the page; a CMYK TIFF is the page
+  separated through the press profile, not the inks as authored;
+  removing chromatic aberration on a Canon raw holds the page for
+  seconds; when storage is full the crash draft stops where it last
+  fitted, without saying; a Canon raw named .jpg is refused in its
+  reader's words; a mask made from a selection, or a shape, cannot be
+  brushed, and Reveal or Hide selection replaces a brushed mask
+  without saying; Find and replace gives the replacement the style of
+  the match's last letter; the delete warning says copies "show
+  nothing" where those with parts of their own keep a box; the canvas's
+  menu does not refit when the interface size changes; Preferences on
+  the smallest phones at 125% clips its drop-downs; an accent near the
+  background hides the focus ring; the Keys page does not warn when a
+  command takes Ctrl+C, A, V, X or Z; a file arriving mid-drag splits
+  the drag in two; Ctrl+0 is the page's fit, so the browser's own zoom
+  is not undone from the keyboard; a long press on a layer's row is
+  not known to open its menu on iOS.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

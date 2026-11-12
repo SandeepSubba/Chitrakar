@@ -141,7 +141,17 @@ export function chordFromEvent(e: KeyboardEvent): string {
     Minus: "-",
     Equal: "=",
   };
-  const key = printed[e.code] ?? (e.key.length === 1 ? e.key.toLowerCase() : "");
+  // Plus and minus are read by what they print: the zoom keys are where
+  // they are on no two layouts (a Swedish keyboard's plus sits where a
+  // US one has minus, and zoomed out), and the number pad has its own.
+  // Plus is the zoom-in key, which a US keyboard has unshifted as "=".
+  const sign =
+    e.code === "NumpadAdd" || e.key === "+"
+      ? "="
+      : e.code === "NumpadSubtract" || e.key === "-"
+        ? "-"
+        : null;
+  const key = sign ?? printed[e.code] ?? (e.key.length === 1 ? e.key.toLowerCase() : "");
   if (!key) return "";
   parts.push(key);
   return parts.join("+");
