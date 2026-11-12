@@ -493,6 +493,8 @@ export function ExportDialog({
   /** The picture beside the settings: a URL the browser can show, and
    * whether it is the file itself or the page standing in for one the
    * browser cannot decode. */
+  /** The preview's width over its height, once it has loaded. */
+  const [previewShape, setPreviewShape] = useState<number | null>(null);
   const [preview, setPreview] = useState<{ url: string; standIn: boolean } | null>(null);
   // A blob URL holds its bytes until it is let go of, so the last one is
   // revoked whenever a new one takes its place, and when the window goes.
@@ -636,10 +638,27 @@ export function ExportDialog({
         <div className="export-body">
         <figure className="export-preview" aria-label="Preview">
           {preview ? (
-            <img
-              src={preview.url}
-              alt={preview.standIn ? "The page as it draws" : "The file as it will be written"}
-            />
+            // The picture its own shape inside the square, so that its
+            // checkerboard ends where it does: drawn to fill the square,
+            // the bands either side of a wide picture read as more of
+            // it, transparent, and the page looked square.
+            <div className="export-preview-frame">
+              <img
+                src={preview.url}
+                alt={preview.standIn ? "The page as it draws" : "The file as it will be written"}
+                onLoad={(e) => {
+                  const { naturalWidth: w, naturalHeight: h } = e.currentTarget;
+                  setPreviewShape(w > 0 && h > 0 ? w / h : null);
+                }}
+                style={
+                  previewShape === null
+                    ? undefined
+                    : previewShape >= 1
+                      ? { width: "100%", height: "auto", aspectRatio: `${previewShape}` }
+                      : { height: "100%", width: "auto", aspectRatio: `${previewShape}` }
+                }
+              />
+            </div>
           ) : (
             <span className="hint">
               {refusal ? "" : size === -1 ? "Too big to show unasked" : "…"}

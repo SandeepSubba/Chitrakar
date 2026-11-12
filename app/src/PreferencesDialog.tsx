@@ -163,6 +163,16 @@ export function PreferencesDialog({
   onClose: () => void;
 }) {
   const [group, setGroup] = useState<Group>(initialGroup ?? "general");
+  // Each page opens at its top: the scroll of a long page was carried
+  // onto the next, and the Keys page opened with its search field
+  // above the fold.
+  const paneRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    for (let el: HTMLElement | null = paneRef.current; el; el = el.parentElement) {
+      if (el.scrollTop) el.scrollTop = 0;
+      if (el.getAttribute("role") === "dialog") break;
+    }
+  }, [group]);
   /** Whether the subject model is kept in this browser (null while it is
    * being looked for), and how much of it is fetched while it is. */
   const [subjectKept, setSubjectKept] = useState<boolean | null>(null);
@@ -456,7 +466,7 @@ export function PreferencesDialog({
             ))}
           </nav>
 
-          <div className="prefs-pane">
+          <div className="prefs-pane" ref={paneRef}>
             {group === "appearance" && (
               <>
                 <label className="row">

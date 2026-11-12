@@ -19051,7 +19051,7 @@ assert(
     (await page.locator('[aria-label="Brushes"] button[aria-label="Brush Soft"]').getAttribute("aria-pressed")) === "true",
     "and shows it is the brush in hand",
   );
-  await page.click('[aria-label="Brushes"] button[aria-label="Brush Brush 4"]');
+  await page.click('[aria-label="Brushes"] button[aria-label="Brush 4"]');
   await page.waitForTimeout(150);
   assert(
     (await page.locator('input[aria-label="Paint width"]').inputValue()) === "13",
@@ -19063,10 +19063,10 @@ assert(
   await page.waitForTimeout(600);
   await pickTool("Paint");
   assert(
-    (await page.locator('[aria-label="Brushes"] button[aria-label="Brush Brush 4"]').count()) === 1,
+    (await page.locator('[aria-label="Brushes"] button[aria-label="Brush 4"]').count()) === 1,
     "a kept brush survives a reload",
   );
-  await page.click('[aria-label="Brushes"] button[aria-label="Brush Brush 4"]', { modifiers: ["Alt"] });
+  await page.click('[aria-label="Brushes"] button[aria-label="Brush 4"]', { modifiers: ["Alt"] });
   await page.waitForTimeout(150);
   assert((await chips.count()) === 3, "alt-press forgets it");
   await pickTool("Move");
@@ -21655,6 +21655,92 @@ assert(
     (await page.locator(".panel ul li .layer-name").count()) === rowsBefore,
     `and the document it was opened over is still there (${await page.locator(".panel ul li .layer-name").count()} of ${rowsBefore} rows)`,
   );
+}
+
+// 9dk. The thirty-second audit's interface pass. Ctrl+Z typed in the
+// layer search undid the document; the Export window's preview showed a
+// wide picture as a square; Preferences opened a page at the last one's
+// scroll; and a phone turned on its side left the page below the edge.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  for (const [x, y, k] of [[40, 40, "r"], [200, 120, "e"]]) {
+    await p.locator("#engine-canvas").hover();
+    await p.keyboard.press(k);
+    await p.mouse.move(r.x + x, r.y + y);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x + 60, r.y + y + 50, { steps: 4 });
+    await p.mouse.up();
+    await p.waitForTimeout(250);
+  }
+  const steps = () => p.locator(".history li:not(.history-start):not(.future)").count();
+  const before = await steps();
+  const search = p.locator('input[aria-label="Find layers"]');
+  if ((await search.count()) > 0) {
+    await search.click();
+    await p.keyboard.type("Rect");
+    await p.keyboard.press("Control+z");
+    await p.waitForTimeout(250);
+    assert((await steps()) === before, `Ctrl+Z in the layer search leaves the document alone (${before} → ${await steps()})`);
+    await search.fill("");
+  }
+  // The Export window's picture is the page's shape, not a square.
+  await p.keyboard.press("Escape");
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("Control+Shift+e");
+  await p.waitForSelector('.export-preview img', { timeout: 15000 });
+  await p.waitForTimeout(800);
+  const shape = await p.locator(".export-preview img").evaluate((img) => {
+    const b = img.getBoundingClientRect();
+    return [b.width, b.height, img.naturalWidth, img.naturalHeight];
+  });
+  assert(
+    Math.abs(shape[0] / shape[1] - shape[2] / shape[3]) < 0.03,
+    `the preview stands in the picture's shape (${shape})`,
+  );
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(200);
+  // Preferences: each page opens at its top.
+  await p.keyboard.press("Control+Comma");
+  await p.click('.prefs-rail button[aria-label="Tools"]');
+  await p.waitForTimeout(200);
+  await p.evaluate(() => {
+    for (const el of document.querySelectorAll(".prefs-pane, .prefs-body, [role=dialog]")) el.scrollTop = 100000;
+  });
+  await p.click('.prefs-rail button[aria-label="Keys"]');
+  await p.waitForTimeout(300);
+  const scrolled = await p.evaluate(() =>
+    [...document.querySelectorAll(".prefs-pane, .prefs-body, [role=dialog]")].map((el) => el.scrollTop),
+  );
+  assert(scrolled.every((v) => v === 0), `the Keys page opens at its top (${scrolled})`);
+  await p.keyboard.press("Escape");
+  await ctx.close();
+}
+{
+  // A phone turned on its side keeps the page in sight.
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+  const p = await ctx.newPage();
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1500);
+  await p.setViewportSize({ width: 844, height: 390 });
+  await p.waitForTimeout(800);
+  const seen = await p.evaluate(() => {
+    const page = document.getElementById("engine-page").getBoundingClientRect();
+    const host = document.getElementById("engine-canvas").parentElement.getBoundingClientRect();
+    const w = Math.max(0, Math.min(page.right, host.right) - Math.max(page.left, host.left));
+    const h = Math.max(0, Math.min(page.bottom, host.bottom) - Math.max(page.top, host.top));
+    const cx = (page.left + page.right) / 2;
+    const cy = (page.top + page.bottom) / 2;
+    return { share: (w * h) / (page.width * page.height), mid: cx > host.left && cx < host.right && cy > host.top && cy < host.bottom };
+  });
+  assert(seen.mid, `the page's middle stays in the window when a phone is turned (${JSON.stringify(seen)})`);
+  await ctx.close();
 }
 
 // 9dj. The thirty-first audit's editing pass. The Pen's press on the

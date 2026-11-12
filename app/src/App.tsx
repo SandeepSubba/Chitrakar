@@ -10,7 +10,7 @@ import {
   type MenuSpec,
 } from "./nativeMenu";
 import { byteAt, editOf, rangePieces, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
-import { accentAsText, onColour, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
+import { accentAsText, onColour, readPrefs, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
 import {
   DOCUMENTS,
   baseName,
@@ -1967,11 +1967,11 @@ export function App() {
    * picked. Typing a colour, or lifting one off the page, lets go of it:
    * what came out of the palette is what follows it. */
   const [inkFrom, setInkFrom] = useState<string | null>(null);
-  const [brushSize, setBrushSize] = useState(8);
+  const [brushSize, setBrushSize] = useState(() => readPrefs().brushWidth);
   /** The paint brush: how wide it is in document pixels, how much of that
    * width its edge fades over, and whether it is rubbing paint out
    * instead of laying it down. */
-  const [paintSize, setPaintSize] = useState(24);
+  const [paintSize, setPaintSize] = useState(() => readPrefs().paintWidth);
   /** How many sides a polygon has, or points a star. One number for the
    * two, since a five-sided thing and a five-pointed one are the same
    * ask made twice. */
@@ -2325,7 +2325,7 @@ export function App() {
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);
   };
-  const [paintSoftness, setPaintSoftness] = useState(0.5);
+  const [paintSoftness, setPaintSoftness] = useState(() => readPrefs().paintSoftness);
   /** Rubbing out is the eraser tool rather than a switch on the paint
    * tool, and healing the heal tool rather than a switch on the clone:
    * a person looks for the eraser on the rail, as in every editor, and
@@ -2457,6 +2457,22 @@ export function App() {
    * The names below are bound so the call sites that used to hold their
    * own state read exactly as they did. */
   const { prefs, set: setPrefs, reset: resetPrefs } = usePrefs();
+  // The brushes in hand are kept a breath after they last change, not on
+  // every step of a slider's drag.
+  useEffect(() => {
+    if (
+      prefs.brushWidth === brushSize &&
+      prefs.paintWidth === paintSize &&
+      prefs.paintSoftness === paintSoftness
+    )
+      return;
+    const t = setTimeout(
+      () => setPrefs({ brushWidth: brushSize, paintWidth: paintSize, paintSoftness }),
+      400,
+    );
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brushSize, paintSize, paintSoftness]);
   /** The tool keys as they stand, the person's rebindings over the
    * defaults: what the keyboard handler, the rail's tooltips and the
    * keys sheet all read. */
@@ -4035,7 +4051,7 @@ export function App() {
    * handles pointing the wrong way. Or on the page. Which frame is asked
    * of `begun`, where the drawing started. */
   const placeAt = (x: number, y: number, begun: [number, number] = [x, y]) => {
-    const onPage = { parent: session?.root_id ?? 0, index: topLevelCount(layers), at: identity(x, y) };
+    const onPage = { parent: session?.root_id ?? 0, index: session ? session.child_count(session.root_id) : topLevelCount(layers), at: identity(x, y) };
     if (!session) return onPage;
     // The frame it was begun in, which is where the person was drawing:
     // the corner of its box can be in another frame, or off a turned one.
@@ -4420,12 +4436,22 @@ export function App() {
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const measure = () =>
-      setViewport(([w, h]) =>
-        w === host.clientWidth && h === host.clientHeight
-          ? [w, h]
-          : [host.clientWidth, host.clientHeight],
-      );
+    let was: [number, number] | null = null;
+    const measure = () => {
+      const now: [number, number] = [host.clientWidth, host.clientHeight];
+      // A phone or a tablet turned on its side: what was in the middle
+      // of the window stays in the middle. Kept where it was from the
+      // window's corner, most of an upright page was left below the
+      // edge of a window turned wide. Only for a turn — the window's
+      // long side changing over — so a panel opened beside the canvas
+      // does not slide the page.
+      if (was && was[0] > 0 && was[1] > 0 && now[0] > 0 && now[1] > 0 && was[0] > was[1] !== now[0] > now[1]) {
+        const [dx, dy] = [(now[0] - was[0]) / 2, (now[1] - was[1]) / 2];
+        setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+      }
+      was = now;
+      setViewport(([w, h]) => (w === now[0] && h === now[1] ? [w, h] : now));
+    };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(host);
@@ -4685,6 +4711,28 @@ export function App() {
   /** The lines a drag can catch on: the page's own edges and middle, and
    * the same three from every layer that is not travelling with the drag
    * (its ancestors and descendants move too, so they are no use). */
+  /** Whether a layer is seen: shown itself, and every group it is in
+   * shown too. A hidden layer is not there to be caught on, as a hidden
+   * guide is not — a drag snapped to the edge of a rectangle nobody
+   * could see. */
+  const seenLayers = (): Set<number> => {
+    const byId = new Map(layers.map((l) => [l.id, l]));
+    const seen = new Set<number>();
+    for (const l of layers) {
+      let at: LayerInfo | undefined = l;
+      let shown = true;
+      for (let depth = 0; at && depth < 256; depth++) {
+        if (!at.visible) {
+          shown = false;
+          break;
+        }
+        at = byId.get(at.parent);
+      }
+      if (shown) seen.add(l.id);
+    }
+    return seen;
+  };
+
   const snapTargets = (moving: NodeId[]): [number[], number[]] => {
     const xs = snapLines(0, docSize[0]);
     const ys = snapLines(0, docSize[1]);
@@ -4702,8 +4750,10 @@ export function App() {
       for (let y = 0; y <= docSize[1]; y += grid) ys.push(y);
     }
     if (!session) return [xs, ys];
+    const seen = seenLayers();
     for (const layer of layers) {
       const id = layer.id as NodeId;
+      if (!seen.has(layer.id)) continue;
       if (moving.some((m) => relatedTo(id, m))) continue;
       const b = session.bounds_of(id);
       if (b.length !== 4) continue;
@@ -4718,8 +4768,10 @@ export function App() {
   const spacerBoxes = (moving: NodeId[]): Box[] => {
     if (!session) return [];
     const out: Box[] = [];
+    const seen = seenLayers();
     for (const layer of layers) {
       const id = layer.id as NodeId;
+      if (!seen.has(layer.id)) continue;
       if (moving.some((m) => relatedTo(id, m))) continue;
       const b = session.bounds_of(id);
       if (b.length === 4) out.push([b[0], b[1], b[0] + b[2], b[1] + b[3]]);
@@ -7855,7 +7907,7 @@ export function App() {
     if (key === "dodge" || key === "burn") {
       if (!session) return;
       try {
-        const id = session.add_dodge_burn(session.root_id, topLevelCount(layers), key === "dodge") as NodeId;
+        const id = session.add_dodge_burn(session.root_id, session.child_count(session.root_id), key === "dodge") as NodeId;
         setSelected(id);
         setMultiSel([]);
         setTool("Paint");
@@ -7921,7 +7973,10 @@ export function App() {
     try {
       const id = session.add_over_selection(
         session.root_id,
-        topLevelCount(layers),
+        // The page's own count, not the rows at the top of the panel: a
+        // live copy's own layers are listed there too, and an adjustment
+        // asked for with one picked was put past the page's end.
+        session.child_count(session.root_id),
         JSON.stringify(nodePayload(preset.name, preset.kind)),
       ) as number;
       setSelected(id as NodeId);
@@ -10393,6 +10448,19 @@ export function App() {
       : field === "w"
         ? [ratio, 1]
         : [1, ratio];
+    // Turned or leaning on the page, the box the fields show is the
+    // page's, not the layer's own: the stretch is made along the page's
+    // sides, about the box's corner, so the box comes out the size typed
+    // and stays where it was. Made along the layer's own sides, a layer
+    // turned a quarter typed 40 wide grew 40 tall instead.
+    const parent = toTransform(session.parent_space_of(selected));
+    const placed = composeT(parent, t0);
+    const back = invertT(parent);
+    if ((Math.abs(placed.b) > 1e-9 || Math.abs(placed.c) > 1e-9) && back) {
+      const stretch: Transform = { a: sx, b: 0, c: 0, d: sy, e: (1 - sx) * x, f: (1 - sy) * y };
+      run({ SetTransform: { id: selected, transform: composeT(back, composeT(stretch, placed)) } });
+      return;
+    }
     const [fx, fy] = [selLocal[0], selLocal[1]];
     const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
     run({
@@ -14474,6 +14542,8 @@ export function App() {
                       onValue={setPaintSize}
                       title="Brush width"
                       aria-label="Paint width"
+                      // What is typed here is not a step: its own undo takes it back.
+                      data-own-undo=""
                       className="brush-size"
                     />
                     px
@@ -14510,7 +14580,7 @@ export function App() {
                       key={br.name}
                       className={inHand ? "swatch brush-chip active" : "swatch brush-chip"}
                       title={`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click (or Delete) to forget it`}
-                      aria-label={`Brush ${br.name}`}
+                      aria-label={/^brush\b/i.test(br.name) ? br.name : `Brush ${br.name}`}
                       aria-pressed={inHand}
                       onKeyDown={chipKeys(() =>
                         setPrefs({ brushes: prefs.brushes.filter((o) => o.name !== br.name) }),
@@ -14566,6 +14636,8 @@ export function App() {
                     onValue={setBrushSize}
                     title="Brush width"
                     aria-label="Brush width"
+                    // What is typed here is not a step: its own undo takes it back.
+                    data-own-undo=""
                     className="brush-size"
                   />
                   px
@@ -15013,14 +15085,12 @@ export function App() {
               );
               const path = selectedKind.Vector.shape.Path;
               const handles = withHandles(path);
-              // With a tool that draws in hand, a press on the picked
-              // path's dots is the tool's: the Pen's click there was
-              // swallowed (three clicks made two points) and its drag
+              // The dots are the Move and Node tools' to drag. With any
+              // other tool in hand a press on them is that tool's: the
+              // Pen's click there was swallowed (three clicks made two
+              // points), and a marquee, a fill or a crop begun on one
               // moved the old path's anchor.
-              const drawing =
-                tool === "Pen" ||
-                (SHAPE_TOOLS as readonly string[]).includes(tool) ||
-                ["Frame", "Brush", "Paint", "Eraser", "Clone", "Heal", "Text", "Knife", "Gradient"].includes(tool);
+              const drawing = tool !== "Move" && tool !== "Node";
               const screen = (x: number, y: number) => ({
                 left: view.x + (t.a * x + t.c * y + t.e) * view.zoom,
                 top: view.y + (t.b * x + t.d * y + t.f) * view.zoom,
@@ -15125,6 +15195,11 @@ export function App() {
                             ? "justify"
                             : "left",
                     whiteSpace: spec.width > 0 ? "pre-wrap" : "pre",
+                    // Each paragraph reads the way its first strong
+                    // letter does, as the page lays it out: a line
+                    // starting in Hebrew was set left to right here, and
+                    // the caret and a selection stood over other letters.
+                    unicodeBidi: "plaintext",
                     fontStyle: spec.italic ? "italic" : "normal",
                     fontWeight: spec.bold ? "bold" : "normal",
                     caretColor: caret,
@@ -15885,6 +15960,8 @@ export function App() {
                 }
               }}
               aria-label="Find layers"
+              // What is typed here is not a step: its own undo takes it back.
+              data-own-undo=""
             />
             <select
               value={layerKind}

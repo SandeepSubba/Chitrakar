@@ -8840,8 +8840,20 @@ fn fill_rect_band_scanlines(
     let outer_across: Vec<f32> = (0..n)
         .map(|i| span(t.e - hi * t.a, t.e + (width + hi) * t.a, bbox.x0 + i as u32))
         .collect();
+    // The inner edge's box, which a border wider than half the shape
+    // turns inside out: there is no inside left, and the border is the
+    // whole of it. Read as a box with its ends sorted, the inside-out one
+    // was a box again, and a block of fill showed in the middle.
+    let inner_wide = width + 2.0 * lo > 0.0;
+    let inner_tall = height + 2.0 * lo > 0.0;
     let inner_across: Vec<f32> = (0..n)
-        .map(|i| span(t.e - lo * t.a, t.e + (width + lo) * t.a, bbox.x0 + i as u32))
+        .map(|i| {
+            if inner_wide {
+                span(t.e - lo * t.a, t.e + (width + lo) * t.a, bbox.x0 + i as u32)
+            } else {
+                0.0
+            }
+        })
         .collect();
     let between: Vec<bool> = (0..n)
         .map(|i| {
@@ -8871,7 +8883,11 @@ fn fill_rect_band_scanlines(
         let (_, yb) = inv.at(0.0, py as f32 + 1.0);
         let (ly0, ly1) = (ya.min(yb), ya.max(yb));
         let outer_down = span(t.f - hi * t.d, t.f + (height + hi) * t.d, py);
-        let inner_down = span(t.f - lo * t.d, t.f + (height + lo) * t.d, py);
+        let inner_down = if inner_tall {
+            span(t.f - lo * t.d, t.f + (height + lo) * t.d, py)
+        } else {
+            0.0
+        };
         if ly0 >= reach && ly1 <= height - reach {
             if outer_down <= 0.0 {
                 continue;
@@ -26532,6 +26548,64 @@ mod tests {
             Bounds::Rect(20.0, 20.0, 40.0, 40.0),
             "the layer itself is not one pixel wider for having a shadow"
         );
+    }
+
+    /// A border laid inside a rectangle wider than half its short side
+    /// leaves no inside: the whole of it is border. It left a block of
+    /// fill in the middle — the inside's box, turned inside out, read as
+    /// a box again.
+    #[test]
+    fn a_border_wider_than_half_a_rect_leaves_no_fill_inside() {
+        for width in [16.0f32, 20.0, 28.0] {
+            let mut doc = Document::new(100, 60, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector(
+                "Bar",
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 30.0,
+                    radius: 0.0,
+                },
+            );
+            node.transform = Transform::translation(10.0, 10.0);
+            if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+                *fill = Some(chitrakar_color::AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 1.0,
+                    b: 0.0,
+                    a: 1.0,
+                });
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    cap: Default::default(),
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: Default::default(),
+                    align: Some(StrokeAlign::Inside),
+                });
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let s = render(&doc).unwrap();
+            for (x, y) in [(40, 25), (25, 25), (55, 25), (40, 20)] {
+                let p = s.get(x, y);
+                let inside = width < 15.0 && (x, y) == (40, 25);
+                if !inside {
+                    assert!(
+                        p.r > 0.95 && p.g < 0.05,
+                        "width {width} at ({x}, {y}): {p:?}"
+                    );
+                }
+            }
+        }
     }
 
     /// A turned ellipse's box is round the oval it draws, not round its

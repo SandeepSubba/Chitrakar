@@ -3631,7 +3631,7 @@ button.fold:hover {
   display: block;
   width: 13rem;
   height: 13rem;
-  object-fit: contain;
+  object-fit: fill;
   border: 1px solid var(--border);
   border-radius: 8px;
   background-color: var(--check-a);
@@ -3640,6 +3640,19 @@ button.fold:hover {
     linear-gradient(45deg, var(--check-b) 25%, transparent 25%, transparent 75%, var(--check-b) 75%);
   background-size: 12px 12px;
   background-position: 0 0, 6px 6px;
+}
+
+.export-preview-frame {
+  width: 13rem;
+  height: 13rem;
+  display: grid;
+  place-items: center;
+}
+
+.export-preview-frame img {
+  max-width: 100%;
+  max-height: 100%;
+  box-sizing: border-box;
 }
 
 .export-preview > span {

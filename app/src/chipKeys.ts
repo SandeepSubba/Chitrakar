@@ -23,6 +23,16 @@ export function chipKeys(forget: () => void, rename?: () => void) {
       setTimeout(() => {
         if (chip.isConnected) return;
         const left = row?.isConnected ? row.querySelectorAll("button:not(:disabled)").length : 0;
+        if (row?.isConnected && left === 0) {
+          // Still there with nothing left to press (kept regions with no
+          // "+" while nothing is picked out): the row itself holds the
+          // focus, where Delete is the row's and forgets nothing. Handed
+          // to the bar's button beside it, the next Delete took the
+          // picked layer.
+          if (row.tabIndex < 0 && !row.hasAttribute("tabindex")) row.tabIndex = -1;
+          row.focus();
+          return;
+        }
         if (!row?.isConnected || left === 0) {
           // Gone, or left with nothing to press (kept regions with no
           // "+" while nothing is picked out).

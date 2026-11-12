@@ -4076,7 +4076,7 @@ impl Session {
         if let Some(mask) = &node.mask {
             cmds.push(Command::SetMask {
                 id,
-                mask: Some(Box::new(mask.carried_through(carry))),
+                mask: Some(Box::new(mask.carried_between(carry, was, now))),
             });
         }
         if !node.effects.is_empty() {
@@ -4085,7 +4085,7 @@ impl Session {
                 effects: node
                     .effects
                     .iter()
-                    .map(|e| e.carried_through(carry))
+                    .map(|e| e.carried_between(carry, was, now))
                     .collect(),
             });
         }
@@ -6025,7 +6025,7 @@ impl Session {
                 if let Some(Command::AddNode { node, .. }) = cmds.get_mut(at) {
                     node.transform = moved.compose(node.transform);
                     if let Some(mask) = &mut node.mask {
-                        *mask = mask.carried_through(moved);
+                        *mask = mask.carried_between(moved, space, space);
                     }
                 }
                 made.push(copy);
@@ -6312,12 +6312,12 @@ impl Session {
                 let node = &mut moved.node;
                 node.transform = carry.compose(node.transform);
                 if let Some(mask) = node.mask.take() {
-                    node.mask = Some(mask.carried_through(carry));
+                    node.mask = Some(mask.carried_between(carry, root.space, now));
                 }
                 node.effects = node
                     .effects
                     .iter()
-                    .map(|e| e.carried_through(carry))
+                    .map(|e| e.carried_between(carry, root.space, now))
                     .collect();
                 moved
             })
@@ -8268,7 +8268,7 @@ impl Session {
         // stroke was confined to went through untouched, so a rubbed-out
         // piece of a layer inside a group scaled by two came back out as
         // a region with the brush still the size it was inside.
-        Some(mask.carried_through(Self::seen_from(space)?))
+        Some(mask.carried_between(Self::seen_from(space)?, Transform::default(), space))
     }
 
     /// What is picked out of the page, carried into `space`, ready to
@@ -9667,6 +9667,10 @@ impl Session {
         // it; once they leave, each has to carry that part itself or the
         // whole group would jump back to where it was before it was moved.
         let group_t = self.doc.node(id)?.transform;
+        // The space the children were placed in, and the one they come
+        // out into, for carrying their softness as long on the page.
+        let outside = chitrakar_render::ancestor_space(&self.doc, id);
+        let inside = outside.compose(group_t);
         // Hidden and locked, on the other hand, mean exactly the same
         // thing said of every child, so they come out with them: a
         // hidden group whose layers reappear on being dissolved is the
@@ -9693,7 +9697,7 @@ impl Session {
                 if let Some(mask) = &kid.mask {
                     cmds.push(Command::SetMask {
                         id: *child,
-                        mask: Some(Box::new(mask.carried_through(group_t))),
+                        mask: Some(Box::new(mask.carried_between(group_t, inside, outside))),
                     });
                 }
                 if !kid.effects.is_empty() {
@@ -9702,7 +9706,7 @@ impl Session {
                         effects: kid
                             .effects
                             .iter()
-                            .map(|e| e.carried_through(group_t))
+                            .map(|e| e.carried_between(group_t, inside, outside))
                             .collect(),
                     });
                 }
@@ -12384,11 +12388,19 @@ impl Session {
             if !faces.iter().any(|(name, bytes)| differs(name, bytes)) {
                 continue;
             }
+            // A name of its own: not one a face here holds with other
+            // bytes, and not one the file itself uses for something else
+            // — a file carrying "Brand" and its own "Brand 2" had both
+            // put under "Brand 2", and lost one of them.
+            let taken_by_file = |name: &str| {
+                opened.fonts.iter().any(|(n, _)| n == name) || families.iter().any(|f| f == name)
+            };
             let Some(to) = (2..1000).map(|n| format!("{family} {n}")).find(|to| {
                 faces.iter().all(|(name, bytes)| {
                     let name = format!("{to}{}", &name[family.len()..]);
-                    !differs(&name, bytes)
-                })
+                    !differs(&name, bytes) && !taken_by_file(&name)
+                }) && !taken_by_file(to)
+                    && !renamed.iter().any(|(_, t)| t == to)
             }) else {
                 continue;
             };
@@ -14034,6 +14046,82 @@ mod tests {
                 .is_err(),
             "a step has to be numbers"
         );
+    }
+
+    /// A layer moved into a group stretched three by a half keeps its
+    /// mask's feather and its shadow's blur as long on the page: they
+    /// were carried by the longer of the undoing's stretches, and the
+    /// renderer reads them by the longer of the group's, so they came out
+    /// six times softer.
+    #[test]
+    fn softness_moved_into_a_stretched_group_is_as_soft_on_the_page() {
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let a = add_rect(&mut s, "A", 40.0, 40.0);
+        let holder = add_rect(&mut s, "Holder", 10.0, 10.0);
+        let group = s.group_nodes(&[holder], "G").unwrap();
+        s.apply(Command::SetTransform {
+            id: group,
+            transform: Transform {
+                a: 3.0,
+                b: 0.0,
+                c: 0.0,
+                d: 0.5,
+                e: 0.0,
+                f: 0.0,
+            },
+        })
+        .unwrap();
+        s.apply(Command::SetMask {
+            id: a,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Gradient {
+                    radial: false,
+                    from: [0.0, 0.0],
+                    to: [40.0, 0.0],
+                },
+                invert: false,
+                feather: 10.0,
+            })),
+        })
+        .unwrap();
+        s.apply(Command::SetEffects {
+            id: a,
+            effects: vec![chitrakar_doc::Effect::DropShadow {
+                dx: 4.0,
+                dy: 4.0,
+                blur: 6.0,
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                opacity: 0.5,
+                spread: 0.0,
+            }],
+        })
+        .unwrap();
+        s.reparent(a, group, 0).unwrap();
+        let node = s.document().node(a).unwrap();
+        let space = chitrakar_render::ancestor_space(s.document(), a);
+        let feather = node.mask.as_ref().unwrap().feather * space.max_scale();
+        assert!(
+            (feather - 10.0).abs() < 0.01,
+            "the feather on the page is {feather}"
+        );
+        let chitrakar_doc::Effect::DropShadow { blur, .. } = node.effects[0] else {
+            panic!("a shadow")
+        };
+        assert!(
+            (blur * space.max_scale() - 6.0).abs() < 0.01,
+            "the blur on the page is {}",
+            blur * space.max_scale()
+        );
+        // And back out again, as it was.
+        let root = s.document().root();
+        s.reparent(a, root, 0).unwrap();
+        let node = s.document().node(a).unwrap();
+        assert!((node.mask.as_ref().unwrap().feather - 10.0).abs() < 0.01);
     }
 
     /// Repeat steps on the page whatever the group's own placing: inside
@@ -31277,6 +31365,51 @@ mod tests {
             bytes.len(),
             without.len()
         );
+    }
+
+    /// A file carrying "Brand" and a "Brand 2" of its own, opened where
+    /// another "Brand" is loaded: its Brand is kept under a name neither
+    /// face uses, and its own Brand 2 stays its own.
+    #[test]
+    fn a_files_renamed_font_does_not_take_another_of_its_own_names() {
+        const SERIF: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSerif.ttf");
+        const MONO: &[u8] = include_bytes!("../../../app/public/fonts/DejaVuSansMono.ttf");
+        const OBLIQUE: &[u8] =
+            include_bytes!("../../../app/public/fonts/DejaVuSansMono-Oblique.ttf");
+        Session::register_font("Twin Brand", MONO.to_vec()).unwrap();
+        let mut doc = chitrakar_doc::Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        for (i, face) in ["Twin Brand", "Twin Brand 2"].iter().enumerate() {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: i,
+                node: Box::new(text_in(face)),
+            })
+            .unwrap();
+        }
+        let bytes = chitrakar_codecs::save_chitra_with_fonts(
+            &doc,
+            &[("Twin Brand", SERIF), ("Twin Brand 2", OBLIQUE)],
+        )
+        .unwrap();
+        let session = Session::load(&bytes).unwrap();
+        let used = session.fonts_used();
+        assert_eq!(
+            used,
+            ["Twin Brand 2", "Twin Brand 3"],
+            "{:?}",
+            session.import_notes()
+        );
+        assert_eq!(
+            chitrakar_render::text::font_bytes("Twin Brand 2"),
+            Some(OBLIQUE)
+        );
+        assert_eq!(
+            chitrakar_render::text::font_bytes("Twin Brand 3"),
+            Some(SERIF)
+        );
+        let again = chitrakar_codecs::load_chitra_with_fonts(&session.save().unwrap()).unwrap();
+        assert_eq!(again.fonts.len(), 2, "both faces go back into the file");
     }
 
     /// A file whose shadow asks for a blur of ten thousand, a border a

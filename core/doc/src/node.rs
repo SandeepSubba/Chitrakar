@@ -114,6 +114,48 @@ impl Transform {
     pub fn max_scale(self) -> f32 {
         self.a.hypot(self.b).max(self.c.hypot(self.d))
     }
+
+    /// The transform that undoes this one, or `None` for one that
+    /// collapses the plane.
+    pub fn inverted(self) -> Option<Transform> {
+        let det = self.a * self.d - self.b * self.c;
+        if !det.is_finite() || det.abs() < 1e-12 {
+            return None;
+        }
+        let (a, b, c, d) = (self.d / det, -self.b / det, -self.c / det, self.a / det);
+        Some(Transform {
+            a,
+            b,
+            c,
+            d,
+            e: -(a * self.e + c * self.f),
+            f: -(b * self.e + d * self.f),
+        })
+    }
+
+    /// What a length carried by `carry` from the space `from` places on
+    /// the page into the space `to` does has to be multiplied by, past
+    /// what `carry` itself does to it, to come out as long on the page as
+    /// the page's own map says it should be. One length stands for a
+    /// stretch that differs along the two axes by the longer of them
+    /// (`max_scale`), and the longer of a stretched space's undoing is
+    /// not one over the longer of the stretch: carried into a group
+    /// stretched three by a half, a feather of ten drew six times softer.
+    /// One for any carry between spaces that are only turned, flipped
+    /// and scaled alike.
+    pub fn length_correction(carry: Transform, from: Transform, to: Transform) -> f32 {
+        let (Some(back), true) = (from.inverted(), carry.max_scale() > 0.0) else {
+            return 1.0;
+        };
+        let on_page = to.compose(carry).compose(back);
+        let want = from.max_scale() * on_page.max_scale() / to.max_scale().max(1e-12);
+        let k = want / carry.max_scale();
+        if k.is_finite() && k > 0.0 {
+            k
+        } else {
+            1.0
+        }
+    }
 }
 
 /// One stop on a colour ramp: where it sits along the gradient (0..=1) and
@@ -2271,6 +2313,15 @@ impl Mask {
         out
     }
 
+    /// [`carried_through`](Self::carried_through) from the space `from`
+    /// places on the page into the space `to`, its feather as soft on
+    /// the page as the page's own map says (`Transform::length_correction`).
+    pub fn carried_between(&self, m: Transform, from: Transform, to: Transform) -> Mask {
+        let mut out = self.carried_through(m);
+        out.feather *= Transform::length_correction(m, from, to);
+        out
+    }
+
     pub fn carried_through(&self, m: Transform) -> Mask {
         let mut out = self.clone();
         // How far the edge is softened over is a length in that space
@@ -2548,9 +2599,10 @@ pub enum Effect {
 
 impl Effect {
     /// The longest blur, border, bevel or softening an effect is drawn
-    /// with: six times what the panel offers, and what Photoshop's own
-    /// effects reach.
-    pub const LONGEST: f32 = 250.0;
+    /// with on the way in from a file: two and a half times what the
+    /// panel offers. At 250 a damaged file's shadow still held a small
+    /// page for ten seconds; at 100 it is a second or two.
+    pub const LONGEST: f32 = 100.0;
     /// The farthest a shadow is set off its layer, either way.
     pub const FARTHEST: f32 = 2000.0;
 
@@ -2793,6 +2845,24 @@ impl Effect {
             (Effect::Bevel { size, .. }, Effect::Bevel { size: was, .. }) => *size = *was,
             (Effect::Blur { sigma }, Effect::Blur { sigma: was }) => *sigma = *was,
             _ => {}
+        }
+        out
+    }
+
+    /// [`carried_through`](Self::carried_through) from the space `from`
+    /// places on the page into the space `to`, its lengths as long on
+    /// the page as the page's own map says (`Transform::length_correction`).
+    pub fn carried_between(&self, m: Transform, from: Transform, to: Transform) -> Effect {
+        let mut out = self.carried_through(m);
+        let k = Transform::length_correction(m, from, to);
+        if k != 1.0 {
+            match &mut out {
+                Effect::DropShadow { blur, .. } | Effect::InnerShadow { blur, .. } => *blur *= k,
+                Effect::Outline { width, .. } => *width *= k,
+                Effect::Bevel { size, .. } => *size *= k,
+                Effect::ColorOverlay { .. } => {}
+                Effect::Blur { sigma } => *sigma *= k,
+            }
         }
         out
     }

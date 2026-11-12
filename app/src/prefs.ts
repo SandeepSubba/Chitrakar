@@ -105,6 +105,12 @@ export type Prefs = {
   showGuides: boolean;
   /** How near a thing has to come before it catches, in screen pixels. */
   snap: number;
+  /** The brushes in hand: the vector brush's width, the paint brush's
+   * width and how much of it its edge fades over — kept, as every other
+   * tool's settings are, so a reload does not hand back the defaults. */
+  brushWidth: number;
+  paintWidth: number;
+  paintSoftness: number;
   /** How far an arrow key moves a layer, and how far with shift held. */
   nudge: number;
   nudgeBig: number;
@@ -214,6 +220,9 @@ export const DEFAULTS: Prefs = {
   grid: 0,
   showGuides: true,
   snap: 6,
+  brushWidth: 8,
+  paintWidth: 24,
+  paintSoftness: 0.5,
   nudge: 1,
   nudgeBig: 10,
   keepDraft: true,
@@ -366,6 +375,9 @@ export function clamp(p: Prefs): Prefs {
     alignTo: p.alignTo === "page" || p.alignTo === "key" ? p.alignTo : "selection",
     grid: n(Math.round(p.grid), 0, 512, 0),
     snap: n(Math.round(p.snap), 0, 64, 6),
+    brushWidth: n(p.brushWidth, 1, 64, 8),
+    paintWidth: n(p.paintWidth, 1, 200, 24),
+    paintSoftness: n(p.paintSoftness, 0, 1, 0.5),
     nudge: n(p.nudge, 0.1, 100, 1),
     nudgeBig: n(p.nudgeBig, 0.1, 1000, 10),
     newWidth: n(Math.round(p.newWidth), 1, 8192, 1024),

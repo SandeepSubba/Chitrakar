@@ -105,7 +105,9 @@ without reading anything else.*
      that did not say so, text typed with an input method thrown away,
      mixed right-to-left lines drawn backwards, a document's font lost
      to one of the same name, ramps slanted off their drag, Repeat in
-     the wrong space.
+     the wrong space. The thirty-second: softness carried into a
+     stretched group, a file's renamed font taking another of its
+     names, right-to-left text in SVG and justified.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12106,9 +12108,10 @@ without reading anything else.*
   both, where the page fades each (such a layer goes faded in its
   pixels); a damaged or hand-written file's shadow with a blur of ten
   thousand froze the page for minutes (effects are held on the way in
-  to what can be drawn — lengths to 250, offsets to 2000 — and the open
+  to what can be drawn — lengths to 100, offsets to 2000 — and the open
   says how many). Limits written down: a layer wearing a hundred and
-  fifty effects at those limits still takes twenty seconds to draw; a
+  fifty effects, each within those limits, still holds the page for
+  minutes — the count is not held, since a file's effects are its own; a
   text box's own undo stays on Ctrl+Z when Undo is bound elsewhere; the
   Delete key on one of the panel's controls for the picked layer still
   deletes the layer, as it does anywhere outside a field.
@@ -12130,13 +12133,61 @@ without reading anything else.*
   in thirty (a shape and its copy need no arithmetic). Limits written
   down: a shape stretched by a side handle is stretched as a picture is —
   its border is thicker on the stretched sides, its corners oval, and
-  Offset path measures by the stretch's average; a heal stroke over text
-  set along a path with runs of its own, in a group scaled to three
-  quarters, can draw differently on the canvas at some zooms (4.16,
-  3.3) from its export at the same scale, which matches the file
-  reopened (the cut-down file is kept with the audit's scripts); a
+  Offset path measures by the stretch's average; where glyphs of
+  different colours overlap — text set along a path much tighter than
+  the letters, each run its own colour — which colour a pixel shows is
+  decided by which glyph covers it more, and that can turn on where
+  the page falls between pixels, so the canvas and an export can
+  disagree there (first seen under a heal stroke, which only made the
+  canvas draw with a margin); a
   conic ramp carried into a box of another shape still turns a little
   between its start and its end.
+  **A thirty-second audit (November 2026).** Its check of round 31:
+  a file carrying "Brand" and a "Brand 2" of its own, opened where
+  another Brand was loaded, put both under "Brand 2" and lost one (the
+  name the file's family is kept under is one the file does not use
+  itself); a right-to-left line in an SVG was laid out left to right by
+  every reader (the line is wrapped in an embedding, U+202B … U+202C,
+  and placed by its middle, since a browser and resvg disagree about
+  which end such a line starts from); the box the canvas's text is typed
+  into set a Hebrew line left to right, so the caret and a selection
+  stood over other letters (each paragraph reads by its first strong
+  letter); a damaged file's effects were held to 250, which still held a
+  small page for ten seconds (100 now); a marquee, a fill, a crop begun
+  on the picked path's dots moved its anchor (only Move and Node take
+  them); forgetting the last kept region handed the focus to the bar's
+  next button, where Delete took the picked layer (the row holds it);
+  an adjustment asked for with a live copy's own layer picked was put
+  past the page's end (the page's own count of its layers is used).
+  Its editing pass (six fuzz runs, no undo, redo or reopen mismatch):
+  justified right-to-left text ran its words into one another (each
+  glyph moves by the spaces to its left on the page); a feather or a
+  shadow's blur carried into a group stretched unevenly — moved in,
+  revealed from a selection, repeated, ungrouped, pasted — came out up
+  to six times softer (`Transform::length_correction`: a length is as
+  long on the page after as before); a rectangle's inside border wider
+  than half its short side left a block of fill in the middle; W or H
+  typed for a turned or leaning layer did not come out the size typed
+  (the stretch is made along the page's sides, about the box's corner);
+  snapping caught the edges of hidden layers. Its interface pass:
+  Ctrl+Z in the layer search and the brushes' width fields undid the
+  document; the Export window's preview of a wide picture read as
+  square; Preferences opened a page at the last one's scroll; a phone
+  turned on its side left most of the page below the window's edge (the
+  middle stays in the middle); the Batch window let the focus fall to
+  the page while it ran; the brushes' widths and softness were not kept
+  over a reload. Limits written down: Blend shapes carries a turned
+  shape's ramp in box units, so between two turned bars the ramp runs
+  across; a wrapped text block pinned to stretch in a frame is stretched
+  as a picture rather than re-wrapped; taking an anchor off a curve does
+  not refit the curve; letter spacing breaks Arabic's joins; a list's
+  markers stand at the left of a right-to-left paragraph, and its last
+  justified line is set left; a layer held to the one below takes its
+  opacity and not its blend; Find and replace changes locked text; the
+  Angle and Skew fields read the layer's own turn, where X, Y, W and H
+  read the page's box; a wheel or a two-finger swipe zooms and never
+  pans; an SVG's right-to-left text along a path is ordered left to
+  right by a reader.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

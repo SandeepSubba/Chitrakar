@@ -1241,18 +1241,53 @@ fn write_node(
                         } else {
                             String::new()
                         };
+                        // A line whose paragraph reads right to left is
+                        // said to: a reader orders its mixed stretches
+                        // by the direction it is told, and left to read
+                        // it left to right put the Hebrew of "שלום abc"
+                        // on the left. Read that way, the line starts at
+                        // its right end, so that is where it is placed.
+                        // A line whose paragraph reads right to left is
+                        // said to, by an embedding round the whole line
+                        // (U+202B … U+202C): a reader orders the line's
+                        // mixed stretches by it, and told nothing, put the
+                        // Hebrew of "שלום abc" on its left. Marks in the
+                        // text rather than `direction`, which resvg reads
+                        // nothing from; and the line placed by its middle,
+                        // since readers disagree about which end a line
+                        // read right to left starts from, and the middle
+                        // is the same to all of them.
+                        if set.rtl {
+                            let spaces = set.text.bytes().filter(|b| *b == b' ').count() as f32;
+                            let middle = x + (set.width + set.gap * spaces) / 2.0;
+                            let _ = write!(
+                                out,
+                                r#"<tspan x="{middle:.2}" y="{y:.2}" text-anchor="middle">"#
+                            );
+                        }
+                        let last = cuts.len().saturating_sub(1);
                         for (n, (piece, run)) in cuts.iter().enumerate() {
-                            let at = if n == 0 {
+                            let at = if n == 0 && !set.rtl {
                                 format!(r#" x="{x:.2}" y="{y:.2}""#)
                             } else {
                                 String::new()
                             };
+                            let (open, close) = match (set.rtl, n == 0, n == last) {
+                                (true, a, b) => (
+                                    if a { "\u{202B}" } else { "" },
+                                    if b { "\u{202C}" } else { "" },
+                                ),
+                                _ => ("", ""),
+                            };
                             let _ = write!(
                                 out,
-                                "<tspan{at}{gap}{}>{}</tspan>",
+                                "<tspan{at}{gap}{}>{open}{}{close}</tspan>",
                                 run_attrs(doc, spec, *run),
                                 escape_xml(piece)
                             );
+                        }
+                        if set.rtl {
+                            let _ = write!(out, "</tspan>");
                         }
                     }
                     let _ = writeln!(out, "</text>");
@@ -5816,6 +5851,60 @@ mod tests {
             e.0.abs_diff(r.0) <= 1 && e.1.abs_diff(r.1) <= 1 && e.2.abs_diff(r.2) <= 1,
             "top, foot and right edge: the engine {e:?}, a reader {r:?}"
         );
+    }
+
+    /// A line whose paragraph starts in Hebrew is ordered right to left
+    /// by a reader of its SVG as on the page: told nothing, a reader laid
+    /// "שלום abc 2026" out left to right, the Hebrew on the left.
+    #[test]
+    fn a_right_to_left_line_reads_the_same_in_its_svg() {
+        for text in ["שלום abc 2026", "abc שלום def"] {
+            let mut doc = Document::new(420, 70, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = chitrakar_doc::Node::text(
+                "Words",
+                chitrakar_doc::TextSpec::new(
+                    text,
+                    40.0,
+                    chitrakar_color::AuthoredColor::Srgb {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    },
+                ),
+            );
+            node.transform = chitrakar_doc::Transform::translation(10.0, 10.0);
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let ours = chitrakar_render::render(&doc).unwrap();
+            let theirs = resvg_alpha(&doc);
+            // Ink by column, in bands of twenty: where along the line the
+            // letters stand.
+            let w = doc.meta.width as usize;
+            let bands = |alpha: &dyn Fn(usize, usize) -> f32| -> Vec<f32> {
+                (0..w / 20)
+                    .map(|b| {
+                        (b * 20..b * 20 + 20)
+                            .flat_map(|x| (0..70).map(move |y| (x, y)))
+                            .map(|(x, y)| alpha(x, y))
+                            .sum()
+                    })
+                    .collect()
+            };
+            let a = bands(&|x, y| ours.get(x as u32, y as u32).a);
+            let b = bands(&|x, y| theirs[y * w + x]);
+            let off: f32 = a.iter().zip(&b).map(|(p, q)| (p - q).abs()).sum();
+            let all: f32 = a.iter().sum();
+            assert!(
+                off < all * 0.15,
+                "{text}: {off} of {all} stands elsewhere\n{a:?}\n{b:?}"
+            );
+        }
     }
 
     /// What a reader that is not us covers, pixel by pixel, when it

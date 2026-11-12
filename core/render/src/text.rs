@@ -452,6 +452,26 @@ fn reads_leftward(c: char) -> bool {
     matches!(unicode_bidi::bidi_class(c), R | AL | RLE | RLO | RLI)
 }
 
+/// The paragraph a line at `at` in the block was wrapped out of, or the
+/// line itself when it is not a slice of the block's text.
+fn paragraph_of<'a>(spec: &'a TextSpec, at: usize, line: &'a str) -> &'a str {
+    let text = spec.text.as_str();
+    if text.get(at..at + line.len()) == Some(line) {
+        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+        &text[start..end.max(at + line.len())]
+    } else {
+        line
+    }
+}
+
+/// Whether the paragraph a line belongs to reads right to left.
+fn paragraph_reads_leftward(spec: &TextSpec, at: usize, line: &str) -> bool {
+    let paragraph = paragraph_of(spec, at, line);
+    paragraph.chars().any(reads_leftward)
+        && unicode_bidi::get_base_direction(paragraph) == unicode_bidi::Direction::Rtl
+}
+
 /// The line's pieces in the order they stand on the page, left to
 /// right, each with whether it reads right to left: `(from, to, run,
 /// rtl)`, offsets into the line as [`pieces_in`] gives them.
@@ -469,14 +489,7 @@ fn in_reading_order(
     spec: &TextSpec,
 ) -> Vec<(usize, usize, Option<usize>, bool)> {
     let pieces = pieces_in(spec, at, line.len());
-    let text = spec.text.as_str();
-    let paragraph = if text.get(at..at + line.len()) == Some(line) {
-        let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
-        let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
-        &text[start..end.max(at + line.len())]
-    } else {
-        line
-    };
+    let paragraph = paragraph_of(spec, at, line);
     if !paragraph.chars().any(reads_leftward) && !line.chars().any(reads_leftward) {
         return pieces
             .into_iter()
@@ -829,21 +842,21 @@ fn set_line(spec: &TextSpec, l: &Layout, line_no: usize, scale: f32) -> (Vec<Sha
     let mut width = l.widths[line_no];
     if gap > 0.0 {
         let bytes = line.as_bytes();
-        // How many spaces stand before each byte of the line.
-        let mut before = Vec::with_capacity(bytes.len() + 1);
-        let mut n = 0usize;
-        for b in bytes {
-            before.push(n);
-            n += usize::from(*b == b' ');
-        }
-        before.push(n);
+        // Each glyph moves on by the spaces standing to its left on the
+        // page, which is the order the glyphs come in. Counted in the
+        // line's own order instead — the spaces written before it — a
+        // line read right to left moved its words the wrong way, into
+        // one another.
+        let mut left = 0usize;
         for g in &mut glyphs {
             let c = g.cluster.min(bytes.len());
-            g.x += gap * before[c] as f32;
+            g.x += gap * left as f32;
             if bytes.get(c) == Some(&b' ') {
                 g.advance += gap;
+                left += 1;
             }
         }
+        let n = bytes.iter().filter(|b| **b == b' ').count();
         width += gap * n as f32;
     }
     // A list item's marker, set just before where its first line starts,
@@ -1670,6 +1683,11 @@ pub struct SetLine {
     pub x: f32,
     /// A list item's first line's marker.
     pub marker: Option<SetMarker>,
+    /// Whether the line's paragraph reads right to left — its first
+    /// strong letter is Hebrew or Arabic — which is how the line's mixed
+    /// stretches are ordered (`in_reading_order`), and what a reader of
+    /// an exported line has to be told to order them the same.
+    pub rtl: bool,
 }
 
 /// A list item's marker as an exporter writes it: what it says, the x it
@@ -1722,6 +1740,7 @@ pub fn set(spec: &TextSpec) -> SetBlock {
                     x: line_start(spec, &l, k) - m.width - list_gap(spec, 1.0),
                     run: m.glyphs.first().and_then(|g| g.run),
                 }),
+                rtl: paragraph_reads_leftward(spec, l.lines[k].1, &l.lines[k].0),
             })
             .collect(),
         width: l.width,
@@ -2221,6 +2240,48 @@ mod tests {
         lines_of(spec, scale).into_iter().map(|(l, _)| l).collect()
     }
     use chitrakar_color::AuthoredColor;
+
+    #[test]
+    fn justified_right_to_left_lines_reach_both_edges_without_overlap() {
+        for text in [
+            "שלום עולם זה טקסט ארוך שצריך להתיישר לשני הצדדים יפה",
+            "the quick brown fox jumps over the lazy dog and keeps on running",
+        ] {
+            let mut s = spec(text, 20.0);
+            s.width = 240.0;
+            s.align = chitrakar_doc::TextAlign::Justify;
+            let l = layout(&s, 1.0);
+            assert!(l.lines.len() > 2, "{text}: wraps");
+            for line_no in 0..l.lines.len() - 1 {
+                let (glyphs, start, _) = set_line(&s, &l, line_no, 1.0);
+                let (line, _) = &l.lines[line_no];
+                let ink: Vec<&Shaped> = glyphs
+                    .iter()
+                    .filter(|g| line.as_bytes().get(g.cluster) != Some(&b' '))
+                    .collect();
+                let left = ink.iter().map(|g| start + g.x).fold(f32::MAX, f32::min);
+                let right = ink
+                    .iter()
+                    .map(|g| start + g.x + g.advance)
+                    .fold(f32::MIN, f32::max);
+                assert!(left.abs() < 1.5, "{text} line {line_no}: starts at {left}");
+                assert!(
+                    (right - 240.0).abs() < 1.5,
+                    "{text} line {line_no}: ends at {right}"
+                );
+                // No two letters stand on one another.
+                let mut by_x: Vec<(f32, f32)> =
+                    ink.iter().map(|g| (g.x, g.x + g.advance)).collect();
+                by_x.sort_by(|a, b| a.0.total_cmp(&b.0));
+                for w in by_x.windows(2) {
+                    assert!(
+                        w[1].0 >= w[0].1 - 0.5,
+                        "{text} line {line_no}: {w:?} overlap"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn a_line_mixing_the_two_directions_reads_as_a_browser_draws_it() {

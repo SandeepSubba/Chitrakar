@@ -238,7 +238,17 @@ export function BatchDialog({
         )}
         <div className="modal-actions">
           {running ? (
-            <button onClick={() => (stop.current = true)}>Stop after this one</button>
+            <button
+              // It takes the place of the button pressed to start, which
+              // went from under the focus: the focus goes to it rather
+              // than to the page for the whole run.
+              ref={(el) => {
+                if (el && (document.activeElement === document.body || document.activeElement === null)) el.focus();
+              }}
+              onClick={() => (stop.current = true)}
+            >
+              Stop after this one
+            </button>
           ) : (
             <>
               <button onClick={onClose}>{failures.length > 0 ? "Close" : "Cancel"}</button>
