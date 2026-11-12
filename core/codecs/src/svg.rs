@@ -139,7 +139,7 @@ fn write_children(
     let pad = "  ".repeat(depth);
     for &child in doc.children_of(group)? {
         if let Some(sigma) = softening(doc, child) {
-            let name = format!("soft{}", child.0);
+            let name = fresh_def_id(defs, &format!("soft{}", child.0));
             // Where the filter is allowed to write. SVG's default is a
             // box a tenth larger than what is being filtered, which cuts
             // a blur off well inside its own spread; and the region is
@@ -1130,7 +1130,9 @@ fn write_node(
                 // back from its own SVG at the page's corner. Defined
                 // where the text is, the two readings are the same.
                 let guide = chitrakar_render::text::guide_points(spec);
-                let guide_name = format!("guide{}", child.0);
+                // Defined where the text is, so asked of what is written
+                // so far as well as of the defs.
+                let guide_name = fresh_def_id_in(&[defs, out], &format!("guide{}", child.0));
                 let common = match &guide {
                     Some((points, closed)) => {
                         let mut d = String::new();
@@ -1689,9 +1691,14 @@ fn mask_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
 /// file: a layer an original and its live copy both write is written
 /// twice, and an id is one to a file.
 fn fresh_def_id(defs: &str, base: &str) -> String {
+    fresh_def_id_in(&[defs], base)
+}
+
+/// The same, asked of every text an id may already be given in.
+fn fresh_def_id_in(texts: &[&str], base: &str) -> String {
     let mut name = base.to_string();
     let mut k = 0;
-    while defs.contains(&format!(r#"id="{name}""#)) {
+    while texts.iter().any(|t| t.contains(&format!(r#"id="{name}""#))) {
         k += 1;
         name = format!("{base}_{k}");
     }
@@ -1744,7 +1751,7 @@ fn clip_attrs(doc: &Document, id: NodeId, defs: &mut String) -> String {
 /// reader (ours brings it back as one, where a mask is pictures). Writes
 /// the definition and gives the attribute that uses it.
 fn side_cut(d: &str, offset: f32, around: [f32; 4], child: NodeId, defs: &mut String) -> String {
-    let name = format!("band{}", child.0);
+    let name = fresh_def_id(defs, &format!("band{}", child.0));
     let region = if offset > 0.0 {
         d.to_string()
     } else {
@@ -1947,7 +1954,7 @@ fn paint_attrs(
     // stops are already in objectBoundingBox units, which is SVG's default.
     if let Some(g) = gradient {
         if !g.stops().is_empty() {
-            let name = format!("chitrakar-grad-{}", id.0);
+            let name = fresh_def_id(defs, &format!("chitrakar-grad-{}", id.0));
             write_gradient_def(doc, g, &name, defs);
             let _ = write!(s, r##" fill="url(#{name})""##);
             alpha(&mut s, "fill", fade);
@@ -2117,10 +2124,13 @@ fn stroke_attrs(
         let Some(shape) = marker_path(marker, at_start) else {
             continue;
         };
-        let name = format!(
-            "chitrakar-{}-{}",
-            if at_start { "start" } else { "end" },
-            id.0
+        let name = fresh_def_id(
+            defs,
+            &format!(
+                "chitrakar-{}-{}",
+                if at_start { "start" } else { "end" },
+                id.0
+            ),
         );
         let (l, r) = (chitrakar_doc::MARKER_LENGTH, chitrakar_doc::MARKER_REACH);
         // Visible past its box: a marker's box is cut at the line's end,

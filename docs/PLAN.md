@@ -90,7 +90,9 @@ without reading anything else.*
      100-megapixel photograph on the wrong page. The twenty-sixth:
      still nothing lost; drawn paths left unpicked, CMYK chips off the
      profile, a squeezed floating rail, focus dropped after a delete, a
-     crash draft that could keep a drag never let go of.
+     crash draft that could keep a drag never let go of. The
+     twenty-seventh's check: that draft then lost text being typed;
+     ids and a bleed's masks inside copies and frames.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -11805,6 +11807,54 @@ without reading anything else.*
   for a mouse; the toolbar's grip does nothing from the keyboard;
   About opened by the mouse lands on its link; a phone at 125% clips
   the document's name without an ellipsis.
+  **A twenty-seventh audit (November 2026).** Its check of round 26:
+  the crash draft, now written from the committed page, lost text being
+  typed (typing is a preview with no press held, and is kept; a preview
+  is set aside only while a press is down or a window holds it); a pinch
+  begun with the Pen still left the first finger's anchor; an SVG still
+  gave a gradient's, a line end's, a softening's and a text guide's id
+  twice inside a live copy (every definition takes a fresh id); a
+  marked PDF's bleed moved the frame's layers but not their masks, and
+  grew a frame a live copy follows; gradient knobs, raised over the
+  side handles, covered the corners too (a knob on a corner goes under
+  it); a damaged document dropped beside a good one turned the good one
+  away (each is tried until one opens); the keys sheet's key column ran
+  descriptions off a phone at 125%; the focus, kept in the panel, went
+  to its first stop rather than the nearest. Limits written down: an
+  Alt-drag copy or a paint stroke held when the tab dies comes back as
+  the step it began with (a copy on its original, an empty paint
+  layer); a rail floated low on a window between 500 and 700 tall is
+  held to the room below it; a recent colour that is a rich black in a
+  CMYK document comes back a shade lighter through the profile.
+  Its interface pass, fourteen seeded monkey runs and a poster by mouse,
+  keys and finger: every window opened from a phone's Menus drawer put
+  the focus in its first field and brought the keyboard up (the drawer
+  gave the focus back to its button first, and the put-back skipped
+  the touch rule); Straighten and Feather ran off a narrow phone's left
+  edge at a larger size, and Find and replace off its side; a flyout
+  closed by Escape or by the tool picked in it dropped the focus to the
+  page (it goes back to the flyout's button); a layer deleted from the
+  panel's button left the focus on the comps' "+", where the next Enter
+  kept a comp (the layer list comes before the panel's wider parts).
+  Limits written down: a toolbar floated on a wide window can sit over
+  the layers panel on a narrower one; a Delete from the canvas's menu
+  after a row lost the focus can bring it back to the panel.
+  Its editing pass, twelve fuzz runs of two hundred steps (CMYK and
+  masks among them) and six projects by the interface, each checked by
+  undo, redo, reopening and the export at every zoom: all exact, but a
+  graduated mask changed its angle and width when its layer left a
+  group stretched one way (its fade is now carried exactly, as a
+  direction and not as two points); the Knife on a shape a live copy
+  follows, or a locked one, did nothing without a word (it says what it
+  cuts); align steps were named in the code's words ("Align
+  (center-h)"). Limits written down: an outline's corners round a
+  little when its layer leaves a group stretched one way (its width
+  goes by the larger scale); a feathered region made the mask of a
+  layer in a group stretched one way is softer than the region (one
+  softness cannot follow two scales); a Pen path's anchor dragged with
+  the Node tool is "Multiple edits" in the history; a very thin
+  rectangle drawn over another shape's middle can snap to nothing
+  (Ctrl draws it unsnapped).
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

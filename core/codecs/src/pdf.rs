@@ -296,7 +296,13 @@ fn bled_frames(doc: &Document, bleed: f32) -> Result<Document, PdfError> {
             continue;
         };
         let t = node.transform;
+        // A frame a live copy follows is left at its size: the copy,
+        // drawn elsewhere on the page, would draw the grown one.
+        let copied = doc
+            .nodes()
+            .any(|(_, n)| matches!(n.kind, NodeKind::Instance { of, .. } if of == id));
         if !node.visible
+            || copied
             || node.mask.is_some()
             || t.b.abs() > 1e-6
             || t.c.abs() > 1e-6
@@ -329,9 +335,19 @@ fn bled_frames(doc: &Document, bleed: f32) -> Result<Document, PdfError> {
             id,
             transform: t.compose(Transform::translation(-left, -top)),
         })?;
+        let shift = Transform::translation(left, top);
         for kid in out.children_of(id)?.to_vec() {
-            let transform = Transform::translation(left, top).compose(out.node(kid)?.transform);
+            let transform = shift.compose(out.node(kid)?.transform);
             out.apply(Command::SetTransform { id: kid, transform })?;
+            // A mask is written in the frame's space, not the layer's,
+            // so it is taken along by hand: left where it was, a graduated
+            // mask faded a bleed's width off where the page has it.
+            if let Some(mask) = out.node(kid)?.mask.clone() {
+                out.apply(Command::SetMask {
+                    id: kid,
+                    mask: Some(Box::new(mask.carried_through(shift))),
+                })?;
+            }
         }
     }
     Ok(out)
@@ -4298,6 +4314,59 @@ mod tests {
             doc.node(inner).unwrap(),
             "a frame inside the page is left"
         );
+        // A layer's mask is in the frame's space, and is taken along.
+        let masked = shape(
+            "faded",
+            VectorShape::Rect {
+                width: 100.0,
+                height: 100.0,
+                radius: 0.0,
+            },
+            Some(BLUE),
+        );
+        doc.apply(Command::AddNode {
+            parent: full,
+            index: 1,
+            node: Box::new(masked),
+        })
+        .unwrap();
+        let faded = doc.children_of(full).unwrap()[1];
+        doc.apply(Command::SetMask {
+            id: faded,
+            mask: Some(Box::new(chitrakar_doc::Mask {
+                kind: chitrakar_doc::MaskKind::Gradient {
+                    radial: false,
+                    from: [10.0, 10.0],
+                    to: [60.0, 10.0],
+                },
+                invert: false,
+                feather: 0.0,
+            })),
+        })
+        .unwrap();
+        let bled = bled_frames(&doc, 9.0).unwrap();
+        let Some(chitrakar_doc::MaskKind::Gradient { from, to, .. }) = bled
+            .node(faded)
+            .unwrap()
+            .mask
+            .as_ref()
+            .map(|m| m.kind.clone())
+        else {
+            panic!("the mask is kept")
+        };
+        assert_eq!((from, to), ([19.0, 19.0], [69.0, 19.0]));
+        // A frame a live copy follows is left alone.
+        let mut copied = doc.clone();
+        let root = copied.root();
+        copied
+            .apply(Command::AddNode {
+                parent: root,
+                index: 2,
+                node: Box::new(chitrakar_doc::Node::instance("copy", full)),
+            })
+            .unwrap();
+        let bled = bled_frames(&copied, 9.0).unwrap();
+        assert_eq!(bled.node(full).unwrap(), copied.node(full).unwrap());
     }
 
     #[test]

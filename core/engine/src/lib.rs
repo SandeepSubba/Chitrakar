@@ -6393,7 +6393,19 @@ impl Session {
         if cmds.is_empty() {
             return Ok(());
         }
-        self.apply_labeled(Command::Batch(cmds), Some(format!("Align ({mode})")))
+        // Named as its button is: "Align (center-h)" was the code's word.
+        let label = match mode {
+            "left" => "Align left edges",
+            "center-h" => "Align horizontal centres",
+            "right" => "Align right edges",
+            "top" => "Align top edges",
+            "middle-v" => "Align vertical centres",
+            "bottom" => "Align bottom edges",
+            "distribute-h" => "Space evenly across",
+            "distribute-v" => "Space evenly down",
+            _ => "Align",
+        };
+        self.apply_labeled(Command::Batch(cmds), Some(label.to_string()))
     }
 
     /// The region picked out of the page, as the shape it is made of.
@@ -11835,20 +11847,34 @@ impl Session {
     /// edit — a photograph is tens of megabytes, an edit a few hundred
     /// bytes of manifest.
     pub fn save_skeleton(&self) -> Result<Vec<u8>, EngineError> {
+        self.save_skeleton_pressed(false)
+    }
+
+    /// The crash draft, written a breath after every refresh. A gesture
+    /// still in flight is set aside where it is one nobody has let go of:
+    /// a window's held preview (Straighten open on an angle), or any
+    /// preview while a press is down (`pressed`: a drag held still, a
+    /// slider held) — written mid-drag, it kept a turn nobody had taken,
+    /// restored with no step to undo it by. Text being typed is a
+    /// preview too, a long one with no press held, and is kept: it is
+    /// what a crash would otherwise lose.
+    pub fn save_skeleton_pressed(&self, pressed: bool) -> Result<Vec<u8>, EngineError> {
         let names = self.fonts_used();
         let fonts: Vec<(&str, &[u8])> = names
             .iter()
             .filter_map(|n| chitrakar_render::text::font_bytes(n).map(|b| (n.as_str(), b)))
             .collect();
-        chitrakar_codecs::save_chitra_skeleton(&self.committed(), &fonts)
+        let doc = if pressed || self.held_gesture {
+            self.committed()
+        } else {
+            std::borrow::Cow::Borrowed(&self.doc)
+        };
+        chitrakar_codecs::save_chitra_skeleton(&doc, &fonts)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
-    /// The document as its history has it: a gesture still in flight —
-    /// a drag held still, the Straighten window open on an angle — set
-    /// aside. The crash draft is written a breath after every refresh,
-    /// and written mid-preview it kept a turn nobody had taken, restored
-    /// with no step to undo it by.
+    /// The document as its history has it, a gesture still in flight set
+    /// aside.
     fn committed(&self) -> std::borrow::Cow<'_, Document> {
         let Some(gesture) = &self.preview_gesture else {
             return std::borrow::Cow::Borrowed(&self.doc);
@@ -14275,7 +14301,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s.document().node(rect).unwrap().transform.e, 90.0);
-        let mid = s.save_skeleton().unwrap();
+        let mid = s.save_skeleton_pressed(true).unwrap();
         let back = Session::load(&mid).unwrap();
         let kept = back.document().node(rect).unwrap().transform;
         assert_eq!(
@@ -14283,6 +14309,18 @@ mod tests {
             (0.0, 0.0),
             "the draft keeps the page as committed"
         );
+        // With no press held the preview is typing, say, and is kept.
+        let typed = Session::load(&s.save_skeleton().unwrap()).unwrap();
+        assert_eq!(typed.document().node(rect).unwrap().transform.e, 90.0);
+        // A window's held preview is set aside whether or not a press is.
+        s.cancel_preview().unwrap();
+        s.preview_held(Command::SetTransform {
+            id: rect,
+            transform: t,
+        })
+        .unwrap();
+        let held = Session::load(&s.save_skeleton().unwrap()).unwrap();
+        assert_eq!(held.document().node(rect).unwrap().transform.e, 0.0);
         // And the session itself still shows the drag.
         assert_eq!(s.document().node(rect).unwrap().transform.e, 90.0);
     }
@@ -27977,7 +28015,7 @@ mod tests {
         );
         assert_eq!(
             session.history_labels().0.last().map(String::as_str),
-            Some("Align (bottom)")
+            Some("Align bottom edges")
         );
         assert_cache_matches_fresh(&mut session);
 

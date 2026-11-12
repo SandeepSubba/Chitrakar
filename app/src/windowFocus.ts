@@ -83,7 +83,7 @@ export function watchWindowFocus(doc: Document = document): void {
       const modals = doc.querySelectorAll(MODAL);
       const top = modals[modals.length - 1];
       if (top) {
-        firstStop(top)?.focus({ preventScroll: true });
+        enter(top);
         return;
       }
       const menu = el.closest(".menu");
@@ -91,6 +91,20 @@ export function watchWindowFocus(doc: Document = document): void {
     },
     true,
   );
+  // On a touch screen a field given the focus brings the keyboard up
+  // over half the window before anything is asked of it, so there the
+  // window itself takes the focus and Tab begins inside it — whichever
+  // way the focus comes to it: a window opened from the phone's drawer
+  // was entered by the put-back above, as the drawer gave the focus to
+  // its button, and that went to the first field.
+  const enter = (win: Element) => {
+    if (coarse() && win instanceof HTMLElement) {
+      if (!win.hasAttribute("tabindex")) win.setAttribute("tabindex", "-1");
+      win.focus({ preventScroll: true });
+    } else {
+      firstStop(win)?.focus({ preventScroll: true });
+    }
+  };
   const open = new Map<Element, HTMLElement | null>();
   const settle = () => {
     const now = new Set<Element>(doc.querySelectorAll(`${MODAL}, ${PANEL}`));
@@ -107,15 +121,7 @@ export function watchWindowFocus(doc: Document = document): void {
       open.set(win, returnTo);
       if (win.matches(MODAL)) win.setAttribute("aria-modal", "true");
       if (win.contains(doc.activeElement)) continue;
-      // On a touch screen a field given the focus brings the keyboard up
-      // over half the window before anything is asked of it, so there
-      // the window itself takes the focus and Tab begins inside it.
-      if (coarse() && win instanceof HTMLElement) {
-        if (!win.hasAttribute("tabindex")) win.setAttribute("tabindex", "-1");
-        win.focus({ preventScroll: true });
-      } else {
-        firstStop(win)?.focus({ preventScroll: true });
-      }
+      enter(win);
     }
   };
   new MutationObserver(settle).observe(doc.body, { childList: true, subtree: true });
@@ -170,6 +176,8 @@ export function keepPanelFocus(doc: Document = document): void {
   keeping = true;
   let held: HTMLElement | null = null;
   let chain: Element[] = [];
+  /** Where the held stop was on screen, for finding the one nearest. */
+  let where: [number, number] = [0, 0];
   const inMenu = (el: Element) => !!el.closest("[role=menu]");
   doc.addEventListener(
     "focusin",
@@ -186,6 +194,8 @@ export function keepPanelFocus(doc: Document = document): void {
         held = null;
       } else if (panel) {
         held = el;
+        const r = el.getBoundingClientRect();
+        where = [r.left + r.width / 2, r.top + r.height / 2];
         chain = [];
         for (let a = el.parentElement; a && a !== panel.parentElement; a = a.parentElement) chain.push(a);
       } else if (!inMenu(el)) {
@@ -214,7 +224,14 @@ export function keepPanelFocus(doc: Document = document): void {
     // it next draws), or already fallen to the page.
     const active = doc.activeElement;
     if (active && active !== doc.body && active !== lost) return;
-    for (const part of chain) {
+    // Near the lost stop first (what it sat in, and that one's own
+    // part), then the layer list — a deleted layer's button or a removed
+    // effect's left the focus on the comps' "+" or the proportion lock,
+    // where the next Enter or Space did something nobody asked for —
+    // and only then the panel's wider parts.
+    const list = doc.querySelector(`${KEPT_IN} .layer-list`);
+    const parts = [...chain.slice(0, 2), ...(list ? [list] : []), ...chain.slice(2)];
+    for (const part of parts) {
       if (!part.isConnected) continue;
       // A button or a row, never a field: put in X, the next Delete was
       // typed there rather than taking the layer away.
@@ -222,8 +239,18 @@ export function keepPanelFocus(doc: Document = document): void {
         (el) => !(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) && !el.isContentEditable,
       );
       if (stops.length === 0) continue;
+      // The picked row if this part holds one, else the stop nearest
+      // where the lost one was — the next effect's or stop's, the row
+      // that took the deleted one's place — rather than the part's
+      // first, which for the panel's properties was a tick box far
+      // above the list the focus had been in.
       const picked = stops.find((s) => s.closest(".selected, [aria-selected=true]"));
-      (picked ?? stops[0]).focus({ preventScroll: true });
+      const far = (s: HTMLElement) => {
+        const r = s.getBoundingClientRect();
+        return Math.abs(r.top + r.height / 2 - where[1]) * 4 + Math.abs(r.left + r.width / 2 - where[0]);
+      };
+      const nearest = stops.reduce((a, b) => (far(b) < far(a) ? b : a));
+      (picked ?? nearest).focus({ preventScroll: true });
       return;
     }
   };

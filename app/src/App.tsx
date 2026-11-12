@@ -596,6 +596,15 @@ function whenIdle(): Promise<void> {
   });
 }
 
+/** Whether a press is held anywhere on the page: a drag or a slider
+ * still in hand, whose preview the crash draft leaves out. */
+let pressHeld = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("pointerdown", () => (pressHeld = true), true);
+  for (const end of ["pointerup", "pointercancel"]) window.addEventListener(end, () => (pressHeld = false), true);
+  window.addEventListener("blur", () => (pressHeld = false));
+}
+
 /** Keep the draft: the parts not kept yet, then the skeleton with the
  * list of parts it needs in one step, then the parts no draft needs any
  * more — so whatever moment the tab is closed at, the skeleton kept has
@@ -632,7 +641,7 @@ async function putDraft(
   await draftWrite(
     db,
     [
-      [slotKey(draftSlot, "current"), session.save_skeleton()],
+      [slotKey(draftSlot, "current"), session.save_skeleton_pressed(pressHeld)],
       [slotKey(draftSlot, "parts"), JSON.stringify(names)],
     ],
     // Listed now, so no longer only pending.
@@ -1898,6 +1907,10 @@ export function App() {
   const anyFlyout = shapesOpen || selectsOpen || moreOpen;
   useEffect(() => {
     if (!anyFlyout) return;
+    // What opened it has the focus back when it goes, by Escape or by a
+    // tool picked in it: the flyout's rows went with it, and the
+    // keyboard's place fell to the page.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const close = () => {
       setShapesOpen(false);
       setSelectsOpen(false);
@@ -1933,6 +1946,10 @@ export function App() {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", close);
+      requestAnimationFrame(() => {
+        const lost = document.activeElement === null || document.activeElement === document.body;
+        if (lost && opener?.isConnected && opener.closest(".toolbar")) opener.focus({ preventScroll: true });
+      });
     };
   }, [anyFlyout]);
   useEffect(() => {
@@ -4634,6 +4651,28 @@ export function App() {
    * lifts: clicks on the menu meanwhile are that finger's, not a choice. */
   const contextHeldBy = useRef<number | null>(null);
 
+  // A gradient's knob sits over a side's handle (a gradient laid across
+  // the layer ends on a side's middle) but under a corner's: a gradient
+  // from corner to corner put its knobs on the corners, and dragging a
+  // corner moved the gradient's end instead of sizing the layer.
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const knobs = host.querySelectorAll<HTMLElement>(".grad-handle");
+    if (knobs.length === 0) return;
+    const corners = [...host.querySelectorAll<HTMLElement>(".handle:not(.side)")].map((h) => {
+      const r = h.getBoundingClientRect();
+      return [r.left + r.width / 2, r.top + r.height / 2];
+    });
+    for (const k of knobs) {
+      const r = k.getBoundingClientRect();
+      const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
+      k.classList.toggle(
+        "on-corner",
+        corners.some(([cx, cy]) => Math.hypot(cx - x, cy - y) < 8),
+      );
+    }
+  });
   // A click anywhere else, or Escape, puts the menu away — the same two
   // ways the menus in the bar close.
   const contextRef = useRef<HTMLDivElement>(null);
@@ -4727,6 +4766,15 @@ export function App() {
     const pts = [...touchesRef.current.values()];
     if (pts.length !== 2) return;
     clearLong();
+    // The first finger's press put an anchor down before the second made
+    // it a pinch: the view's gesture, not the Pen's, so that anchor (and
+    // any handle it was pulling) goes, and the path drawn before stays.
+    const pen = penDragRef.current;
+    if (pen) {
+      penDragRef.current = null;
+      setPenPoints((ps) => ps.slice(0, pen.index));
+      setPenHandles((hs) => hs.slice(0, pen.index));
+    }
     abandonGesture();
     pinchRef.current = {
       dist: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1,
@@ -6569,6 +6617,12 @@ export function App() {
           setSelected(made[made.length - 1]);
           setMultiSel([...made]);
           refresh(session);
+        } else if (selectionSet.length > 0) {
+          // Picked and left whole without a word, where Delete on the
+          // same shape asks: what the knife will not cut is said.
+          alert(
+            "Knife: nothing was cut. The knife cuts closed shapes that are not locked and that no live copy follows, along a line that crosses one from side to side.",
+          );
         }
       } catch (err) {
         alert(`Knife: ${said(err)}`);
@@ -11329,21 +11383,25 @@ export function App() {
         kinds.push(importKind(file.name, head, file.type));
       }
       const named = (f: File) => f.name || "a file";
-      const at = kinds.indexOf("document");
+      let at = kinds.indexOf("document");
       let opened = false;
       if (at >= 0) {
-        const doc = files[at];
         // Opening by dropping is still opening: what has not been saved
         // is asked about the same as by any other way in.
         if (!mayDiscard()) return;
-        opened = openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
       }
-      // A document that would not open has said so; what came with it is
-      // placed as though it had come alone, rather than told it was left
-      // behind by an open that did not happen.
-      if (at >= 0 && !opened) {
-        files = files.filter((_, i) => i !== at);
-        kinds.splice(at, 1);
+      // A document that would not open has said so and is let go of; the
+      // next one dropped beside it is tried, where it was told it could
+      // not open "one at a time" after nothing had. What came with them
+      // is placed as though it had come alone if none opens.
+      while (at >= 0 && !opened) {
+        const doc = files[at];
+        opened = openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
+        if (!opened) {
+          files = files.filter((_, i) => i !== at);
+          kinds.splice(at, 1);
+          at = kinds.indexOf("document");
+        }
       }
       if (at >= 0 && opened) {
         const doc = files[at];
@@ -11416,12 +11474,20 @@ export function App() {
       }
     };
     const kinds = await Promise.all(paths.map(kindOf));
-    const at = kinds.indexOf("document");
     let rest = paths.map((p, i) => [p, kinds[i]] as const);
-    if (at >= 0) {
+    if (kinds.includes("document")) {
       if (!mayDiscard()) return;
-      const opened = await openPath(paths[at]);
-      rest = rest.filter(([p]) => p !== paths[at]);
+      // Each document in turn until one opens: one that would not has
+      // said so, and the next is not then told "one at a time".
+      let at = "";
+      let opened = false;
+      for (const [p, k] of rest) {
+        if (k !== "document") continue;
+        at = p;
+        opened = await openPath(p);
+        rest = rest.filter(([q]) => q !== p);
+        if (opened) break;
+      }
       if (opened) {
         if (rest.length > 0) {
           const docs = rest.filter(([, k]) => k === "document").map(([p]) => baseName(p));
@@ -11433,7 +11499,7 @@ export function App() {
             );
           if (docs.length > 0)
             told.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
-          alert(`Opened ${baseName(paths[at])}. ${told.join(" ")}`);
+          alert(`Opened ${baseName(at)}. ${told.join(" ")}`);
         }
         return;
       }

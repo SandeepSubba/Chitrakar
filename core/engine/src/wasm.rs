@@ -1836,6 +1836,12 @@ impl WasmSession {
         self.inner.save_skeleton().map_err(to_js)
     }
 
+    /// The draft, with a gesture in flight set aside when a press is
+    /// held (a drag held still) — see `Session::save_skeleton_pressed`.
+    pub fn save_skeleton_pressed(&self, pressed: bool) -> Result<Vec<u8>, JsError> {
+        self.inner.save_skeleton_pressed(pressed).map_err(to_js)
+    }
+
     /// JSON: the names of the parts a skeleton leaves out.
     pub fn draft_parts(&self) -> String {
         serde_json::to_string(&self.inner.draft_parts()).unwrap_or_else(|_| "[]".into())

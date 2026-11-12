@@ -658,6 +658,10 @@ body {
    count of what was found sits under them, quietly. */
 .modal .row input[type="text"] {
   width: 12rem;
+  /* Gives way on a narrow phone rather than pushing the window wide. */
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 12rem;
 }
 
 .modal .found {
@@ -1534,6 +1538,10 @@ body {
   bottom: 1.2rem;
   z-index: 30;
   width: 17rem;
+  /* Never wider than the window leaves: on a small phone at a larger
+     interface size it ran off the left edge. */
+  max-width: calc(100vw - 2.4rem);
+  box-sizing: border-box;
   padding: 0.7rem 0.8rem;
   background: color-mix(in srgb, var(--panel) 94%, #000);
   border: 1px solid var(--border);
@@ -1978,9 +1986,14 @@ body {
 
 /* A gradient's ends over the layer's side handles: a gradient laid
    across the layer has an end on a side's middle, and the handle took
-   the press meant for the knob. */
+   the press meant for the knob. Under a corner's (`on-corner`, set where
+   one sits on a corner): sizing the layer is what a corner is for. */
 .grad-handle {
   z-index: 2;
+}
+
+.grad-handle.on-corner {
+  z-index: 0;
 }
 
 .handle {
@@ -3441,13 +3454,16 @@ button.fold:hover {
 }
 .keys-columns dl > div {
   display: grid;
-  grid-template-columns: 10rem 1fr;
+  /* The key's column gives way on a narrow sheet rather than pushing
+     what it does past the sheet's edge. */
+  grid-template-columns: minmax(0, min(10rem, 45%)) minmax(0, 1fr);
   gap: 0.7rem;
   align-items: baseline;
   padding: 0.12rem 0;
   font-size: 0.82rem;
 }
 .keys-columns dt {
+  overflow-wrap: anywhere;
   color: var(--text);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.76rem;
@@ -3455,6 +3471,7 @@ button.fold:hover {
 .keys-columns dd {
   margin: 0;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 /* A finger is not a pointer: what a mouse can hit at ten pixels wants

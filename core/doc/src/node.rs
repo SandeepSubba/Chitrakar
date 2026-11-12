@@ -2280,8 +2280,27 @@ impl Mask {
                     *from = middle;
                     *to = [middle[0] + rx, middle[1] + ry];
                 } else {
-                    *from = at(*from);
-                    *to = at(*to);
+                    // The fade's lines run across its direction, and a
+                    // stretch in one direction or a skew does not keep
+                    // them across it: carried as two points, the fade
+                    // came out at another angle and width. How far along
+                    // a point is, (p − from)·d / |d|², carries exactly
+                    // as (p′ − from′)·v with v = L⁻ᵀd / |d|² (L the
+                    // map's linear part), so `to` goes to from′ + v/|v|².
+                    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+                    let len2 = dx * dx + dy * dy;
+                    let det = m.a * m.d - m.b * m.c;
+                    let start = at(*from);
+                    if len2 > 0.0 && det.abs() > 1e-12 {
+                        let vx = (m.d * dx - m.b * dy) / det / len2;
+                        let vy = (-m.c * dx + m.a * dy) / det / len2;
+                        let v2 = vx * vx + vy * vy;
+                        *from = start;
+                        *to = [start[0] + vx / v2, start[1] + vy / v2];
+                    } else {
+                        *from = start;
+                        *to = at(*to);
+                    }
                 }
             }
             MaskKind::Painted { strokes } => {
@@ -2988,6 +3007,56 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+
+    /// A graduated mask carried through a stretch in one direction and a
+    /// skew fades the same at every point of the page as before: carried
+    /// as two points, its fade came out at another angle and width when
+    /// a layer left a group stretched one way.
+    #[test]
+    fn a_graduated_mask_carries_exactly_through_a_stretch() {
+        let (from, to) = ([20.0f32, 30.0], [80.0f32, 70.0]);
+        let mask = Mask {
+            kind: MaskKind::Gradient {
+                radial: false,
+                from,
+                to,
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let m = Transform {
+            a: 1.41,
+            b: 0.2,
+            c: -0.3,
+            d: 0.8,
+            e: 12.0,
+            f: -5.0,
+        };
+        let MaskKind::Gradient {
+            from: f2, to: t2, ..
+        } = mask.carried_through(m).kind
+        else {
+            panic!()
+        };
+        let along = |p: [f32; 2], f: [f32; 2], t: [f32; 2]| {
+            let (dx, dy) = (t[0] - f[0], t[1] - f[1]);
+            ((p[0] - f[0]) * dx + (p[1] - f[1]) * dy) / (dx * dx + dy * dy)
+        };
+        for p in [
+            [0.0, 0.0],
+            [50.0, 50.0],
+            [90.0, 10.0],
+            [33.0, 77.0],
+            [-40.0, 120.0],
+        ] {
+            let q = [m.a * p[0] + m.c * p[1] + m.e, m.b * p[0] + m.d * p[1] + m.f];
+            let (before, after) = (along(p, from, to), along(q, f2, t2));
+            assert!(
+                (before - after).abs() < 1e-4,
+                "{p:?}: {before} became {after}"
+            );
+        }
+    }
 
     /// A radial gradient mask carried through a turn stays the ellipse it
     /// was: a circle whole at any angle, and an ellipse's radii swapped
