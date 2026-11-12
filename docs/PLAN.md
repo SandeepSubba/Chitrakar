@@ -92,7 +92,10 @@ without reading anything else.*
      profile, a squeezed floating rail, focus dropped after a delete, a
      crash draft that could keep a drag never let go of. The
      twenty-seventh's check: that draft then lost text being typed;
-     ids and a bleed's masks inside copies and frames.
+     ids and a bleed's masks inside copies and frames. Its broad
+     passes: nothing lost; a graduated mask off a stretched group, a
+     document arriving under the Develop window, focus and phone
+     fitting.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -11855,6 +11858,20 @@ without reading anything else.*
   the Node tool is "Multiple edits" in the history; a very thin
   rectangle drawn over another shape's middle can snap to nothing
   (Ctrl draws it unsnapped).
+  Its files pass, a shoot, a hand-off, a print job, 236 made-up bad
+  files and two crashes: a document arriving ("Open with", a share, the
+  shell's drop) while the Develop window was up went in under it, and
+  Place then lost the development with "no raw file is open" (files
+  that arrive wait for the window to close); the shell's drop held
+  every file it was given in memory at once (each is read and let go
+  of in turn); a 0 × 0 PSD was "more than the 100 megapixels a page can
+  be", a layer box inside out "larger than a page", and an SVG in
+  UTF-16 was refused in its library's words; "Could not open the
+  document" did not say which. Limits written down: a stroked path
+  whose segments cross one another thousands of times takes seconds a
+  frame, and at a hundred thousand runs the engine out of memory
+  (realistic paths of that length are quick); an RGB document has no
+  TIFF to export, only a press profile's CMYK one.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -200,10 +200,12 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
     // The page a PSD opens as is a page like any other, held to what a
     // page may be. A header said 20000 square and the reading set it
     // aside, which stopped the engine for good.
-    if width == 0
-        || height == 0
-        || (width as u64 * height as u64) > chitrakar_doc::MAX_CANVAS_PIXELS
-    {
+    if width == 0 || height == 0 {
+        return Err(bad(format!(
+            "its page is {width} × {height}, which has nothing on it"
+        )));
+    }
+    if (width as u64 * height as u64) > chitrakar_doc::MAX_CANVAS_PIXELS {
         return Err(bad(format!(
             "its page is {width} × {height}, more than the {} megapixels a page can be",
             chitrakar_doc::MAX_CANVAS_PIXELS / 1_000_000
@@ -660,10 +662,12 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     let right = r.i32()?;
     // Worked in 64 bits: a box from one end of an i32 to the other
     // wrapped, and passed.
-    if bottom < top
-        || right < left
-        || area(top, left, bottom, right) > chitrakar_doc::MAX_CANVAS_PIXELS
-    {
+    if bottom < top || right < left {
+        return Err(bad(
+            "a layer's box is inside out (its bottom above its top)",
+        ));
+    }
+    if area(top, left, bottom, right) > chitrakar_doc::MAX_CANVAS_PIXELS {
         return Err(bad("a layer larger than a page can be"));
     }
     let n = r.u16()? as usize;

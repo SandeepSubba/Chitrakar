@@ -128,6 +128,8 @@ export function said(err: unknown): string {
     [/manifest error|missing field|invalid type: .* expected/i, "the document inside the file is damaged, or from a version that wrote it differently"],
     // Before "not well-formed": a drawing whose uses of one another fan
     // out past the reader's count is whole, only too big to read.
+    // usvg's words for a drawing saved as UTF-16, ahead of the rest.
+    [/has not an? UTF-8 encoding|not valid utf-8|invalid utf-8/i, "the SVG is not written in UTF-8 (it may be saved as UTF-16) — save it again as UTF-8 first"],
     [/nodes limit reached|elements limit/i, "the drawing has more parts than can be read (its uses of one another multiply too far)"],
     [/svg data parsing failed|xml|unexpected .* tag|expected '.*' tag/i, "the SVG is not well-formed (an unclosed or mismatched tag)"],
     [/invalid zip|zip archive|could not find central directory|invalid checksum/i, "the file is damaged: it is not a whole .chitra"],

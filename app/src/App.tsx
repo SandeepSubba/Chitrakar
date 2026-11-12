@@ -886,6 +886,16 @@ if (typeof window !== "undefined") {
  * deselect, and a layer chord pressed at one does not reach the
  * document behind it. */
 const WINDOWS = ".modal-scrim, .sheet-scrim, .straighten-panel, .menu-pop";
+
+/** Files that arrive while a window is up — "Open with", a share, the
+ * shell's drop — wait for it to close. Opened under the Develop window,
+ * a document took the session the raw was being developed on, and
+ * Place then said "no raw file is open" and lost the settings. */
+async function windowsClosed(): Promise<void> {
+  while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
 function aWindowIsUp(): boolean {
   return windowUpForKey || document.querySelector(WINDOWS) !== null;
 }
@@ -10774,7 +10784,9 @@ export function App() {
       fitView();
       return true;
     } catch (err) {
-      alert(`Could not open the document: ${said(err)}`);
+      // Named, when there is a name: with several dropped, "the
+      // document" did not say which.
+      alert(`Could not open ${name ? name : "the document"}: ${said(err)}`);
       return false;
     }
   };
@@ -11374,6 +11386,7 @@ export function App() {
     // File › Open asks; one the editor cannot read is said, where it
     // used to be dropped without a word.
     void (async () => {
+      await windowsClosed();
       const kinds: (string | null)[] = [];
       // By its bytes always, as File › Open goes: a document named .png
       // was refused as no picture, and a PNG named .chitra as a damaged
@@ -11456,24 +11469,27 @@ export function App() {
    * document dropped on the window has its file the way one opened from
    * the panel does, and Save writes back to it. */
   const onShellDrop = async (paths: string[]) => {
+    await windowsClosed();
     // As a drop on the page goes: the bytes decide where the name would
     // mislead (a document named .png, a file named nothing at all), one
     // document opens and what came with it is said, and a file nobody can
     // read is named rather than skipped without a word.
-    const read = new Map<string, Uint8Array>();
+    // Read one at a time and let go of: a shoot of a hundred raws held
+    // whole at once was gigabytes in the webview before any was placed.
+    // A file is read again when its turn to be placed comes.
     // Every file is read, as a drop on the page is: it is read to be
     // placed anyway, and a document saved as "card.png" was placed as a
     // picture by its name.
     const kindOf = async (path: string) => {
       try {
         const bytes = await readPath(path);
-        read.set(path, bytes);
         return importKind(baseName(path), bytes.subarray(0, 1024));
       } catch {
         return null;
       }
     };
-    const kinds = await Promise.all(paths.map(kindOf));
+    const kinds: (string | null)[] = [];
+    for (const path of paths) kinds.push(await kindOf(path));
     let rest = paths.map((p, i) => [p, kinds[i]] as const);
     if (kinds.includes("document")) {
       if (!mayDiscard()) return;
@@ -11517,7 +11533,7 @@ export function App() {
       }
       const type = imageType(path) ?? "";
       try {
-        const bytes = read.get(path) ?? (await readPath(path));
+        const bytes = await readPath(path);
         placeImageFile(new File([bytes as BlobPart], baseName(path), { type }));
       } catch (err) {
         alert(`Could not place ${baseName(path)}: ${said(err)}`);
