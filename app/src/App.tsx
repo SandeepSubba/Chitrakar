@@ -10619,9 +10619,19 @@ export function App() {
     return cmds;
   };
 
+  /** A step the engine may refuse in words, said: thrown from `run`, the
+   * refusal of a reorder among a copy's own layers was a page error, and
+   * the person saw nothing happen. */
+  const runOrSay = (what: string, cmd: Command) => {
+    try {
+      run(cmd);
+    } catch (err) {
+      alert(`${what}: ${said(err)}`);
+    }
+  };
   const reorderSelected = (direction: 1 | -1) => {
     const cmds = reorderCommands(direction);
-    if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+    if (cmds.length > 0) runOrSay("Move", cmds.length === 1 ? cmds[0] : { Batch: cmds });
   };
 
   /** The group or frame the picked layer sits in, when it sits in one.
@@ -10683,7 +10693,7 @@ export function App() {
         });
       }
     }
-    if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+    if (cmds.length > 0) runOrSay("Move", cmds.length === 1 ? cmds[0] : { Batch: cmds });
   };
 
   /** Opacity and blend reach every picked layer, not only the one whose
@@ -11461,6 +11471,7 @@ export function App() {
       // open on a layer that is not in it.
       if (liveSession.current !== session) {
         againBusy.current = false;
+        alert(`${layer.name} was not developed again: its document was closed while its raw file was read.`);
         return;
       }
       await giveLensProfiles(session);
@@ -11526,6 +11537,9 @@ export function App() {
           info.lensProfile && !unprofiled.uncorrected ? { ...unprofiled, lens_profile: info.lensProfile } : unprofiled,
         );
         const got = await developedElsewhere(packed, t.name, own);
+        // Deleted while it was being developed: passed over, as one
+        // deleted before its turn is, rather than ending the run.
+        if (!(JSON.parse(session.layers_json()) as LayerInfo[]).some((l) => l.id === t.id)) continue;
         if (got) session.stage_redevelop_pixels(t.id, got.rgba, got.width, got.height, own);
         else session.stage_redevelop(t.id, own);
       }
@@ -11539,8 +11553,9 @@ export function App() {
         session.raw_close();
         setImporting(null);
         againBusy.current = false;
-        // Drawn only if it is still the document in hand.
+        // Drawn only if it is still the document in hand; said if not.
         if (!gone()) refresh(session);
+        else alert("The develop settings were not given to the other pictures: their document was closed while they were developed.");
       }
     }
   };

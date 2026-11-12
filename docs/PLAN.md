@@ -12021,6 +12021,24 @@ without reading anything else.*
   the drag in two; Ctrl+0 is the page's fit, so the browser's own zoom
   is not undone from the keyboard; a long press on a layer's row is
   not known to open its menu on iOS.
+  **A thirtieth audit (November 2026).** Its check of round 29: a
+  copy's own layers were still taken from or added to by a merge, a
+  combine, Repeat, Blend shapes and a live copy made in place, each
+  leaving one standing in for the wrong layer of the original (any step
+  that adds to, takes from or moves a copy's children without saying
+  which of the original's they stand in for is refused now); a reorder
+  among them was refused as a page error, unseen (it is said); a layer
+  deleted while a sync developed it ended the whole run (it is passed
+  over), and a sync or Develop again stopped by a new document did not
+  say so; the PSD budget counted every layer as a whole page and
+  refused a photograph with a dozen small shapes over it (each layer
+  now counts its own box); forgetting the last recent colour dropped
+  the focus to the page, and the next Delete took the picked layer; a
+  copy of a frame stretched one way while its original stretched the
+  other did not grow. Limits written down: a copy of a turned frame
+  pinned to stretch does not grow with it; a frame inside a frame
+  keeps its mask's size when stretched with its holder; Ctrl+F, Ctrl+G
+  and Ctrl+D in a text box are still the browser's.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

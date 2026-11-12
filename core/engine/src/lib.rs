@@ -1526,27 +1526,64 @@ impl Session {
     /// another standing in the wrong place — the copy's panel drew
     /// nothing, and "Follow again" took away the wrong layer.
     fn refuse_moving_a_copys_own(&self, cmd: &Command) -> Result<(), EngineError> {
-        match cmd {
-            Command::Batch(cmds) => cmds
-                .iter()
-                .try_for_each(|c| self.refuse_moving_a_copys_own(c)),
-            Command::MoveNode { id, parent, .. } => {
-                let into_copy = self
-                    .doc
-                    .node(*parent)
-                    .is_ok_and(|p| matches!(p.kind, NodeKind::Instance { .. }));
-                if self.is_a_copys_own(*id) || into_copy {
-                    return Err(EngineError::BadCommand(
-                        "a copy's own layers keep their places, since each stands in for one \
-                         of the original's: to let one go, choose \u{201c}Follow the original \
-                         again\u{201d} for it; to change the order, change the original's."
-                            .into(),
-                    ));
+        // Every live copy whose children a step adds to, takes from or
+        // moves, and every copy the same step tells which of the
+        // original's layers its children stand in for. A step that does
+        // the first without the second — a merge, a combine, a repeat, a
+        // blend, a copy made in place, a reorder — leaves one of the
+        // copy's own layers standing in for the wrong one: Making a layer
+        // its own and Following again say both, and pass.
+        let is_copy = |id: NodeId| {
+            self.doc
+                .node(id)
+                .is_ok_and(|n| matches!(n.kind, NodeKind::Instance { .. }))
+        };
+        let mut touched = std::collections::HashSet::new();
+        let mut told = std::collections::HashSet::new();
+        fn walk(
+            cmd: &Command,
+            doc: &Document,
+            is_copy: &dyn Fn(NodeId) -> bool,
+            touched: &mut std::collections::HashSet<NodeId>,
+            told: &mut std::collections::HashSet<NodeId>,
+        ) {
+            match cmd {
+                Command::Batch(cmds) => cmds
+                    .iter()
+                    .for_each(|c| walk(c, doc, is_copy, touched, told)),
+                Command::AddNode { parent, .. } if is_copy(*parent) => {
+                    touched.insert(*parent);
                 }
-                Ok(())
+                Command::RemoveNode { id } => {
+                    if let Some(p) = doc.parent_of(*id).filter(|p| is_copy(*p)) {
+                        touched.insert(p);
+                    }
+                }
+                Command::MoveNode { id, parent, .. } => {
+                    if let Some(p) = doc.parent_of(*id).filter(|p| is_copy(*p)) {
+                        touched.insert(p);
+                    }
+                    if is_copy(*parent) {
+                        touched.insert(*parent);
+                    }
+                }
+                Command::SetKind { id, kind } if matches!(**kind, NodeKind::Instance { .. }) => {
+                    told.insert(*id);
+                }
+                _ => {}
             }
-            _ => Ok(()),
         }
+        walk(cmd, &self.doc, &is_copy, &mut touched, &mut told);
+        if touched.iter().all(|c| told.contains(c)) {
+            return Ok(());
+        }
+        Err(EngineError::BadCommand(
+            "a copy's own layers keep their places, since each stands in for one \
+             of the original's: this would add to them, take from them or move \
+             them. To let one go, choose \u{201c}Follow the original again\u{201d} \
+             for it; to change the order, change the original's."
+                .into(),
+        ))
     }
 
     fn apply_labeled(&mut self, cmd: Command, label: Option<String>) -> Result<(), EngineError> {
@@ -4425,21 +4462,41 @@ impl Session {
             // its new size — scaled as well, it grew twice and its circle
             // came out an oval. It is only moved by its pin.
             if let NodeKind::Instance { of, .. } = &kid.kind {
-                // Resized here only where its own pins stretch it.
-                let resized_here = self.doc.children_of(id)?.contains(of)
-                    && self.doc.node(*of).is_ok_and(|n| {
-                        matches!(n.kind, NodeKind::Artboard { .. })
-                            && (n.pinned.x == chitrakar_doc::Pin::Stretch
-                                || n.pinned.y == chitrakar_doc::Pin::Stretch)
+                // Resized here only on the axes its own pins stretch it:
+                // on those the copy is only moved, on the others it is
+                // stretched as any layer is.
+                let stretched = self
+                    .doc
+                    .node(*of)
+                    .ok()
+                    .filter(|n| {
+                        self.doc.children_of(id).is_ok_and(|c| c.contains(of))
+                            && matches!(n.kind, NodeKind::Artboard { .. })
+                    })
+                    .map(|n| {
+                        (
+                            n.pinned.x == chitrakar_doc::Pin::Stretch,
+                            n.pinned.y == chitrakar_doc::Pin::Stretch,
+                        )
                     });
-                if resized_here && (sx != 1.0 || sy != 1.0) {
-                    let shift = Transform::translation(tx, ty);
-                    cmds.push(Command::SetTransform {
-                        id: child,
-                        transform: shift.compose(kid.transform),
-                    });
-                    Self::carry_mask_and_effects(kid, child, shift, &mut cmds);
-                    continue;
+                if let Some((by_x, by_y)) = stretched {
+                    if (by_x && sx != 1.0) || (by_y && sy != 1.0) {
+                        let (ax, ay) = (if by_x { 1.0 } else { sx }, if by_y { 1.0 } else { sy });
+                        let outer = Transform {
+                            a: ax,
+                            b: 0.0,
+                            c: 0.0,
+                            d: ay,
+                            e: tx + x0 * (1.0 - ax),
+                            f: ty + y0 * (1.0 - ay),
+                        };
+                        cmds.push(Command::SetTransform {
+                            id: child,
+                            transform: outer.compose(kid.transform),
+                        });
+                        Self::carry_mask_and_effects(kid, child, outer, &mut cmds);
+                        continue;
+                    }
                 }
             }
             // A frame inside, stretched with this one, is resized — as a
@@ -10036,8 +10093,45 @@ impl Session {
         // with the composite while the file is written: four layers of a
         // 61-megapixel photograph ran the engine out of memory and the page
         // reloaded. Refused in words before anything is drawn.
-        let layers = self.doc.nodes().count().saturating_sub(1) as u64;
-        let need = (layers + 2) * u64::from(w) * u64::from(h) * 4;
+        // What is held: each layer written, cut to its own box (a frame
+        // or a copy is one picture, its insides drawn into it), plus a
+        // page-sized surface to draw each on and the composite. Counted
+        // as a page each, a 24-megapixel photograph with a dozen small
+        // shapes over it was refused.
+        let page = u64::from(w) * u64::from(h);
+        let drawn_into = |id: NodeId| {
+            let mut at = self.doc.parent_of(id);
+            while let Some(p) = at {
+                if self.doc.node(p).is_ok_and(|n| {
+                    matches!(
+                        n.kind,
+                        NodeKind::Artboard { .. } | NodeKind::Instance { .. }
+                    )
+                }) {
+                    return true;
+                }
+                at = self.doc.parent_of(p);
+            }
+            false
+        };
+        let mut kept: u64 = 0;
+        let mut layers: u64 = 0;
+        for (&id, node) in self.doc.nodes() {
+            if id == self.doc.root() || matches!(node.kind, NodeKind::Group) || drawn_into(id) {
+                continue;
+            }
+            layers += 1;
+            kept += match chitrakar_render::node_bounds(&self.doc, id) {
+                Ok(Bounds::Rect(x0, y0, x1, y1)) => {
+                    let cw = (x1.min(w as f32) - x0.max(0.0)).max(0.0) as u64;
+                    let ch = (y1.min(h as f32) - y0.max(0.0)).max(0.0) as u64;
+                    (cw * ch).min(page)
+                }
+                Ok(Bounds::None) => 0,
+                _ => page,
+            };
+        }
+        let need = (kept + 2 * page) * 4;
         // Set between what was measured to write (eight layers of 24
         // megapixels, one of 100) and what ran out (four of 61).
         const PSD_BUDGET: u64 = 1_300_000_000;
@@ -14444,6 +14538,31 @@ mod tests {
             assert!(seen.insert(id.to_string()), "id {id} given twice:\n{svg}");
         }
         assert!(seen.len() >= 4, "{seen:?}");
+    }
+
+    /// A copy's own layers keep their places: merging two of them, or
+    /// making a live copy of one in place, is refused, and making one its
+    /// own and following again still work.
+    #[test]
+    fn a_copys_own_layers_keep_their_places() {
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let a = add_rect(&mut s, "A", 40.0, 40.0);
+        let b = add_rect(&mut s, "B", 40.0, 40.0);
+        let card = s.group_nodes(&[a, b], "Card").unwrap();
+        let copy = s.make_instance(card).unwrap();
+        let own_a = s.override_child(copy, 0).unwrap();
+        let own_b = s.override_child(copy, 1).unwrap();
+        let before = s.history_labels().0.len();
+        let err = s.merge_layers(&[own_a, own_b]).unwrap_err().to_string();
+        assert!(err.contains("keep their places"), "{err}");
+        assert!(
+            s.make_instance(own_a).is_err(),
+            "a copy made in place is refused"
+        );
+        assert_eq!(s.history_labels().0.len(), before, "nothing was done");
+        // Following again still lets one go.
+        s.clear_override(copy, 0).unwrap();
+        assert!(s.document().node(own_a).is_err() || s.document().parent_of(own_a) != Some(copy));
     }
 
     /// A frame resized takes its layers' masks along with them: a layer

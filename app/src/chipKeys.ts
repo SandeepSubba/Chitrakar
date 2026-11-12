@@ -15,10 +15,23 @@ export function chipKeys(forget: () => void, rename?: () => void) {
       const chip = e.currentTarget;
       const row = chip.parentElement;
       const at = row ? [...row.querySelectorAll<HTMLElement>("button")].indexOf(chip as HTMLElement) : -1;
+      // The rows beside it, for when the last chip takes its row with it
+      // (the recent colours): the focus fell to the page, and the next
+      // Delete took the picked layer.
+      const beside = [row?.previousElementSibling, row?.nextElementSibling];
       forget();
       setTimeout(() => {
         if (chip.isConnected) return;
-        if (!row?.isConnected) return;
+        if (!row?.isConnected) {
+          for (const near of beside) {
+            const stop = near?.isConnected ? near.querySelector<HTMLElement>("button:not(:disabled)") : null;
+            if (stop) {
+              stop.focus();
+              return;
+            }
+          }
+          return;
+        }
         const buttons = [...row.querySelectorAll<HTMLElement>("button:not(:disabled)")];
         (buttons[Math.min(at, buttons.length - 1)] ?? buttons[0])?.focus();
       }, 0);
