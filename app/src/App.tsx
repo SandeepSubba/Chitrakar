@@ -901,17 +901,85 @@ function proofingTrouble(err: unknown): string {
  * stylesheet's own placing was cut away whole, since a rail that scrolls
  * sideways clips up and down too, and nothing behind the corner could
  * be reached. */
+/** A slider stretched to take a value past its ends — a blur Resize page
+ * carried to 160 — so a nudge moves it a step from where it is rather
+ * than back to the end. The stretch holds while the slider is being
+ * dragged: taken from the value alone, the end came back to 50 the
+ * moment the drag passed it, the thumb jumped, and 160 could not be
+ * dragged back to. */
+function StretchRange({
+  min,
+  max,
+  value,
+  onValue,
+  ...rest
+}: {
+  min: number;
+  max: number;
+  value: number;
+  onValue: (v: number) => void;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, "min" | "max" | "value" | "onChange" | "type">) {
+  const dragging = useRef(false);
+  const [ends, setEnds] = useState<[number, number]>([Math.min(min, value), Math.max(max, value)]);
+  useEffect(() => {
+    setEnds(([lo, hi]) =>
+      dragging.current
+        ? [Math.min(lo, value), Math.max(hi, value)]
+        : [Math.min(min, value), Math.max(max, value)],
+    );
+  }, [min, max, value]);
+  const { onPointerDown, onPointerUp, onPointerCancel, ...others } = rest;
+  return (
+    <input
+      type="range"
+      min={ends[0]}
+      max={ends[1]}
+      value={value}
+      onChange={(e) => onValue(Number(e.target.value))}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        onPointerDown?.(e);
+      }}
+      onPointerUp={(e) => {
+        dragging.current = false;
+        onPointerUp?.(e);
+      }}
+      onPointerCancel={(e) => {
+        dragging.current = false;
+        onPointerCancel?.(e);
+      }}
+      {...others}
+    />
+  );
+}
+
+/** A layer's name as a menu row says it: a name of a paragraph's length
+ * wrapped the row onto ten lines, where the layer's own row cuts it short
+ * with an ellipsis. Cut by characters, not UTF-16 units, so an emoji is
+ * never halved. */
+function clipName(name: string, most = 28): string {
+  const chars = Array.from(name);
+  return chars.length > most ? `${chars.slice(0, most - 1).join("")}…` : name;
+}
+
 function pinFlyout(el: HTMLDivElement | null) {
   const from = el?.parentElement;
   const rail = el?.closest(".toolbar");
   if (!el || !from || !rail) return;
   const at = from.getBoundingClientRect();
   el.style.position = "fixed";
+  // Wrapped to the room the window has: with many tools put away the
+  // flyout was one row a thousand pixels long, and on a phone or a
+  // tablet the tools past the window's edge could not be reached.
   if (getComputedStyle(rail).flexDirection === "column") {
-    el.style.left = `${Math.round(at.right + 6)}px`;
-    el.style.top = `${Math.round(at.top)}px`;
+    const left = Math.round(at.right + 6);
+    el.style.left = `${left}px`;
+    el.style.maxWidth = `${Math.max(48, window.innerWidth - left - 8)}px`;
+    const tall = el.getBoundingClientRect().height;
+    el.style.top = `${Math.round(Math.max(8, Math.min(at.top, window.innerHeight - tall - 8)))}px`;
     return;
   }
+  el.style.maxWidth = `${window.innerWidth - 16}px`;
   const wide = el.getBoundingClientRect().width;
   el.style.top = "auto";
   el.style.bottom = `${Math.round(window.innerHeight - at.top + 6)}px`;
@@ -1909,22 +1977,6 @@ function markNeedsALayer(entries: MenuEntry[], nonePicked: boolean) {
   }
 }
 
-/** A button of a pair (Undo and Redo) that greys itself out under the
- * focus — the last step undone — hands the focus to its neighbour,
- * which the same press has just made live. Left alone, the focus fell
- * to the page and the next Tab began again from the top. */
-function keepFocusInGroup(button: HTMLElement) {
-  requestAnimationFrame(() => {
-    if (!(button as HTMLButtonElement).disabled) return;
-    const lost = document.activeElement === null || document.activeElement === document.body;
-    if (!lost) return;
-    const other = [...(button.parentElement?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
-      (b) => b !== button && !b.disabled,
-    );
-    other?.focus({ preventScroll: true });
-  });
-}
-
 /** Grey out the rows that have nothing to act on now: Undo with nothing
  * done, a row about the region picked out with none, Clear guides with
  * none. They were pressable and answered with nothing, or an alert. */
@@ -2420,8 +2472,21 @@ export function App() {
    * document on every render. */
   const docSizeRef = useRef<[number, number]>([DOC_WIDTH, DOC_HEIGHT]);
   const setDocumentSize = useCallback((w: number, h: number) => {
+    const [ow, oh] = docSizeRef.current;
     docSizeRef.current = [w, h];
     setDocSize([w, h]);
+    // A crop frame waiting for Enter, and a path's anchors so far, were
+    // drawn on the page as it stood: on a page turned, resized, grown or
+    // undone to another size, or a new document, they frame nothing they
+    // meant, and a frame wider than the page grew it when it was taken.
+    // Said here, where every change of size passes, rather than where a
+    // refresh notices one: a turn set the size first, and the refresh
+    // after it saw nothing change.
+    if (w !== ow || h !== oh) {
+      setCropFrame(null);
+      setPenPoints([]);
+      setPenHandles([]);
+    }
   }, []);
   const [newDocOpen, setNewDocOpen] = useState(false);
   /** The export window, and the preferences window. */
@@ -3132,13 +3197,6 @@ export function App() {
         s.height !== docSizeRef.current[1]
       ) {
         setDocumentSize(s.width, s.height);
-        // A crop frame waiting for Enter, and a path's anchors so far,
-        // were drawn on the page as it stood: on a page turned, grown or
-        // undone to another size they frame nothing they meant, and a
-        // frame wider than the page grew it when it was taken.
-        setCropFrame(null);
-        setPenPoints([]);
-        setPenHandles([]);
       }
     },
     [setDocumentSize],
@@ -3374,6 +3432,9 @@ export function App() {
     while (taken.has(`Comp ${n}`)) n++;
     const name = window.prompt("Keep the page as it is now as:", `Comp ${n}`);
     if (name === null) return;
+    // A name already kept is asked about rather than written over without
+    // a word, as Rename refuses it.
+    if (taken.has(name.trim()) && !window.confirm(`A comp called “${name.trim()}” is kept already. Keep the page as it is now in its place?`)) return;
     try {
       session.keep_comp(name);
       refresh(session);
@@ -3422,6 +3483,7 @@ export function App() {
     const answer = window.prompt("Keep what is picked out as:", `Region ${n}`);
     if (answer === null) return;
     const name = answer.trim() || `Region ${n}`;
+    if (taken.has(name) && !window.confirm(`A region called “${name}” is kept already. Keep what is picked out now in its place?`)) return;
     try {
       session.keep_selection(name);
       refresh(session);
@@ -9126,12 +9188,17 @@ export function App() {
       alert("Blend: pick exactly two shapes");
       return;
     }
-    const answer = window.prompt("How many shapes between the two?", "5");
+    const answer = window.prompt("How many shapes between the two? (1 to 100)", "5");
     if (answer === null) return;
     const typed = typedNumber(answer);
     const steps = typed === null ? NaN : Math.round(typed);
     if (!Number.isFinite(steps) || steps < 1) {
       alert(`Blend: “${answer}” is not a number of shapes — type one or more, such as 5.`);
+      return;
+    }
+    // A hundred at the most, said rather than quietly made instead.
+    if (steps > 100) {
+      alert(`Blend: ${steps} is more shapes than a blend makes — a hundred at the most.`);
       return;
     }
     try {
@@ -12407,7 +12474,7 @@ export function App() {
             sub(
               `${what}-only`,
               icon,
-              `Only on ${selectedLayer.name}`,
+              `Only on ${clipName(selectedLayer.name)}`,
               // Dodge and burn paint over everything below; a layer of
               // its own has nothing for them to do.
               rows(
@@ -12930,6 +12997,24 @@ export function App() {
       "pick-subject": selected === null && !layers.some((l) => l.kind === "raster" && l.visible),
     });
   }
+  /** Which of the bar's Undo and Redo was pressed last, until the history
+   * it changed has been drawn: one that greys itself out under the focus
+   * — the last step undone — hands the focus to the other, which the
+   * same press made live. Left alone, the focus fell to the page and
+   * the next Tab began again from the top. */
+  const historyPressed = useRef<"undo" | "redo" | null>(null);
+  useEffect(() => {
+    const which = historyPressed.current;
+    historyPressed.current = null;
+    if (!which) return;
+    const buttons = [
+      ...document.querySelectorAll<HTMLButtonElement>('.chrome-group[aria-label="History"] button'),
+    ];
+    const [pressed, other] = which === "undo" ? buttons : [...buttons].reverse();
+    if (!pressed?.disabled || !other || other.disabled) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body || at === pressed) other.focus({ preventScroll: true });
+  }, [history.past.length, history.future.length]);
   const menusRef = useRef(menus);
   menusRef.current = menus;
   // A chord a person gave a menu row runs that row, from wherever the
@@ -13378,9 +13463,9 @@ export function App() {
         <div className="chrome-group" role="group" aria-label="History">
           <button
             className="chrome-button icon-only"
-            onClick={(e) => {
+            onClick={() => {
+              historyPressed.current = "undo";
               undo();
-              keepFocusInGroup(e.currentTarget);
             }}
             title={tip("Undo", "undo")}
             disabled={history.past.length === 0}
@@ -13389,9 +13474,9 @@ export function App() {
           </button>
           <button
             className="chrome-button icon-only"
-            onClick={(e) => {
+            onClick={() => {
+              historyPressed.current = "redo";
               redo();
-              keepFocusInGroup(e.currentTarget);
             }}
             title={tip("Redo", "redo")}
             disabled={history.future.length === 0}
@@ -15937,7 +16022,7 @@ export function App() {
               {selectedLayer &&
                 selectedLayer.kind !== "adjustment" &&
                 selectedLayer.kind !== "filter" && (
-                  <optgroup label={`Only on ${selectedLayer.name}`}>
+                  <optgroup label={`Only on ${clipName(selectedLayer.name)}`}>
                     {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
                       <option key={`only:${key}`} value={`only:${key}`}>
                         {p.name}
@@ -16743,6 +16828,15 @@ export function App() {
                   value={selectedLayer.blend}
                   onChange={(e) =>
                     setBlendOfSelection(e.target.value as BlendMode)
+                  }
+                  // An adjustment or a filter rewrites what is under it
+                  // and has nothing of its own left to blend: a mode
+                  // chosen for one was kept and did nothing.
+                  disabled={selectedLayer.kind === "adjustment" || selectedLayer.kind === "filter"}
+                  title={
+                    selectedLayer.kind === "adjustment" || selectedLayer.kind === "filter"
+                      ? "An adjustment or a filter changes what is under it, and has nothing of its own to blend"
+                      : undefined
                   }
                   aria-label="Blend mode"
                 >
@@ -18612,6 +18706,10 @@ function PdfDialog({
   // Whole pixels as the reader makes them, which drops the part of a
   // pixel left over: rounded, it said 417 and gave 416.
   const [pw, ph] = [Math.max(1, Math.floor(w * k)), Math.max(1, Math.floor(h * k))];
+  // And a picture past a hundred megapixels is taken down to it when it
+  // lands, as any is: said here, where the size was promised.
+  const down = Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph)));
+  const [lw, lh] = [Math.max(1, Math.floor(pw * down)), Math.max(1, Math.floor(ph * down))];
   const ok = page >= 1 && page <= sizes.length && dpi > 0;
   const go = () => ok && onPlace(page - 1, dpi);
   const enter = (e: React.KeyboardEvent) => {
@@ -18669,8 +18767,10 @@ function PdfDialog({
         </label>
         <p className="modal-aside" role="status" aria-label="Page size">
           {ok
-            ? `${(w / 72).toFixed(2)} × ${(h / 72).toFixed(2)} in, comes in at ${pw} × ${ph} px` +
-              (k < dpi / 72 ? " — as large as a page is drawn" : "")
+            ? down < 1
+              ? `${(w / 72).toFixed(2)} × ${(h / 72).toFixed(2)} in, drawn at ${pw} × ${ph} px and taken down to about ${lw} × ${lh}, a hundred megapixels`
+              : `${(w / 72).toFixed(2)} × ${(h / 72).toFixed(2)} in, comes in at ${pw} × ${ph} px` +
+                (k < dpi / 72 ? " — as large as a page is drawn" : "")
             : `A page from 1 to ${sizes.length}.`}
         </p>
         <p className="modal-aside">
@@ -19186,8 +19286,12 @@ function ScalePageDialog({
   const shown = (px: number) => inUnits(px, units, dpi);
   const fromWidth = (w: number) => setFactor(w / per / width);
   const fromHeight = (h: number) => setFactor(h / per / height);
-  const ok = Number.isFinite(factor) && factor > 0 && Math.abs(factor - 1) > 1e-6;
   const [nw, nh] = [Math.max(1, Math.round(width * factor)), Math.max(1, Math.round(height * factor))];
+  // Nor past what a page can be, said here with the button put out as
+  // Canvas size says it: the window closed and said no after, with
+  // what was typed gone.
+  const fits = nw <= MAX_SIDE && nh <= MAX_SIDE && nw * nh <= 100e6;
+  const ok = Number.isFinite(factor) && factor > 0 && Math.abs(factor - 1) > 1e-6 && fits;
   const apply = () => {
     if (ok) onScale(factor);
   };
@@ -19249,6 +19353,12 @@ function ScalePageDialog({
           (pct) => setFactor(pct / 100),
           "%",
           1,
+        )}
+        {Number.isFinite(factor) && !fits && (
+          <p className="modal-aside" role="alert">
+            A page can be up to {MAX_SIDE.toLocaleString("en")} pixels a side and 100 megapixels;{" "}
+            {nw.toLocaleString("en")} × {nh.toLocaleString("en")} is past that.
+          </p>
         )}
         <p className="modal-aside">
           Proportions are kept: a design stretched one way is not the
@@ -19424,6 +19534,9 @@ function CanvasSizeDialog({
 /** What had the focus before the keyboard came to the menu bar: where
  * a row chosen gives it back (`MenuButton`). `null` for the page itself. */
 let menusEnteredFrom: HTMLElement | null = null;
+/** Whether that was a layer's row — asked when it is recorded, since a
+ * row deleted by what was chosen is no longer in the panel to ask. */
+let menusEnteredFromRow = false;
 
 function MenuButton({
   label,
@@ -19475,13 +19588,14 @@ function MenuButton({
       // Come from a layer's row, the keyboard goes back to the row of
       // the layer picked now, once the row chosen has had its say: a
       // copy made is picked, and a layer deleted has no row to go to.
-      if (back?.closest("aside.panel .layer-list li")) {
+      if (back && menusEnteredFromRow) {
         labelRef.current?.blur();
         requestAnimationFrame(() => {
           const lost = document.activeElement === null || document.activeElement === document.body;
           if (!lost) return;
           const picked = document.querySelector<HTMLElement>("aside.panel .layer-list li.selected");
-          (picked ?? (back.isConnected ? back : null))?.focus({ preventScroll: true });
+          const first = document.querySelector<HTMLElement>("aside.panel .layer-list li");
+          (picked ?? (back.isConnected ? back : first))?.focus({ preventScroll: true });
         });
         return;
       }
@@ -19540,6 +19654,7 @@ function MenuButton({
           const from = e.relatedTarget;
           if (!(from instanceof Element && from.closest(".menubar, [role=menu]"))) {
             menusEnteredFrom = from instanceof HTMLElement ? from : null;
+            menusEnteredFromRow = !!menusEnteredFrom?.closest("aside.panel .layer-list li");
           }
         }}
         onKeyDown={(e) => {
@@ -19711,6 +19826,29 @@ function MenuSheet({ menus, onClose }: { menus: MenuSpec[]; onClose: () => void 
         role="dialog"
         aria-label="Menus"
         onPointerDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // The arrows walk what shows — the menus' labels and the rows
+          // of the one open — as in the bar's menus; Tab was the only
+          // way down them.
+          const by =
+            e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : e.key === "Home" ? -Infinity : e.key === "End" ? Infinity : 0;
+          if (by === 0) return;
+          const stops = [
+            ...e.currentTarget.querySelectorAll<HTMLElement>(
+              ".sheet-menu-label, button.menu-item:not([disabled]), summary.menu-item",
+            ),
+          ].filter((r) => r.getClientRects().length > 0);
+          if (stops.length === 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const at = stops.indexOf(document.activeElement as HTMLElement);
+          const to =
+            by === -Infinity ? 0
+            : by === Infinity ? stops.length - 1
+            : at < 0 ? (by > 0 ? 0 : stops.length - 1)
+            : (at + by + stops.length) % stops.length;
+          stops[to].focus({ preventScroll: false });
+        }}
       >
         {menus.map((m) => (
           <section key={m.id} className={open === m.id ? "sheet-menu open" : "sheet-menu"}>
@@ -19726,26 +19864,6 @@ function MenuSheet({ menus, onClose }: { menus: MenuSpec[]; onClose: () => void 
                 className="sheet-rows"
                 role="menu"
                 aria-label={m.label}
-                onKeyDown={(e) => {
-                  // The arrows walk the rows showing, as in the bar's
-                  // menus; Tab was the only way down them.
-                  const by =
-                    e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : e.key === "Home" ? -Infinity : e.key === "End" ? Infinity : 0;
-                  if (by === 0) return;
-                  const rows = [
-                    ...e.currentTarget.querySelectorAll<HTMLElement>("button.menu-item:not([disabled]), summary.menu-item"),
-                  ].filter((r) => r.getClientRects().length > 0);
-                  if (rows.length === 0) return;
-                  e.preventDefault();
-                  e.stopPropagation();
-                  const at = rows.indexOf(document.activeElement as HTMLElement);
-                  const to =
-                    by === -Infinity ? 0
-                    : by === Infinity ? rows.length - 1
-                    : at < 0 ? (by > 0 ? 0 : rows.length - 1)
-                    : (at + by + rows.length) % rows.length;
-                  rows[to].focus({ preventScroll: false });
-                }}
               >
                 {rows(m.entries, 0)}
               </div>
@@ -20548,16 +20666,12 @@ function KindProps({
   ) => (
     <label key={label}>
       <SliderHead label={label} value={value} />
-      {/* Stretched to take a value past its ends — a blur Resize page
-          carried to 160 — so a nudge moves it a step from where it is
-          rather than back to the end of the slider. */}
-      <input
-        type="range"
-        min={Math.min(min, value)}
-        max={Math.max(max, value)}
+      <StretchRange
+        min={min}
+        max={max}
         step={step}
         value={value}
-        onChange={(e) => onEdit(set(Number(e.target.value)), true)}
+        onValue={(v) => onEdit(set(v), true)}
         onPointerUp={onGestureEnd}
         onKeyUp={onGestureEnd}
         onBlur={onGestureEnd}

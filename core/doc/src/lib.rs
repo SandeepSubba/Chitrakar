@@ -1248,6 +1248,12 @@ impl Document {
                 if !self.node(parent)?.kind.holds_children() {
                     return Err(DocError::NotAGroup(parent));
                 }
+                // As for SetTransform: a layer arriving placed by infinity
+                // (Repeat at ten thousand percent twenty times) saved as
+                // null and the file would not open again.
+                if !node.transform.within_reason() {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let siblings = &self.children[&parent];
                 if index > siblings.len() {
                     return Err(DocError::IndexOutOfBounds {
@@ -1353,11 +1359,7 @@ impl Document {
                 // place became infinity, a document saved after it said
                 // null where a number belonged, and would not open again.
                 // A billion pixels out is past any drawing as well.
-                let t = transform;
-                let fits = [t.a, t.b, t.c, t.d, t.e, t.f]
-                    .iter()
-                    .all(|v| v.is_finite() && v.abs() <= 1e9);
-                if !fits {
+                if !transform.within_reason() {
                     return Err(DocError::PlacedPastReason);
                 }
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
@@ -1604,6 +1606,16 @@ impl Document {
                 }
                 let prev = (self.meta.width, self.meta.height);
                 let filters = self.filter_kinds();
+                // Where each layer on the page stood, to be set back to
+                // exactly: scaled each way by what fills the page, there
+                // and back came to 0.99999994 rather than 1.
+                let placed: Vec<(NodeId, Transform)> = self
+                    .children
+                    .get(&self.root)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.transform)))
+                    .collect();
                 self.meta.width = width;
                 self.meta.height = height;
                 // Each way by what fills the page, where the size said is
@@ -1628,14 +1640,24 @@ impl Document {
                     },
                     prev,
                 );
-                Ok(Self::with_filters_back(
+                let back = Self::with_filters_back(
                     Command::ScaleCanvas {
                         factor: 1.0 / factor,
                         width: prev.0,
                         height: prev.1,
                     },
                     filters,
-                ))
+                );
+                let mut cmds = match back {
+                    Command::Batch(cmds) => cmds,
+                    one => vec![one],
+                };
+                cmds.extend(
+                    placed
+                        .into_iter()
+                        .map(|(id, transform)| Command::SetTransform { id, transform }),
+                );
+                Ok(Command::Batch(cmds))
             }
             Command::SetGuides { guides } => {
                 let prev = std::mem::replace(&mut self.guides, guides);

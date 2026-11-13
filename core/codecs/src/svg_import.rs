@@ -881,15 +881,16 @@ fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<Vec<[f32; 2]>>>) {
                 let even_odd = p
                     .fill()
                     .is_some_and(|f| f.rule() == usvg::FillRule::EvenOdd);
+                // Nonzero, the default, is said as the even-odd rings that
+                // fill the same: a counter wound against its letter, or a
+                // compound path's hole, stays open, and a star drawn in
+                // one stroke keeps its middle.
+                let rings = if even_odd || rings.is_empty() {
+                    rings
+                } else {
+                    chitrakar_render::boolean::nonzero_as_even_odd(&rings).unwrap_or(rings)
+                };
                 if rings.len() > 1 {
-                    // Nonzero, the default, is said as the even-odd rings
-                    // that fill the same: a counter wound against its
-                    // letter, or a compound path's hole, stays open.
-                    let rings = if even_odd {
-                        rings
-                    } else {
-                        chitrakar_render::boolean::nonzero_as_even_odd(&rings).unwrap_or(rings)
-                    };
                     out.push(rings);
                 } else {
                     out.extend(rings.into_iter().map(|ring| vec![ring]));
@@ -4613,6 +4614,15 @@ mod tests {
         assert!(
             ours.get(20, 20).a < 0.05,
             "and a hole wound against it does not: {:?}",
+            ours.get(20, 20)
+        );
+        // The same box given twice, as another program can write one, is
+        // still the box: kept as two rings each, even-odd read nothing.
+        let twice = nonzero.replace("M10,10 L30,10 L30,30 L10,30 Z", "M0,0 L40,0 L40,40 L0,40 Z");
+        let ours = chitrakar_render::render(&brought_in(&twice, 40, 40)).unwrap();
+        assert!(
+            ours.get(20, 20).a > 0.95,
+            "a box given twice shows: {:?}",
             ours.get(20, 20)
         );
     }

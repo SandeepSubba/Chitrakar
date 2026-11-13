@@ -151,6 +151,13 @@ export function said(err: unknown): string {
       "the TIFF holds channels in a way the editor does not read (CMYK with transparency, or extra channels such as a saved selection) — save it as RGB, or without the extra channels, first",
     ],
     [/image format could not be determined/i, "it is not a picture this editor can read"],
+    // A TIFF's reader's own words, said as what they mean for the file.
+    [
+      /16 bits per channel not supported/i,
+      "it is a TIFF of half-precision (16-bit floating-point) values, which the editor does not read — save it as 16-bit integer or 32-bit float first",
+    ],
+    [/required tag `?\w+`? not found|incomplete deflate stream|invalid (?:lzw|deflate)/i, "the file is damaged or cut short"],
+    [/decoder limits are exceeded/i, "it is larger than the editor can read"],
     [/^InvalidFont$/i, "it is not a font file this editor can read"],
     // A colour profile's reader's own words.
     [/^InvalidProfile$/i, "the file is damaged, or is not a colour profile"],

@@ -333,15 +333,53 @@ impl Bounds {
 
 /// The box a paint layer's strokes cover in its own space, or nothing
 /// when none of them covers anything.
+/// What a paint or clone layer's strokes lay down, as a box in its own
+/// space: an eraser lays nothing down — what it takes off is inside the
+/// paint already — and a stroke held to a region lays nothing outside
+/// that region's box. Both were counted, so a stroke dragged across the
+/// page inside a narrow marquee, or an eraser swept over empty page,
+/// gave the layer a box many times its ink, and alignment went by it.
 fn painted_bounds(strokes: &[chitrakar_doc::PaintStroke]) -> Option<[f32; 4]> {
-    strokes.iter().filter_map(|s| s.bounds()).reduce(|a, b| {
-        [
-            a[0].min(b[0]),
-            a[1].min(b[1]),
-            a[2].max(b[2]),
-            a[3].max(b[3]),
-        ]
-    })
+    strokes
+        .iter()
+        .filter(|s| !s.erase)
+        .filter_map(|s| {
+            let b = s.bounds()?;
+            let Some(held) = s.clip.as_deref().filter(|m| !m.invert) else {
+                return Some(b);
+            };
+            let (region, transform) = match &held.kind {
+                MaskKind::Vector { shape, transform } => {
+                    (local_bounds(flatten_shape(shape).as_ref()), *transform)
+                }
+                MaskKind::Raster {
+                    width,
+                    height,
+                    transform,
+                    ..
+                } => ((0.0, 0.0, *width as f32, *height as f32), *transform),
+                _ => return Some(b),
+            };
+            let Bounds::Rect(x0, y0, x1, y1) = transformed_local_bounds(transform, region) else {
+                return Some(b);
+            };
+            let soft = held.feather.max(0.0) * 3.0;
+            let cut = [
+                b[0].max(x0 - soft),
+                b[1].max(y0 - soft),
+                b[2].min(x1 + soft),
+                b[3].min(y1 + soft),
+            ];
+            (cut[2] > cut[0] && cut[3] > cut[1]).then_some(cut)
+        })
+        .reduce(|a, b| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        })
 }
 
 /// Local size (width, height) of a node's own content, before its transform.
@@ -647,9 +685,26 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
                 _ => boxed([x0, y0, x1, y1]),
             };
             if let Some(stroke) = stroke {
-                let pad = stroke_pad(shape, stroke) * max_scale(t);
+                // A mitred corner reaches as far as the corner it turns
+                // asks, not as far as any could: padded by the limit, an
+                // 80 by 60 rectangle with a border of 10 said it was 120
+                // by 100, and was aligned 30 off its ink.
+                let mitred = stroke.join == chitrakar_doc::StrokeJoin::Miter;
+                let pad = if mitred {
+                    let mut bevelled = stroke.clone();
+                    bevelled.join = chitrakar_doc::StrokeJoin::Bevel;
+                    stroke_pad(shape, &bevelled)
+                } else {
+                    stroke_pad(shape, stroke)
+                } * max_scale(t);
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+                }
+                if mitred {
+                    for [x, y] in miter_tips(flat.as_ref(), shape, stroke) {
+                        let (px, py) = (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f);
+                        bounds = bounds.union(Bounds::Rect(px, py, px, py));
+                    }
                 }
             }
             bounds
@@ -7567,6 +7622,73 @@ pub fn stroke_skeleton(shape: &VectorShape, width: f32, widths: &[f32]) -> Vec<S
         }
     }
     rings
+}
+
+/// Where a mitred stroke's corners come to points, in the shape's own
+/// space: at each corner of a path the band's outer edges meet out along
+/// the corner's bisector, half the band over the sine of half the angle
+/// away — unless that is past [`chitrakar_doc::MITER_LIMIT`] half-widths,
+/// where the corner is cut off and reaches no further than a bevel. A
+/// rectangle's or an ellipse's corners reach no further than half a band
+/// each way, which the pad says already. `flat` is `shape` flattened.
+fn miter_tips(
+    flat: &VectorShape,
+    shape: &VectorShape,
+    stroke: &chitrakar_doc::Stroke,
+) -> Vec<[f32; 2]> {
+    let band = match stroke_align(shape, stroke) {
+        StrokeAlign::Inside => return Vec::new(),
+        StrokeAlign::Centre => stroke.width / 2.0,
+        StrokeAlign::Outside => stroke.width,
+    };
+    let VectorShape::Path {
+        points,
+        closed,
+        subpaths,
+        ..
+    } = flat
+    else {
+        return Vec::new();
+    };
+    let mut tips = Vec::new();
+    let mut ring = |pts: &[[f32; 2]], closed: bool| {
+        let n = pts.len();
+        if n < 3 {
+            return;
+        }
+        let (first, last) = if closed { (0, n) } else { (1, n - 1) };
+        for i in first..last {
+            let p = pts[i];
+            let prev = pts[(i + n - 1) % n];
+            let next = pts[(i + 1) % n];
+            let unit = |q: [f32; 2]| {
+                let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+                let len = (dx * dx + dy * dy).sqrt();
+                (len > 1e-6).then(|| [dx / len, dy / len])
+            };
+            let (Some(u), Some(v)) = (unit(prev), unit(next)) else {
+                continue;
+            };
+            // The sine of half the corner's angle, from the cosine of it.
+            let cos = (u[0] * v[0] + u[1] * v[1]).clamp(-1.0, 1.0);
+            let half_sin = ((1.0 - cos) / 2.0).sqrt();
+            if half_sin <= 1.0 / chitrakar_doc::MITER_LIMIT {
+                continue;
+            }
+            let (bx, by) = (u[0] + v[0], u[1] + v[1]);
+            let blen = (bx * bx + by * by).sqrt();
+            if blen <= 1e-6 {
+                continue;
+            }
+            let reach = band / half_sin;
+            tips.push([p[0] - bx / blen * reach, p[1] - by / blen * reach]);
+        }
+    };
+    ring(points, *closed);
+    for sub in subpaths {
+        ring(sub, true);
+    }
+    tips
 }
 
 /// How far past the box its anchors make a path's stroke can land, in
@@ -26553,6 +26675,117 @@ mod tests {
             node_visual_bounds(&doc, id).unwrap(),
             Bounds::Rect(20.0, 20.0, 40.0, 40.0),
             "the layer itself is not one pixel wider for having a shadow"
+        );
+    }
+
+    /// A paint layer's box is the paint it shows: an eraser swept over
+    /// empty page adds nothing to it, and a stroke held to a region adds
+    /// only what is inside the region.
+    #[test]
+    fn a_paint_layers_box_is_the_paint_it_shows() {
+        let stroke = |points: Vec<[f32; 2]>, erase: bool, clip: Option<Box<Mask>>| {
+            chitrakar_doc::PaintStroke {
+                points,
+                radii: vec![10.0],
+                color: RED,
+                softness: 0.0,
+                erase,
+                source: [0.0, 0.0],
+                heal: false,
+                clip,
+            }
+        };
+        let held = Mask {
+            kind: MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 80.0,
+                    height: 300.0,
+                    radius: 0.0,
+                },
+                transform: Transform::translation(100.0, 0.0),
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let strokes = vec![
+            stroke(
+                vec![[20.0, 50.0], [380.0, 50.0]],
+                false,
+                Some(Box::new(held)),
+            ),
+            stroke(vec![[200.0, 200.0], [390.0, 260.0]], true, None),
+        ];
+        let b = painted_bounds(&strokes).unwrap();
+        assert_eq!(b, [100.0, 40.0, 180.0, 60.0], "{b:?}");
+    }
+
+    /// A mitred border's box is as far as its corners reach, not as far
+    /// as any corner could: an 80 by 60 rectangle with a border of 10 is
+    /// 90 by 70, and a triangle's box reaches its sharp corner's point,
+    /// which is past its anchors' box and no further.
+    #[test]
+    fn a_mitred_borders_box_is_its_ink() {
+        let stroke = |align: StrokeAlign| chitrakar_doc::Stroke {
+            color: RED,
+            width: 10.0,
+            widths: Vec::new(),
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            cap: Default::default(),
+            join: chitrakar_doc::StrokeJoin::Miter,
+            start_marker: Default::default(),
+            end_marker: Default::default(),
+            align: Some(align),
+        };
+        let boxed = |shape: VectorShape, align: StrokeAlign| {
+            let mut doc = Document::new(400, 300, ColorMode::Rgb);
+            let root = doc.root();
+            let mut node = Node::vector("S", shape);
+            node.transform = Transform::translation(100.0, 100.0);
+            if let NodeKind::Vector { stroke: s, .. } = &mut node.kind {
+                *s = Some(stroke(align));
+            }
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(node),
+            })
+            .unwrap();
+            let id = doc.children_of(root).unwrap()[0];
+            match node_visual_bounds(&doc, id).unwrap() {
+                Bounds::Rect(x0, y0, x1, y1) => (x0, y0, x1, y1),
+                other => panic!("{other:?}"),
+            }
+        };
+        let rect = || VectorShape::Rect {
+            width: 80.0,
+            height: 60.0,
+            radius: 0.0,
+        };
+        let (x0, y0, x1, y1) = boxed(rect(), StrokeAlign::Centre);
+        assert!(
+            (x1 - x0 - 90.0).abs() < 0.01 && (y1 - y0 - 70.0).abs() < 0.01,
+            "{x0} {y0} {x1} {y1}"
+        );
+        let (x0, _, x1, _) = boxed(rect(), StrokeAlign::Outside);
+        assert!((x1 - x0 - 100.0).abs() < 0.01, "outside: {x0} {x1}");
+        // A triangle pointing up, 60 wide and 80 tall: its apex's miter
+        // reaches up past the apex by half the band over the sine of
+        // half its angle, and no further.
+        let triangle = VectorShape::Path {
+            points: vec![[0.0, 80.0], [30.0, 0.0], [60.0, 80.0]],
+            closed: true,
+            smooth: false,
+            handles: Vec::new(),
+            subpaths: Vec::new(),
+        };
+        let (_, y0, _, _) = boxed(triangle, StrokeAlign::Centre);
+        let half_angle = (30.0f32 / 80.0).atan();
+        let tip = 5.0 / half_angle.sin();
+        assert!(
+            (100.0 - y0 - tip).abs() < 0.05,
+            "apex reaches {} above, its miter {tip}",
+            100.0 - y0
         );
     }
 

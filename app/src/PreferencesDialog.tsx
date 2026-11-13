@@ -377,7 +377,15 @@ export function PreferencesDialog({
   // window has drawn: read as it drew, it was the other theme's accent.
   useEffect(() => {
     const frame = requestAnimationFrame(() => setThemeAccent(readAccent()));
-    return () => cancelAnimationFrame(frame);
+    // And when the theme the page wears changes without the preference
+    // changing — "as the system", and the system turned dark — which
+    // left the picker on the other theme's accent.
+    const watch = new MutationObserver(() => setThemeAccent(readAccent()));
+    watch.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => {
+      cancelAnimationFrame(frame);
+      watch.disconnect();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefs.theme]);
 

@@ -21660,6 +21660,89 @@ assert(
   );
 }
 
+// 9dn. The thirty-fifth audit's interface pass. Resize page took a
+// size past what a page can be, closed, and only then said no; the
+// flyout of tools put away was one row a thousand pixels long, past a
+// phone's edge; and just above a phone's width at a larger interface
+// size the bar's name and its unsaved dot went onto a second row.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  await p.click('.menu-label:text-is("Page")');
+  await p.click('.menu-pop .menu-item:has-text("Resize page")');
+  await p.waitForSelector('[role="dialog"][aria-label="Resize page"]');
+  const width = p.locator('input[aria-label="Scale to width"]');
+  await width.fill("100000");
+  await width.press("Tab");
+  await p.waitForTimeout(150);
+  assert(
+    await p.locator('[role="dialog"][aria-label="Resize page"] button:text-is("Scale")').isDisabled(),
+    "Resize page puts its button out for a page past what one can be",
+  );
+  await width.press("Enter");
+  await p.waitForTimeout(200);
+  assert(
+    (await p.locator('[role="dialog"][aria-label="Resize page"]').count()) === 1,
+    "and Enter leaves the window up with what was typed",
+  );
+  await ctx.close();
+}
+{
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await ctx.addInitScript(() => {
+    try {
+      localStorage.setItem(
+        "chitrakar:prefs",
+        JSON.stringify({ hiddenTools: ["Rect", "Ellipse", "Polygon", "Star", "Line", "Pen", "Text", "Paint", "Eraser", "Clone", "Heal", "Gradient", "Eyedropper", "Crop", "Zoom", "Hand"] }),
+      );
+    } catch {}
+  });
+  const p = await ctx.newPage();
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const more = p.locator('.toolbar button[aria-label^="More tools"]');
+  if ((await more.count()) > 0) {
+    // Brought into sight first: the rail scrolling under a flyout lets
+    // it go, and a click on a button out of sight scrolls it.
+    await more.first().scrollIntoViewIfNeeded();
+    await p.waitForTimeout(300);
+    await more.first().click();
+    await p.waitForTimeout(250);
+    const box = await p.locator('[role="group"][aria-label="Tools put away"]').boundingBox();
+    assert(box && box.x >= 0 && box.x + box.width <= 390 + 1, `the tools put away stay inside a phone's window (${box?.x}, ${box?.width})`);
+  }
+  await ctx.close();
+}
+{
+  const ctx = await browser.newContext({ viewport: { width: 700, height: 900 } });
+  await ctx.addInitScript(() => {
+    try {
+      localStorage.setItem("chitrakar:prefs", JSON.stringify({ uiScale: 1.25 }));
+    } catch {}
+  });
+  const p = await ctx.newPage();
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  // An edit, so the unsaved dot is there.
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 20, r.y + 20);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 80, r.y + 60, { steps: 3 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  const row = await p.locator(".topbar-menus").boundingBox();
+  assert(row && row.height < 60, `the menus' row stays one row at 700 wide and a larger size (${row?.height})`);
+  await ctx.close();
+}
+
 // 9dm. The thirty-fourth audit's interface pass. A window opened from a
 // menu row gave the focus back to the menu's label, not to where the
 // keyboard had been; F10 did nothing from a field that keeps its keys;
@@ -21986,8 +22069,12 @@ assert(
   await p.locator("#engine-canvas").hover();
   await p.keyboard.press("t");
   await p.mouse.click(r.x + 60, r.y + 60);
-  await p.waitForTimeout(300);
+  // The block is open and has the caret before anything is typed: on a
+  // busy machine a fixed pause was not always long enough.
+  await p.waitForSelector("textarea.inline-text");
+  await p.waitForFunction(() => document.activeElement?.matches("textarea.inline-text"));
   await p.keyboard.type("Tokyo ");
+  await p.waitForFunction(() => document.querySelector("textarea.inline-text")?.value.startsWith("Tokyo"));
   await p.evaluate(() => {
     for (const key of ["Escape", "Enter"]) {
       document.activeElement?.dispatchEvent(

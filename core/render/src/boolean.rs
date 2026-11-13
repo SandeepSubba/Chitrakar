@@ -575,6 +575,77 @@ fn winding(rings: &[Ring], p: Point) -> i32 {
 /// no piece has the region on both sides there is nothing a hole could
 /// have appeared in, and the rings are left as they are.
 pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
+    // Rings whose boxes do not meet cannot wind round each other's
+    // points, so each cluster of rings that do is worked out alone. The
+    // work inside one grows as the square of its points: a line of text
+    // was one path of every glyph, and two hundred letters took seven
+    // seconds where each letter alone takes nothing.
+    let boxes: Vec<[f32; 4]> = rings
+        .iter()
+        .map(|r| {
+            r.iter()
+                .fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
+                    [
+                        b[0].min(p[0]),
+                        b[1].min(p[1]),
+                        b[2].max(p[0]),
+                        b[3].max(p[1]),
+                    ]
+                })
+        })
+        .collect();
+    let mut owner: Vec<usize> = (0..rings.len()).collect();
+    fn root(owner: &mut [usize], mut i: usize) -> usize {
+        while owner[i] != i {
+            owner[i] = owner[owner[i]];
+            i = owner[i];
+        }
+        i
+    }
+    for i in 0..rings.len() {
+        for j in i + 1..rings.len() {
+            let (a, b) = (boxes[i], boxes[j]);
+            if a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3] {
+                let (ri, rj) = (root(&mut owner, i), root(&mut owner, j));
+                owner[ri] = rj;
+            }
+        }
+    }
+    let mut clusters: std::collections::BTreeMap<usize, Vec<Ring>> = Default::default();
+    for (i, ring) in rings.iter().enumerate() {
+        clusters
+            .entry(root(&mut owner, i))
+            .or_default()
+            .push(ring.clone());
+    }
+    if clusters.len() == 1 {
+        return cluster_as_even_odd(rings);
+    }
+    let mut changed = false;
+    let mut out = Vec::with_capacity(rings.len());
+    for cluster in clusters.into_values() {
+        match cluster_as_even_odd(&cluster) {
+            Some(said) => {
+                changed = true;
+                out.extend(said);
+            }
+            None => out.extend(cluster),
+        }
+    }
+    changed.then_some(out)
+}
+
+/// The most points one cluster of rings is worked out for. Past it the
+/// rings are left as they are — read even-odd, which differs only where
+/// an outline winds round a point twice — rather than the page hanging:
+/// a path of fifty thousand points took a minute, two hundred thousand
+/// twelve.
+const NONZERO_MOST: usize = 4000;
+
+fn cluster_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
+    if rings.iter().map(Vec::len).sum::<usize>() > NONZERO_MOST {
+        return None;
+    }
     const SIDE: f32 = 1e-3;
     let mut keep = Vec::new();
     let mut inside_twice = false;
@@ -595,7 +666,23 @@ pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
             (false, false) => {}
         }
     }
-    if !inside_twice || keep.is_empty() {
+    // An edge the outline runs twice the same way — a subpath given
+    // twice, as a clip path drawn by another program can be — is one
+    // edge of the region, not two: kept twice, it chained into the same
+    // ring twice, which even-odd reads as nothing at all. The rules part
+    // company there too, with nothing inside twice to say so.
+    let before = keep.len();
+    let mut seen = std::collections::HashSet::new();
+    keep.retain(|(a, b)| {
+        seen.insert([
+            a[0].to_bits(),
+            a[1].to_bits(),
+            b[0].to_bits(),
+            b[1].to_bits(),
+        ])
+    });
+    let doubled = keep.len() < before;
+    if !(inside_twice || doubled) || keep.is_empty() {
         return None;
     }
     chain(keep)

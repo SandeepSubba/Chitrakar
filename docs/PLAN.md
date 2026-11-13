@@ -111,7 +111,9 @@ without reading anything else.*
      filters left behind by the page's own changes, a file of the
      editor's own reopened changed. The thirty-fourth: those filters
      carried twice inside a group, a crop frame outliving its page,
-     the focus given back to the menus rather than where it was.
+     the focus given back to the menus rather than where it was. The
+     thirty-fifth: a file Repeat could make that would not reopen, a
+     mitred border's box, a clip path given twice drawing nothing.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12295,6 +12297,59 @@ without reading anything else.*
   patterns, is anchored to the page's corner. Its check of round 33
   also found a filter's length carried past its slider's end jumped
   back to the end on the first nudge (the slider stretches to it now).
+  **A thirty-fifth audit (November 2026).** Its check of round 34: an
+  SVG clip path or mask with a subpath given twice drew nothing (an
+  edge run twice the same way is one edge); the crop frame outlived a
+  turn, Resize page and a new document, which set the page's size
+  before the refresh that was to notice it (it goes where every size
+  passes now); Undo and Redo on the bar still lost the focus as they
+  greyed; a stretched slider shrank back mid-drag; Resize page's undo
+  came back a rounding off (the layers' places are set back exactly);
+  the phone's drawer's arrows did not reach its labels; a layer deleted
+  from the menus by keyboard left the focus on the bar. Its editing
+  pass (two fuzz runs weighted to brushes, masks, styles and copies:
+  nothing): a mitred border's box was padded by the furthest any
+  corner could reach (an 80 by 60 rectangle with a border of 10 was
+  120 by 100; its corners' own points now); a paint layer's box
+  counted an eraser's sweep and paint held outside a region; an
+  adjustment's or a filter's Blend was offered and did nothing (greyed
+  now). Its interface pass: Repeat at ten thousand percent twenty times
+  placed copies by infinity, saved as null, and the file and its draft
+  would not open (refused, and no layer is placed by what is not a
+  number); the tools put away ran off a phone's edge (the flyout
+  wraps); Resize page said no to a page past the limit only after
+  closing; just above a phone's width at a larger interface size the
+  bar went to two rows; a long layer name wrapped the Adjust menu onto
+  ten lines; the PDF window promised a size a hundred megapixels cut;
+  a bright accent's focus ring was under 3:1 on the light theme; Blend
+  shapes made a hundred when asked for five hundred without a word; a
+  comp or a region kept under a name already kept was written over
+  without a word; Preferences let a new region's softness be 500 where
+  the window stops at 200; the accent picker kept the other theme's
+  accent when the system's theme changed. Limits written down: a brush
+  or an eraser on a layer stretched one way lays a dab stretched with
+  it (a stroke's radius is one number in the layer's own space); an
+  adjustment held to a faded layer changes what shows through it too
+  (it is drawn where it stands and mixed back by the layer's coverage);
+  a dashed rounded rectangle made a path starts its dashes elsewhere,
+  as an ellipse does; F10 from a field whose value the leaving commits
+  gives Escape back to the page rather than the field. Its files pass:
+  an SVG path of many points under the default (nonzero) rule hung the
+  page for a minute, a line of SVG text of two hundred letters for
+  seven seconds (the rule is worked out per cluster of rings that can
+  touch, and a cluster past 4000 points is read even-odd, which
+  differs only where an outline winds round a point twice); the Batch
+  window and a damaged or half-float TIFF said a decoder's own words;
+  an SVG a billion across was "taken down to 0%". Limits written down:
+  a CMYK TIFF written out, and a placed CMYK picture in any export, are
+  separated again from the page's RGB, so a black of K alone comes out
+  as four inks and a cyan of 100 picks up magenta (the PDF keeps the
+  inks a layer was given; the page is drawn in RGB, and carrying ink
+  values through it is work for after 1.0); an SVG of sixty thousand
+  elements comes in and is then slow to work with, its layers' panel
+  above all; a PNG that states its colour by gAMA, cHRM or cICP rather
+  than an ICC profile comes in as sRGB; a WebP's EXIF orientation is
+  not applied, as a browser's own does not.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

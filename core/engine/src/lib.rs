@@ -11615,9 +11615,16 @@ impl Session {
             {
                 shrink *= 0.99;
             }
+            // Said to as many places as a share this small needs: a
+            // drawing a billion across was "taken down to 0%".
+            let percent = shrink * 100.0;
+            let places = if percent >= 1.0 {
+                1
+            } else {
+                (-percent.log10()).ceil().clamp(1.0, 8.0) as usize + 1
+            };
             self.import_notes.push(format!(
-                "at {width} × {height} it is larger than a page can be, so it is taken down to {}%",
-                ((shrink * 1000.0).round() / 10.0)
+                "at {width} × {height} it is larger than a page can be, so it is taken down to {percent:.places$}%"
             ));
         }
         let (width, height) = if shrink < 1.0 {
@@ -31527,6 +31534,35 @@ mod tests {
         );
     }
 
+    /// Repeat by a step that runs past what a number holds — ten thousand
+    /// percent twenty times — is refused, and leaves the document as it
+    /// was. The copies were placed by infinity, saved as null, and the
+    /// file (and the draft) would not open again.
+    #[test]
+    fn a_repeat_past_what_a_number_holds_is_refused() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let id = add_rect(&mut s, "Card", 20.0, 10.0);
+        let before = s.save().unwrap();
+        assert!(s
+            .repeat_nodes(&[id], 20, 0.0, 0.0, 0.0, 100.0, [0.0, 0.0])
+            .is_err());
+        assert!(s
+            .repeat_nodes(&[id], 10, 1e38, 0.0, 0.0, 1.0, [0.0, 0.0])
+            .is_err());
+        assert_eq!(
+            s.document().children_of(s.document().root()).unwrap().len(),
+            1
+        );
+        assert_eq!(s.save().unwrap(), before, "nothing was made");
+        // A sane repeat still goes.
+        assert_eq!(
+            s.repeat_nodes(&[id], 3, 30.0, 0.0, 0.0, 1.0, [0.0, 0.0])
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
     /// A smooth path cut at an anchor is drawn as it was: each piece keeps
     /// the bends it had. The curve was read off the anchors either side,
     /// and a piece of two anchors had none to read — a straight line.
@@ -31604,12 +31640,26 @@ mod tests {
         );
         let page = s.render().unwrap();
         assert!(page.get(200, 150).a > 0.99, "{:?}", page.get(200, 150));
+        let root = s.document().root();
+        let id = s.document().children_of(root).unwrap()[0];
+        let was = s.document().node(id).unwrap().transform;
         assert!(s.undo().unwrap());
         let back = s.render().unwrap();
         assert!(
             back.get(400, 300).a > 0.99,
             "and back: {:?}",
             back.get(400, 300)
+        );
+        assert_eq!(
+            s.document().node(id).unwrap().transform,
+            Transform::default(),
+            "and placed exactly as it was"
+        );
+        assert!(s.redo().unwrap());
+        assert_eq!(
+            s.document().node(id).unwrap().transform,
+            was,
+            "redo is the same step again"
         );
     }
 

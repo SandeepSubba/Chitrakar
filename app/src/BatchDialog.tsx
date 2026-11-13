@@ -14,6 +14,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { withDefaults, type DevelopPreset } from "./develop";
+import { said } from "./imports";
 import { WasmSession } from "./engine";
 import type { Outgoing } from "./files";
 import { developElsewhere } from "./developer";
@@ -121,14 +122,19 @@ export function BatchDialog({
       try {
         done.push(await developToJpeg(f, settings, opts));
       } catch (err) {
-        // As Place says it: the reader's own words only after ours.
+        // As Place says it, in words a person reads (`said`): the
+        // reader's own ("subview_until_eof(): Offset … is behind EOF")
+        // were put in brackets after ours.
         const text = String(err);
+        const plain = said(err);
         failed.push(
           /outside the bounds/i.test(text)
             ? `${f.name}: the file is damaged (its parts point outside it)`
-            : /camera raw|decode|EOF|corrupt/i.test(text)
-              ? `${f.name}: it may be damaged, or from a camera this editor does not know yet (${text})`
-              : `${f.name}: ${text}`,
+            : plain !== text.replace(/^(?:Error|RuntimeError|JsError):\s*/i, "").trim()
+              ? `${f.name}: ${plain}`
+              : /camera raw|decode|EOF|corrupt/i.test(text)
+                ? `${f.name}: it may be damaged, or from a camera this editor does not know yet`
+                : `${f.name}: ${plain}`,
         );
       }
     }

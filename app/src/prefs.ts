@@ -401,7 +401,7 @@ export function clamp(p: Prefs): Prefs {
     // The engine keeps a bleed to 25 mm as well; held here so the field
     // does not show what will not be written.
     pdfBleed: n(p.pdfBleed, 0, 25, 0),
-    feather: n(p.feather, 0, 500, 0),
+    feather: n(p.feather, 0, 200, 0),
     subjectTolerance: n(p.subjectTolerance, 0, 1, 0.5),
     // Only names that are tools, each once, and never the one tool the
     // rail cannot do without. `typeof []` is "object" and so is

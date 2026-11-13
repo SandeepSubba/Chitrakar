@@ -55,6 +55,18 @@ pub struct Transform {
     pub f: f32,
 }
 
+impl Transform {
+    /// Whether a layer can be placed by this: every number a number, and
+    /// none past a billion — past what an f32 holds a place becomes
+    /// infinity, which a file writes as null and cannot read back, and a
+    /// billion pixels out is past any drawing.
+    pub fn within_reason(&self) -> bool {
+        [self.a, self.b, self.c, self.d, self.e, self.f]
+            .iter()
+            .all(|v| v.is_finite() && v.abs() <= 1e9)
+    }
+}
+
 impl Default for Transform {
     fn default() -> Self {
         Self {
