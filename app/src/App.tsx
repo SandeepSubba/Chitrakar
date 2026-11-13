@@ -1,0 +1,22716 @@
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
+import { Icon, IconName } from "./icons";
+import {
+  findEntry,
+  isTauri,
+  menuSignature,
+  setNativeMenu,
+  subIsDead,
+  type MenuEntry,
+  type MenuSpec,
+} from "./nativeMenu";
+import { byteAt, editOf, rangePieces, rangeSays, shiftRuns, styleRange, type Styling } from "./runs";
+import { accentAsText, onColour, readPrefs, usePrefs, withRecent, withRecentColor, type AlignTo } from "./prefs";
+import {
+  DOCUMENTS,
+  baseName,
+  saysItsName,
+  chooseToOpen,
+  chooseToSave,
+  folderName,
+  imageType,
+  openedFiles,
+  readPath,
+  writeFiles,
+  graphemes,
+  canShareFiles,
+  shareFiles,
+  writePath,
+  type Outgoing,
+} from "./files";
+import { SHAPE_PRESETS, presetPath } from "./shapes";
+import { boxOf, gapsBetween, union, type Box, type Gap } from "./measure";
+import { equalSpacing } from "./spacing";
+import { matchesIn, replaceIn, type FindOptions } from "./findReplace";
+import { FingerTaps, NONE_HELD, afterPress, wear, type Held } from "./touch";
+import { onLaunch, takeShared } from "./offline";
+import {
+  ALWAYS_SHOWN,
+  KEY_FAMILIES,
+  RAIL,
+  SELECT_TOOLS,
+  SHAPE_TOOLS,
+  TOOL_ICONS,
+  TOOLS,
+  boundKeys,
+  type Tool,
+} from "./tools";
+import {
+  boundChords,
+  chordFromEvent,
+  typesAlone,
+  chordLabel,
+  browserKeeps,
+  firesWhileTyping,
+  onAMac,
+  type CommandId,
+} from "./commands";
+import { ExportDialog } from "./ExportDialog";
+import { NumberField } from "./NumberField";
+import { enterMeansGo } from "./dialogKeys";
+import { BatchDialog, type BatchFile } from "./BatchDialog";
+import { enginePicture } from "./picture";
+import { pdfReader, unpackPage } from "./pdf";
+import { readRaw } from "./raw";
+import {
+  importKind,
+  OPEN_ACCEPT,
+  PLACE_ACCEPT,
+  PLACE_EXTENSIONS,
+  RAW_EXTENSIONS,
+  said,
+  unreadable,
+} from "./imports";
+import {
+  drawHistogram,
+  histogram,
+  kelvinToSlider,
+  LIGHTS,
+  lightOf,
+  markClipping,
+  RAW_DEFAULTS,
+  type DevelopPreset,
+  type RawInfo,
+  type RawSettings,
+  samePreset,
+  cleanCurve,
+  autoChannels,
+  cleanMixer,
+  MIXER_BANDS,
+  cleanGrading,
+  GRADE_ZONES,
+  NO_GRADING,
+  type GradeZone,
+  type CurveKey,
+  sliderToKelvin,
+  stepKelvin,
+  withDefaults,
+} from "./develop";
+import { GpuFrames } from "./gpuFrames";
+import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
+import { focusFirstRow, menuKeyDown } from "./menuKeys";
+import { ActionSelect } from "./ActionSelect";
+import { chipKeys } from "./chipKeys";
+import { guardSession } from "./engineGuard";
+import {
+  addLensFiles,
+  forgetLensFile,
+  giveLensProfiles,
+  lensFiles,
+  lensProfileTexts,
+} from "./lensProfiles";
+import { developElsewhere, startDeveloper } from "./developer";
+import { SUBJECT_MODEL, fetchSubjectModel, hasSubjectModel, subjectMatte } from "./subject";
+import {
+  Adjustment,
+  BlendMode,
+  AuthoredColor,
+  Command,
+  Effect,
+  EffectKind,
+  TextList,
+  Gradient,
+  GradientSpread,
+  GradientStop,
+  KeptStyle,
+  LayerInfo,
+  LUMA,
+  Mask,
+  NodeId,
+  NodeKind,
+  Pin,
+  Stroke,
+  Swatch,
+  Transform,
+  VectorShape,
+  WasmSession,
+  colorToHex,
+  showInksWith,
+  flatColor,
+  display_p3_profile,
+  engine_version,
+  effectBody,
+  effectKind,
+  getWasmMemory,
+  hexColor,
+  hexToCmykColor,
+  swatchName,
+  gradientStops,
+  initEngine,
+  nodePayload,
+  identity,
+  sendCommand,
+  sendPreview,
+  type TextSpec,
+} from "./engine";
+
+/** The colour a ramp shows partway between two stops.
+ *
+ * The engine mixes stops on the values a device shows — the space SVG,
+ * PDF and every browser mix a gradient in — so this has to as well:
+ * interpolating in linear light instead lands a visibly different colour
+ * at the midpoint, and inserting a stop there would bend a ramp that
+ * should have been left alone. CMYK stops resolve
+ * through the press profile in the engine, which the UI cannot reproduce
+ * without it, so those interpolate by ink — close enough to place a stop,
+ * and it is the same ink the flat-fill editor authors. */
+function mixAuthored(
+  a: AuthoredColor,
+  b: AuthoredColor,
+  t: number,
+): AuthoredColor {
+  const at = (x: number, y: number) => x + (y - x) * t;
+  // A palette colour is mixed as the colour it stands for: a stop added
+  // between a named colour and another was a copy of the first, and the
+  // ramp changed when it should not have.
+  [a, b] = [flatColor(a), flatColor(b)];
+  if ("Srgb" in a && "Srgb" in b) {
+    return {
+      Srgb: {
+        r: at(a.Srgb.r, b.Srgb.r),
+        g: at(a.Srgb.g, b.Srgb.g),
+        b: at(a.Srgb.b, b.Srgb.b),
+        a: at(a.Srgb.a, b.Srgb.a),
+      },
+    };
+  }
+  if ("Cmyk" in a && "Cmyk" in b) {
+    return {
+      Cmyk: {
+        c: at(a.Cmyk.c, b.Cmyk.c),
+        m: at(a.Cmyk.m, b.Cmyk.m),
+        y: at(a.Cmyk.y, b.Cmyk.y),
+        k: at(a.Cmyk.k, b.Cmyk.k),
+        a: at(a.Cmyk.a, b.Cmyk.a),
+      },
+    };
+  }
+  return a;
+}
+
+/** `outer` applied after `inner` — the nesting rule, matching the engine's
+ * Transform::compose. */
+function composeT(outer: Transform, inner: Transform): Transform {
+  return {
+    a: outer.a * inner.a + outer.c * inner.b,
+    b: outer.b * inner.a + outer.d * inner.b,
+    c: outer.a * inner.c + outer.c * inner.d,
+    d: outer.b * inner.c + outer.d * inner.d,
+    e: outer.a * inner.e + outer.c * inner.f + outer.e,
+    f: outer.b * inner.e + outer.d * inner.f + outer.f,
+  };
+}
+
+/** An offset in a radial gradient's box units as its rings measure it:
+ * through its axes, where it has them (`Gradient::Radial::axes`). */
+function throughAxes(axes: [number, number, number, number] | null | undefined, du: number, dv: number): [number, number] {
+  return axes ? [axes[0] * du + axes[1] * dv, axes[2] * du + axes[3] * dv] : [du, dv];
+}
+
+/** A linear ramp's `to - from`, in the shape's box units, for a ramp
+ * that runs `seen` (also in box units) as it is seen on the page, where
+ * `axes` carries the box onto the page (as `throughAxes` reads it).
+ *
+ * A ramp is stored in the box, and its bands lie square to `to - from`
+ * there: in a box that is not square on the page, the bands of a ramp
+ * dragged at an angle came out slanted to the drag, the red running
+ * 228 to 32 along a line that should have been one colour. The ramp a
+ * person drags is square on the page, so what is stored is the box's
+ * ramp that makes it so: one whose colour changes, step by step across
+ * the box, as the page's does — `G·seen / (seenᵀ·G·seen)`, with `G` the
+ * page's measure of the box — written as its end. */
+function rampStored(axes: [number, number, number, number], seen: [number, number]): [number, number] {
+  const [a, b, c, d] = axes;
+  const [g00, g01, g11] = [a * a + c * c, a * b + c * d, b * b + d * d];
+  const [x, y] = seen;
+  const len = x * (g00 * x + g01 * y) + y * (g01 * x + g11 * y);
+  if (!(len > 1e-12)) return seen;
+  const w = [(g00 * x + g01 * y) / len, (g01 * x + g11 * y) / len];
+  const w2 = w[0] * w[0] + w[1] * w[1];
+  return w2 > 1e-12 ? [w[0] / w2, w[1] / w2] : seen;
+}
+
+/** How a box's units lie on the screen, for `rampStored` and `rampSeen`:
+ * where its two sides go, read off the function that places a point of
+ * the box. */
+function boxAxes(at: (u: number, v: number) => [number, number]): [number, number, number, number] {
+  const o = at(0, 0);
+  const x = at(1, 0);
+  const y = at(0, 1);
+  return [x[0] - o[0], y[0] - o[0], x[1] - o[1], y[1] - o[1]];
+}
+
+/** The other way: where a stored ramp's end is seen, square to its bands
+ * on the page — the knob the ramp is dragged by. `rampStored` of what
+ * this gives is the ramp given. */
+function rampSeen(axes: [number, number, number, number], stored: [number, number]): [number, number] {
+  const [a, b, c, d] = axes;
+  const [g00, g01, g11] = [a * a + c * c, a * b + c * d, b * b + d * d];
+  const det = g00 * g11 - g01 * g01;
+  const v2 = stored[0] * stored[0] + stored[1] * stored[1];
+  if (!(Math.abs(det) > 1e-12) || !(v2 > 1e-12)) return stored;
+  const w = [stored[0] / v2, stored[1] / v2];
+  const q = [(g11 * w[0] - g01 * w[1]) / det, (-g01 * w[0] + g00 * w[1]) / det];
+  const len = w[0] * q[0] + w[1] * q[1];
+  return len > 1e-12 ? [q[0] / len, q[1] / len] : stored;
+}
+
+/** The transform that undoes `t`, or null where it collapses a dimension
+ * and nothing can. */
+function invertT(t: Transform): Transform | null {
+  const det = t.a * t.d - t.b * t.c;
+  if (Math.abs(det) < 1e-9) return null;
+  const [a, b, c, d] = [t.d / det, -t.b / det, -t.c / det, t.a / det];
+  return { a, b, c, d, e: -(a * t.e + c * t.f), f: -(b * t.e + d * t.f) };
+}
+
+/** A path's handles, padded to one per anchor so callers can index freely.
+ * Stored empty when nothing is curved, which is what keeps older files (and
+ * plain polylines) free of the field entirely. */
+function withHandles(path: Extract<VectorShape, { Path: unknown }>["Path"]) {
+  const zero = () => [0, 0, 0, 0] as [number, number, number, number];
+  return path.points.map((_, i) => path.handles[i] ?? zero());
+}
+
+/** Explicit handles that reproduce exactly what the path already draws, so
+ * converting hands you controls without changing the shape under you.
+ *
+ * A straight segment is a cubic whose controls lie on the chord at thirds,
+ * and a Catmull-Rom spline is a cubic whose controls are a sixth of the
+ * neighbour-to-neighbour span — so which seed preserves the shape depends on
+ * whether `smooth` was on. */
+function seedHandles(
+  path: Extract<VectorShape, { Path: unknown }>["Path"],
+): [number, number, number, number][] {
+  const pts = path.points;
+  const n = pts.length;
+  const at = (i: number) =>
+    path.closed ? pts[((i % n) + n) % n] : pts[Math.min(Math.max(i, 0), n - 1)];
+  return pts.map((p, i) => {
+    const [prev, next] = [at(i - 1), at(i + 1)];
+    if (path.smooth) {
+      const tx = (next[0] - prev[0]) / 6;
+      const ty = (next[1] - prev[1]) / 6;
+      return [-tx, -ty, tx, ty];
+    }
+    return [
+      (prev[0] - p[0]) / 3,
+      (prev[1] - p[1]) / 3,
+      (next[0] - p[0]) / 3,
+      (next[1] - p[1]) / 3,
+    ];
+  });
+}
+
+/** What each of them asks the engine for. */
+const REGION_KIND: Record<string, string> = {
+  Select: "rect",
+  "Select ellipse": "ellipse",
+  Lasso: "path",
+  // The wand asks the engine to work the region out from the page
+  // itself, so it has no shape of its own to send.
+  Wand: "",
+};
+
+/** What a layer can be pinned to inside a frame, named for the axis so
+ * the words say what they mean rather than "start" and "end". */
+const PINS: Record<"x" | "y", [Pin, string][]> = {
+  x: [
+    ["Start", "Left"],
+    ["Middle", "Centre"],
+    ["End", "Right"],
+    ["Stretch", "Both sides"],
+  ],
+  y: [
+    ["Start", "Top"],
+    ["Middle", "Centre"],
+    ["End", "Bottom"],
+    ["Stretch", "Top and bottom"],
+  ],
+};
+
+/** The line patterns the panel offers, as the lengths on and off that
+ * the document keeps. Scaled by the stroke's own width would make them
+ * follow it; fixed lengths are what every editor's presets are, and the
+ * numbers are in the shape's own units. */
+const DASHES: [string, number[]][] = [
+  ["Solid", []],
+  ["Dashed", [12, 8]],
+  ["Dotted", [1, 5]],
+  ["Long dash", [24, 10]],
+  ["Dash-dot", [16, 6, 2, 6]],
+];
+
+/** How far along a dash pattern repeats: its lengths summed, or twice
+ * that for an odd number of them, whose runs have to come round to "on"
+ * again. */
+const dashPeriod = (dash: number[]): number => {
+  const sum = dash.reduce((a, b) => a + Math.max(0, b), 0);
+  return dash.length % 2 === 1 ? sum * 2 : sum;
+};
+
+/** A glyph per layer kind, so the stack is scannable without reading the
+ * type label at the end of every row. */
+/** The layer kinds that hold other layers — what a row can be dropped
+ * into, and what the panel walks down through. */
+const HOLDS_CHILDREN = new Set(["group", "artboard"]);
+
+const KIND_ICONS: Record<string, IconName> = {
+  group: "group-layer",
+  artboard: "frame",
+  instance: "instance",
+  vector: "rect",
+  raster: "image",
+  adjustment: "adjust",
+  filter: "filter",
+  text: "text",
+  paint: "paint",
+  clone: "clone",
+};
+
+/** The blend modes, grouped the way every editor groups them: the plain
+ * one, the ones that darken, the ones that lighten, the ones that work on
+ * contrast, the ones that compare, and the four that take one part of a
+ * colour and leave the rest. */
+const BLEND_GROUPS: [string, BlendMode[]][] = [
+  ["", ["Normal"]],
+  ["Darken", ["Darken", "Multiply", "ColorBurn"]],
+  ["Lighten", ["Lighten", "Screen", "ColorDodge"]],
+  ["Contrast", ["Overlay", "SoftLight", "HardLight"]],
+  ["Compare", ["Difference", "Exclusion"]],
+  ["Colour", ["Hue", "Saturation", "Color", "Luminosity"]],
+];
+/** What each is called in the picker: the spec's CamelCase read as
+ * words. */
+const BLEND_NAMES: Partial<Record<BlendMode, string>> = {
+  ColorDodge: "Colour dodge",
+  ColorBurn: "Colour burn",
+  HardLight: "Hard light",
+  SoftLight: "Soft light",
+  Color: "Colour",
+};
+/** Minimum travel between recorded brush samples, and how far a simplified
+ * stroke may stray from the one that was drawn — both in document units. */
+/** The two boxes a block's text can be typed into: the panel's field and
+ * the one that opens over the block on the canvas. A style button reads
+ * whichever of them holds the caret. */
+const TEXT_BOXES = ["Text on canvas", "Text content"];
+
+const BRUSH_STEP = 3;
+/** How many pixels a layer's picture in the panel is across. Twice the
+ * size it is shown at, so it stays crisp on a display that has the
+ * pixels for it. */
+const THUMB = 36;
+const BRUSH_TOLERANCE = 2;
+
+/** The colour the page shows at a document point, as a hex string, or
+ * null where the page shows nothing. The composite rather than the layer
+ * under the cursor: what the eye is pointing at is what it takes. */
+function colorUnder(
+  session: WasmSession,
+  x: number,
+  y: number,
+): string | null {
+  const c = session.color_at(x, y);
+  if (c.length !== 4 || c[3] === 0) return null;
+  return `#${[c[0], c[1], c[2]]
+    .map((v) => v.toString(16).padStart(2, "0"))
+    .join("")}`;
+}
+
+/** Ramer-Douglas-Peucker, returning the *indices* it keeps so per-sample
+ * data (the widths) can be carried along with the points. A raw stroke is
+ * hundreds of points at screen resolution, which renders the same and
+ * cannot be edited by hand; this keeps the shape within `tol` of what was
+ * drawn and leaves a handful of anchors to grab afterwards. */
+function simplifyStroke(pts: [number, number][], tol: number): number[] {
+  const walk = (lo: number, hi: number): number[] => {
+    let worst = 0;
+    let at = lo;
+    for (let i = lo + 1; i < hi; i++) {
+      const d = pointToSegment(pts[i], pts[lo], pts[hi]);
+      if (d > worst) {
+        worst = d;
+        at = i;
+      }
+    }
+    if (worst <= tol) return [lo, hi];
+    return [...walk(lo, at).slice(0, -1), ...walk(at, hi)];
+  };
+  if (pts.length < 3) return pts.map((_, i) => i);
+  return walk(0, pts.length - 1);
+}
+
+/** Stroke width from how fast the cursor is travelling, in document units
+ * per millisecond: slow strokes lay down a full-width line, fast ones thin
+ * out. Clamped so a flick still leaves a visible mark. */
+function speedWidth(speed: number): number {
+  return Math.max(0.25, Math.min(1, 1 - speed * 0.35));
+}
+
+function pointToSegment(
+  p: [number, number],
+  a: [number, number],
+  b: [number, number],
+): number {
+  const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+  const len2 = dx * dx + dy * dy;
+  const t =
+    len2 < 1e-9
+      ? 0
+      : Math.max(
+          0,
+          Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2),
+        );
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+/** Is this event going into something that takes text? Only then should a
+ * bare letter or Delete mean a character rather than a shortcut. A checkbox
+ * or a slider is focusable and ignores both, so treating every input as
+ * text entry silently disables the shortcuts after any panel click. */
+/** The draft of the open document, kept in IndexedDB so it survives a
+ * closed tab and a crash; a .chitra with images can run past what
+ * localStorage holds, and IndexedDB takes bytes as they are.
+ *
+ * Kept in pieces: `current` is the document without its pictures and
+ * originals (`save_skeleton`), written after every edit; each picture's
+ * PNG and each original is a record of its own, `part:<name>`, written
+ * once; and `parts` lists the ones `current` needs. Kept whole, a page of
+ * photographs was hundreds of megabytes copied out and written again a
+ * breath after every edit. A draft from before has no `parts`, and is
+ * the whole document. */
+const DRAFT_DB = "chitrakar";
+const DRAFT_STORE = "drafts";
+const PART = "part:";
+function draftDb(): Promise<IDBDatabase | null> {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(DRAFT_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(DRAFT_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+/** Records put and deleted in one transaction, done when it is. */
+function draftWrite(
+  db: IDBDatabase,
+  put: [string, unknown][],
+  remove: string[] = [],
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DRAFT_STORE, "readwrite");
+    const store = tx.objectStore(DRAFT_STORE);
+    for (const [key, value] of put) store.put(value, key);
+    for (const key of remove) store.delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = tx.onabort = () => reject(tx.error);
+  });
+}
+function draftRead<T>(db: IDBDatabase, keys: string[]): Promise<(T | undefined)[]> {
+  return new Promise((resolve) => {
+    const store = db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE);
+    const out: (T | undefined)[] = [];
+    let left = keys.length;
+    if (left === 0) resolve(out);
+    keys.forEach((key, i) => {
+      const req = store.get(key);
+      req.onsuccess = () => {
+        out[i] = req.result as T;
+        if (--left === 0) resolve(out);
+      };
+      req.onerror = () => {
+        if (--left === 0) resolve(out);
+      };
+    });
+  });
+}
+function draftPartsKept(db: IDBDatabase): Promise<Set<string>> {
+  return new Promise((resolve) => {
+    const req = db.transaction(DRAFT_STORE).objectStore(DRAFT_STORE).getAllKeys();
+    req.onsuccess = () =>
+      resolve(
+        new Set(
+          req.result
+            .filter((k): k is string => typeof k === "string" && k.startsWith(PART))
+            .map((k) => k.slice(PART.length)),
+        ),
+      );
+    req.onerror = () => resolve(new Set());
+  });
+}
+/** Each tab keeps a draft of its own, in a slot it holds a lock on for
+ * as long as it is open: two tabs wrote one draft over the other, and
+ * only the last one's work came back. Slot 0 is the keys a draft always
+ * had (`current`, `parts`, …), so a draft from before slots still opens;
+ * slot n's are the same keys with `#n`. A picture's part is shared by
+ * every slot that needs it, and goes when none does. */
+const DRAFT_SLOTS = 8;
+let draftSlot = 0;
+const slotKey = (slot: number, key: string) => (slot === 0 ? key : `${key}#${slot}`);
+type Locks = {
+  request: (name: string, opts: { ifAvailable: boolean }, cb: (lock: unknown) => Promise<void> | void) => Promise<unknown>;
+  query: () => Promise<{ held?: { name?: string }[] }>;
+};
+const webLocks = (): Locks | null =>
+  typeof navigator !== "undefined" && "locks" in navigator ? ((navigator as unknown as { locks: Locks }).locks ?? null) : null;
+/** Take a slot for this tab and hold it. Slot 0 is asked for a moment
+ * longer: the page a reload replaces lets its lock go a little after the
+ * new one starts, and the reloaded page is the same tab, whose draft is
+ * in slot 0. Without locks (an older browser), every tab is slot 0. */
+async function claimDraftSlot(): Promise<number> {
+  const locks = webLocks();
+  if (!locks) return 0;
+  const take = (n: number) =>
+    new Promise<boolean>((resolve) => {
+      locks
+        .request(`chitrakar-draft-${n}`, { ifAvailable: true }, (lock) => {
+          if (!lock) {
+            resolve(false);
+            return;
+          }
+          resolve(true);
+          // Held for the life of the tab.
+          return new Promise<void>(() => {});
+        })
+        .catch(() => resolve(false));
+    });
+  for (let tries = 0; tries < 6; tries++) {
+    if (await take(0)) return 0;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  for (let n = 1; n < DRAFT_SLOTS; n++) if (await take(n)) return n;
+  // Every slot held by a tab still open: this one keeps no draft rather
+  // than share slot 0 with a live tab, whose work it was then offered as
+  // "your last session", and whose draft its Discard deleted.
+  return -1;
+}
+/** The slots another open tab holds. */
+async function slotsHeld(): Promise<Set<number>> {
+  const locks = webLocks();
+  const out = new Set<number>();
+  if (!locks) return out;
+  try {
+    for (const l of (await locks.query()).held ?? []) {
+      const m = /^chitrakar-draft-(\d+)$/.exec(l.name ?? "");
+      if (m) out.add(Number(m[1]));
+    }
+  } catch {
+    // Nothing known: nothing is taken to be held.
+  }
+  return out;
+}
+/** Every part some slot's draft lists, other than `but`'s — and every
+ * part a slot is about to list, which it is writing now (`pending`): a
+ * tab writing a big photograph's parts one at a time had them on disk
+ * with no list naming them yet, and another tab's draft deleted them as
+ * stale; the crash draft came back with pictures missing. */
+async function partsListed(db: IDBDatabase, but: number): Promise<Set<string>> {
+  const slots = [...Array(DRAFT_SLOTS).keys()].filter((n) => n !== but);
+  const lists = await draftRead<unknown>(
+    db,
+    slots.flatMap((n) => [slotKey(n, "parts"), slotKey(n, "pending")]),
+  );
+  const out = new Set<string>();
+  for (const l of lists) {
+    if (typeof l !== "string") continue;
+    try {
+      for (const n of JSON.parse(l) as string[]) out.add(n);
+    } catch {
+      // A list that does not read keeps nothing.
+    }
+  }
+  return out;
+}
+
+/** The next moment the page has nothing else to do (or two seconds,
+ * whichever comes first: long enough for a gesture begun just now to go
+ * first, short enough that a draft is not left behind while the page
+ * stays busy; a turn of the loop where there is no idle callback, as in
+ * Safari). */
+function whenIdle(): Promise<void> {
+  return new Promise((done) => {
+    if (typeof requestIdleCallback === "function") requestIdleCallback(() => done(), { timeout: 2_000 });
+    else setTimeout(done, 0);
+  });
+}
+
+/** Whether a press is held anywhere on the page: a drag or a slider
+ * still in hand, whose preview the crash draft leaves out. */
+let pressHeld = false;
+if (typeof window !== "undefined") {
+  window.addEventListener("pointerdown", () => (pressHeld = true), true);
+  for (const end of ["pointerup", "pointercancel"]) window.addEventListener(end, () => (pressHeld = false), true);
+  window.addEventListener("blur", () => (pressHeld = false));
+}
+
+/** Keep the draft: the parts not kept yet, then the skeleton with the
+ * list of parts it needs in one step, then the parts no draft needs any
+ * more — so whatever moment the tab is closed at, the skeleton kept has
+ * its parts. `stillLatest` says whether a later draft has begun, which
+ * writes its own skeleton: this one's would be older. */
+async function putDraft(
+  session: WasmSession,
+  stillLatest: () => boolean,
+  /** Parts another draft still needs: the one offered back and not yet
+   * answered, whose pictures were deleted from under it as stale. */
+  spare: string[] = [],
+): Promise<void> {
+  if (draftSlot < 0) return;
+  const db = await draftDb();
+  if (!db) return;
+  const names = JSON.parse(session.draft_parts()) as string[];
+  const kept = await draftPartsKept(db);
+  // Said before any is written, so no other tab takes them for stale.
+  if (names.some((n) => !kept.has(n))) {
+    await draftWrite(db, [[slotKey(draftSlot, "pending"), JSON.stringify(names)]]);
+  }
+  for (const name of names) {
+    if (kept.has(name)) continue;
+    // A picture's part is its PNG, made on this thread — seconds for a
+    // big photograph — so it waits for the page to be idle rather than
+    // landing in the middle of whatever comes next (it froze a zoom
+    // three seconds once, just after a hundred-megapixel picture was
+    // placed). Within two seconds whatever happens, so the net is there.
+    await whenIdle();
+    if (!stillLatest()) return;
+    await draftWrite(db, [[PART + name, session.draft_part(name)]]);
+    if (!stillLatest()) return;
+  }
+  if (!stillLatest()) return;
+  await draftWrite(
+    db,
+    [
+      [slotKey(draftSlot, "current"), session.save_skeleton_pressed(pressHeld)],
+      [slotKey(draftSlot, "parts"), JSON.stringify(names)],
+    ],
+    // Listed now, so no longer only pending.
+    [slotKey(draftSlot, "pending")],
+  );
+  const wanted = new Set([...names, ...spare, ...(await partsListed(db, draftSlot))]);
+  const stale = [...kept].filter((n) => !wanted.has(n)).map((n) => PART + n);
+  if (stale.length) await draftWrite(db, [], stale);
+}
+/** The draft kept, and the names of the parts it needs (none for a draft
+ * kept whole), with what was kept beside it, and the slot it is in. */
+type Draft = {
+  bytes: Uint8Array;
+  parts: string[];
+  slot: number;
+  name: string | null;
+  path: string | null;
+  saved: boolean;
+};
+async function getDraft(slot: number): Promise<Draft | null> {
+  const db = await draftDb();
+  if (!db) return null;
+  const [bytes, parts, name, path, saved] = await draftRead<unknown>(
+    db,
+    ["current", "parts", "name", "path", "saved"].map((k) => slotKey(slot, k)),
+  );
+  if (!(bytes instanceof Uint8Array) || bytes.length === 0) return null;
+  let names: string[] = [];
+  try {
+    names = typeof parts === "string" ? (JSON.parse(parts) as string[]) : [];
+  } catch {
+    names = [];
+  }
+  return {
+    bytes,
+    parts: names,
+    slot,
+    name: typeof name === "string" ? name : null,
+    path: typeof path === "string" && path ? path : null,
+    // A draft kept before this was written down is taken as unsaved: a
+    // question too many is cheaper than work lost twice.
+    saved: saved === "yes",
+  };
+}
+/** The first draft no open tab is keeping: this tab's own slot first
+ * (the draft its last page left), then any a closed tab left. */
+async function offeredDraft(skip: Set<number> = new Set()): Promise<Draft | null> {
+  const held = await slotsHeld();
+  const order = [draftSlot, ...[...Array(DRAFT_SLOTS).keys()].filter((n) => n !== draftSlot)];
+  for (const n of order) {
+    if (skip.has(n) || (n !== draftSlot && held.has(n))) continue;
+    const d = await getDraft(n);
+    if (d) return d;
+  }
+  return null;
+}
+/** A draft's parts, by name: those still there. */
+async function getDraftParts(names: string[]): Promise<Map<string, Uint8Array>> {
+  const db = await draftDb();
+  const out = new Map<string, Uint8Array>();
+  if (!db) return out;
+  const got = await draftRead<unknown>(db, names.map((n) => PART + n));
+  names.forEach((n, i) => {
+    const b = got[i];
+    if (b instanceof Uint8Array) out.set(n, b);
+  });
+  return out;
+}
+/** What is kept beside the draft, so a restored document comes back as
+ * what it was and not only as its layers: `name`, what it was called;
+ * `path`, the file it had in the desktop shell, so Save writes back to
+ * it; `saved`, whether that file already held it. */
+type DraftNote = "name" | "path" | "saved";
+async function putDraftNote(key: DraftNote, value: string): Promise<void> {
+  if (draftSlot < 0) return;
+  const db = await draftDb();
+  if (!db) return;
+  db.transaction(DRAFT_STORE, "readwrite")
+    .objectStore(DRAFT_STORE)
+    .put(value, slotKey(draftSlot, key));
+}
+
+/** Where the tab that copied layers last says so, and this tab's name
+ * for it there. */
+const COPIED_KEY = "chitrakar:copied-in";
+const THIS_TAB = Math.random().toString(36).slice(2);
+/** Whether this tab has copied layers this visit: only then has it a
+ * copy that another tab's could have made stale. */
+let copiedHere = false;
+/** Whether the eraser has said, this visit, that it needs a layer. */
+let toldEraser = false;
+
+/** Move the draft kept in `from` to a slot no tab holds and no draft
+ * is in, and say which (or `null` where none is free). A tab takes a
+ * closed tab's slot, and with it the draft its bar is offering: the
+ * first change made before that was answered was written over it, and
+ * the closed tab's work was gone for good. */
+/** Locks this tab holds on slots it moved an offered draft into, by
+ * slot: held until the draft is answered, so another tab opening meanwhile
+ * cannot take the slot for its own and write over the draft — or have
+ * this tab's Discard clear that tab's work instead. */
+const movedSlotLocks = new Map<number, () => void>();
+function holdSlot(n: number): Promise<(() => void) | null> {
+  const locks = webLocks();
+  if (!locks) return Promise.resolve(() => {});
+  return new Promise((resolve) => {
+    locks
+      .request(`chitrakar-draft-${n}`, { ifAvailable: true }, (lock) => {
+        if (!lock) {
+          resolve(null);
+          return;
+        }
+        return new Promise<void>((release) => resolve(() => release()));
+      })
+      .catch(() => resolve(null));
+  });
+}
+/** Let go of a slot held for a moved draft, once it has been answered. */
+function releaseMovedSlot(n: number) {
+  movedSlotLocks.get(n)?.();
+  movedSlotLocks.delete(n);
+}
+
+async function moveDraft(from: number): Promise<number | null> {
+  const db = await draftDb();
+  if (!db) return null;
+  const keys = ["current", "parts", "pending", "name", "path", "saved"];
+  for (let n = 0; n < DRAFT_SLOTS; n++) {
+    if (n === from) continue;
+    const release = await holdSlot(n);
+    if (!release) continue;
+    const [there] = await draftRead<unknown>(db, [slotKey(n, "current")]);
+    if (there !== undefined) {
+      release();
+      continue;
+    }
+    movedSlotLocks.set(n, release);
+    const got = await draftRead<unknown>(db, keys.map((k) => slotKey(from, k)));
+    const put: [string, unknown][] = [];
+    keys.forEach((k, i) => {
+      if (got[i] !== undefined) put.push([slotKey(n, k), got[i]]);
+    });
+    await draftWrite(db, put, keys.map((k) => slotKey(from, k)));
+    return n;
+  }
+  return null;
+}
+
+/** Let a slot's draft go: its records, and — unless the parts are being
+ * taken over (a draft restored into this tab, whose next draft writes
+ * the ones it needs) — the parts no other slot lists. */
+async function clearDraft(slot: number = draftSlot, keepParts = false): Promise<void> {
+  if (slot < 0) return;
+  const db = await draftDb();
+  if (!db) return;
+  const keys = ["current", "parts", "pending", "name", "path", "saved"].map((k) => slotKey(slot, k));
+  let parts: string[] = [];
+  if (!keepParts) {
+    const others = await partsListed(db, slot);
+    parts = [...(await draftPartsKept(db))].filter((n) => !others.has(n)).map((n) => PART + n);
+  }
+  await draftWrite(db, [], [...keys, ...parts]).catch(() => {});
+}
+
+/** Each text box's selection as it was before its latest edit, so the
+ * edit is known exactly rather than guessed (`editOf`). */
+const textSelections = new WeakMap<HTMLTextAreaElement, [number, number]>();
+/** What was picked in the on-canvas text editor when it last lost the
+ * caret, as bytes of its text, and when. */
+let lastInlinePick: { range: [number, number]; text: string; at: number } | null = null;
+
+/** The part of a text block picked in whichever text box was last used,
+ * as bytes into its words — or what was picked in the on-canvas editor a
+ * press just closed. What a style button, the panel's colour and a
+ * palette swatch all apply to when there is one. */
+function textRange(t: TextSpec): [number, number] | null {
+  for (const label of TEXT_BOXES) {
+    const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
+    if (el && el.selectionStart !== el.selectionEnd) {
+      const [a, b] = [
+        Math.min(el.selectionStart, el.selectionEnd),
+        Math.max(el.selectionStart, el.selectionEnd),
+      ];
+      return [byteAt(el.value, a), byteAt(el.value, b)];
+    }
+  }
+  const kept = lastInlinePick;
+  if (kept && kept.text === t.text && Date.now() - kept.at < 1500) return kept.range;
+  return null;
+}
+
+/** What a proofing failure means, in words: the colour engine's own
+ * names for it say nothing to a person. */
+function proofingTrouble(err: unknown): string {
+  const said = String(err);
+  return /UnsupportedProfileConnection|profile/i.test(said)
+    ? "it cannot be used to proof: it is not a printer's (output) profile. A press profile, such as the printer or the press supplies, can be."
+    : said;
+}
+
+/** A tool's flyout, pinned to the window beside the button it opened
+ * from: the rail scrolls when it is longer than the window, and a flyout
+ * placed inside a scrolling rail is cut off at its edge. Down the side,
+ * beside the button; along the bottom, on a phone, above it — where the
+ * stylesheet's own placing was cut away whole, since a rail that scrolls
+ * sideways clips up and down too, and nothing behind the corner could
+ * be reached. */
+/** A slider stretched to take a value past its ends — a blur Resize page
+ * carried to 160 — so a nudge moves it a step from where it is rather
+ * than back to the end. The stretch holds while the slider is being
+ * dragged: taken from the value alone, the end came back to 50 the
+ * moment the drag passed it, the thumb jumped, and 160 could not be
+ * dragged back to. */
+function StretchRange({
+  min,
+  max,
+  value,
+  onValue,
+  ...rest
+}: {
+  min: number;
+  max: number;
+  value: number;
+  onValue: (v: number) => void;
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, "min" | "max" | "value" | "onChange" | "type">) {
+  const dragging = useRef(false);
+  const [ends, setEnds] = useState<[number, number]>([Math.min(min, value), Math.max(max, value)]);
+  useEffect(() => {
+    setEnds(([lo, hi]) =>
+      dragging.current
+        ? [Math.min(lo, value), Math.max(hi, value)]
+        : [Math.min(min, value), Math.max(max, value)],
+    );
+  }, [min, max, value]);
+  const { onPointerDown, onPointerUp, onPointerCancel, ...others } = rest;
+  return (
+    <input
+      type="range"
+      min={ends[0]}
+      max={ends[1]}
+      value={value}
+      onChange={(e) => onValue(Number(e.target.value))}
+      onPointerDown={(e) => {
+        dragging.current = true;
+        onPointerDown?.(e);
+      }}
+      onPointerUp={(e) => {
+        dragging.current = false;
+        onPointerUp?.(e);
+      }}
+      onPointerCancel={(e) => {
+        dragging.current = false;
+        onPointerCancel?.(e);
+      }}
+      {...others}
+    />
+  );
+}
+
+/** A layer's name as a menu row says it: a name of a paragraph's length
+ * wrapped the row onto ten lines, where the layer's own row cuts it short
+ * with an ellipsis. Cut by characters, not UTF-16 units, so an emoji is
+ * never halved. */
+function clipName(name: string, most = 28): string {
+  const chars = Array.from(name);
+  return chars.length > most ? `${chars.slice(0, most - 1).join("")}…` : name;
+}
+
+function pinFlyout(el: HTMLDivElement | null) {
+  const from = el?.parentElement;
+  const rail = el?.closest(".toolbar");
+  if (!el || !from || !rail) return;
+  const at = from.getBoundingClientRect();
+  el.style.position = "fixed";
+  // Wrapped to the room the window has: with many tools put away the
+  // flyout was one row a thousand pixels long, and on a phone or a
+  // tablet the tools past the window's edge could not be reached.
+  if (getComputedStyle(rail).flexDirection === "column") {
+    const left = Math.round(at.right + 6);
+    el.style.left = `${left}px`;
+    el.style.maxWidth = `${Math.max(48, window.innerWidth - left - 8)}px`;
+    const tall = el.getBoundingClientRect().height;
+    el.style.top = `${Math.round(Math.max(8, Math.min(at.top, window.innerHeight - tall - 8)))}px`;
+    return;
+  }
+  el.style.maxWidth = `${window.innerWidth - 16}px`;
+  const wide = el.getBoundingClientRect().width;
+  el.style.top = "auto";
+  el.style.bottom = `${Math.round(window.innerHeight - at.top + 6)}px`;
+  el.style.left = `${Math.round(Math.max(8, Math.min(at.left, window.innerWidth - wide - 8)))}px`;
+}
+
+/** Whether a window (a dialog, the develop window) was up over the editor
+ * when the key now being handled was pressed. Its keys are its own:
+ * Escape that closes it must not also let go of the picked layer, Enter
+ * is its own, and a letter typed at it is not a tool. Asked at the very
+ * start of the key's way through the page (the window's capture phase),
+ * because by the time the editor's own handlers hear it the window may
+ * already be gone: it closes on the same Escape, and React puts that on
+ * the page in a microtask, which runs between one listener and the next. */
+let windowUpForKey = false;
+/** Says whether a window is up for the key now on its way, and only for
+ * it: let go once the key has been heard everywhere, in a task of its
+ * own. Kept, it said a window was up long after one closed, and a file
+ * dropped on the panel was taken and nothing placed. */
+function noteWindowForKey() {
+  windowUpForKey = document.querySelector(WINDOWS) !== null;
+  if (windowUpForKey) setTimeout(() => (windowUpForKey = false), 0);
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("keydown", noteWindowForKey, true);
+}
+/** The controls the focus last came to by a press of the pointer rather
+ * than by a key that moves it: a button clicked keeps the focus, and
+ * Space there is the hand, where a button reached with Tab is pressed by
+ * it. `:focus-visible` was read for this, and Chromium sets it on the
+ * clicked button at the very Space that asks — so Space undid again
+ * after a click on Undo, toggled an eye back, and a drag meant to pan
+ * moved the picture.
+ *
+ * Asked of the control rather than of the last key: a window opened by
+ * its chord and closed with Escape gives the focus back to the button
+ * clicked before, which was still clicked, not reached — and the panes
+ * stopped panning after Preferences or Export had been opened. So only
+ * the focus arriving decides: by a press, the control was clicked; by
+ * Tab, an arrow or Home/End, reached; given back by a window, it is
+ * what it was. */
+const clickedControls = new WeakSet<Element>();
+let pressedLast = false;
+let navigating = false;
+const MOVES_FOCUS = new Set(["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "pointerdown",
+    (e) => {
+      pressedLast = true;
+      // A press on the control that has the focus already brings no
+      // focusin, and a control reached with Tab and then clicked is
+      // clicked.
+      setTimeout(() => {
+        const now = document.activeElement;
+        if (now && e.target instanceof Node && now.contains(e.target)) clickedControls.add(now);
+      }, 0);
+    },
+    true,
+  );
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.code === "Space") return;
+      pressedLast = false;
+      if (!MOVES_FOCUS.has(e.key)) return;
+      navigating = true;
+      setTimeout(() => (navigating = false), 0);
+    },
+    true,
+  );
+  window.addEventListener(
+    "focusin",
+    (e) => {
+      const el = e.target;
+      if (!(el instanceof Element)) return;
+      if (navigating) clickedControls.delete(el);
+      else if (pressedLast) clickedControls.add(el);
+    },
+    true,
+  );
+}
+/** What counts as a window for the keys: a dialog's scrim, a panel laid
+ * over the canvas (feather, straighten), and an open menu or the
+ * canvas's menu — Escape that puts one of those away is not also a
+ * deselect, and a layer chord pressed at one does not reach the
+ * document behind it. */
+const WINDOWS = ".modal-scrim, .sheet-scrim, .straighten-panel, .menu-pop";
+
+/** A press on the page or a ruler that put an open menu away does only
+ * that: it went on to paint a stroke or let go of the picked layer under
+ * the menu it closed, as no menu anywhere else lets a press through. A
+ * right press goes on, so that it can open a menu where it lands. */
+function pressOnlyCloses(e: PointerEvent) {
+  if (e.button === 2) return;
+  const t = e.target as Element | null;
+  if (t?.closest?.(".canvas-host, .ruler")) {
+    e.stopPropagation();
+    e.preventDefault();
+  }
+}
+
+/** Files that arrive while a window is up — "Open with", a share, the
+ * shell's drop — wait for it to close. Opened under the Develop window,
+ * a document took the session the raw was being developed on, and
+ * Place then said "no raw file is open" and lost the settings. */
+const mustWait = (busy: () => boolean = () => false) =>
+  document.querySelector(".modal-scrim, .sheet-scrim, .straighten-panel") !== null || busy();
+async function windowsClosed(busy: () => boolean = () => false): Promise<void> {
+  while (mustWait(busy)) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+function aWindowIsUp(): boolean {
+  return windowUpForKey || document.querySelector(WINDOWS) !== null;
+}
+
+/** The keys of a field in the panel or the bar. Its own keys stay its
+ * own — a letter is typed, not a tool, and an arrow moves the caret —
+ * but a chord with Ctrl or ⌘ goes on to the editor: undo, save, export
+ * with the caret in a box were dead, and Ctrl+S reached the browser's
+ * own "save page". Enter takes what was typed (the field's blur does)
+ * and stays in the field — which is drawn afresh from the document, so
+ * the focus is put back on the new one by its name. */
+/** The fields whose typing waits for the caret to leave (`fieldKeys`):
+ * an undo pressed in one with something typed drops what was typed,
+ * rather than undoing the step before and then, when the caret left,
+ * settling the typing over it and losing that step's redo. */
+const settlesOnLeave = new WeakSet<HTMLInputElement>();
+
+/** Drops what was typed into such a field and not yet settled. */
+function dropUnsettled(el: Element | null): boolean {
+  if (!(el instanceof HTMLInputElement) || !settlesOnLeave.has(el)) return false;
+  if (el.value === el.defaultValue) return false;
+  el.value = el.defaultValue;
+  el.select();
+  return true;
+}
+
+/** Whether a key pressed in a text box goes on to the editor: a chord
+ * with Ctrl or ⌘, but not the box's own (select all, cut, copy, paste,
+ * undo, redo). Kept in the box, Ctrl+S was the browser's "save page" and
+ * Ctrl+= zoomed the whole window rather than the page. */
+function passesChord(e: React.KeyboardEvent): boolean {
+  if (!(e.ctrlKey || e.metaKey)) return false;
+  if (["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase())) return false;
+  // Nor whatever chord the person has given those same commands: Undo
+  // moved to Ctrl+U and pressed in the box undid the document instead
+  // of the typing, and what had been typed was lost.
+  return !textChords.has(chordFromEvent(e.nativeEvent));
+}
+/** The chords bound now to the commands a text box answers itself:
+ * undo, redo, select all, cut, copy, paste. Kept by the editor as the
+ * person's bindings change. */
+let textChords = new Set<string>();
+
+function fieldKeys(e: React.KeyboardEvent<HTMLInputElement>): void {
+  settlesOnLeave.add(e.currentTarget);
+  if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+  // Escape puts back what the field said, as the text box's does: what
+  // was typed is not taken when the field is let go of.
+  if (e.key === "Escape") {
+    e.currentTarget.value = e.currentTarget.defaultValue;
+    e.currentTarget.select();
+    return;
+  }
+  if (e.key !== "Enter") return;
+  const el = e.currentTarget;
+  const name = el.getAttribute("aria-label");
+  el.blur();
+  if (!name) return;
+  requestAnimationFrame(() => {
+    const again = [...document.querySelectorAll<HTMLInputElement>("input")].find(
+      (i) => i.getAttribute("aria-label") === name,
+    );
+    again?.focus({ preventScroll: true });
+    again?.select();
+  });
+}
+
+/** Whether a field's text is what it was given: tabbing through a field
+ * without typing in it is not an edit, and taking the shown (rounded)
+ * number as one moved the layer by the rounding. */
+function asGiven(el: HTMLInputElement): boolean {
+  return el.value === el.defaultValue;
+}
+
+function isTextEntry(target: EventTarget | null): boolean {
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLElement && target.isContentEditable) return true;
+  if (!(target instanceof HTMLInputElement)) return false;
+  return [
+    "text",
+    "number",
+    "search",
+    "email",
+    "url",
+    "tel",
+    "password",
+  ].includes(target.type);
+}
+
+/** The tools that drag a box out of nothing, which shift squares off. */
+/** The region tools that catch on the same lines a shape does. A lasso
+ * has no corner to catch, and the wand drags nothing. */
+const SNAPPED_REGIONS = new Set<string>(["Select", "Select ellipse"]);
+
+const BOX_TOOLS = new Set<string>([
+  "Rect",
+  "Ellipse",
+  "Polygon",
+  "Star",
+  "Shape",
+  "Frame",
+  "Crop",
+]);
+
+/** How far in a star's inner corners sit, as a share of the way out.
+ *
+ * A star's inner radius is the one that puts its inner points on the
+ * lines its outer points make — which is what makes a five-pointed star
+ * look like a five-pointed star rather than a cog — kept within reach of
+ * that for counts where the arithmetic runs away. */
+function starDepth(sides: number): number {
+  return Math.min(
+    0.8,
+    Math.max(0.2, Math.cos((2 * Math.PI) / sides) / Math.cos(Math.PI / sides)),
+  );
+}
+
+/** How many corners the polygon and star tools draw with: whole, and
+ * no fewer than three or more than the engine draws. */
+function polygonCount(n: number): number {
+  return Math.max(3, Math.min(100, Math.round(n)));
+}
+
+/** The box a drag out of nothing describes: from the point it began to
+ * the point it is at, or about that first point when it is the middle
+ * rather than a corner. */
+function dragBox(drag: {
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  fromCentre?: boolean;
+}): [number, number, number, number] {
+  const [dx, dy] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+  if (drag.fromCentre) {
+    return [
+      drag.startX - Math.abs(dx),
+      drag.startY - Math.abs(dy),
+      Math.abs(dx) * 2,
+      Math.abs(dy) * 2,
+    ];
+  }
+  return [
+    Math.min(drag.startX, drag.lastX),
+    Math.min(drag.startY, drag.lastY),
+    Math.abs(dx),
+    Math.abs(dy),
+  ];
+}
+
+/** `to`, moved onto the nearest eighth of a turn from `from` and keeping
+ * the distance it was at — what shift does to a line being drawn. */
+function onEighths(
+  from: [number, number],
+  to: [number, number],
+): [number, number] {
+  const [dx, dy] = [to[0] - from[0], to[1] - from[1]];
+  const r = Math.hypot(dx, dy);
+  if (r < 1e-6) return to;
+  const step = Math.PI / 4;
+  const a = Math.round(Math.atan2(dy, dx) / step) * step;
+  return [from[0] + r * Math.cos(a), from[1] + r * Math.sin(a)];
+}
+
+const HANDLES = ["nw", "ne", "sw", "se"] as const;
+/** Which corner of the selection quad (tl, tr, br, bl) each handle sits on. */
+const HANDLE_CORNER = [0, 1, 3, 2];
+/** The middles of the four sides: each stretches the layer along one
+ * axis, and with Ctrl (⌘ on a Mac) held slides that side along itself
+ * instead, which is a skew. Each sits between the two quad corners named
+ * beside it. */
+const SIDES = ["n", "e", "s", "w"] as const;
+const SIDE_CORNERS: readonly [number, number][] = [
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 0],
+];
+type Handle = (typeof HANDLES)[number] | (typeof SIDES)[number];
+
+/** Default canvas for a new document; any size can be chosen, and an
+ * opened file brings its own. */
+const DOC_WIDTH = 1280;
+const DOC_HEIGHT = 720;
+
+/** Starting points offered in the new-document dialog: name, pixels, and
+ * the resolution that gives them their size on paper. */
+const DOC_PRESETS: [string, number, number, number][] = [
+  ["HD 1280×720", 1280, 720, 72],
+  ["Full HD 1920×1080", 1920, 1080, 72],
+  ["Square 1080×1080", 1080, 1080, 72],
+  ["A4 at 300dpi", 2480, 3508, 300],
+  ["Postcard at 300dpi", 1748, 1240, 300],
+];
+
+/** Units the rulers and the geometry fields can read in. Pixels are the
+ * document's own; the others go through its resolution. */
+type Units = "px" | "mm" | "in";
+const UNIT_LABELS: Record<Units, string> = {
+  px: "Pixels",
+  mm: "Millimetres",
+  in: "Inches",
+};
+/** How many of the unit one document pixel is. */
+function perPixel(units: Units, dpi: number): number {
+  return units === "px" ? 1 : units === "mm" ? 25.4 / dpi : 1 / dpi;
+}
+/** Tick spacings a ruler chooses between, per unit. */
+const UNIT_TICKS: Record<Units, number[]> = {
+  px: [1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000],
+  // Far enough for a 30,000-pixel page seen at 1%: steps that stopped at a
+  // metre ran their labels into one another there.
+  mm: [0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000],
+  in: [0.125, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000],
+};
+/** The heading over a layer's own settings — what makes it the kind of
+ * layer it is — or none for a kind that has none of its own. */
+function kindHead(kind: NodeKind | null | undefined): string | null {
+  if (!kind || typeof kind !== "object") return null;
+  if ("Adjustment" in kind) return "Adjustment";
+  if ("Filter" in kind) return "Filter";
+  if ("Text" in kind) return "Text";
+  if ("Artboard" in kind) return "Frame";
+  if ("Vector" in kind) return "Shape";
+  return null;
+}
+/** Wait for the page to be drawn: what the engine does next holds the
+ * page's thread, so a line saying it is about to happen has to be on
+ * screen first. */
+const nextPaint = () =>
+  new Promise<void>((done) => requestAnimationFrame(() => setTimeout(done, 0)));
+
+/** A slider's name with its value at the far end of the line, said with
+ * no more places than it has: 48 rather than 48.00, 0.5 rather than
+ * 0.50. In figures of one width, so the value does not shift as it is
+ * dragged. */
+function SliderHead({ label, value, unit = "" }: { label: string; value: number; unit?: string }) {
+  const shown = Math.round(value * 100) / 100;
+  return (
+    <span className="slider-head">
+      <span>{label}</span>
+      <span className="slider-value">
+        {Object.is(shown, -0) ? 0 : shown}
+        {unit}
+      </span>
+    </span>
+  );
+}
+/** A length in the unit, trimmed to what the unit can tell apart. */
+function inUnits(px: number, units: Units, dpi: number): number {
+  const v = px * perPixel(units, dpi);
+  const places = units === "px" ? 2 : units === "mm" ? 2 : 3;
+  return Math.round(v * 10 ** places) / 10 ** places;
+}
+/** A hundredth: a page sixteen thousand pixels long fits a phone's
+ * screen, which at a twentieth it did not. */
+const MIN_ZOOM = 0.01;
+const MAX_ZOOM = 8;
+
+/** A full frame slower than this draws the view as a draft while it
+ * moves (the view effect). Most pages are a few milliseconds and never
+ * do; a phone drawing a heavy one is several times this. */
+const DRAFT_MS = 70;
+/** How long the view keeps still before the draft is drawn sharp. */
+const SETTLE_MS = 160;
+
+/** Where the page's origin is put for the engine, in device pixels.
+ *
+ * A view panned by whole pixels at the same zoom is drawn by the engine
+ * from the frame before it, shifted, with only the strips the pan
+ * exposed drawn afresh — which it can only do when both origins are on
+ * whole pixels, so every pixel kept is the pixel a fresh frame would put
+ * there. A zoom at the pointer lands anywhere, so while the view is
+ * only panning — the zoom and the window as they were, the origin
+ * moved — the origin is rounded, by under half a device pixel; at rest
+ * and on a zoom it is given exactly, so nothing moves that did not.
+ * Asked again for the same view it answers the same, so an attribute
+ * rendered before the effect runs agrees with what the engine gets. */
+function engineOrigin(
+  last: { scale: number; w: number; h: number; rawX: number; rawY: number; x: number; y: number },
+  view: View,
+  viewport: [number, number],
+  dpr: number,
+): { x: number; y: number; panned: boolean } {
+  const scale = Math.min(64, Math.max(0.01, view.zoom * dpr));
+  const [w, h] = [Math.round(viewport[0] * dpr), Math.round(viewport[1] * dpr)];
+  const [rawX, rawY] = [view.x * dpr, view.y * dpr];
+  const same = last.scale === scale && last.w === w && last.h === h;
+  if (same && last.rawX === rawX && last.rawY === rawY) {
+    return { x: last.x, y: last.y, panned: false };
+  }
+  if (same) return { x: Math.round(rawX), y: Math.round(rawY), panned: true };
+  return { x: rawX, y: rawY, panned: false };
+}
+const MIN_SIZE = 2; // doc pixels, resize clamp
+
+interface View {
+  zoom: number;
+  x: number;
+  y: number;
+}
+
+interface ToolDrag {
+  tool: Tool;
+  /** The drag began by making copies (alt), so its move and the copying
+   * are one step in the history. */
+  duplicated?: boolean;
+  /** What was picked before the copies were made, picked again if the
+   * drag comes to nothing and the copies go. */
+  copiedFrom?: NodeId[];
+  /** Shift was held at the press: for the brush, a click joins on to
+   * where the last stroke ended. */
+  shift?: boolean;
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  moved: boolean;
+  /** A box tool: the point the drag began is the box's middle rather
+   * than a corner, because alt was held. */
+  fromCentre?: boolean;
+  /** A region tool, with something picked out already: how the new one
+   * meets it, said by Shift and Alt held at the press. Held from the
+   * start they say that; pressed during the drag they shape the box
+   * (square, from the middle) — Photoshop's reading, and the only one
+   * that lets an added box be any shape. */
+  combine?: "union" | "subtract" | "intersect";
+  /** Move tool: the node being dragged and its full starting transform. */
+  target?: NodeId;
+  t0?: Transform;
+  /** Move tool: every layer travelling with the drag, each with its own
+   * starting transform, since each sits in its own parent space. */
+  moving?: { id: NodeId; t0: Transform }[];
+  /** Brush, and the lasso: the path so far, in document coordinates. */
+  stroke?: [number, number][];
+  /** A region being dragged about, as it was when the drag began. Every
+   * move restates it from here rather than nudging it along, which is
+   * what makes the whole drag one entry in history. */
+  region?: Mask;
+  /** Brush: a width multiplier per recorded sample. */
+  widths?: number[];
+  /** Brush: when the last sample was taken, for the speed that sets it. */
+  lastAt?: number;
+  /** Move: the dragged layer's document-space box when the drag began, and
+   * the edges and centres worth snapping it to. */
+  b0?: [number, number, number, number];
+  snapX?: number[];
+  snapY?: number[];
+  /** Move: the other layers' boxes, which the dragged one can be spaced
+   * evenly among. */
+  spacers?: Box[];
+}
+
+/** Effect names as the panel shows them, in the order the picker offers. */
+const EFFECT_LABELS: Record<EffectKind, string> = {
+  DropShadow: "Drop shadow",
+  Outline: "Outline",
+  InnerShadow: "Inner shadow",
+  Bevel: "Bevel",
+  ColorOverlay: "Colour overlay",
+  Blur: "Blur",
+};
+
+/** The colours each effect is painted in, and what each is called: one
+ * for a shadow or an outline, two for a bevel's light and shade. */
+const EFFECT_COLORS: Record<EffectKind, [string, string][]> = {
+  DropShadow: [["color", "colour"]],
+  Outline: [["color", "colour"]],
+  InnerShadow: [["color", "colour"]],
+  Bevel: [
+    ["highlight", "highlight"],
+    ["shadow", "shadow"],
+  ],
+  ColorOverlay: [["color", "colour"]],
+  Blur: [],
+};
+
+/** The tunable numbers of each effect: [field, label, min, max, step]. */
+const EFFECT_FIELDS: Record<
+  EffectKind,
+  [string, string, number, number, number][]
+> = {
+  DropShadow: [
+    ["dx", "X", -60, 60, 1],
+    ["dy", "Y", -60, 60, 1],
+    ["blur", "Blur", 0, 40, 0.5],
+    ["spread", "Spread", 0, 0.95, 0.01],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+  Outline: [
+    ["width", "Width", 0.5, 40, 0.5],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+  InnerShadow: [
+    ["dx", "X", -40, 40, 1],
+    ["dy", "Y", -40, 40, 1],
+    ["blur", "Blur", 0, 30, 0.5],
+    ["spread", "Choke", 0, 0.95, 0.01],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+  Bevel: [
+    ["size", "Size", 0.5, 40, 0.5],
+    ["depth", "Depth", 0.1, 10, 0.1],
+    ["angle", "Angle", -180, 180, 1],
+    ["altitude", "Altitude", 1, 89, 1],
+    ["opacity", "Strength", 0, 1, 0.01],
+  ],
+  ColorOverlay: [["opacity", "Strength", 0, 1, 0.01]],
+  Blur: [["sigma", "Amount", 0.5, 40, 0.5]],
+};
+
+/** A number an effect's row shows that the effect does not store as
+ * one: a bevel's light is kept as a direction, so that it turns with
+ * the layer exactly, and shown as the angle a person thinks of it by —
+ * degrees anticlockwise from the right, as the page is seen. */
+const EFFECT_DERIVED: Partial<
+  Record<
+    EffectKind,
+    Record<
+      string,
+      {
+        read: (body: Record<string, number>) => number;
+        write: (v: number) => Record<string, number>;
+      }
+    >
+  >
+> = {
+  Bevel: {
+    angle: {
+      read: (b) => Math.round((Math.atan2(-b.ly, b.lx) * 180) / Math.PI),
+      write: (v) => ({
+        lx: Math.cos((v * Math.PI) / 180),
+        ly: -Math.sin((v * Math.PI) / 180),
+      }),
+    },
+  },
+};
+
+/** What the picker offers beyond the effects themselves: a glow is a
+ * shadow cast nowhere, in a light colour and hardened, so it is offered
+ * by name and made as the shadow it is. */
+const EFFECT_PRESETS: Record<string, string> = {
+  OuterGlow: "Outer glow",
+  InnerGlow: "Inner glow",
+};
+
+/** What the effect's row is headed: a shadow cast nowhere is a glow. */
+function effectTitle(effect: Effect): string {
+  const kind = effectKind(effect);
+  const body = effectBody(effect) as Record<string, number>;
+  if ((kind === "DropShadow" || kind === "InnerShadow") && body.dx === 0 && body.dy === 0) {
+    return kind === "DropShadow" ? "Outer glow" : "Inner glow";
+  }
+  return EFFECT_LABELS[kind];
+}
+
+/** A newly added effect, with defaults that read as the effect's name at
+ * a glance rather than as nothing at all. */
+function newEffect(
+  kind: EffectKind | keyof typeof EFFECT_PRESETS,
+  color: AuthoredColor,
+  light: AuthoredColor,
+  white: AuthoredColor,
+): Effect {
+  switch (kind) {
+    case "Bevel":
+      // Lit from the upper left, a little above the page: the light
+      // most pictures are drawn under.
+      return {
+        Bevel: {
+          size: 6,
+          depth: 1,
+          lx: -0.5,
+          ly: -0.866,
+          altitude: 30,
+          highlight: white,
+          shadow: color,
+          opacity: 0.75,
+        },
+      };
+    case "OuterGlow":
+      return {
+        DropShadow: {
+          dx: 0,
+          dy: 0,
+          blur: 8,
+          color: light,
+          opacity: 0.85,
+          spread: 0.3,
+        },
+      };
+    case "InnerGlow":
+      return {
+        InnerShadow: {
+          dx: 0,
+          dy: 0,
+          blur: 6,
+          color: light,
+          opacity: 0.75,
+          spread: 0.2,
+        },
+      };
+    case "Outline":
+      return { Outline: { width: 4, color, opacity: 1 } };
+    // The whole of the layer in the colour in hand.
+    case "ColorOverlay":
+      return { ColorOverlay: { color, opacity: 1 } };
+    // Soft enough to see at once, not so soft it is gone.
+    case "Blur":
+      return { Blur: { sigma: 4 } };
+    case "InnerShadow":
+      return { InnerShadow: { dx: 4, dy: 4, blur: 6, color, opacity: 0.5 } };
+    default:
+      return { DropShadow: { dx: 6, dy: 6, blur: 6, color, opacity: 0.45 } };
+  }
+}
+
+/** Alignment guides currently showing, in document coordinates. */
+interface Guides {
+  x: number[];
+  y: number[];
+}
+
+/** Thickness of the rulers, in CSS pixels. */
+const RULER = 18;
+
+/** A guide the user placed, mirroring `chitrakar_doc::Guide`. */
+type DocGuide = { Vertical: number } | { Horizontal: number };
+
+const guideAt = (g: DocGuide) => ("Vertical" in g ? g.Vertical : g.Horizontal);
+const guideIsVertical = (g: DocGuide) => "Vertical" in g;
+
+/** How close, in screen pixels, an edge has to come before it snaps. A
+ * fixed screen distance rather than a document one, so snapping feels the
+ * same however far you are zoomed in. */
+/** The sRGB transfer curve and its inverse — the engine's, in the UI.
+ * A tone the panel puts a number on is the tone a device shows, since
+ * that is the number the histogram behind it is drawn against. */
+const toShown = (v: number) =>
+  v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055;
+const toLinear = (v: number) =>
+  v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+
+/** What a crop can be held to. A photograph is nearly always cropped to
+ * something — a print, a screen, a square — rather than to whatever the
+ * drag happened to be, and the ones worth naming are few. "Original" is
+ * the page's own proportions, which is how a picture is cropped tighter
+ * without changing what it fits. */
+const CROP_RATIOS: Record<string, number | null> = {
+  Free: null,
+  Original: 0,
+  "1:1": 1,
+  "4:5": 4 / 5,
+  "5:4": 5 / 4,
+  "3:2": 3 / 2,
+  "2:3": 2 / 3,
+  "16:9": 16 / 9,
+  "9:16": 9 / 16,
+};
+
+/** The ratio a name asks for, as width over height: nothing for a free
+ * crop, and the page's own for "Original". */
+const cropRatioOf = (name: string, page: [number, number]): number | null => {
+  const r = CROP_RATIOS[name];
+  if (r === null || r === undefined) return null;
+  return r === 0 ? page[0] / Math.max(1, page[1]) : r;
+};
+
+/** The six bands of colour a picture is spoken to in, in the order a
+ * colour wheel is read, each drawn in something like its own colour. */
+const COLOUR_BANDS: [string, string][] = [
+  ["Reds", "#ff6b6b"],
+  ["Yellows", "#e3c341"],
+  ["Greens", "#4fc76b"],
+  ["Cyans", "#3fc6d0"],
+  ["Blues", "#5b8cff"],
+  ["Magentas", "#d071e0"],
+];
+
+
+/** Where the layout stops having room for the panel beside the canvas.
+ * The stylesheet asks the same question, in the same words. */
+const NARROW = "(max-width: 900px)";
+/** A phone, upright or on its side: too narrow for the menus in a row,
+ * or too short for two rows of bar over the canvas. The stylesheet's
+ * own query, word for word, so the two cannot disagree. */
+const COMPACT = "(max-width: 640px), (max-height: 500px)";
+/** A pointer as big as a fingertip. */
+const COARSE = "(pointer: coarse)";
+/** How long a finger is held still before it asks for the canvas's
+ * menu, and how far it may wander while it does. A little under what
+ * Android itself waits, so the editor's answer comes first. */
+const LONG_PRESS_MS = 450;
+const LONG_PRESS_SLOP = 10;
+/** How far the layers sheet's grip has to be pulled to move it a step. */
+const SHEET_STEP = 60;
+/** How long a finger is held on a layer's row before the row lifts to be
+ * reordered; before that, moving scrolls the list. */
+const ROW_LIFT_MS = 350;
+/** How long a finger's press on a tool that acts at once waits for a
+ * second finger (a pinch, a two-finger tap) before it reaches the tool,
+ * and how far it may move meanwhile. Fingers meant together land within
+ * a few hundredths of a second of each other. */
+const TOUCH_SETTLE_MS = 120;
+const TOUCH_SLOP = 6;
+/** How wide a press makes a stroke, as a part of the brush's width: a
+ * pen's own pressure, from a quarter up; anything else full width. */
+function pressed(e: { pointerType: string; pressure: number }): number {
+  return e.pointerType === "pen" && e.pressure > 0 ? 0.25 + e.pressure * 0.75 : 1;
+}
+/** The tools whose press does something at once, and so waits for it. */
+const ACTS_ON_PRESS: readonly string[] = ["Text", "Wand", "Fill", "Eyedropper", "Node", "Paint", "Eraser", "Clone", "Heal"];
+
+/** What `snapAxis` answers when nothing is being snapped to. */
+const NO_SNAP = { delta: 0, guide: null as number | null };
+
+/** The three lines a box offers on each axis: its edges and its middle. */
+const snapLines = (lo: number, hi: number) => [lo, (lo + hi) / 2, hi];
+
+/** Nudge `moving` onto the nearest of `targets`, if one is within `tol`.
+ * Returns the correction to apply and the line it landed on. */
+function snapAxis(
+  moving: number[],
+  targets: number[],
+  tol: number,
+): { delta: number; guide: number | null } {
+  let best = { delta: 0, guide: null as number | null };
+  let bestGap = tol;
+  for (const m of moving) {
+    for (const t of targets) {
+      const gap = Math.abs(t - m);
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = { delta: t - m, guide: t };
+      }
+    }
+  }
+  return best;
+}
+
+interface HandleDrag {
+  corner: Handle;
+  id: NodeId;
+  t0: Transform;
+  b0: [number, number, number, number];
+  /** A frame resizes rather than scales: its own size follows the corner
+   * and its contents keep the offsets they have from its top-left, the
+   * way a frame behaves everywhere. Its ground travels here so the size
+   * can be rewritten without reading the kind on every move. */
+  frame?: { background: AuthoredColor | null };
+  /** Lines the dragged corner can catch on, as for a move. */
+  snapX?: number[];
+  snapY?: number[];
+  /** Several layers resizing as one. The box is the upright one round
+   * the lot, in the document's own space, and each layer carries the
+   * space its transform is written in so a document-space scale can be
+   * put back into it. */
+  many?: { id: NodeId; t0: Transform; p: Transform; pinv: Transform }[];
+  /** Where the drag began, in the space the box is written in: a skew
+   * slides a side by how far the cursor has come from here, so a side
+   * picked up anywhere along its handle does not jump. */
+  start?: [number, number];
+}
+
+/** The same region, carried `dx, dy` across the page — or null for one
+ * this cannot move.
+ *
+ * A shape or a picture is placed by its transform, so moving one is
+ * moving that. A region brushed by hand is its own points instead, and
+ * the engine is the only side that builds one of those; rather than
+ * teach this half about a shape it never makes, a region it does not
+ * recognise simply does not drag. */
+function regionMoved(mask: Mask, dx: number, dy: number): Mask | null {
+  const kind = mask.kind;
+  if ("Vector" in kind) {
+    const t = kind.Vector.transform;
+    return {
+      ...mask,
+      kind: {
+        Vector: { ...kind.Vector, transform: { ...t, e: t.e + dx, f: t.f + dy } },
+      },
+    };
+  }
+  if ("Raster" in kind) {
+    const t = kind.Raster.transform;
+    return {
+      ...mask,
+      kind: {
+        Raster: { ...kind.Raster, transform: { ...t, e: t.e + dx, f: t.f + dy } },
+      },
+    };
+  }
+  return null;
+}
+
+/** A region as the engine is asked for it: the box it fits in, plus the
+ * points themselves when it is a freehand outline. */
+interface Region {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  points?: number[];
+}
+
+/** What a select drag has picked out so far, or null while it is still
+ * a click.
+ *
+ * `square` holds a box to its own proportions — shift, the same key that
+ * squares off a shape being drawn — and alt draws it from its middle.
+ * A lasso is its own outline and takes neither.
+ */
+function regionOutline(drag: ToolDrag, square: boolean): Region | null {
+  if (drag.tool === "Lasso") {
+    const pts = drag.stroke ?? [];
+    if (pts.length < 3) return null;
+    const xs = pts.map((p) => p[0]);
+    const ys = pts.map((p) => p[1]);
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      w: Math.max(...xs) - Math.min(...xs),
+      h: Math.max(...ys) - Math.min(...ys),
+      points: pts.flat(),
+    };
+  }
+  let [w, h] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+  if (square) {
+    const side = Math.max(Math.abs(w), Math.abs(h));
+    w = Math.sign(w || 1) * side;
+    h = Math.sign(h || 1) * side;
+  }
+  const [x, y] = drag.fromCentre
+    ? [drag.startX - w, drag.startY - h]
+    : [drag.startX, drag.startY];
+  const [ww, hh] = drag.fromCentre ? [w * 2, h * 2] : [w, h];
+  const box = {
+    x: Math.min(x, x + ww),
+    y: Math.min(y, y + hh),
+    w: Math.abs(ww),
+    h: Math.abs(hh),
+  };
+  return box.w < 0.5 || box.h < 0.5 ? null : box;
+}
+
+interface PanDrag {
+  /** The pointer that began the pan, and the only one that drives it. */
+  pointerId?: number;
+  pointerX: number;
+  pointerY: number;
+  viewX: number;
+  viewY: number;
+}
+
+const toTransform = (v: ArrayLike<number>): Transform => ({
+  a: v[0],
+  b: v[1],
+  c: v[2],
+  d: v[3],
+  e: v[4],
+  f: v[5],
+});
+
+/** The Adjust and Filter menus in families, in the order a hand reaches
+ * for them: tone before colour before the ones that remap a picture
+ * outright; blurs, then sharpening, noise, distortions and the stylised. */
+const PRESET_FAMILIES: Record<"Adjustment" | "Filter", string[][]> = {
+  Adjustment: [
+    ["exposure", "brightness-contrast", "levels", "curves", "shadows-highlights"],
+    ["hue-saturation", "vibrance", "white-balance", "colour-balance", "photo-filter", "channel-mixer", "black-and-white", "lookup"],
+    ["gradient-map", "colour-bands", "invert", "posterize", "threshold"],
+    ["dodge", "burn"],
+  ],
+  Filter: [
+    ["blur", "surface", "motion", "radial"],
+    ["sharpen", "high-pass"],
+    ["noise", "median"],
+    ["twirl", "pinch", "ripple", "lens"],
+    ["pixelate", "halftone", "oil-paint", "find-edges", "emboss", "vignette"],
+  ],
+};
+
+/** A line across a menu. */
+const SEP: MenuEntry = { kind: "sep" };
+/** A row in a menu. The id is what the native bar sends back when the
+ * row is picked, so it has to outlive the render that wrote it. */
+const item = (
+  id: string,
+  icon: IconName,
+  label: string,
+  run: () => void,
+  hint?: string,
+): MenuEntry => ({ kind: "item", id, icon, label, run, hint });
+/** A row that opens a menu of its own beside it. */
+const sub = (
+  id: string,
+  icon: IconName,
+  label: string,
+  entries: MenuEntry[],
+): MenuEntry => ({ kind: "sub", id, icon, label, entries });
+/** The menu rows that a command in `commands.ts` runs: they show and
+ * are rebound as that command, so the Keys page does not offer them a
+ * second time among the other rows. */
+const COMMAND_ROWS = new Set([
+  "new", "open", "save", "save-as", "export", "export-png", "undo", "redo",
+  "cut", "copy", "paste", "duplicate", "copy-style", "paste-style",
+  "find-replace", "select-all", "deselect", "pick-inverse", "bring-front", "send-back",
+  "group", "ungroup", "clip", "zoom-in", "zoom-out", "actual-size", "fit",
+  "prefs", "keys",
+]);
+
+/** Rows that stand for something of this document's or this person's —
+ * a recent file, a kept style — rather than a command: they come and
+ * go, so a chord given one would wander to whatever took its place. */
+const passingRow = (id: string) => id.startsWith("recent-") || id.startsWith("style-");
+
+/** A number typed into a question the way people type one: "8 px",
+ * "-4 px", "8,5" (a decimal comma), with spaces round it. `null` for
+ * anything that is not one. Read with `Number` alone, these did nothing
+ * and said nothing. */
+function typedNumber(answer: string): number | null {
+  const t = answer.trim().replace(/\s*(?:px|pixels?)$/i, "").replace(/\s+/g, "");
+  // Written as a person writes a number: digits, a sign, one decimal
+  // point or comma. "1,000" is a thousand to some and one to others, so
+  // it is not taken as either; "0x10" and "1e3" were read as 16 and
+  // 1000 by `Number`.
+  if (!/^[-+]?(\d+([.,]\d+)?|[.,]\d+)$/.test(t) || /^[-+]?\d{1,3},\d{3}$/.test(t)) return null;
+  const v = Number(t.replace(",", "."));
+  return Number.isFinite(v) ? v : null;
+}
+
+/** A chip in the rail shows four letters before it clips: names that
+ * only part further in ("Left eye", "Left ear") read the same there, so
+ * those are said by their first letter and their place instead. */
+function fitChips(out: string[]): string[] {
+  const short = out.map((o, i) => ([...o].length <= 4 ? o : `${[...o][0] ?? "#"}${i + 1}`));
+  return new Set(short).size === short.length ? short : short.map((_, i) => `#${i + 1}`);
+}
+
+/** Kept regions' names as their chips in the rail can hold them: the
+ * rail is a finger wide, and "Region 1" to "Region 4" all read "R…"
+ * there. A name ending in a short number is its first letter and the
+ * number ("R3"); any other long one its first three letters; and where
+ * two would read the same ("Sky 1" and "Sun 1"), each takes another
+ * letter until they differ. The whole name is each chip's label and tip.
+ */
+function chipNames(names: string[]): string[] {
+  const parts = names.map((name) => {
+    const t = name.trim();
+    const m = /^(.*?\S)\s*(\d{1,3})$/u.exec(t);
+    return m ? { stem: [...m[1]], num: m[2] } : { stem: [...t], num: "" };
+  });
+  const take = parts.map((p) => (p.num ? 1 : 3));
+  const say = () =>
+    parts.map((p, i) => (names[i].length <= 4 ? names[i] : p.stem.slice(0, take[i]).join("").trimEnd() + p.num));
+  for (let round = 0; round < 64; round++) {
+    const out = say();
+    const seen = new Map<string, number[]>();
+    out.forEach((o, i) => seen.set(o, [...(seen.get(o) ?? []), i]));
+    let grew = false;
+    for (const same of seen.values()) {
+      if (same.length < 2) continue;
+      for (const i of same) {
+        if (take[i] < parts[i].stem.length) {
+          take[i] += 1;
+          grew = true;
+        }
+      }
+    }
+    if (!grew) return fitChips(out);
+  }
+  return fitChips(say());
+}
+
+/** Rows that act on the picked layers and on nothing else: with none
+ * picked they are greyed out, where fifty of them did nothing and said
+ * nothing (a few others explain themselves in words). Cut, Copy and
+ * Delete are among them: a region alone gives them nothing to take. */
+const NEEDS_A_LAYER = new Set([
+  "cut", "copy", "delete",
+  "duplicate", "instance", "copy-style", "same-fill", "same-stroke", "same-kind",
+  "pick-from-layer", "pick-layer-mask", "group", "ungroup", "bring-front", "bring-forward",
+  "send-backward", "send-back", "flip-h", "flip-v", "square-corners", "mask-rect",
+  "mask-ellipse", "mask-linear", "mask-radial", "mask-from-picked", "hide-picked",
+  "mask-remove", "clip", "keep-style", "join-paths", "cut-path", "offset-path",
+  "simplify-path", "repeat", "blend-shapes", "text-to-shapes", "outline-stroke",
+  "trace-picture", "merge-layers", "develop-again", "rename", "lock", "hide",
+]);
+const needsALayer = (id: string) =>
+  NEEDS_A_LAYER.has(id) || id.startsWith("align-") || id.startsWith("combine-");
+
+/** Grey out the rows that need a picked layer, when none is. */
+function markNeedsALayer(entries: MenuEntry[], nonePicked: boolean) {
+  for (const e of entries) {
+    if (e.kind === "item" && nonePicked && needsALayer(e.id)) e.disabled = true;
+    else if (e.kind === "sub") markNeedsALayer(e.entries, nonePicked);
+  }
+}
+
+/** Grey out the rows that have nothing to act on now: Undo with nothing
+ * done, a row about the region picked out with none, Clear guides with
+ * none. They were pressable and answered with nothing, or an alert. */
+function markNothingToDo(entries: MenuEntry[], idle: Record<string, boolean>) {
+  for (const e of entries) {
+    if (e.kind === "item" && idle[e.id]) e.disabled = true;
+    else if (e.kind === "sub") markNothingToDo(e.entries, idle);
+  }
+}
+
+/** Write each row's own chord, the one a person gave it, beside it —
+ * after whatever the row already says (a tick, "Del"). */
+function markMenuKeys(entries: MenuEntry[], menuOf: Record<string, string>) {
+  for (const e of entries) {
+    if (e.kind === "item" && menuOf[e.id]) {
+      const chord = chordLabel(menuOf[e.id]);
+      e.hint = e.hint ? `${e.hint}  ${chord}` : chord;
+    } else if (e.kind === "sub") {
+      markMenuKeys(e.entries, menuOf);
+    }
+  }
+}
+
+/** Every row of the menus a person may give a chord of their own, with
+ * the way to it: "Layer › Arrange › Bring forward". */
+function keyableRows(menus: MenuSpec[]): { id: string; path: string; label: string }[] {
+  const out: { id: string; path: string; label: string }[] = [];
+  const seen = new Set<string>();
+  const walk = (entries: MenuEntry[], path: string) => {
+    for (const e of entries) {
+      if (e.kind === "sub") walk(e.entries, `${path} › ${e.label}`);
+      else if (e.kind === "item" && !COMMAND_ROWS.has(e.id) && !passingRow(e.id) && !seen.has(e.id)) {
+        seen.add(e.id);
+        out.push({ id: e.id, path, label: e.label });
+      }
+    }
+  };
+  for (const m of menus) walk(m.entries, m.label);
+  return out;
+}
+
+/** Which menu is open, and what the eight of them are called. */
+type MenuId =
+  | "file"
+  | "edit"
+  | "select"
+  | "layer"
+  | "adjust"
+  | "filter"
+  | "page"
+  | "view"
+  | "help";
+
+export function App() {
+  const [session, setSession] = useState<WasmSession | null>(null);
+  /** The document on screen now, for work that outlives the render that
+   * began it: a file still being read when a New document took the
+   * page's place went into the document thrown away, and a raw file's
+   * develop window opened on a document with nothing to develop. */
+  const liveSession = useRef(session);
+  liveSession.current = session;
+  const [tool, setTool] = useState<Tool>("Move");
+  const [fill, setFill] = useState("#6c8cff");
+  /** The palette entry the colour in hand was taken from, if it was taken
+   * from one. A shape drawn now stands for that entry rather than holding
+   * a copy of it — which is what makes reaching for a palette colour mean
+   * something for the layer drawn next as well as for the one already
+   * picked. Typing a colour, or lifting one off the page, lets go of it:
+   * what came out of the palette is what follows it. */
+  const [inkFrom, setInkFrom] = useState<string | null>(null);
+  const [brushSize, setBrushSize] = useState(() => readPrefs().brushWidth);
+  /** The paint brush: how wide it is in document pixels, how much of that
+   * width its edge fades over, and whether it is rubbing paint out
+   * instead of laying it down. */
+  const [paintSize, setPaintSize] = useState(() => readPrefs().paintWidth);
+  /** How many sides a polygon has, or points a star. One number for the
+   * two, since a five-sided thing and a five-pointed one are the same
+   * ask made twice. */
+  const [sides, setSides] = useState(5);
+  /** Which of the library's shapes the Shape tool draws. */
+  const [preset, setPreset] = useState(SHAPE_PRESETS[0].name);
+  /** What the crop is held to, by name. */
+  const [cropRatio, setCropRatio] = useState("Free");
+  /** Waiting for a click to say which pixel of the picture is meant to
+   * be grey, for the white balance to be worked out from. */
+  const [pickingNeutral, setPickingNeutral] = useState(false);
+  const [straightenOpen, setStraightenOpen] = useState(false);
+  /** Edit › Find and replace, open. */
+  const [findOpen, setFindOpen] = useState(false);
+  /** The picture Select › Subject was asked about, while the subject
+   * model is being offered; and the fraction of it fetched, while it is. */
+  const [subjectOffer, setSubjectOffer] = useState<number | null>(null);
+  const [subjectFetched, setSubjectFetched] = useState<number | null>(null);
+  const [subjectAskNoMore, setSubjectAskNoMore] = useState(false);
+  const subjectFetchedRef = useRef(subjectFetched);
+  subjectFetchedRef.current = subjectFetched;
+  // Escape puts the offer away, as it does every other window — but not
+  // the model while it is coming down.
+  useEffect(() => {
+    if (subjectOffer === null) return;
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || subjectFetchedRef.current !== null) return;
+      setSubjectOffer(null);
+      setSubjectAskNoMore(false);
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [subjectOffer]);
+  /** The angle the straighten panel is showing, and whether it is
+   * waiting for a line to be drawn along something level. */
+  const [straightenBy, setStraightenBy] = useState(0);
+  const [levelling, setLevelling] = useState(false);
+  /** Whether typing one side of a layer's box changes the other with it.
+   * On to begin with, for the same reason a dragged corner keeps a
+   * shape's proportions: letting go of a photograph a little squashed is
+   * a mistake nobody notices until it is printed. */
+  const [keepRatio, setKeepRatio] = useState(true);
+  /** How many edits deep the document was when it was last saved,
+   * opened or begun. Anything else is work that has not been written
+   * down anywhere a person could find it again — and undoing back to
+   * that point counts as saved again, which is what a person means by
+   * it. */
+  const [savedAt, setSavedAt] = useState(0);
+  /** The line being drawn along something level, in host coordinates. */
+  const levelRef = useRef<[number, number, number, number] | null>(null);
+  const [levelLine, setLevelLine] = useState<
+    [number, number, number, number] | null
+  >(null);
+  /** Which of the shape tools sits in the rail's one shape slot, and
+   * whether the rest are showing. */
+  const [shapeTool, setShapeTool] = useState<Tool>("Rect");
+  const [shapesOpen, setShapesOpen] = useState(false);
+  useEffect(() => {
+    // However a shape tool was taken up — off the rail, out of the
+    // group, or by its letter — it is the one the slot then holds.
+    if (SHAPE_TOOLS.includes(tool as never)) setShapeTool(tool);
+  }, [tool]);
+  const [selectTool, setSelectTool] =
+    useState<(typeof SELECT_TOOLS)[number]>("Select");
+  const [selectsOpen, setSelectsOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  // A flyout is a moment's choice beside its button, pinned to the
+  // window where it opened: anything else done lets it go — a press
+  // elsewhere, Escape, another tool, the window resized or the rail
+  // scrolled or moved. It stayed over the canvas, and stayed put while
+  // the rail moved out from under it.
+  const anyFlyout = shapesOpen || selectsOpen || moreOpen;
+  useEffect(() => {
+    if (!anyFlyout) return;
+    // What opened it has the focus back when it goes, by Escape or by a
+    // tool picked in it: the flyout's rows went with it, and the
+    // keyboard's place fell to the page.
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const close = () => {
+      setShapesOpen(false);
+      setSelectsOpen(false);
+      setMoreOpen(false);
+    };
+    // Closed by a press elsewhere, it was let go of by the pointer: the
+    // focus is not handed back then, or the next Enter opened it again.
+    let pressedAway = false;
+    const onDown = (e: PointerEvent) => {
+      // Its own button toggles it, on the click after this press.
+      if (e.target instanceof Element && e.target.closest(".tool-flyout, [data-flyout]")) return;
+      pressedAway = true;
+      close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      // The flyout's alone: it also let go of the layer, or of what was
+      // picked out, with a Deselect in the history.
+      if (e.key === "Escape") {
+        close();
+        // Unless a window has come up over it (the keys sheet, Export):
+        // that Escape is the window's, and was swallowed here.
+        if (!aWindowIsUp()) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }
+    };
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Element && e.target.closest(".toolbar")) close();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", close);
+      requestAnimationFrame(() => {
+        const lost = document.activeElement === null || document.activeElement === document.body;
+        if (lost && !pressedAway && opener?.isConnected && opener.closest(".toolbar"))
+          opener.focus({ preventScroll: true });
+      });
+    };
+  }, [anyFlyout]);
+  useEffect(() => {
+    setShapesOpen(false);
+    setSelectsOpen(false);
+    setMoreOpen(false);
+  }, [tool]);
+  useEffect(() => {
+    if (SELECT_TOOLS.includes(tool as never)) {
+      setSelectTool(tool as (typeof SELECT_TOOLS)[number]);
+    }
+  }, [tool]);
+  /** Where the toolbar has been carried to, or `null` while it is still
+   * against the left edge. Remembered across visits, since where someone
+   * put their tools is a preference like any other. */
+  const [floating, setFloating] = useState<[number, number] | null>(() => {
+    try {
+      const at = localStorage.getItem("chitrakar:toolbar");
+      const got: unknown = at ? JSON.parse(at) : null;
+      // Two numbers, or nothing: a damaged value ran the rail past the
+      // window ("NaNpx" for its top).
+      return Array.isArray(got) && got.length === 2 && got.every((v) => typeof v === "number" && Number.isFinite(v))
+        ? (got as [number, number])
+        : null;
+    } catch {
+      return null;
+    }
+  });
+  // Kept inside the window, the grip and some of the rail in sight: put
+  // near an edge and the window then made smaller, the rail sat wholly
+  // off it, and so did the grip that docks it again.
+  // Held only where it is shown: where it was put is kept, so a window
+  // made small and then large again finds it where it was rather than
+  // where the small window pushed it.
+  const [windowSize, setWindowSize] = useState<[number, number]>(() => [window.innerWidth, window.innerHeight]);
+  useEffect(() => {
+    const sized = () => setWindowSize([window.innerWidth, window.innerHeight]);
+    window.addEventListener("resize", sized);
+    return () => window.removeEventListener("resize", sized);
+  }, []);
+  const floatingAt: [number, number] | null = floating
+    ? [
+        Math.max(0, Math.min(floating[0], windowSize[0] - 64)),
+        Math.max(0, Math.min(floating[1], windowSize[1] - 120)),
+      ]
+    : null;
+  useEffect(() => {
+    try {
+      if (floating) localStorage.setItem("chitrakar:toolbar", JSON.stringify(floating));
+      else localStorage.removeItem("chitrakar:toolbar");
+    } catch {
+      /* a browser that keeps nothing still runs the editor */
+    }
+  }, [floating]);
+  /** How wide the layers panel is, dragged by its own edge. */
+  /** Whether the window is too narrow to hold the layer panel beside the
+   * canvas — a phone, a tablet held upright, or a window dragged small.
+   * Read from the same media query the stylesheet uses, so the two cannot
+   * disagree about where the line is. */
+  const [narrow, setNarrow] = useState(
+    () => window.matchMedia(NARROW).matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW);
+    const say = () => setNarrow(mq.matches);
+    mq.addEventListener("change", say);
+    say();
+    return () => mq.removeEventListener("change", say);
+  }, []);
+  /** Whether the window is a phone's, upright or on its side, where the
+   * menus fold into one drawer and the bar is one row. */
+  const [compact, setCompact] = useState(() => window.matchMedia(COMPACT).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(COMPACT);
+    const say = () => setCompact(mq.matches);
+    mq.addEventListener("change", say);
+    say();
+    return () => mq.removeEventListener("change", say);
+  }, []);
+  /** The tool rail, which on a phone lies along the bottom and scrolls. */
+  const railRef = useRef<HTMLElement>(null);
+  /** The drawer the menus fold into on a phone, open. */
+  const [menuSheet, setMenuSheet] = useState(false);
+  // Widened past a phone, the drawer is put away for good: kept, it came
+  // back open over the work, with the focus, when the window narrowed.
+  useEffect(() => {
+    if (!compact) setMenuSheet(false);
+  }, [compact]);
+  /** A screen that is touched rather than pointed at — a phone, a
+   * tablet. It has no keyboard to hold shift on, so the canvas offers
+   * the modifier keys itself. Whether a pointer is coarse can change
+   * when a tablet docks to a keyboard and trackpad, so it is listened
+   * for rather than read once. */
+  const [coarse, setCoarse] = useState(() => window.matchMedia(COARSE).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(COARSE);
+    const say = () => setCoarse(mq.matches);
+    mq.addEventListener("change", say);
+    say();
+    return () => mq.removeEventListener("change", say);
+  }, []);
+  /** The modifier keys the screen is holding down. */
+  const [held, setHeld] = useState<Held>(NONE_HELD);
+  // Held by buttons that are only there on a touch screen: when the
+  // screen stops being one (a tablet docked to a keyboard), the buttons
+  // go and nothing is left to let the keys up, so they are let up with
+  // them — a Ctrl latched before the dock made every click a Ctrl-click.
+  useEffect(() => {
+    if (!coarse) setHeld(NONE_HELD);
+  }, [coarse]);
+  // Every pointer and mouse event is told about them before any handler
+  // reads it, in the capture phase on the window — which runs ahead of
+  // React's own listener on the root — so the canvas, the handles and
+  // the layer list all answer as if a keyboard's key were down.
+  useEffect(() => {
+    if (!held.shift && !held.alt && !held.mod) return;
+    const mac = onAMac();
+    const onEvent = (e: Event) => wear(e, held, mac);
+    const kinds = ["pointerdown", "pointermove", "pointerup", "mousedown", "mouseup", "click", "dblclick", "contextmenu"];
+    for (const k of kinds) window.addEventListener(k, onEvent, true);
+    return () => {
+      for (const k of kinds) window.removeEventListener(k, onEvent, true);
+    };
+  }, [held]);
+  /** Whether the panel is showing. It always is when there is room for
+   * it beside the canvas; where there is not, it comes over the canvas
+   * and starts out of the way, since the canvas is what the room is for. */
+  const [panelOpen, setPanelOpen] = useState(false);
+
+  const [panelWidth, setPanelWidth] = useState(() => {
+    // Read as every other kept setting is, or the page never started
+    // where the browser keeps nothing for a site (it throws on reading).
+    let kept = NaN;
+    try {
+      kept = Number(localStorage.getItem("chitrakar:panel"));
+    } catch {
+      /* nothing kept: the default */
+    }
+    return Number.isFinite(kept) && kept >= 180 ? Math.min(kept, 560) : 240;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("chitrakar:panel", String(panelWidth));
+    } catch {
+      /* as above */
+    }
+  }, [panelWidth]);
+
+  /** Carry the toolbar: it lifts off the edge as soon as it is dragged,
+   * and settles back against it when dropped within reach of home. */
+  const onGripDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const start = [e.clientX, e.clientY];
+    const from = floatingAt ?? [8, 96];
+    const move = (m: PointerEvent) => {
+      const at: [number, number] = [
+        Math.max(0, Math.min(from[0] + m.clientX - start[0], window.innerWidth - 64)),
+        Math.max(0, Math.min(from[1] + m.clientY - start[1], window.innerHeight - 120)),
+      ];
+      setFloating(at[0] < 40 ? null : at);
+    };
+    // A cancelled touch (a system gesture, a call) lets go as a lift
+    // does: listening for the lift alone, the next finger anywhere went
+    // on carrying it.
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+
+  /** On a phone held upright the panel is a sheet from the bottom edge,
+   * half the screen so the picture stays in sight above it; pulled up it
+   * takes nearly all of it. */
+  const [sheetTall, setSheetTall] = useState(false);
+  /** How far the sheet's grip is being dragged, down positive; null
+   * when it is not. */
+  const [sheetPull, setSheetPull] = useState<number | null>(null);
+  const sheetFrom = useRef(0);
+  /** The grip along the sheet's top: dragged down it lowers the sheet a
+   * step — tall to half, half to away — and up it raises it; tapped, it
+   * toggles between half and tall. A step needs a deliberate pull, so a
+   * thumb resting on it does nothing. */
+  const onSheetGrip = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    sheetFrom.current = e.clientY;
+    setSheetPull(0);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // A pointer the browser no longer knows: the drag is still read.
+    }
+  };
+  const onSheetGripMove = (e: React.PointerEvent) => {
+    if (sheetPull === null) return;
+    setSheetPull(e.clientY - sheetFrom.current);
+  };
+  const onSheetGripUp = (e: React.PointerEvent) => {
+    if (sheetPull === null) return;
+    const pulled = e.clientY - sheetFrom.current;
+    setSheetPull(null);
+    if (pulled > SHEET_STEP) {
+      if (sheetTall) setSheetTall(false);
+      else setPanelOpen(false);
+    } else if (pulled < -SHEET_STEP) {
+      setSheetTall(true);
+    } else if (Math.abs(pulled) < 6) {
+      setSheetTall((t) => !t);
+    }
+  };
+
+  /** Drag the panel's own edge to give it more or less room. */
+  /** The widest the panel is drawn, in its own units: two fifths of
+   * the window (at least 200 pixels) or 560, whichever is less. */
+  const panelMost = () => Math.min(560, Math.max(200, window.innerWidth * 0.4) / prefs.uiScale);
+  /** A width for the panel, held to what it can be drawn at. */
+  const panelHeld = (w: number) => Math.round(Math.max(180, Math.min(panelMost(), w)));
+  const onPanelEdge = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    // From the width it is drawn at: one kept wider than the window now
+    // gives it room for did not move under the pointer until the drag
+    // had made up the difference.
+    const from = Math.min(panelWidth, panelMost());
+    const move = (m: PointerEvent) => setPanelWidth(panelHeld(from + (startX - m.clientX) / prefs.uiScale));
+    // A cancelled touch (a system gesture, a call) lets go as a lift
+    // does: listening for the lift alone, the next finger anywhere went
+    // on carrying it.
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+  const [paintSoftness, setPaintSoftness] = useState(() => readPrefs().paintSoftness);
+  /** Rubbing out is the eraser tool rather than a switch on the paint
+   * tool, and healing the heal tool rather than a switch on the clone:
+   * a person looks for the eraser on the rail, as in every editor, and
+   * a mode that is a tool does not also want a switch. The engine is
+   * told the same thing it always was. */
+  const erasing = tool === "Eraser";
+  const painting = tool === "Paint" || tool === "Eraser";
+  const cloning = tool === "Clone" || tool === "Heal";
+  // On a phone the rail is a row that scrolls, and what a tool brings
+  // with it — a paint tool's width and edge — comes at its far end, past
+  // the edge of the screen. Picking such a tool brings them into sight.
+  useEffect(() => {
+    const rail = railRef.current;
+    if (!rail || !window.matchMedia("(max-width: 640px)").matches) return;
+    const last = rail.querySelector(".paint-softness, .brush-size:last-of-type");
+    if (last) last.scrollIntoView({ inline: "end", block: "nearest" });
+  }, [tool]);
+  /** Whether the clone brush heals: laying the source's texture down in
+   * the colour of the place it lands, rather than as it found it. */
+  const healing = tool === "Heal";
+  /** Where the brush is hovering, in the canvas's own coordinates, so the
+   * ring that shows how big it is can sit under the pointer. Null when the
+   * pointer is not over the canvas, or the brush is not the tool in hand. */
+  const [brushAt, setBrushAt] = useState<[number, number] | null>(null);
+  /** Where the clone tool reads from, in document units. Alt-click sets
+   * it; until it is set the tool has nothing to lift and says so. */
+  const [cloneFrom, setCloneFrom] = useState<[number, number] | null>(null);
+  /** A small picture of each layer, by id, for the panel. Regenerated a
+   * breath after the document settles rather than on every frame: a drag
+   * refreshes the layer list many times a second and none of those frames
+   * is worth a re-render of the whole stack. */
+  const [thumbs, setThumbs] = useState<Record<number, string>>({});
+  /** And a picture of each layer's mask, fitted the same way, so the row
+   * shows what is being let through as well as what is under it. */
+  const [maskThumbs, setMaskThumbs] = useState<Record<number, string>>({});
+  /** Groups and frames folded shut in the panel. A document of several
+   * artboards is a long list otherwise, and most of it is not what is
+   * being worked on. */
+  const [collapsed, setCollapsed] = useState<number[]>([]);
+  // Folded groups are a document's: another one's ids are other layers.
+  useEffect(() => setCollapsed([]), [session]);
+  /** The document's palette, re-read whenever the document changes. */
+  const [swatches, setSwatches] = useState<Swatch[]>([]);
+  /** The looks kept by name in the document, beside the palette. */
+  const [styles, setStyles] = useState<KeptStyle[]>([]);
+  /** Four runs of 256 counts — red, green, blue, luminance — of what the
+   * picked adjustment layer sees, for the graphs drawn over them. */
+  const [histogram, setHistogram] = useState<Uint32Array | null>(null);
+  /** The live document's pixel size. Every screen/document conversion goes
+   * through this rather than a constant, so an opened file of any size
+   * lands on a canvas that fits it. */
+  const [docSize, setDocSize] = useState<[number, number]>([
+    DOC_WIDTH,
+    DOC_HEIGHT,
+  ]);
+  /** The same size, for callbacks that must stay referentially stable:
+   * fitView is a dependency of newDocument, which is a dependency of the
+   * one-shot startup effect, so reading state there would rebuild the
+   * document on every render. */
+  const docSizeRef = useRef<[number, number]>([DOC_WIDTH, DOC_HEIGHT]);
+  const setDocumentSize = useCallback((w: number, h: number) => {
+    const [ow, oh] = docSizeRef.current;
+    docSizeRef.current = [w, h];
+    setDocSize([w, h]);
+    // A crop frame waiting for Enter, and a path's anchors so far, were
+    // drawn on the page as it stood: on a page turned, resized, grown or
+    // undone to another size, or a new document, they frame nothing they
+    // meant, and a frame wider than the page grew it when it was taken.
+    // Said here, where every change of size passes, rather than where a
+    // refresh notices one: a turn set the size first, and the refresh
+    // after it saw nothing change.
+    if (w !== ow || h !== oh) {
+      setCropFrame(null);
+      setPenPoints([]);
+      setPenHandles([]);
+    }
+  }, []);
+  const [newDocOpen, setNewDocOpen] = useState(false);
+  /** The export window, and the preferences window. */
+  const [exportOpen, setExportOpen] = useState(false);
+  /** The layers the repeat window is open on, if it is. */
+  const [repeatFor, setRepeatFor] = useState<number[] | null>(null);
+  /** The picture the trace window is open on, if it is. */
+  const [traceFor, setTraceFor] = useState<{ id: number; name: string } | null>(null);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  /** The lens profile files, as the Preferences window lists them. */
+  const [lensList, setLensList] = useState<{ name: string; lenses: number; system?: boolean }[]>([]);
+  const [showAbout, setShowAbout] = useState(false);
+  /** Which page the preferences window opens on: a row that is about
+   * the tools opens it on the tools. */
+  const [prefsGroup, setPrefsGroup] = useState<PrefGroup>("general");
+  const openPrefs = (group: PrefGroup) => {
+    setPrefsGroup(group);
+    setPrefsOpen(true);
+  };
+  const [canvasSizeOpen, setCanvasSizeOpen] = useState(false);
+  const [scalePageOpen, setScalePageOpen] = useState(false);
+  /** Whether the softness of what is picked is being chosen in its own
+   * window. The number is also in the rail, where a hand already on the
+   * canvas can reach it; this is the way to it for somebody who does not
+   * yet know the rail has one. */
+  const [featherOpen, setFeatherOpen] = useState(false);
+  const featherOpenRef = useRef(false);
+  featherOpenRef.current = featherOpen;
+  /** The sheet of keys and gestures, opened with "?" or from the View
+   * menu: half of what this editor can do is a gesture nobody would
+   * guess at, and a menu cannot show a gesture. */
+  const [showKeys, setShowKeys] = useState(false);
+  const [layers, setLayers] = useState<LayerInfo[]>([]);
+  const [selected, setSelected] = useState<NodeId | null>(null);
+  const [cmyk, setCmyk] = useState(false);
+  /** Which top-level menu is open, if any. */
+  const [openMenu, setOpenMenu] = useState<MenuId | null>(
+    null,
+  );
+  // The bar and the phone's drawer are different menus: one open in the
+  // bar when the window narrows has no bar to be shown in, and stayed
+  // open unseen, to come back over the page on its own when it widened
+  // and take the tools' letters. A change of layout closes them.
+  useEffect(() => {
+    setOpenMenu(null);
+  }, [compact]);
+  const openInputRef = useRef<HTMLInputElement>(null);
+  const placeInputRef = useRef<HTMLInputElement>(null);
+  /** Raw files chosen to be developed and exported together. */
+  const batchInputRef = useRef<HTMLInputElement>(null);
+  const [batch, setBatch] = useState<BatchFile[] | null>(null);
+  const iccInputRef = useRef<HTMLInputElement>(null);
+  /** The `.cube` picker, and where what it reads goes: a new layer over
+   * everything, one only on the picked layer, or the picked lookup's own
+   * table replaced. */
+  const lookupInputRef = useRef<HTMLInputElement>(null);
+  const lookupFor = useRef<"over" | "only" | "replace">("over");
+  const screenIccInputRef = useRef<HTMLInputElement>(null);
+  const fontInputRef = useRef<HTMLInputElement>(null);
+  const pick = (ref: React.RefObject<HTMLInputElement>) => ref.current?.click();
+  const [view, setView] = useState<View>({ zoom: 1, x: 0, y: 0 });
+  /** The open document's resolution, and the units the rulers and the
+   * geometry fields read in — the latter remembered across visits. */
+  const [docDpi, setDocDpi] = useState(72);
+  /** How you like to work, all of it, in one place — see `prefs.ts`.
+   * The names below are bound so the call sites that used to hold their
+   * own state read exactly as they did. */
+  const { prefs, set: setPrefs, reset: resetPrefs } = usePrefs();
+  // The brushes in hand are kept a breath after they last change, not on
+  // every step of a slider's drag.
+  useEffect(() => {
+    if (
+      prefs.brushWidth === brushSize &&
+      prefs.paintWidth === paintSize &&
+      prefs.paintSoftness === paintSoftness
+    )
+      return;
+    const t = setTimeout(
+      () => setPrefs({ brushWidth: brushSize, paintWidth: paintSize, paintSoftness }),
+      400,
+    );
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [brushSize, paintSize, paintSoftness]);
+  /** The tool keys as they stand, the person's rebindings over the
+   * defaults: what the keyboard handler, the rail's tooltips and the
+   * keys sheet all read. */
+  const keys = useMemo(() => boundKeys(prefs.toolKeys), [prefs.toolKeys]);
+  const TOOL_HINT = keys.hint;
+  /** A tool's tooltip: its name and its key, or its name alone when
+   * another tool has taken its key — "Rect ()" said nothing. */
+  const toolTitle = (t: Tool) => (TOOL_HINT[t] ? `${t} (${TOOL_HINT[t]})` : t);
+  /** The command chords as they stand, and what a menu row writes for
+   * one: the person's rebindings over what each shipped with. */
+  const chords = useMemo(
+    () => boundChords(prefs.commandKeys, prefs.menuKeys),
+    [prefs.commandKeys, prefs.menuKeys],
+  );
+  textChords = new Set(
+    (["undo", "redo", "select-all", "cut", "copy", "paste"] as CommandId[])
+      .map((id) => chords.of[id])
+      .filter((c): c is string => !!c),
+  );
+  const hint = useCallback(
+    (id: CommandId) => {
+      const chord = chords.of[id];
+      return chord ? chordLabel(chord) : undefined;
+    },
+    [chords],
+  );
+  /** A button's tooltip with its command's chord as it stands, so a
+   * chord changed on the Keys page is not contradicted by the button it
+   * runs: "Undo (Ctrl+Z)", or only "Undo" for a command given none. */
+  const tip = (label: string, id: CommandId) => {
+    const chord = hint(id);
+    return chord ? `${label} (${chord})` : label;
+  };
+  // The theme, resolved to one of the two and put on the root for the
+  // stylesheet: "system" follows the machine, and follows it *live*, so
+  // a machine that goes dark at dusk takes the chrome with it.
+  useEffect(() => {
+    const system = window.matchMedia("(prefers-color-scheme: light)");
+    const apply = () => {
+      document.documentElement.dataset.theme =
+        prefs.theme === "system" ? (system.matches ? "light" : "dark") : prefs.theme;
+      // A phone's own bar above the page takes the colour of the app's.
+      const bar = getComputedStyle(document.documentElement).getPropertyValue("--panel").trim();
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", bar);
+    };
+    apply();
+    system.addEventListener("change", apply);
+    return () => system.removeEventListener("change", apply);
+  }, [prefs.theme]);
+  // The person's own colours and size, laid over the theme on the root:
+  // an accent (and what reads on it), the sliders' and ticks' colour,
+  // and how large the chrome is drawn. Nothing set is nothing laid, so
+  // the theme's own show through.
+  useEffect(() => {
+    const root = document.documentElement.style;
+    if (prefs.accent) {
+      root.setProperty("--accent", prefs.accent);
+      root.setProperty("--on-accent", onColour(prefs.accent));
+      root.setProperty("--accent-on-dark", accentAsText(prefs.accent, "#2a2a30"));
+      root.setProperty("--accent-on-light", accentAsText(prefs.accent, "#ffffff"));
+    } else {
+      for (const name of ["--accent", "--on-accent", "--accent-on-dark", "--accent-on-light"]) root.removeProperty(name);
+    }
+    if (prefs.sliderColor) root.setProperty("--slider", prefs.sliderColor);
+    else root.removeProperty("--slider");
+    root.fontSize = prefs.uiScale === 1 ? "" : `${16 * prefs.uiScale}px`;
+    // Said on the root too, for the bar: what it gives up and when is
+    // decided by the window's width, which a larger interface fills
+    // sooner.
+    const scaleName =
+      prefs.uiScale < 1 ? "compact" : prefs.uiScale > 1.2 ? "larger" : prefs.uiScale > 1 ? "large" : "";
+    if (scaleName) document.documentElement.dataset.scale = scaleName;
+    else delete document.documentElement.dataset.scale;
+  }, [prefs.accent, prefs.sliderColor, prefs.uiScale]);
+  /** Which tools are on the rail. Put away in Preferences is not gone:
+   * the tool keeps its key and sits behind the slot at the rail's end.
+   * The one tool that cannot be put away is the one that moves things. */
+  const shown = (t: Tool) => t === ALWAYS_SHOWN || !prefs.hiddenTools.includes(t);
+  const hiddenTools = TOOLS.filter((t) => !shown(t));
+  const shownShapes = SHAPE_TOOLS.filter(shown);
+  const shownSelects = SELECT_TOOLS.filter(shown);
+  /** What sits in the shared slots: the tool last used if it is still on
+   * the rail, else the first of its family that is. */
+  const shapeSlot: Tool = shown(shapeTool) ? shapeTool : (shownShapes[0] ?? "Rect");
+  const selectSlot: Tool = shown(selectTool) ? selectTool : (shownSelects[0] ?? "Select");
+  /** The rail's sections with the put-away tools taken out, and any
+   * section that is then empty taken out with them. `Select` and `Rect`
+   * stand for their families' shared slots, which stay while any of the
+   * family does. */
+  const railSections = RAIL.map((section) =>
+    section.filter((t) =>
+      t === "Select"
+        ? shownSelects.length > 0
+        : t === "Rect"
+          ? shownShapes.length > 0
+          : shown(t),
+    ),
+  ).filter((section) => section.length > 0);
+  const units = prefs.units;
+  const setUnits = (u: Units) => setPrefs({ units: u });
+  /** The viewport's size in CSS pixels. The canvas covers it, and the
+   * engine composites only what fits — so a print-sized page costs a
+   * screenful of pixels to show, not nine megapixels. */
+  const [viewport, setViewport] = useState<[number, number]>([1, 1]);
+  const dpr = typeof window === "undefined" ? 1 : window.devicePixelRatio || 1;
+  // A window carried to a screen of another density keeps its size, so
+  // nothing else redraws it: the canvas stayed at the old resolution,
+  // blurred, until the next click.
+  const [, setDensity] = useState(dpr);
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return;
+    const mq = matchMedia(`(resolution: ${dpr}dppx)`);
+    const moved = () => setDensity(window.devicePixelRatio || 1);
+    mq.addEventListener?.("change", moved);
+    return () => mq.removeEventListener?.("change", moved);
+  }, [dpr]);
+  const [opacityDraft, setOpacityDraft] = useState<number | null>(null);
+  /** Whether a paste event followed the last Ctrl+V; see the keydown. */
+  const pasteSeen = useRef(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hostRef = useRef<HTMLDivElement>(null);
+  /** The pointer's place on the page, shown in the buttons' row. */
+  const readoutRef = useRef<HTMLSpanElement>(null);
+  const imgDataRef = useRef<ImageData | null>(null);
+  /** Where a draft frame is laid before it is stretched over the canvas. */
+  const draftCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  /** How long the last full-size frame took, which decides whether the
+   * next view change is drawn as a draft. */
+  const frameMsRef = useRef(0);
+  /** The sharp frame waiting for the view to keep still. */
+  const settleRef = useRef<number | null>(null);
+  /** A gradient being dragged across a shape with the gradient tool:
+   * which shape, what it held before, how a document point lands in its
+   * unit box, and where the drag began. */
+  const gradToolRef = useRef<{
+    id: NodeId;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+    unit: (x: number, y: number) => [number, number];
+    start: [number, number];
+    /** Where the drag began on the page, which Shift's angles are
+     * measured from. */
+    from: [number, number];
+    radial: boolean;
+    /** A radial one's axes: the box's units carried onto the page, so
+     * its rings are circles there whatever the box's proportions. */
+    axes: [number, number, number, number];
+  } | null>(null);
+  /** The knife being dragged: where the line started, in document
+   * coordinates. */
+  const knifeRef = useRef<[number, number] | null>(null);
+  /** The line the knife is drawing, shown over the page until it lets
+   * go: start and end, in document coordinates. */
+  const [knifeLine, setKnifeLine] = useState<[number, number, number, number] | null>(null);
+  /** The distances shown with alt held over the canvas: from what is
+   * picked to what the pointer is over, or to the frame or page round
+   * it — and the box they are measured to, outlined. */
+  const [measures, setMeasures] = useState<{ gaps: Gap[]; to: Box } | null>(null);
+  /** The gaps a dragged layer has just made equal, marked while it is
+   * held there. */
+  const [spacing, setSpacing] = useState<Gap[]>([]);
+  /** Where the pointer last was over the canvas, in document units, so
+   * pressing alt without moving shows the distances there. */
+  const lastPointer = useRef<[number, number] | null>(null);
+  const toolDragRef = useRef<ToolDrag | null>(null);
+  const handleDragRef = useRef<HandleDrag | null>(null);
+  const panDragRef = useRef<PanDrag | null>(null);
+  const spaceRef = useRef(false);
+  const shapeCount = useRef(0);
+  const frameCount = useRef(0);
+  const paintCount = useRef(0);
+  /** Where the last paint sample landed, for the speed the width follows. */
+  const lastPaint = useRef<[number, number]>([0, 0]);
+  /** Where the last stroke ended, so shift-clicking can draw a straight
+   * line on from there — what a brush does everywhere else. */
+  const strokeEnd = useRef<[number, number] | null>(null);
+  /** Pen tool: anchors of the path being drawn, in doc coordinates. */
+  const [penPoints, setPenPoints] = useState<[number, number][]>([]);
+  /** The pen's curve handles, one per anchor beside `penPoints`:
+   * `[in_x, in_y, out_x, out_y]` from the anchor, nought for a corner —
+   * the same shape a path keeps them in. A drag on a new anchor pulls
+   * them out, as it does in every editor with a pen. */
+  const [penHandles, setPenHandles] = useState<[number, number, number, number][]>([]);
+  /** The anchor a pen drag is pulling handles out of, and where it is. */
+  const penDragRef = useRef<{ index: number; x: number; y: number } | null>(null);
+  /** The line from the last anchor to the pointer, moved by hand rather
+   * than through state so a pointer crossing the canvas does not draw
+   * the whole editor again at every step. */
+  const penRubberRef = useRef<SVGLineElement>(null);
+  /** A box being dragged with the zoom tool, in the viewport's own
+   * pixels: where it began and where the pointer is. */
+  const zoomBoxRef = useRef<[number, number, number, number] | null>(null);
+  /** Where the brush's last stroke ended, for a shift-click to join on. */
+  const brushEndRef = useRef<[number, number] | null>(null);
+  const [zoomBox, setZoomBox] = useState<[number, number, number, number] | null>(null);
+  // Anything that lets go of the anchors lets go of their handles too.
+  useEffect(() => {
+    if (penPoints.length === 0) setPenHandles([]);
+  }, [penPoints]);
+  /** A draft from an earlier visit, offered back until it is taken or
+   * thrown away; and the draft-writer, a breath after the last change.
+   * `saveTick` is bumped on every refresh, so the draft follows the
+   * document. */
+  const [recoverable, setRecoverable] = useState<Draft | null>(null);
+  const recoverableRef = useRef<Draft | null>(null);
+  recoverableRef.current = recoverable;
+  const [saveTick, setSaveTick] = useState(0);
+  /** What this document is called: the name it was opened under, or the
+   * one typed in the bar. Every save and every export is named after it,
+   * so a file keeps its name through a session. */
+  const [docName, setDocName] = useState("untitled");
+  // The tab says which document it holds, so several can be told apart.
+  useEffect(() => {
+    const name = docName.trim();
+    document.title = name ? `${name} — Chitrakar` : "Chitrakar";
+  }, [docName]);
+  /** Where the document lives on disk, in the desktop shell, once it has
+   * been opened from or saved to a file: Save writes back there. A
+   * browser never learns a path, so there this stays null and every
+   * save is a download. */
+  const [docPath, setDocPath] = useState<string | null>(null);
+  /** Which draft is being kept: one begun later makes an earlier one
+   * stop rather than write an older skeleton over it. */
+  const draftRun = useRef(0);
+  /** This tab's draft slot, once it holds one: nothing is written before. */
+  const slotReady = useRef<Promise<number> | null>(null);
+  /** Slots whose drafts were offered and answered this visit. */
+  const answered = useRef(new Set<number>());
+  /** Whether the document is still the empty one the visit opened with,
+   * nothing yet done to it. */
+  const untouchedStart = useRef(false);
+  useEffect(() => {
+    slotReady.current = claimDraftSlot().then((n) => {
+      draftSlot = n;
+      if (n < 0)
+        setImportNotes({
+          name: "This tab",
+          notes: [
+            "no crash draft is kept here: the editor is open in eight other tabs, which keep theirs. Save this work, or close another tab and reload this one.",
+          ],
+        });
+      return n;
+    });
+    // Not offered where it would not have been kept.
+    if (!prefs.keepDraft) return;
+    void slotReady.current.then(() => offeredDraft()).then((draft) => draft && setRecoverable(draft));
+  }, []);
+  /** A draft answered, Restore or Discard: the next one a closed tab
+   * left, if there is one, is offered after it. */
+  const offerNextDraft = (done: number) => {
+    answered.current.add(done);
+    // This tab's own slot is offered only as the page opens, for what its
+    // last page left: after that it holds this tab's own work.
+    answered.current.add(draftSlot);
+    void offeredDraft(answered.current).then((d) => setRecoverable(d));
+  };
+  useEffect(() => {
+    // Turned off in Preferences: nothing is kept, and whatever was kept
+    // before goes — a setting that stops writing but leaves the last
+    // draft behind is not the setting it says it is.
+    if (!prefs.keepDraft) {
+      // This tab's own, and every draft no open tab is keeping — a closed
+      // tab's was left and offered again once the setting came back. And
+      // the bar offering one goes with it: answered after the draft was
+      // cleared, Restore brought back a document missing its pictures.
+      setRecoverable(null);
+      void slotReady.current?.then(async () => {
+        const held = await slotsHeld();
+        for (let n = 0; n < DRAFT_SLOTS; n++) {
+          if (n === draftSlot || !held.has(n) || movedSlotLocks.has(n)) await clearDraft(n);
+        }
+        for (const n of [...movedSlotLocks.keys()]) releaseMovedSlot(n);
+      });
+      return;
+    }
+    // Nothing to keep until something is done: the empty document every
+    // visit starts with must not overwrite a draft that has not been
+    // taken back yet. A page emptied by hand is something done, and is
+    // kept as it is — a crash after deleting the last layer brought it
+    // back.
+    if (!session || saveTick === 0) return;
+    // The page a visit opens with is put up by a refresh like any other,
+    // so the count above had already moved: a second and a half after
+    // every reload the empty page was written over the draft its own bar
+    // was offering, and with two tabs each swept the other's pictures
+    // away. Until something is done on it, it keeps nothing.
+    if (untouchedStart.current) {
+      if (session.history_mark() === 0) return;
+      untouchedStart.current = false;
+    }
+    const t = setTimeout(() => {
+      const mine = ++draftRun.current;
+      (slotReady.current ?? Promise.resolve(0))
+        .then(async () => {
+          // The draft the bar is still offering, if it is in this tab's
+          // own slot, is moved out of the way before this tab's work is
+          // written there; with nowhere to move it, nothing is written
+          // over it until it is answered.
+          const offered = recoverableRef.current;
+          if (offered && offered.slot === draftSlot) {
+            const to = await moveDraft(draftSlot);
+            if (to === null) throw new Error("the offered draft has nowhere to go");
+            offered.slot = to;
+            setRecoverable((d) => (d === offered ? { ...offered, slot: to } : d));
+          }
+        })
+        .then(() => putDraft(session, () => draftRun.current === mine, recoverableRef.current?.parts ?? []))
+        .then(() => {
+          putDraftNote("name", docName);
+          putDraftNote("path", docPath ?? "");
+          putDraftNote("saved", unsaved ? "no" : "yes");
+        })
+        .catch(() => {
+          // A draft that cannot be written is not worth an alert.
+        });
+    }, 1500);
+    return () => clearTimeout(t);
+    // `unsaved` is declared further down, with the history it reads;
+    // `savedAt` is what moves it when nothing else here does.
+  }, [session, saveTick, layers.length, docName, docPath, savedAt, prefs.keepDraft]);
+
+  /** Faces a text block can be set in. The bundled one is always there;
+   * the rest are fetched from /fonts once per page load and registered
+   * with the engine, which keeps them for good. */
+  const [fontNames, setFontNames] = useState<string[]>(["DejaVu Sans"]);
+  const fontsLoaded = useRef(false);
+  useEffect(() => {
+    if (!session || fontsLoaded.current) return;
+    fontsLoaded.current = true;
+    const faces: [string, string][] = [
+      ["DejaVu Sans Bold", "/fonts/DejaVuSans-Bold.ttf"],
+      ["DejaVu Serif", "/fonts/DejaVuSerif.ttf"],
+      ["DejaVu Sans Mono", "/fonts/DejaVuSansMono.ttf"],
+      ["DejaVu Sans Mono Oblique", "/fonts/DejaVuSansMono-Oblique.ttf"],
+    ];
+    Promise.all(
+      faces.map(async ([name, url]) => {
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return;
+          WasmSession.register_font(
+            name,
+            new Uint8Array(await res.arrayBuffer()),
+          );
+        } catch {
+          // A face that will not load is simply not offered.
+        }
+      }),
+    ).then(() =>
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]),
+    );
+  }, [session]);
+
+  /** Alignment guides drawn while a drag is snapped to something. */
+  const [guides, setGuides] = useState<Guides>({ x: [], y: [] });
+  /** The guides the user has placed, read back from the document. */
+  const [docGuides, setDocGuides] = useState<DocGuide[]>([]);
+  const showGuides = prefs.showGuides;
+  const setShowGuides = (v: boolean | ((was: boolean) => boolean)) =>
+    setPrefs({ showGuides: typeof v === "function" ? v(prefs.showGuides) : v });
+  /** How far apart the grid's lines are, in document pixels; 0 for no
+   * grid at all. A view setting like the guides' own visibility — it
+   * says how you are working rather than what the document is — so it is
+   * remembered here rather than saved with the file. */
+  const grid = prefs.grid;
+  const setGrid = (g: number) => setPrefs({ grid: g });
+  /** A guide being dragged: out of a ruler (index null) or an existing one
+   * being moved. `at` is where it currently sits, in document units. */
+  const [guideDrag, setGuideDrag] = useState<{
+    vertical: boolean;
+    index: number | null;
+    at: number;
+  } | null>(null);
+  /** The crop frame being dragged, in host coordinates: [x0, y0, x1, y1]. */
+  /** The crop's frame, `[x, y, w, h]` on the page: drawn by a drag and
+   * then kept — moved by its inside, resized by its handles — until Enter,
+   * a double-click in it or the bar's Crop takes it, as in Photoshop,
+   * Affinity and Lightroom. It used to be taken the moment the pointer
+   * let go, with no second look. */
+  const [cropFrame, setCropFrame] = useState<
+    [number, number, number, number] | null
+  >(null);
+  /** A kept frame being moved or resized: which edges follow the pointer
+   * (all four for a move), where the press was and the frame it began. */
+  const cropEditRef = useRef<{
+    edges: { l: boolean; r: boolean; t: boolean; b: boolean };
+    from: [number, number];
+    frame0: [number, number, number, number];
+  } | null>(null);
+  // A frame belongs to the crop tool: putting it down lets it go.
+  useEffect(() => {
+    if (tool !== "Crop") setCropFrame(null);
+  }, [tool]);
+  /** Extra layers picked with ctrl/cmd-click, beyond the primary selection. */
+  const [multiSel, setMultiSel] = useState<NodeId[]>([]);
+  /** The region being dragged out, while it is being dragged. Only the
+   * overlay wants it: the engine is not told until the pointer comes up,
+   * so a drag costs no history and no repaint. */
+  const [regionDrag, setRegionDrag] = useState<Region | null>(null);
+  /** How far the wand's colour may stray from the one it was clicked on:
+   * 0 is exactly that colour and 1 is the whole page. */
+  const [wandTolerance, setWandTolerance] = useState(0.12);
+  /** How readily a colour counts as background when the subject is
+   * picked out: nothing at 0, everything at 1, and at a half the
+   * picture's own evidence decides. Its own knob rather than the wand's
+   * — the wand is told a colour by being clicked on one, and this is
+   * told a background by reading the frame, so the same number would not
+   * mean the same thing to them.
+   *
+   * A half because that is where it measured best against a set of
+   * photographs whose answers were known, not because a half is a
+   * pleasing place to start. Either way from there it gives ground
+   * gently rather than falling over. */
+  const subjectTolerance = prefs.subjectTolerance;
+  const setSubjectTolerance = (v: number) => setPrefs({ subjectTolerance: v });
+  /** How far the next grow or shrink of the region reaches. */
+  const [growBy, setGrowBy] = useState(2);
+  /** Whether the view is showing the picture as it was before the work
+   * — the page with every adjustment and filter left out. A setting of
+   * the view, so nothing about it reaches the history or the file. */
+  const [untouched, setUntouched] = useState(false);
+  /** The layer being looked at on its own, or null. A setting of the
+   * view rather than an edit: nothing about the document changes, so
+   * nothing goes into the history or the file. */
+  const [solo, setSolo] = useState<NodeId | null>(null);
+  /** The regions this document has kept by name. A region is often the
+   * expensive thing on a page — a sky wanded out between branches — and
+   * the only place to put one used to be the layer it was handed to. */
+  const [kept, setKept] = useState<string[]>([]);
+  /** What the layers are being searched for: a word in the name, and a
+   * kind, either of them empty for any. */
+  const [layerQuery, setLayerQuery] = useState("");
+  const [layerKind, setLayerKind] = useState("");
+  /** The states of the page kept by name, and whether each is the one
+   * showing now — read back from the engine on every refresh, since any
+   * edit can make the page stop being one or start being one again. */
+  const [comps, setComps] = useState<{ name: string; layers: number; showing: boolean }[]>([]);
+  /** A wash over what is *not* picked, for when the ants cannot say
+   * enough: a softened edge is neither in nor out, an inverted region
+   * is everything but its rings, and a hundred rings is a thicket. Kept
+   * as a blob URL, remade whenever what is picked changes. */
+  const [veil, setVeil] = useState<string | null>(null);
+  const showVeil = useRef(false);
+  const [veilOn, setVeilOn] = useState(false);
+  /** Whether the wand asks about the run of pixels it landed in or
+   * about the colour wherever it is on the page. A sky between branches
+   * is one colour in a hundred pieces, and spreading never gets from
+   * one piece to the next. */
+  const [wandTouching, setWandTouching] = useState(true);
+  /** How far the edge of the next region picked is softened over. Kept
+   * here rather than read off the document so it carries from one
+   * region to the next, the way a brush size does. */
+  const selectionFeather = prefs.feather;
+  const setSelectionFeather = (v: number) => setPrefs({ feather: v });
+  /** The outline of what is picked out, in page coordinates, as the
+   * engine flattens it — asked for rather than worked out again here,
+   * since a rounded box, an ellipse and a freehand path each flatten
+   * differently and two answers would show as ants off the edge. */
+  const [antRings, setAntRings] = useState<[number, number][][]>([]);
+
+  /** The engine's own frame laid on the canvas: what changed since the
+   * last one, or — after a frame the graphics card drew, which the
+   * engine's buffer never saw — all of it. */
+  const cpuFrame = (s: WasmSession, whole: boolean) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d")!;
+    const started = performance.now();
+    const dirty = s.render_frame();
+    // A frame smaller than the canvas is a draft (`DRAFT_MS`): laid whole
+    // onto a canvas of its own size and stretched over this one. Timed
+    // only at full size, since that is the cost a draft is standing in
+    // for.
+    if (s.frame_width() !== canvas.width || s.frame_height() !== canvas.height) {
+      const draft = (draftCanvasRef.current ??= document.createElement("canvas"));
+      draft.width = s.frame_width();
+      draft.height = s.frame_height();
+      const view = new Uint8ClampedArray(getWasmMemory().buffer, s.frame_ptr(), s.frame_len());
+      draft
+        .getContext("2d")!
+        .putImageData(new ImageData(new Uint8ClampedArray(view), draft.width, draft.height), 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(draft, 0, 0, canvas.width, canvas.height);
+      canvas.dataset.draft = "1";
+      return;
+    }
+    // Only a whole frame says what a view change costs: an edit repaints
+    // the little it touched.
+    if (dirty.length === 4 && dirty[2] === canvas.width && dirty[3] === canvas.height) {
+      frameMsRef.current = performance.now() - started;
+    }
+    canvas.dataset.draft = "0";
+    if (
+      !imgDataRef.current ||
+      imgDataRef.current.width !== s.frame_width() ||
+      imgDataRef.current.height !== s.frame_height()
+    ) {
+      imgDataRef.current = new ImageData(s.frame_width(), s.frame_height());
+    }
+    if (dirty.length === 4 || whole) {
+      // Zero-copy view into wasm memory; ImageData needs its own buffer.
+      const view = new Uint8ClampedArray(
+        getWasmMemory().buffer,
+        s.frame_ptr(),
+        s.frame_len(),
+      );
+      imgDataRef.current.data.set(view);
+      const [x, y, w, h] = whole
+        ? [0, 0, s.frame_width(), s.frame_height()]
+        : [dirty[0], dirty[1], dirty[2], dirty[3]];
+      ctx.putImageData(imgDataRef.current, 0, 0, x, y, w, h);
+    }
+  };
+  /** A frame of straight sRGB bytes from the graphics card, laid whole. */
+  const gpuRef = useRef(
+    new GpuFrames((bytes, width, height) => {
+      const ctx = canvasRef.current?.getContext("2d");
+      if (!ctx || bytes.length !== width * height * 4) return;
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(bytes), width, height), 0, 0);
+      // The engine's buffer did not draw this one: the next frame it
+      // draws is laid whole.
+      cpuStaleRef.current = true;
+    }),
+  );
+  const gpuOnRef = useRef(false);
+  const cpuStaleRef = useRef(false);
+  /** The view the engine was last told, for a frame drawn elsewhere. */
+  const viewArgsRef = useRef({ scale: 1, x: 0, y: 0 });
+  /** The view the engine was last given, and what it was given for it:
+   * the origin in device pixels, rounded to whole ones while the view
+   * is only panning (`engineOrigin`). Read during render for the
+   * attributes that place things over the page, and written by the
+   * effect that hands the view to the engine, so the two agree. */
+  const engineViewRef = useRef({ scale: 1, w: 0, h: 0, rawX: NaN, rawY: NaN, x: 0, y: 0 });
+  gpuOnRef.current = isTauri() && prefs.gpuFrames;
+
+  /** The frame and nothing else: from the desktop shell's graphics
+   * card when that is asked for and the card can draw it exactly, and
+   * otherwise from the engine here, as it always was. A view moving —
+   * every frame of a pan or a pinch — needs only this: the layers, the
+   * guides, the palette, the region and the rest are the document's,
+   * and a view changes none of them. Reading them all back as JSON and
+   * handing them to the panels was a frame's worth of work a frame. */
+  const present = useCallback((s: WasmSession) => {
+    const canvas = canvasRef.current;
+    if (canvas && gpuOnRef.current) {
+      gpuRef.current.request(
+        s,
+        () => ({
+          ...viewArgsRef.current,
+          width: s.frame_width(),
+          height: s.frame_height(),
+        }),
+        () => cpuFrame(s, true),
+      );
+    } else if (canvas) {
+      cpuFrame(s, cpuStaleRef.current);
+      cpuStaleRef.current = false;
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const refresh = useCallback(
+    (s: WasmSession) => {
+      setSaveTick((n) => n + 1);
+      // Another edit made while Straighten or Feather stood open let its
+      // preview go (`hold_preview`): the window has nothing left to
+      // apply, and goes as its Cancel would.
+      if (s.take_dropped_preview()) {
+        setStraightenOpen(false);
+        setLevelling(false);
+        if (featherOpenRef.current) setSelectionFeather(featherWas.current);
+        setFeatherOpen(false);
+      }
+      // What is picked out, as the engine flattens it. Read on every
+      // refresh because a page that turns carries the region round with
+      // it: the ants have to follow.
+      try {
+        setAntRings(JSON.parse(s.selection_outline_json()) as [number, number][][]);
+      } catch {
+        setAntRings([]);
+      }
+      try {
+        setKept(JSON.parse(s.kept_regions_json()) as string[]);
+      } catch {
+        setKept([]);
+      }
+      try {
+        setComps(JSON.parse(s.comps_json()));
+      } catch {
+        setComps([]);
+      }
+      // Read back rather than remembered: a layer being looked at on
+      // its own can go — by an undo as readily as by a delete — and the
+      // engine puts the page back when it does.
+      try {
+        const alone = s.solo();
+        setSolo(alone < 0 ? null : (alone as NodeId));
+        setUntouched(s.untouched());
+      } catch {
+        setSolo(null);
+      }
+      // The wash, when it is asked for. Made here rather than in an
+      // effect because this is the one place that knows the region has
+      // just been read: an effect would have to work out for itself
+      // whether anything changed, and would remake it on every render.
+      setVeil((old) => {
+        if (old) URL.revokeObjectURL(old);
+        if (!showVeil.current) return null;
+        try {
+          const png = s.selection_veil() as Uint8Array;
+          return URL.createObjectURL(
+            new Blob([png as BlobPart], { type: "image/png" }),
+          );
+        } catch {
+          // Nothing picked out: nothing to wash over.
+          return null;
+        }
+      });
+      present(s);
+      setLayers(JSON.parse(s.layers_json()) as LayerInfo[]);
+      setDocGuides(JSON.parse(s.guides_json()) as DocGuide[]);
+      setSwatches(JSON.parse(s.swatches_json()) as Swatch[]);
+      setStyles(JSON.parse(s.styles_json()) as KeptStyle[]);
+      // The page's size is document state like anything else — undoing a
+      // crop changes it — so it is read back here rather than only being
+      // written where a crop or a new document sets it.
+      if (
+        s.width !== docSizeRef.current[0] ||
+        s.height !== docSizeRef.current[1]
+      ) {
+        setDocumentSize(s.width, s.height);
+      }
+    },
+    [setDocumentSize],
+  );
+
+  /** Give a session that has not drawn anything yet the view a fitted
+   * page will have, before its first frame. Without one the engine draws
+   * the whole page at full size — a 12-megapixel photograph's page is a
+   * 195 MB float surface and a 48 MB frame — and an engine's memory, once
+   * grown, is never handed back: one frame drawn before the view arrived
+   * left a phone's tab a quarter of a gigabyte heavier for the rest of
+   * the visit. Read off the host directly rather than out of state, so
+   * this is no dependency of the callbacks that make a session. */
+  const fitSession = useCallback((s: WasmSession, w: number, h: number) => {
+    const host = hostRef.current;
+    if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
+    const d = window.devicePixelRatio || 1;
+    const zoom = Math.min(host.clientWidth / w, host.clientHeight / h) * 0.9;
+    s.set_viewport(
+      zoom * d,
+      ((host.clientWidth - w * zoom) / 2) * d,
+      ((host.clientHeight - h * zoom) / 2) * d,
+      Math.round(host.clientWidth * d),
+      Math.round(host.clientHeight * d),
+    );
+  }, []);
+
+  const fitView = useCallback(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    // Held to the zoom's own range: a one-pixel page fitted at 73980%
+    // was then "zoomed in" to 800% and shrank.
+    const zoom = Math.min(
+      MAX_ZOOM,
+      Math.max(
+        MIN_ZOOM,
+        Math.min(host.clientWidth / docSizeRef.current[0], host.clientHeight / docSizeRef.current[1]) * 0.9,
+      ),
+    );
+    setView({
+      zoom,
+      x: (host.clientWidth - docSizeRef.current[0] * zoom) / 2,
+      y: (host.clientHeight - docSizeRef.current[1] * zoom) / 2,
+    });
+  }, []);
+
+  /** Zoom about the centre of the viewport, so the View menu behaves like
+   * the wheel does under the cursor. */
+  const zoomBy = useCallback((factor: number) => {
+    const host = hostRef.current;
+    if (!host) return;
+    setView((v) => {
+      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
+      const k = zoom / v.zoom;
+      const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
+      return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+    });
+  }, []);
+
+  /** Zoom about a point of the canvas, the way the wheel does: the
+   * document point under it stays under it. */
+  const zoomAt = useCallback((cx: number, cy: number, factor: number) => {
+    setView((v) => {
+      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
+      const k = zoom / v.zoom;
+      return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+    });
+  }, []);
+
+  /** Set the zoom outright, keeping the viewport's centre where it is. */
+  const zoomTo = useCallback((zoom: number) => {
+    const host = hostRef.current;
+    if (!host) return;
+    setView((v) => {
+      const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)) / v.zoom;
+      const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
+      return {
+        zoom: v.zoom * k,
+        x: cx - (cx - v.x) * k,
+        y: cy - (cy - v.y) * k,
+      };
+    });
+  }, []);
+
+  const newDocument = useCallback(
+    (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72) => {
+      // A document asked for is something done, and kept.
+      untouchedStart.current = false;
+      const s = guardSession(new WasmSession(width, height, useCmyk));
+      fitSession(s, width, height);
+      s.set_dpi(dpi);
+      setDocDpi(dpi);
+      setSession(s);
+      setDocumentSize(width, height);
+      setCmyk(useCmyk);
+      setSelected(null);
+      setHasIcc(false);
+      setProofing(false);
+      setGamutWarn(false);
+      shapeCount.current = 0;
+      paintCount.current = 0;
+      setCloneFrom(null);
+      setDocName("untitled");
+      setDocPath(null);
+      setSavedAt(0);
+      // What was said about the document before goes with it: a missing
+      // picture's note stayed over the new empty page.
+      setImportNotes(null);
+      refresh(s);
+      fitView();
+    },
+    [refresh, fitView, fitSession, setDocumentSize],
+  );
+
+  /** Why the engine could not start, if it could not: said on the page
+   * rather than left blank. */
+  const [engineFailed, setEngineFailed] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    initEngine().then(
+      () => {
+        if (cancelled) return;
+        newDocument(false);
+        untouchedStart.current = true;
+      },
+      (err) => {
+        if (!cancelled) setEngineFailed(err instanceof Error ? err.message : String(err));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [newDocument]);
+
+  const run = useCallback(
+    (cmd: Command) => {
+      if (!session) return;
+      sendCommand(session, cmd);
+      refresh(session);
+    },
+    [session, refresh],
+  );
+
+  const preview = useCallback(
+    (cmd: Command) => {
+      if (!session) return;
+      sendPreview(session, cmd);
+      refresh(session);
+    },
+    [session, refresh],
+  );
+
+  /** After an undo or redo, point the selection at the layer it touched —
+   * undoing a delete brings the layer back and should bring the selection
+   * back with it — and drop it when that layer is gone. */
+  const followHistory = useCallback(
+    (s: WasmSession) => {
+      const alive = new Set(
+        (JSON.parse(s.layers_json()) as LayerInfo[]).map((l) => l.id as NodeId),
+      );
+      const touched = s.last_touched_node();
+      // A selection that survived the step is left alone: undoing an edit
+      // to one layer while another is picked should not steal the pick.
+      // Only a selection the step took away — a delete undone, an add
+      // redone — is pointed at what came back.
+      setSelected((prev) =>
+        prev !== null && alive.has(prev)
+          ? prev
+          : touched === undefined
+            ? null
+            : touched,
+      );
+      setMultiSel((prev) => prev.filter((id) => alive.has(id)));
+      refresh(s);
+    },
+    [refresh],
+  );
+
+  const undo = useCallback(() => {
+    if (session?.undo()) followHistory(session);
+  }, [session, followHistory]);
+  const redo = useCallback(() => {
+    if (session?.redo()) followHistory(session);
+  }, [session, followHistory]);
+
+  /** Pick every top-level layer. */
+  /** Replace the palette, one history entry. */
+  const setPalette = (next: Swatch[]) =>
+    run({ SetSwatches: { swatches: next } });
+
+  /** Pick the whole page out as a region, rather than picking every
+   * layer — which is what the same words mean two lines up. */
+  const pickWholePage = () => {
+    if (!session) return;
+    try {
+      session.pick_all();
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${said(err)}`);
+    }
+  };
+  const pickInverse = () => {
+    if (session?.pick_inverse()) refresh(session);
+  };
+  /** Deselect, as Ctrl+D does in Photoshop: the selection picked out of
+   * the page first, when there is one; otherwise the picked layers. */
+  const deselectAll = useCallback(() => {
+    if (session?.pick_none()) {
+      refresh(session);
+      return;
+    }
+    setSelected(null);
+    setMultiSel([]);
+  }, [session, refresh]);
+  /** The other way round: the shape the picked layer covers, come back
+   * out into the page as a region. It is how a photograph is held to
+   * the shape of the words over it — no marquee can be dragged into
+   * that shape, but the layer that draws it already knows it. */
+  /** Keep what is picked out under a name, so a region that took work
+   * can be picked up again — and put back exactly as it was kept,
+   * softness and inside-out included, rather than as an outline that
+   * lost both. */
+  /** Keep the page as it is under a name: which layers show, where, and
+   * how strongly. */
+  /** The comp a press just showed, for a double-click to take back. */
+  const compShownBy = useRef<{ name: string; at: number } | null>(null);
+  const keepComp = () => {
+    if (!session) return;
+    // A name no comp has: the count alone named the next one after a
+    // comp forgotten, and accepting it wrote over that comp.
+    const taken = new Set(comps.map((c) => c.name));
+    let n = comps.length + 1;
+    while (taken.has(`Comp ${n}`)) n++;
+    const name = window.prompt("Keep the page as it is now as:", `Comp ${n}`);
+    if (name === null) return;
+    // A name already kept is asked about rather than written over without
+    // a word, as Rename refuses it.
+    if (taken.has(name.trim()) && !window.confirm(`A comp called “${name.trim()}” is kept already. Keep the page as it is now in its place?`)) return;
+    try {
+      session.keep_comp(name);
+      refresh(session);
+    } catch (err) {
+      alert(`Comp: ${said(err)}`);
+    }
+  };
+  /** A comp chip pressed: shown; with shift, brought up to the page as
+   * it is; with ctrl, forgotten. */
+  const onComp = (name: string, e: React.MouseEvent) => {
+    if (!session) return;
+    try {
+      if (e.ctrlKey || e.metaKey) {
+        session.forget_comp(name);
+      } else if (e.shiftKey) {
+        session.keep_comp(name);
+      } else if (e.detail <= 1) {
+        // A double-click's first press shows the comp; the second is
+        // the rename, which takes that back (`renameCompChip`).
+        compShownBy.current = session.apply_comp(name) ? { name, at: Date.now() } : null;
+      }
+      refresh(session);
+    } catch (err) {
+      alert(`Comp: ${said(err)}`);
+    }
+  };
+  const renameComp = (name: string) => {
+    if (!session) return;
+    const to = window.prompt("Call the comp:", name);
+    if (to === null || to === name) return;
+    try {
+      session.rename_comp(name, to);
+      refresh(session);
+    } catch (err) {
+      alert(`Comp: ${said(err)}`);
+    }
+  };
+
+  const keepSelection = () => {
+    if (!session) return;
+    // A name of its own by default, as a comp and a style have: an empty
+    // answer was an error from the engine.
+    const taken = new Set(kept);
+    let n = kept.length + 1;
+    while (taken.has(`Region ${n}`)) n++;
+    const answer = window.prompt("Keep what is picked out as:", `Region ${n}`);
+    if (answer === null) return;
+    const name = answer.trim() || `Region ${n}`;
+    if (taken.has(name) && !window.confirm(`A region called “${name}” is kept already. Keep what is picked out now in its place?`)) return;
+    try {
+      session.keep_selection(name);
+      refresh(session);
+    } catch (err) {
+      alert(`Keep: ${said(err)}`);
+    }
+  };
+  /** Pick a kept region up again — with the same modifiers a marquee
+   * takes, since it is a region arriving the same way. */
+  const pickKept = (index: number, how: string) => {
+    if (!session) return;
+    try {
+      session.pick_kept(index, how);
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${said(err)}`);
+    }
+  };
+  const forgetRegion = (index: number) => {
+    if (!session) return;
+    try {
+      session.forget_region(index);
+      refresh(session);
+    } catch (err) {
+      alert(`Forget: ${said(err)}`);
+    }
+  };
+  /** Pick every layer that shares the picked one's fill colour, stroke
+   * colour or kind — what Illustrator's Select › Same does. The engine
+   * leaves out what could not be clicked; the picked layer stays the
+   * one the panel speaks for when it is among them. */
+  const selectAlike = (what: "fill" | "stroke" | "kind") => {
+    if (!session || selected === null) return;
+    try {
+      const found = Array.from(session.alike(selected, what)) as NodeId[];
+      if (found.length === 0) return;
+      setSelected(found.includes(selected) ? selected : found[0]);
+      setMultiSel(found);
+    } catch (err) {
+      alert(`Select: ${said(err)}`);
+    }
+  };
+
+  const pickFromLayer = () => {
+    if (!session || selected === null) return;
+    try {
+      session.pick_from_layer(selected, "replace");
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${said(err)}`);
+    }
+  };
+  /** Pick the subject out of a photograph — what stands in front of its
+   * background.
+   *
+   * It asks about a *layer* rather than about the page, because the
+   * background it reads is the one running off that picture's edges:
+   * asked about a page with a photograph sitting on it, the edges are
+   * the page's and the answer is the whole photograph.
+   *
+   * Which picture, though, is usually not a question worth asking. A
+   * document holding one picture has one answer, and making somebody
+   * pick it in the panel first — then saying "pick the picture first"
+   * when they have not — is a demand for a decision that has already
+   * been made. So: the picked layer if there is one, since an explicit
+   * choice beats a guess; otherwise the one picture here. Only when
+   * there are several and none is picked is there really something to
+   * ask, and then it says so rather than choosing for them. */
+  const pickSubject = async () => {
+    if (!session) return;
+    // Hidden pictures are not candidates: a subject cannot be read off
+    // a layer that is not being drawn, and a document with an old
+    // version turned off behind the one in use would otherwise be
+    // "several pictures" with nothing to show for it.
+    const pictures = layers.filter((l) => l.kind === "raster" && l.visible);
+    const id = selected ?? (pictures.length === 1 ? pictures[0].id : null);
+    if (id === null) {
+      alert(
+        pictures.length === 0
+          ? "There is no picture here to find a subject in: open a photograph first."
+          : "Pick which picture: a subject is found by reading the edges of the picture it is in, and there is more than one here.",
+      );
+      return;
+    }
+    // The system's own model first, where the machine has one. It knows
+    // what a person looks like, which is the one thing reasoning about
+    // colour cannot get at: a white shirt in front of a white curtain
+    // has nothing locally to say it is a shirt. Nothing is shipped for
+    // it and nothing is downloaded — on macOS and iOS it is already
+    // there, and everywhere else this quietly does not happen and the
+    // engine's own pick answers instead.
+    if (isTauri()) {
+      try {
+        // Shrunk on the way out: the model works at its own size
+        // whatever it is given, the matte is stretched back over the
+        // page when it lands, and a twelve-megapixel PNG crossing into
+        // the shell is a pause nobody asked for.
+        const across = Math.max(session.width, session.height);
+        const page = session.export_png_at(Math.min(1, 1536 / across), 0, 0, 0, 0);
+        const { invoke } = await import("@tauri-apps/api/core");
+        const matte = await invoke<ArrayBuffer>("subject_matte", page);
+        if (matte && matte.byteLength > 0) {
+          // Held to the picture, since the matte was worked out from the
+          // whole page and a photograph placed on one is not all of it.
+          session.pick_matte_png(
+            new Uint8Array(matte),
+            id,
+            selectionFeather,
+            "replace",
+          );
+          refresh(session);
+          return;
+        }
+      } catch (err) {
+        // A shell too old to have been asked, a picture it made nothing
+        // of, a platform with no model: none of these is a failure worth
+        // stopping for when there is a second way of answering.
+        console.warn("the system's subject matte was not available:", err);
+      }
+    }
+    // In a browser, the subject model where it has been fetched; offered
+    // once (its size said) where it has not, unless the person said they
+    // would rather pick by colour.
+    if (!isTauri()) {
+      if (await hasSubjectModel()) {
+        if (await subjectFromModel(id)) return;
+      } else if (!prefs.subjectQuick) {
+        setSubjectOffer(id);
+        return;
+      }
+    }
+    subjectByColour(id);
+  };
+  /** The colour pick: the engine's own, quick, and what answers when
+   * there is no model to ask. */
+  const subjectByColour = (id: number) => {
+    if (!session) return;
+    try {
+      // The softness rides along in the pick rather than following it,
+      // so one press of the button is one thing to undo.
+      session.pick_subject(id, subjectTolerance, selectionFeather, "replace");
+      refresh(session);
+    } catch (err) {
+      alert(`Select subject: ${said(err)}`);
+    }
+  };
+  /** The subject model's matte for the page, held to picture `id`; false
+   * when the model could not answer, for the colour pick to. */
+  const subjectFromModel = async (id: number): Promise<boolean> => {
+    if (!session) return false;
+    setImporting("Finding the subject…");
+    try {
+      // Shrunk on the way: the model works at 320 pixels whatever it is
+      // given, and the matte is stretched back over the page.
+      const across = Math.max(session.width, session.height);
+      const page = session.export_png_at(Math.min(1, 1280 / across), 0, 0, 0, 0);
+      const { matte, side } = await subjectMatte(page);
+      session.pick_matte_grey(matte, side, side, id, selectionFeather, "replace");
+      refresh(session);
+      return true;
+    } catch (err) {
+      console.warn("the subject model did not answer:", err);
+      return false;
+    } finally {
+      setImporting(null);
+    }
+  };
+  /** Choose the softness of what is picked, in its own window.
+   *
+   * The rail has the same number, and will keep it: a hand already on
+   * the canvas should not have to cross the screen for it. What the
+   * window adds is being findable — the rail's number appears only with
+   * a region picked and a picking tool in hand, which is a lot to know
+   * before you can learn the app can do this at all.
+   *
+   * It previews as the slider moves and costs one entry in the history,
+   * which is what the preview API is for: softening is a judgement made
+   * by looking, and a slider that could only be judged after committing
+   * would be no better than typing a number. */
+  /** A line along the edge of what is picked, asked for in a small
+   * window: how wide and which side, in the ink in hand. */
+  const [strokeOpen, setStrokeOpen] = useState(false);
+  const openStroke = () => {
+    if (!session) return;
+    if (!session.selection_json() || session.selection_json() === "null") {
+      alert("Pick something out first: there is no edge to draw along yet.");
+      return;
+    }
+    setStrokeOpen(true);
+  };
+  const strokeSelection = (width: number, side: string) => {
+    if (!session) return;
+    try {
+      const id = session.stroke_selection(JSON.stringify(currentInk()), width, side) as number;
+      setStrokeOpen(false);
+      setSelected(id as NodeId);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Stroke: ${said(err)}`);
+    }
+  };
+  /** The softness regions were being given when the Feather window
+   * opened, which Cancel puts back. */
+  const featherWas = useRef(0);
+  /** The softness a region picked now is given: while Feather stands
+   * open, what it will put back as it is let go (a region drawn beside
+   * it lets it go), not the number typed into it — a finger's marquee
+   * beside the window took the cancelled 12. */
+  const newFeather = () => (featherOpenRef.current ? featherWas.current : selectionFeather);
+  const openFeather = () => {
+    if (!session) return;
+    if (!session.selection_json() || session.selection_json() === "null") {
+      alert("Pick something out first: there is no edge to soften yet.");
+      return;
+    }
+    featherWas.current = selectionFeather;
+    setFeatherOpen(true);
+  };
+  /** Feather let go of: its preview taken back, and the softness the
+   * next region is given put back too — set as the window was typed in,
+   * a cancelled window left it for the next marquee. */
+  const cancelFeather = () => {
+    setFeatherOpen(false);
+    setSelectionFeather(featherWas.current);
+    session?.cancel_preview();
+    if (session) refresh(session);
+  };
+  /** Straighten let go of: the page as it was. */
+  const cancelStraighten = () => {
+    setStraightenOpen(false);
+    setLevelling(false);
+    previewStraighten(0);
+  };
+  // Straighten and Feather stand open beside the editor with their
+  // preview in place, so anything done elsewhere — a press outside the
+  // window, a key, a chord — lets the window go as its Cancel would,
+  // *before* it is done: worked out from the previewed page, a layer
+  // moved or flipped beside Straighten kept the turn, a Save wrote it
+  // down, and the two windows open at once shared one preview. A press
+  // on the canvas while the level line is being drawn is the window's.
+  const heldWindows = useRef({ cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling, tool });
+  heldWindows.current = { cancelStraighten, cancelFeather, straightenOpen, featherOpen, levelling, tool };
+  /** Let a standing Straighten or Feather go before what writes the
+   * document down: a save asked for from the system's own menu bar comes
+   * with no press on the page, and wrote down a turn not applied, then
+   * counted it saved. */
+  const letHeldGo = () => {
+    const h = heldWindows.current;
+    if (h.straightenOpen) h.cancelStraighten();
+    if (h.featherOpen) h.cancelFeather();
+  };
+  useEffect(() => {
+    if (!straightenOpen && !featherOpen) return;
+    const panelOf = (t: EventTarget | null) =>
+      t instanceof Element ? t.closest(".straighten-panel") : null;
+    const letGo = (keep: Element | null) => {
+      const h = heldWindows.current;
+      const label = keep?.getAttribute("aria-label");
+      if (h.straightenOpen && label !== "Straighten") h.cancelStraighten();
+      if (h.featherOpen && label !== "Feather") h.cancelFeather();
+    };
+    const onDown = (e: PointerEvent) => {
+      const panel = panelOf(e.target);
+      if (panel) {
+        // In one window: the other, if it is open too, goes.
+        letGo(panel);
+        return;
+      }
+      const host = document.getElementById("engine-canvas")?.parentElement;
+      const onCanvas = !!host && e.target instanceof Node && host.contains(e.target);
+      if (heldWindows.current.levelling && onCanvas) return;
+      // Looking about the page is not leaving the window: the middle
+      // button, the space bar, the hand, and a finger (a pinch's first)
+      // move the view and nothing in it, and closing the window for
+      // them threw away the angle typed — on a phone there was no way
+      // to zoom in on the line being levelled. A finger that goes on
+      // to draw lets the window go through the engine, as any other
+      // preview does (`preview_held`).
+      if (
+        onCanvas &&
+        (e.button === 1 ||
+          (e.button === 0 && (spaceRef.current || heldWindows.current.tool === "Hand")) ||
+          e.pointerType === "touch")
+      )
+        return;
+      letGo(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (["Shift", "Control", "Alt", "Meta", " ", "Escape", "Tab"].includes(e.key)) return;
+      const panel = panelOf(e.target);
+      const chord = e.ctrlKey || e.metaKey;
+      // Typing in the window's own box, its text keys included, is the
+      // window's.
+      if (panel && (!chord || ["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase()))) return;
+      // Let go of at once, and the window off the page before the
+      // editor's own keys hear this one: they stand down while a window
+      // is up, so Ctrl+S closed Straighten and saved nothing, and the
+      // browser's own "save page" came up instead.
+      flushSync(() => letGo(null));
+      noteWindowForKey();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [straightenOpen, featherOpen]);
+  const previewFeather = (radius: number) => {
+    if (!session) return;
+    try {
+      const mask = JSON.parse(session.selection_json()) as Mask | null;
+      if (!mask) return;
+      mask.feather = Math.max(0, radius);
+      // Held: the window stays open beside the editor, and anything else
+      // done meanwhile lets this preview go (`preview_held`).
+      session.preview_held(JSON.stringify({ SetSelection: { selection: mask } }));
+      refresh(session);
+    } catch (err) {
+      console.warn("feather preview:", err);
+    }
+  };
+  /** The way back: a layer's mask, out into the page as a region. A
+   * mask is moved and resized on canvas but not reshaped there, and
+   * this is what reshaping one is — take it out, add to it, soften it,
+   * grow it, hand it back. */
+  const pickLayerMask = () => {
+    if (!session || selected === null) return;
+    try {
+      session.pick_layer_mask(selected, "replace");
+      refresh(session);
+    } catch (err) {
+      alert(`Select: ${said(err)}`);
+    }
+  };
+  /** Hand the region to the picked layer as its mask. This is what a
+   * selection is for in a non-destructive editor: nothing is cut out,
+   * the layer is simply held to the part of it that was picked. */
+  const maskFromSelection = (hide: boolean) => {
+    if (!session || selected === null) return;
+    try {
+      session.mask_from_selection(selected, hide);
+      refresh(session);
+    } catch (err) {
+      alert(`Mask: ${said(err)}`);
+    }
+  };
+  /** The region as a shape layer of its own, in the fill colour. A lasso
+   * is the only way to draw some of these shapes at all. */
+  const fillSelection = () => {
+    if (!session) return;
+    try {
+      const paint = currentInk();
+      const id = session.fill_selection(JSON.stringify(paint)) as number;
+      setSelected(id as NodeId);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Fill: ${said(err)}`);
+    }
+  };
+  const cropToSelection = () => {
+    if (!session) return;
+    try {
+      session.crop_to_selection();
+      setDocumentSize(session.width, session.height);
+      refresh(session);
+      fitView();
+    } catch (err) {
+      alert(`Crop: ${said(err)}`);
+    }
+  };
+
+  const selectAll = useCallback(() => {
+    const top = layers.filter((l) => l.depth === 0).map((l) => l.id as NodeId);
+    if (top.length === 0) return;
+    setSelected(top[0]);
+    setMultiSel(top);
+  }, [layers]);
+
+  const deselect = useCallback(() => {
+    setSelected(null);
+    setMultiSel([]);
+  }, []);
+
+  /** Take back the copies an alt-drag began by making, and pick what
+   * they were copies of again. */
+  const dropCopies = useCallback(
+    (drag: ToolDrag) => {
+      if (!session || !drag.duplicated) return;
+      session.take_back();
+      const from = drag.copiedFrom ?? [];
+      setSelected(from[0] ?? null);
+      setMultiSel(from.length > 1 ? from : []);
+      refresh(session);
+    },
+    [session, refresh],
+  );
+
+  // Focus going from one slider to the next is not the first one let go
+  // of — its own pointer coming up did that. Its blur came after the
+  // second slider's first move, and ended that one's gesture there: one
+  // drag, two steps, the first undoing to the value at the press.
+  useEffect(() => {
+    const isRange = (t: EventTarget | null) => t instanceof HTMLInputElement && t.type === "range";
+    const onFocusOut = (e: FocusEvent) => {
+      if (isRange(e.target) && isRange(e.relatedTarget)) e.stopPropagation();
+    };
+    window.addEventListener("focusout", onFocusOut, true);
+    return () => window.removeEventListener("focusout", onFocusOut, true);
+  }, []);
+
+  /** The pointers pressed on the page now, by id. */
+  const pointersDown = useRef(new Set<number>());
+  useEffect(() => {
+    const down = (e: PointerEvent) => pointersDown.current.add(e.pointerId);
+    const up = (e: PointerEvent) => pointersDown.current.delete(e.pointerId);
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+    };
+  }, []);
+
+  /** Whether a drag is held: a tool's, or one on any handle. */
+  const handleHeld = (): boolean =>
+    toolDragRef.current !== null ||
+    handleDragRef.current !== null ||
+    gradToolRef.current !== null ||
+    knifeRef.current !== null ||
+    cropEditRef.current !== null ||
+    paintingRef.current !== null ||
+    warpDragRef.current !== null ||
+    anchorDragRef.current !== null ||
+    curveDragRef.current !== null ||
+    rotateDragRef.current !== null ||
+    gradDragRef.current !== null ||
+    maskDragRef.current !== null ||
+    gradMaskRef.current !== null;
+
+  /** Let go of whatever is in flight, and say whether anything was. */
+  const cancelGesture = useCallback((keepWork = false): boolean => {
+    if (!session) return false;
+    const held = toolDragRef.current;
+    const inFlight = handleHeld() || zoomBoxRef.current !== null;
+    toolDragRef.current = null;
+    // The handles on the canvas each keep their own drag: let go of all
+    // of them, or the next pointer move previews again and the release
+    // commits what Escape was pressed to throw away.
+    for (const ref of [warpDragRef, anchorDragRef, curveDragRef, rotateDragRef, gradDragRef, maskDragRef, gradMaskRef] as { current: unknown }[]) {
+      ref.current = null;
+    }
+    setRegionDrag(null);
+    handleDragRef.current = null;
+    gradToolRef.current = null;
+    knifeRef.current = null;
+    setKnifeLine(null);
+    // A zoom box let go of with Escape zooms nowhere when the button is.
+    zoomBoxRef.current = null;
+    setZoomBox(null);
+    // A pinch lets go of what the fingers were dragging, not of the work
+    // the tool has in hand: a path's anchors so far and a crop frame
+    // waiting for Enter went with every two-finger zoom.
+    if (!keepWork) {
+      setPenPoints([]);
+      setCropFrame(null);
+    }
+    cropEditRef.current = null;
+    const cancelled = session.cancel_preview();
+    // An alt-drag let go of takes its copies with it.
+    if (held?.duplicated) dropCopies(held);
+    // A stroke let go of takes what it made for itself with it.
+    if (paintingRef.current) {
+      paintingRef.current = null;
+      if (strokeMade.current) session.take_back();
+      strokeMade.current = false;
+      refresh(session);
+    } else if (cancelled) refresh(session);
+    return inFlight || cancelled;
+  }, [session, refresh, dropCopies]);
+
+  /** Undo pressed with a drag still held takes back the drag, as Escape
+   * would, rather than the step before it — which used to vanish with
+   * the drag's preview still standing on top of the page. A slider held
+   * part-way is let go of the same way. */
+  const undoMidGesture = useCallback((): boolean => {
+    if (!session) return false;
+    // Only while a pointer is down: a drag's ref outliving its release
+    // would otherwise take every later Ctrl+Z for a drag to let go of.
+    if (pointersDown.current.size > 0 && (handleHeld() || zoomBoxRef.current !== null)) return cancelGesture();
+    if (session.cancel_preview()) {
+      // The opacity slider keeps what it shows as a draft, kept when it
+      // is let go of: gone with the preview, or the key coming up kept it.
+      setOpacityDraft(null);
+      refresh(session);
+      return true;
+    }
+    return false;
+  }, [session, refresh, cancelGesture]);
+
+  /** Commit the pen path being drawn: closed shapes get the current fill,
+   * open polylines get a stroke. Anchors normalize to a (0,0) origin with
+   * the offset carried by the node transform. */
+  /** A text block dropped at a point of the page, picked and open for
+   * typing — what the Text tool's press does, and the Layer menu's
+   * "Add text" in the middle of the view. */
+  const dropText = (x: number, y: number) => {
+    if (!session) return;
+    shapeCount.current += 1;
+    const place = placeAt(x, y);
+    const before = new Set(layers.map((l) => l.id));
+    run({
+      AddNode: {
+        parent: place.parent,
+        index: place.index,
+        node: {
+          ...nodePayload(
+          `Text ${shapeCount.current}`,
+          {
+            Text: {
+              text: "Text",
+              size: 48,
+              fill: currentInk(),
+              align: "Left",
+              line_height: 1,
+              letter_spacing: 0,
+              paragraph_spacing: 0,
+              width: 0,
+              font: "",
+              italic: false,
+              bold: false,
+              underline: false,
+              strike: false,
+              along: null,
+              along_offset: 0,
+              runs: [],
+            },
+          },
+          ),
+          transform: place.at,
+        },
+      },
+    });
+    setTool("Move");
+    // And typing begins: the block is picked and opens for editing with
+    // its word picked, so what is typed next replaces it — rather than
+    // each letter taking up a tool (H the hand, e the ellipse…).
+    const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+    if (added) {
+      setSelected(added.id as NodeId);
+      setMultiSel([]);
+      typeIntoNewText.current = true;
+      justDropped.current = { mark: session.history_mark(), at: performance.now(), pointer: null };
+    }
+  };
+  /** The block the Text tool put down a moment ago, for a pinch begun
+   * with the same finger to take back: the finger had moved far enough
+   * to be the tool's before the second one landed. */
+  const justDropped = useRef<{ mark: number; at: number; pointer: number | null } | null>(null);
+
+  /** A shape put in the middle of the view at a size it can be seen at,
+   * picked — so a rectangle, an ellipse, a line or a text block can be
+   * made from the menus, and from the keyboard, where every other way of
+   * making one is a drag. */
+  const addInView = (kind: "Rect" | "Ellipse" | "Line" | "Text" | "Frame") => {
+    if (!session || !canvasRef.current) return;
+    const r = canvasRef.current.getBoundingClientRect();
+    const [cx, cy] = docPoint({ clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
+    if (kind === "Text") {
+      dropText(cx, cy);
+      return;
+    }
+    if (kind === "Frame") {
+      // A frame from the keyboard, as the Frame tool draws one: half
+      // what is in view, white, picked. There was no way to make one
+      // without dragging.
+      const seen = Math.min(r.width, r.height) / view.zoom;
+      const side = Math.max(MIN_SIZE, Math.round(Math.min(seen, docSize[0], docSize[1]) / 2));
+      frameCount.current += 1;
+      try {
+        const id = session.add_artboard(
+          `Artboard ${frameCount.current}`,
+          Math.round(cx - side / 2),
+          Math.round(cy - side / 2),
+          side,
+          side,
+          JSON.stringify(hexColor("#ffffff")),
+        );
+        setSelected(id);
+        setMultiSel([]);
+        refresh(session);
+      } catch (err) {
+        alert(`Frame: ${said(err)}`);
+      }
+      return;
+    }
+    const seen = Math.min(r.width, r.height) / view.zoom;
+    const side = Math.max(MIN_SIZE, Math.round(Math.min(seen, docSize[0], docSize[1]) / 4));
+    const [x0, y0] = [cx - side / 2, cy - side / 2];
+    // The frame the view is on, as the middle of the view says.
+    const place = placeAt(x0, y0, [cx, cy]);
+    const [w, h] = [side, side];
+    const ink = currentInk();
+    const shape =
+      kind === "Rect"
+        ? { Rect: { width: w, height: h, radius: 0 } }
+        : kind === "Ellipse"
+          ? { Ellipse: { rx: w / 2, ry: h / 2 } }
+          : {
+              Path: {
+                points: [
+                  [0, h / 2],
+                  [w, h / 2],
+                ] as [number, number][],
+                closed: false,
+                smooth: false,
+                handles: [],
+                subpaths: [],
+              },
+            };
+    const paint =
+      kind === "Line"
+        ? {
+            fill: null,
+            stroke: {
+              color: ink,
+              width: 4,
+              widths: [],
+              dash: [],
+              cap: "Round" as const,
+              join: "Round" as const,
+              start_marker: "None" as const,
+              end_marker: "None" as const,
+              align: null,
+            },
+          }
+        : { fill: ink, stroke: null };
+    shapeCount.current += 1;
+    const before = new Set(layers.map((l) => l.id));
+    run({
+      AddNode: {
+        parent: place.parent,
+        index: place.index,
+        node: {
+          ...nodePayload(`${kind} ${shapeCount.current}`, { Vector: { shape, ...paint, gradient: null } }),
+          transform: place.at,
+        },
+      },
+    });
+    const added = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+    if (added) {
+      setSelected(added.id as NodeId);
+      setMultiSel([]);
+    }
+  };
+
+  /** Where a layer drawn at the page point `x`, `y` goes, and the
+   * transform that puts its own (0, 0) there: into the frame the point is
+   * in, carried by the whole of the frame's space — a turn and a scale as
+   * well as an offset — so what was drawn upright on the page lands as it
+   * was drawn. Carrying the corners alone left a shape in a turned frame
+   * a hundred pixels from the drag, a line turned, and a pen curve's
+   * handles pointing the wrong way. Or on the page. Which frame is asked
+   * of `begun`, where the drawing started. */
+  const placeAt = (x: number, y: number, begun: [number, number] = [x, y]) => {
+    const onPage = { parent: session?.root_id ?? 0, index: session ? session.child_count(session.root_id) : topLevelCount(layers), at: identity(x, y) };
+    if (!session) return onPage;
+    // The frame it was begun in, which is where the person was drawing:
+    // the corner of its box can be in another frame, or off a turned one.
+    const board = session.frame_at(begun[0], begun[1]);
+    if (board < 0) return onPage;
+    const o = session.point_inside(board, x, y);
+    const u = session.point_inside(board, x + 100, y);
+    const v = session.point_inside(board, x, y + 100);
+    if (o.length !== 2 || u.length !== 2 || v.length !== 2) return onPage;
+    return {
+      parent: board,
+      index: session.child_count(board),
+      at: {
+        a: (u[0] - o[0]) / 100,
+        b: (u[1] - o[1]) / 100,
+        c: (v[0] - o[0]) / 100,
+        d: (v[1] - o[1]) / 100,
+        e: o[0],
+        f: o[1],
+      } as Transform,
+    };
+  };
+
+  const finishPath = useCallback(
+    (
+      closed: boolean,
+      upTo?: number,
+      given?: { pts: [number, number][]; hs: [number, number, number, number][] },
+    ) => {
+      if (!session) return;
+      // Read from what is drawn rather than inside a state updater: an
+      // updater may be run twice, and this one adds a layer.
+      const from = given?.pts ?? penPoints;
+      const fromHandles = given?.hs ?? penHandles;
+      const drawn = from.slice(0, upTo ?? from.length);
+      const hs = drawn.map((_, i) => fromHandles[i] ?? ([0, 0, 0, 0] as [number, number, number, number]));
+      {
+        if (drawn.length < (closed ? 3 : 2)) return;
+        // Written on the page as drawn, handles and all, then carried
+        // into the frame it was drawn in by the frame's whole space.
+        const minX = Math.min(...drawn.map((p) => p[0]));
+        const minY = Math.min(...drawn.map((p) => p[1]));
+        const place = placeAt(minX, minY, drawn[0]);
+        const points = drawn.map(
+          (p) => [p[0] - minX, p[1] - minY] as [number, number],
+        );
+        shapeCount.current += 1;
+        // Picked once made, as a shape drawn is: the layer picked before
+        // stayed picked, and Delete next took it instead of the path.
+        const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
+        run({
+          AddNode: {
+            parent: place.parent,
+            index: place.index,
+            node: {
+            ...nodePayload(
+              `Path ${shapeCount.current}`,
+              {
+                Vector: {
+                  shape: {
+                    Path: {
+                      points,
+                      closed,
+                      smooth: false,
+                      // Only where a drag pulled some out: a path of
+                      // corners is written as it always was.
+                      handles: hs.some((h) => h.some((v) => v !== 0)) ? hs : [],
+                      subpaths: [],
+                    },
+                  },
+                  fill: closed ? currentInk() : null,
+                  stroke: closed
+                    ? null
+                    : {
+                        // In a CMYK document, an ink: an sRGB stroke took
+                        // another road to the press than the inks did.
+                        color: inkOf(fill),
+                        width: 4,
+                        widths: [],
+                        dash: [],
+                        cap: "Round",
+                        join: "Round",
+                        start_marker: "None",
+                        end_marker: "None",
+                        align: null,
+                      },
+                  gradient: null,
+                },
+              },
+            ),
+            transform: place.at,
+            },
+          },
+        });
+        const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+        if (made) {
+          setSelected(made.id as NodeId);
+          setMultiSel([]);
+        }
+        setPenPoints([]);
+        setPenHandles([]);
+        penDragRef.current = null;
+      }
+    },
+    [session, layers, fill, cmyk, run, penPoints, penHandles],
+  );
+
+  // F10 goes to the menu bar, as it does in every desktop program: its
+  // first menu, or the button the menus are behind on a phone. Heard on
+  // the way down, since a field keeps its own keys from the editor's
+  // (`fieldKeys`, the layer search, the name, the text box) and F10 is
+  // none of a field's.
+  useEffect(() => {
+    const onF10 = (e: KeyboardEvent) => {
+      if (e.key !== "F10" || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (aWindowIsUp()) return;
+      const bar = document.querySelector<HTMLElement>(".menubar .menu-label, .menu-sheet-toggle");
+      if (!bar) return;
+      e.preventDefault();
+      e.stopPropagation();
+      bar.focus();
+    };
+    window.addEventListener("keydown", onF10, true);
+    return () => window.removeEventListener("keydown", onF10, true);
+  }, []);
+
+  // Keyboard: tool shortcuts, undo/redo, space-to-pan, escape-to-cancel.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (aWindowIsUp()) {
+        // The keys sheet is a window too, and has no Escape of its own.
+        if (e.key === "Escape" && showKeys) setShowKeys(false);
+        // Select all over a window is the browser's, which painted the
+        // whole of the app blue: kept to the field the caret is in.
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          e.key.toLowerCase() === "a" &&
+          !isTextEntry(e.target)
+        )
+          e.preventDefault();
+        return;
+      }
+      // F10 is heard on the way down (below), from any field.
+      if (e.key === "F10" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) return;
+      // An Escape in the menus closes them, and is not the editor's: it
+      // let go of the layer the menus were come to for.
+      if (e.key === "Escape" && e.target instanceof Element && e.target.closest(".menubar, [role=menu]")) return;
+      // Shift+F10 or the menu key with nothing in particular focused is
+      // the canvas's menu for what is picked — or, with nothing picked,
+      // the bare canvas's (Paste, Select all, Fit) — opened in the middle
+      // of the view, as a right-click on it would. A row, a field or a button
+      // has its own (or the browser's).
+      if (
+        ((e.key === "F10" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) || e.key === "ContextMenu") &&
+        (e.target === document.body || hostRef.current?.contains(e.target as Node)) &&
+        !aWindowIsUp()
+      ) {
+        const r = hostRef.current?.getBoundingClientRect();
+        if (r) {
+          e.preventDefault();
+          setContextAt([r.left + r.width / 2, r.top + r.height / 2]);
+        }
+        return;
+      }
+      // A single letter is a tool switch, but only when it isn't being typed
+      // into something: a text layer's content is edited in a textarea and a
+      // layer is renamed in an input, and both contain the letters below.
+      const typing =
+        isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
+      if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // Shift on a digit types its symbol (shift+5 is %), so a tool
+        // given a digit is found by the key itself when shift is down —
+        // or its family, which the Tools page says is shift+5, could not
+        // be walked at all.
+        const pressed =
+          e.shiftKey && /^Digit[0-9]$/.test(e.code)
+            ? e.code.slice(5)
+            : // A tool's letter on a Cyrillic or Greek keyboard is the key
+              // where that letter would be.
+              /^Key[A-Z]$/.test(e.code) && e.key.length === 1 && !/^[\x20-\x7e]$/.test(e.key)
+              ? e.code.slice(3).toLowerCase()
+              : e.key.toLowerCase();
+        const shortcut = keys.byKey[pressed];
+        if (shortcut) {
+          e.preventDefault();
+          // With shift, a key whose tool shares it with a family walks
+          // the family — shift+M the region tools, shift+G the gradient
+          // and the fill — which is Photoshop's convention and keeps the
+          // plain key meaning one tool, always. Read off the tool in hand
+          // at the press rather than the one this closure was built with.
+          const shifted = e.shiftKey;
+          setTool((held) => {
+            const family = KEY_FAMILIES.find((f) => f.includes(shortcut));
+            if (shifted && family && family.includes(held)) {
+              return family[(family.indexOf(held) + 1) % family.length];
+            }
+            return shortcut;
+          });
+          setPenPoints([]);
+        }
+        // Brackets resize the brush, as they do everywhere else. By a
+        // ratio rather than a step, so the small sizes stay adjustable
+        // and the large ones do not take forever.
+        if (e.key === "[" || e.key === "]") {
+          e.preventDefault();
+          // Rounded away from where it started, so a small brush can
+          // still be made smaller rather than rounding back to itself.
+          const step = (most: number) => (size: number) =>
+            Math.max(1, Math.min(most, e.key === "]" ? Math.ceil(size * 1.25) : Math.floor(size / 1.25)));
+          // The size of the brush in hand: the vector brush has a width
+          // of its own (to 64), and the keys changed the paint brush's.
+          if (tool === "Brush") setBrushSize(step(64));
+          else setPaintSize(step(200));
+        }
+      }
+      // Undo and redo come off the same table the file and layer keys
+      // do, so a chord changed on the Keys page reaches them as well.
+      //
+      // And they fire with the caret in a field, which everything else
+      // here does not: a colour typed into a box, a name being edited,
+      // a number in a panel are all edits of the *document*, and the
+      // key that takes one back is the same key. Guarding these the way
+      // the rest are guarded handed the field's own undo the page's
+      // work, which the text-run block noticed at once.
+      const pressedNow = chordFromEvent(e);
+      const fired = typing && typesAlone(pressedNow) ? undefined : chords.byChord[pressedNow];
+      if (fired === "undo" && tool === "Pen" && penPoints.length > 0 && !typing) {
+        // Halfway through a path, undo takes back the last anchor put
+        // down, as every pen does — not the step before the path began,
+        // which used to vanish from the page with the anchors still up.
+        e.preventDefault();
+        setPenPoints((pts) => pts.slice(0, -1));
+        setPenHandles((hs) => hs.slice(0, -1));
+      } else if (
+        (fired === "undo" || fired === "redo") &&
+        document.activeElement instanceof HTMLElement &&
+        document.activeElement.dataset.ownUndo !== undefined
+      ) {
+        // The document's name is not a step in its history: the box's
+        // own undo takes back what was typed there.
+      } else if (fired === "undo" || fired === "redo") {
+        e.preventDefault();
+        if (fired === "undo" && dropUnsettled(document.activeElement)) return;
+        if (undoMidGesture()) return;
+        if (fired === "redo") redo();
+        else undo();
+      }
+      // The zoom keys every editor has: in, out, the whole page, and the
+      // page's own pixels one for one — off the same table, so they can
+      // be rebound. With shift, "=" is "+" and "-" is "_", and a hand
+      // reaching for "+" means zoom in: while zoom in and out keep their
+      // shipped chords and nothing else has the shifted ones, those
+      // mean the same. They mean nothing to a box, so they are the
+      // view's with the caret in one too: held back there, they reached
+      // the browser, which zoomed the whole app instead.
+      {
+        const pressed = chordFromEvent(e);
+        const alternate =
+          !chords.byChord[pressed] && !chords.menuByChord[pressed]
+            ? pressed === "mod+shift+=" && chords.of["zoom-in"] === "mod+="
+              ? "zoom-in"
+              : pressed === "mod+shift+-" && chords.of["zoom-out"] === "mod+-"
+                ? "zoom-out"
+                : null
+            : null;
+        const zoom: Partial<Record<CommandId, () => void>> = {
+          "zoom-in": () => zoomBy(1.25),
+          "zoom-out": () => zoomBy(0.8),
+          "zoom-fit": fitView,
+          "zoom-actual": () => zoomTo(1),
+        };
+        const run = zoom[(fired ?? alternate) as CommandId];
+        if (run) {
+          e.preventDefault();
+          run();
+        }
+      }
+      // Escape cancels whatever is in flight; with nothing in flight it
+      // drops the selection, which is what every editor does with it.
+      if (e.key === "Escape") {
+        if (showKeys) {
+          setShowKeys(false);
+          return;
+        }
+        // A path being drawn with the pen is kept, as Illustrator, Affinity
+        // and Figma keep it: Escape ends it where it is. Only a single
+        // anchor, which is no path yet, is let go of.
+        if (tool === "Pen" && penPoints.length >= 2) {
+          finishPath(false);
+          return;
+        }
+        // Something in flight is all Escape means: a drag of a region
+        // or a new marquee let go of, the region picked before it stays.
+        if (cancelGesture()) return;
+        // Escape lets go of the region first when there is one and a
+        // marquee is in hand: that is what the key was last used for,
+        // and the layers being picked is not what the user is looking
+        // at.
+        if (SELECT_TOOLS.includes(tool as never) && session?.pick_none()) {
+          refresh(session);
+          return;
+        }
+        deselect();
+      }
+      if (!typing && fired === "select-all") {
+        e.preventDefault();
+        // Two things are called selecting everything, and the tool in
+        // hand says which is meant: with a marquee up it is the page
+        // that gets picked out, and otherwise it is every layer. Both
+        // are in the Edit menu, so neither is only reachable this way.
+        if (SELECT_TOOLS.includes(tool as never)) pickWholePage();
+        else selectAll();
+      }
+      if (!typing && fired === "pick-inverse") {
+        e.preventDefault();
+        pickInverse();
+      }
+      if (!typing && fired === "deselect") {
+        e.preventDefault();
+        deselectAll();
+      }
+      // "?" opens the sheet of shortcuts, and closes it again — by its
+      // chord, or by "?" wherever a keyboard puts it while the chord is
+      // still the one it shipped with.
+      if (
+        !typing &&
+        (fired === "keys-sheet" ||
+          (e.key === "?" && chords.of["keys-sheet"] === "shift+/" && !chords.menuByChord[chordFromEvent(e)]))
+      ) {
+        e.preventDefault();
+        setShowKeys((open) => !open);
+      }
+      if (e.key === "Enter" && !(e.target instanceof HTMLInputElement)) {
+        finishPath(false); // pen tool: finish as an open (stroked) path
+      }
+      // Space held is the hand — except on a control reached with the
+      // keyboard, where it presses the button or opens the list as it
+      // does everywhere. A button only clicked keeps the focus without
+      // showing it, and Space there still pans, so picking a tool and
+      // then holding Space to look around works (`clickedControls`).
+      // A slider, a tick box or a colour well is a control like a button:
+      // clicked, Space there is the hand too — a drag after clicking the
+      // opacity slider moved the layer instead of the view.
+      const toggled =
+        e.target instanceof HTMLInputElement && ["range", "checkbox", "radio", "color"].includes(e.target.type);
+      const pressing =
+        (e.target instanceof HTMLButtonElement || e.target instanceof HTMLSelectElement || toggled) &&
+        !clickedControls.has(e.target as Element);
+      // A drop-down counts as typing for the tools' letters (they choose
+      // an option there), but a clicked one is a control like the rest:
+      // read as typing here too, Space after picking a blend mode opened
+      // the list and the drag that followed moved the layer.
+      const clickedSelect = e.target instanceof HTMLSelectElement && !pressing;
+      if (
+        e.code === "Space" &&
+        (!(e.target instanceof HTMLInputElement) || toggled) &&
+        !pressing &&
+        (!typing || clickedSelect)
+      ) {
+        spaceRef.current = true;
+        e.preventDefault();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") spaceRef.current = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+    // `showKeys` is in here because Escape reads it: without it the
+    // listener would keep a closure from before the sheet opened.
+  }, [
+    undo,
+    redo,
+    cancelGesture,
+    undoMidGesture,
+    finishPath,
+    tool,
+    penPoints,
+    selectAll,
+    deselect,
+    deselectAll,
+    showKeys,
+    zoomBy,
+    zoomTo,
+    fitView,
+    keys,
+    chords,
+    selected,
+  ]);
+
+  // Keep the viewport measurement in step with the element it describes.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    let was: [number, number] | null = null;
+    const measure = () => {
+      const now: [number, number] = [host.clientWidth, host.clientHeight];
+      // A phone or a tablet turned on its side: what was in the middle
+      // of the window stays in the middle. Kept where it was from the
+      // window's corner, most of an upright page was left below the
+      // edge of a window turned wide. Only for a turn — the window's
+      // long side changing over — so a panel opened beside the canvas
+      // does not slide the page.
+      if (was && was[0] > 0 && was[1] > 0 && now[0] > 0 && now[1] > 0 && was[0] > was[1] !== now[0] > now[1]) {
+        const [dx, dy] = [(now[0] - was[0]) / 2, (now[1] - was[1]) / 2];
+        setView((v) => ({ ...v, x: v.x + dx, y: v.y + dy }));
+      }
+      was = now;
+      setViewport(([w, h]) => (w === now[0] && h === now[1] ? [w, h] : now));
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(host);
+    return () => observer.disconnect();
+  }, []);
+
+  // Turned on or off, the page is drawn again the other way: whole,
+  // since the canvas holds the other one's last frame.
+  useEffect(() => {
+    if (!session) return;
+    cpuStaleRef.current = true;
+    refresh(session);
+  }, [prefs.gpuFrames]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Tell the engine what the canvas is looking at, then repaint. The
+  // canvas is a window onto the page now, so its backing store follows the
+  // viewport rather than the document, and every pan or zoom is a fresh
+  // frame — which is cheap, because it is only ever a screenful.
+  //
+  // A page whose full frame is slow — a radial blur, a dozen filters, a
+  // phone — is drawn at half the resolution while the view is moving,
+  // which is a quarter of the pixels, stretched over the canvas; and at
+  // its own once the view has been still a moment. What the hand is
+  // doing is moving the page, and a sharp frame every third of a second
+  // is worse at that than a soft one every tenth. The page is drawn
+  // sharp again whatever the last frame cost, so a light page never
+  // drafts and a heavy one only while it moves.
+  useEffect(() => {
+    if (!session) return;
+    const { x: ox, y: oy, panned } = engineOrigin(engineViewRef.current, view, viewport, dpr);
+    const full = (): [number, number, number, number, number] => [
+      view.zoom * dpr,
+      ox,
+      oy,
+      Math.round(viewport[0] * dpr),
+      Math.round(viewport[1] * dpr),
+    ];
+    const threshold =
+      (window as unknown as { __chitrakarDraftMs?: number }).__chitrakarDraftMs ?? DRAFT_MS;
+    // Never for a pan: the engine draws one from the frame before it,
+    // shifted, with only the strips the pan exposed drawn afresh — a
+    // small cost whatever the page weighs — and a draft would throw
+    // that frame away for a whole one at half size. On a slow machine
+    // every pan drafted, and a drag was slower than it had been.
+    const drafting = !gpuOnRef.current && frameMsRef.current > threshold && !panned;
+    if (settleRef.current !== null) window.clearTimeout(settleRef.current);
+    settleRef.current = null;
+    if (drafting) {
+      const [k, x, y, w, h] = full();
+      session.set_viewport(k / 2, x / 2, y / 2, Math.ceil(w / 2), Math.ceil(h / 2));
+      settleRef.current = window.setTimeout(() => {
+        settleRef.current = null;
+        session.set_viewport(...full());
+        session.invalidate();
+        present(session);
+      }, SETTLE_MS);
+    } else {
+      session.set_viewport(...full());
+    }
+    viewArgsRef.current = {
+      scale: Math.min(64, Math.max(0.01, view.zoom * dpr)),
+      x: ox,
+      y: oy,
+    };
+    engineViewRef.current = {
+      scale: Math.min(64, Math.max(0.01, view.zoom * dpr)),
+      w: Math.round(viewport[0] * dpr),
+      h: Math.round(viewport[1] * dpr),
+      rawX: view.x * dpr,
+      rawY: view.y * dpr,
+      x: ox,
+      y: oy,
+    };
+    // Resizing the element clears its backing store, and the engine tracks
+    // what it has already presented, so it has to be told — unless the
+    // view only panned, when the engine presents the whole frame anyway.
+    if (!panned) session.invalidate();
+    present(session);
+  }, [session, view, viewport, dpr, docSize, present]);
+
+  // Ctrl+wheel, and a trackpad's pinch (which the browser sends as one),
+  // over the panel, the rail or the bar zoomed the browser's page — the
+  // whole app — rather than nothing. The canvas has its own below.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // Wheel zoom toward the cursor. Attached manually: React wheel listeners
+  // are passive, and we must preventDefault to stop page scroll.
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = host.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      setView((v) => {
+        const zoom = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, v.zoom * Math.exp(-e.deltaY * 0.0015)),
+        );
+        // Keep the document point under the cursor fixed.
+        return {
+          zoom,
+          x: cx - ((cx - v.x) / v.zoom) * zoom,
+          y: cy - ((cy - v.y) / v.zoom) * zoom,
+        };
+      });
+    };
+    host.addEventListener("wheel", onWheel, { passive: false });
+    return () => host.removeEventListener("wheel", onWheel);
+  }, []);
+
+  /** Pointer position in document pixels. The canvas covers the whole
+   * viewport, so the page's position within it is the view, not the
+   * element's box. */
+  const docPoint = (e: {
+    clientX: number;
+    clientY: number;
+  }): [number, number] => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return [
+      (e.clientX - rect.left - view.x) / view.zoom,
+      (e.clientY - rect.top - view.y) / view.zoom,
+    ];
+  };
+
+  // The pointer's place on the page, read out as it moves over the
+  // canvas and cleared when it leaves. Re-bound when the view or the
+  // units change, so the numbers are always the page's in those units.
+  useEffect(() => {
+    const host = hostRef.current;
+    const out = readoutRef.current;
+    if (!host || !out) return;
+    const places = units === "px" ? 0 : units === "mm" ? 1 : 2;
+    const move = (e: PointerEvent) => {
+      if (!canvasRef.current) return;
+      const [x, y] = docPoint(e);
+      // Rounded first, so a hair left of the edge reads 0 and not -0.
+      const say = (v: number) => {
+        const t = (v * perPixel(units, docDpi)).toFixed(places);
+        return /^-0(\.0*)?$/.test(t) ? t.slice(1) : t;
+      };
+      out.textContent = `${say(x)}, ${say(y)} ${units}`;
+    };
+    const leave = () => {
+      out.textContent = "";
+    };
+    host.addEventListener("pointermove", move);
+    host.addEventListener("pointerleave", leave);
+    return () => {
+      host.removeEventListener("pointermove", move);
+      host.removeEventListener("pointerleave", leave);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, units, docDpi]);
+
+  /** Invert an affine, or null when it collapses space. */
+  const inverseOf = (t: Transform) => {
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return null;
+    return (x: number, y: number): [number, number] => {
+      const [ux, uy] = [x - t.e, y - t.f];
+      return [(t.d * ux - t.c * uy) / det, (t.a * uy - t.b * ux) / det];
+    };
+  };
+
+  /** A pointer position in the space the selected layer's transform is
+   * written against — its parent's. Identity for a top-level layer; for one
+   * inside a moved group, this is what keeps a drag from fighting the
+   * group's transform. */
+  const layerPoint = (
+    e: { clientX: number; clientY: number },
+    id: NodeId | null = selected,
+    /** Treat the coordinates as document units already, not screen ones. */
+    inDoc = false,
+  ): [number, number] => {
+    const [x, y] = inDoc ? [e.clientX, e.clientY] : docPoint(e);
+    if (!session || id === null) return [x, y];
+    const inv = inverseOf(toTransform(session.parent_space_of(id)));
+    return inv ? inv(x, y) : [x, y];
+  };
+
+  /** A displacement carried into a layer's parent space: a vector, so only
+   * the linear part of the space applies. */
+  const layerVector = (
+    id: NodeId,
+    dx: number,
+    dy: number,
+  ): [number, number] => {
+    if (!session) return [dx, dy];
+    const t = toTransform(session.parent_space_of(id));
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return [dx, dy];
+    return [(t.d * dx - t.c * dy) / det, (t.a * dy - t.b * dx) / det];
+  };
+
+  /** Is `id` inside the currently selected group? The layers list is
+   * depth-first, so a group's subtree is the run of rows after it with a
+   * greater depth. */
+  const inSelectedGroup = (id: NodeId) => {
+    if (selected === null || id === selected) return false;
+    const at = layers.findIndex((l) => l.id === selected);
+    if (at < 0 || !HOLDS_CHILDREN.has(layers[at].kind)) return false;
+    for (let i = at + 1; i < layers.length; i++) {
+      if (layers[i].depth <= layers[at].depth) break;
+      if (layers[i].id === id) return true;
+    }
+    return false;
+  };
+
+  /** Whether `id` travels with `target` — it is the node itself, one of its
+   * ancestors, or one of its descendants. Such a layer is no use to snap
+   * against, because it moves too. */
+  const relatedTo = (id: NodeId, target: NodeId): boolean => {
+    if (id === target) return true;
+    const parentOf = (n: NodeId) =>
+      layers.find((l) => l.id === n)?.parent as NodeId | undefined;
+    const climbs = (from: NodeId, to: NodeId) => {
+      let up = parentOf(from);
+      // The root is its own parent, so bound the walk by the tree's depth.
+      for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
+        if (up === to) return true;
+        const next = parentOf(up);
+        if (next === up) return false;
+        up = next;
+      }
+      return false;
+    };
+    return climbs(id, target) || climbs(target, id);
+  };
+
+  /** Turn a document-space displacement into one SetTransform per layer,
+   * each expressed in that layer's own parent space. Layers that would not
+   * actually move are left out. */
+  const translateAll = (
+    moving: { id: NodeId; t0: Transform }[],
+    mx: number,
+    my: number,
+  ): Command[] => {
+    const out: Command[] = [];
+    for (const { id, t0 } of moving) {
+      const [dx, dy] = layerVector(id, mx, my);
+      if (dx === 0 && dy === 0) continue;
+      out.push({
+        SetTransform: { id, transform: { ...t0, e: t0.e + dx, f: t0.f + dy } },
+      });
+    }
+    return out;
+  };
+
+  /** The lines a drag can catch on: the page's own edges and middle, and
+   * the same three from every layer that is not travelling with the drag
+   * (its ancestors and descendants move too, so they are no use). */
+  /** Whether a layer is seen: shown itself, and every group it is in
+   * shown too. A hidden layer is not there to be caught on, as a hidden
+   * guide is not — a drag snapped to the edge of a rectangle nobody
+   * could see. */
+  const seenLayers = (): Set<number> => {
+    const byId = new Map(layers.map((l) => [l.id, l]));
+    const seen = new Set<number>();
+    for (const l of layers) {
+      let at: LayerInfo | undefined = l;
+      let shown = true;
+      for (let depth = 0; at && depth < 256; depth++) {
+        if (!at.visible) {
+          shown = false;
+          break;
+        }
+        at = byId.get(at.parent);
+      }
+      if (shown) seen.add(l.id);
+    }
+    return seen;
+  };
+
+  const snapTargets = (moving: NodeId[]): [number[], number[]] => {
+    const xs = snapLines(0, docSize[0]);
+    const ys = snapLines(0, docSize[1]);
+    // A guide is placed to be snapped to; that is the whole point of one.
+    // Hidden, it is not there to be caught on: a drag landed on a line
+    // nobody could see.
+    for (const g of showGuides ? docGuides : []) {
+      (guideIsVertical(g) ? xs : ys).push(guideAt(g));
+    }
+    // So is a grid. Its lines are listed rather than solved for, which
+    // costs nothing at the sizes a grid is worth having and keeps every
+    // kind of line the same kind of thing to the snapping.
+    if (grid > 0 && docSize[0] / grid + docSize[1] / grid < 4000) {
+      for (let x = 0; x <= docSize[0]; x += grid) xs.push(x);
+      for (let y = 0; y <= docSize[1]; y += grid) ys.push(y);
+    }
+    if (!session) return [xs, ys];
+    const seen = seenLayers();
+    for (const layer of layers) {
+      const id = layer.id as NodeId;
+      if (!seen.has(layer.id)) continue;
+      if (moving.some((m) => relatedTo(id, m))) continue;
+      const b = session.bounds_of(id);
+      if (b.length !== 4) continue;
+      xs.push(...snapLines(b[0], b[0] + b[2]));
+      ys.push(...snapLines(b[1], b[1] + b[3]));
+    }
+    return [xs, ys];
+  };
+
+  /** The boxes a dragged layer can be spaced evenly among: every layer
+   * not travelling with it, as snapTargets reads them. */
+  const spacerBoxes = (moving: NodeId[]): Box[] => {
+    if (!session) return [];
+    const out: Box[] = [];
+    const seen = seenLayers();
+    for (const layer of layers) {
+      const id = layer.id as NodeId;
+      if (!seen.has(layer.id)) continue;
+      if (moving.some((m) => relatedTo(id, m))) continue;
+      const b = session.bounds_of(id);
+      if (b.length === 4) out.push([b[0], b[1], b[0] + b[2], b[1] + b[3]]);
+    }
+    return out;
+  };
+
+  /** Nudge a point being drawn onto the nearest of the lines it can
+   * catch, and show the ones it landed on. A shape has no box yet, so
+   * what snaps is the corner under the cursor rather than three lines an
+   * axis; ctrl (or cmd) draws free of them. */
+  const snapPoint = (
+    x: number,
+    y: number,
+    xs: number[],
+    ys: number[],
+    free: boolean,
+  ): [number, number] => {
+    const tol = prefs.snap / view.zoom;
+    const sx = free ? NO_SNAP : snapAxis([x], xs, tol);
+    const sy = free ? NO_SNAP : snapAxis([y], ys, tol);
+    const next: Guides = { x: [], y: [] };
+    if (sx.guide !== null) next.x.push(sx.guide);
+    if (sy.guide !== null) next.y.push(sy.guide);
+    // Only re-render when the guides actually change: this runs on every
+    // pointer sample.
+    setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
+    return [x + sx.delta, y + sy.delta];
+  };
+
+  /** The document-space box around a set of layers, as two corners.
+   * `bounds_of` answers [x, y, w, h]; everything here works in corners. */
+  const unionBounds = (
+    ids: NodeId[],
+    /** With what the layers' effects reach (an export), rather than the
+     * layers' own box (laying out, the panel's numbers). */
+    drawn = false,
+  ): [number, number, number, number] | null => {
+    if (!session) return null;
+    let acc: [number, number, number, number] | null = null;
+    for (const id of ids) {
+      const b = drawn ? session.drawn_bounds_of(id) : session.bounds_of(id);
+      if (b.length !== 4) continue;
+      const box: [number, number, number, number] = [
+        b[0],
+        b[1],
+        b[0] + b[2],
+        b[1] + b[3],
+      ];
+      acc = acc
+        ? [
+            Math.min(acc[0], box[0]),
+            Math.min(acc[1], box[1]),
+            Math.max(acc[2], box[2]),
+            Math.max(acc[3], box[3]),
+          ]
+        : box;
+    }
+    return acc;
+  };
+
+  /** Fingers on the canvas, by pointer id, in the canvas's coordinates.
+   * Pointer events say nothing about the other fingers, so they are kept
+   * here: two of them are a pinch. */
+  const touchesRef = useRef<Map<number, [number, number]>>(new Map());
+  /** Two fingers tapped is undo, three is redo. */
+  const tapsRef = useRef(new FingerTaps());
+  /** Pens touching the screen, by pointer id. While one is, a hand
+   * resting on the glass is a palm and not a finger: it neither draws
+   * nor pinches. */
+  const pensRef = useRef<Set<number>>(new Set());
+  /** Pointers whose every later event is ignored: palms, and the finger
+   * whose long press became a menu. Their gesture has already been let go
+   * of; what they do until they lift is nobody's. */
+  const ignoredRef = useRef<Set<number>>(new Set());
+  /** A finger held still on the canvas, waiting to become a long press —
+   * a touch screen's right-click. */
+  const longRef = useRef<{ id: number; x: number; y: number; timer: number; defer: boolean } | null>(null);
+  /** `defer`: a hold that becomes the menu only if the pointer then lifts
+   * where it is, and a drag as ever if it moves on (`pressedLong`). */
+  const startLong = (e: React.PointerEvent, defer = false) => {
+    clearLong();
+    longRef.current = {
+      id: e.pointerId,
+      x: e.clientX,
+      y: e.clientY,
+      timer: window.setTimeout(pressedLong, LONG_PRESS_MS),
+      defer,
+    };
+  };
+  const clearLong = () => {
+    if (longRef.current) clearTimeout(longRef.current.timer);
+    longRef.current = null;
+  };
+
+  /** Where the menu a right-click asks for is drawn, in window
+   * coordinates, or null when there is none open. */
+  const [contextAt, setContextAt] = useState<[number, number] | null>(null);
+
+  const onCanvasContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    // A long press the system has called a context menu first (Android
+    // does) is the long press: the finger's gesture has to be let go of
+    // as well as the menu opened.
+    if (longRef.current) {
+      pressedLong();
+      return;
+    }
+    openContextAt(e.clientX, e.clientY);
+  };
+
+  /** The canvas's menu, opened at a point in the window. */
+  const openContextAt = (clientX: number, clientY: number) => {
+    // A menu about "this" has to be about what was pointed at: a
+    // right-click on something that is not picked picks it first, and one
+    // on bare canvas leaves the selection alone and offers what can be
+    // done with no layer in hand.
+    if (session) {
+      const [x, y] = docPoint({ clientX, clientY });
+      const hit = session.hit_test(x, y);
+      if (hit !== undefined && !selectionSet.includes(hit)) {
+        setSelected(inSelectedGroup(hit) ? selected : hit);
+        setMultiSel([]);
+      }
+    }
+    // Kept inside the window: a menu opened near the right edge or the
+    // bottom would otherwise hang off it with no way to scroll to it.
+    setContextAt([clientX, clientY]);
+  };
+
+  /** A finger held still long enough: whatever it had begun is let go
+   * of — a press that turned into a question is not a click on the page
+   * — and the menu opens where it is. The finger is ignored from here
+   * until it lifts, so lifting it does not finish a drag it no longer
+   * has. */
+  const pressedLong = () => {
+    const at = longRef.current;
+    if (!at) return;
+    clearLong();
+    // A pen is held still a moment before the drag it means — placing the
+    // nib — so its hold only asks for the menu if it then lifts where it
+    // is. Taken as the menu at once, a rectangle begun with a pause was
+    // never drawn.
+    if (at.defer) {
+      const done = () => {
+        window.removeEventListener("pointermove", moved, true);
+        window.removeEventListener("pointerup", lifted, true);
+        window.removeEventListener("pointercancel", done, true);
+      };
+      const moved = (e: PointerEvent) => {
+        if (e.pointerId === at.id && Math.hypot(e.clientX - at.x, e.clientY - at.y) > LONG_PRESS_SLOP) done();
+      };
+      const lifted = (e: PointerEvent) => {
+        if (e.pointerId !== at.id) return;
+        done();
+        // The lift is the question's, not the end of a click on the page.
+        e.stopPropagation();
+        abandonGesture();
+        panDragRef.current = null;
+        tapsRef.current.spoil(at.id);
+        touchesRef.current.delete(at.id);
+        navigator.vibrate?.(12);
+        openContextAt(at.x + 24, at.y - 12);
+      };
+      window.addEventListener("pointermove", moved, true);
+      window.addEventListener("pointerup", lifted, true);
+      window.addEventListener("pointercancel", done, true);
+      return;
+    }
+    abandonGesture();
+    panDragRef.current = null;
+    tapsRef.current.spoil(at.id);
+    touchesRef.current.delete(at.id);
+    ignoredRef.current.add(at.id);
+    // A tick under the finger, as a phone's own long press gives: the
+    // press has turned into a question. Where there is no vibration
+    // (Safari) there is no tick.
+    navigator.vibrate?.(12);
+    // The finger is still down on the glass, and the click its lift
+    // makes would land on whatever row came to be under it — "Cut", the
+    // menu being pulled up to fit: the layer was deleted by the press
+    // that only asked about it. So the menu opens beside the finger, and
+    // ignores clicks until a moment after that finger lifts.
+    contextHeldBy.current = at.id;
+    const lifted = (e: PointerEvent) => {
+      if (e.pointerId !== at.id) return;
+      window.removeEventListener("pointerup", lifted, true);
+      window.removeEventListener("pointercancel", lifted, true);
+      window.setTimeout(() => {
+        if (contextHeldBy.current === at.id) contextHeldBy.current = null;
+      }, 350);
+    };
+    window.addEventListener("pointerup", lifted, true);
+    window.addEventListener("pointercancel", lifted, true);
+    openContextAt(at.x + 24, at.y - 12);
+  };
+  /** The finger that held the canvas's menu open, until just after it
+   * lifts: clicks on the menu meanwhile are that finger's, not a choice. */
+  const contextHeldBy = useRef<number | null>(null);
+
+  // A gradient's knob sits over a side's handle (a gradient laid across
+  // the layer ends on a side's middle) but under a corner's: a gradient
+  // from corner to corner put its knobs on the corners, and dragging a
+  // corner moved the gradient's end instead of sizing the layer.
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const knobs = host.querySelectorAll<HTMLElement>(".grad-handle");
+    if (knobs.length === 0) return;
+    const corners = [...host.querySelectorAll<HTMLElement>(".handle:not(.side)")].map((h) => {
+      const r = h.getBoundingClientRect();
+      return [r.left + r.width / 2, r.top + r.height / 2];
+    });
+    for (const k of knobs) {
+      const r = k.getBoundingClientRect();
+      const [x, y] = [r.left + r.width / 2, r.top + r.height / 2];
+      k.classList.toggle(
+        "on-corner",
+        corners.some(([cx, cy]) => Math.hypot(cx - x, cy - y) < 8),
+      );
+    }
+  });
+  // A click anywhere else, or Escape, puts the menu away — the same two
+  // ways the menus in the bar close.
+  const contextRef = useRef<HTMLDivElement>(null);
+  const contextOpen = contextAt !== null;
+  // Kept inside the window by its own size, once it is drawn: it was
+  // moved up by a size it was assumed to have (380 tall), so a menu of
+  // three rows opened near the bottom far above the finger.
+  useLayoutEffect(() => {
+    const el = contextRef.current;
+    if (!el || !contextAt) return;
+    const r = el.getBoundingClientRect();
+    const x = Math.max(8, Math.min(contextAt[0], window.innerWidth - r.width - 8));
+    const y = Math.max(8, Math.min(contextAt[1], window.innerHeight - r.height - 8));
+    el.style.left = `${x}px`;
+    el.style.top = `${y}px`;
+  }, [contextAt]);
+  useEffect(() => {
+    if (!contextOpen) return;
+    // The menu takes the focus on its first row, as one opened from the
+    // keyboard (Shift+F10 on a row) has to, and gives it back after.
+    const back = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    focusFirstRow(() => contextRef.current);
+    return () => {
+      const lost = document.activeElement === null || document.activeElement === document.body;
+      if (!lost) return;
+      // Opened on a layer's row, it goes back to the row of the layer
+      // picked once the row chosen has had its say: a copy made is
+      // picked, and stayed on the original's row.
+      if (back?.closest("aside.panel .layer-list li")) {
+        requestAnimationFrame(() => {
+          const still = document.activeElement === null || document.activeElement === document.body;
+          if (!still) return;
+          const picked = document.querySelector<HTMLElement>("aside.panel .layer-list li.selected");
+          (picked ?? (back.isConnected ? back : null))?.focus({ preventScroll: true });
+        });
+        return;
+      }
+      if (back?.isConnected) back.focus({ preventScroll: true });
+    };
+  }, [contextOpen]);
+  useEffect(() => {
+    if (!contextAt) return;
+    // A press inside the menu is the item being chosen: taking the menu
+    // away there would delete the button before its click ever landed.
+    const away = (e: PointerEvent) => {
+      if (contextRef.current?.contains(e.target as Node)) return;
+      setContextAt(null);
+      pressOnlyCloses(e);
+    };
+    const key = (e: KeyboardEvent) => e.key === "Escape" && setContextAt(null);
+    // A window resized or a phone turned puts it away, as it does the
+    // bar's menus: it stayed open where the old window had room, below
+    // the new one's edge, out of sight.
+    // Only a change of width: a phone's keyboard going away changes the
+    // height alone, and the menu a long press had just opened over it
+    // closed at once.
+    const wide = window.innerWidth;
+    const resized = () => window.innerWidth !== wide && setContextAt(null);
+    // Heard on the way in: the canvas keeps its presses to itself, and a
+    // press there left the menu open and painted under it.
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", key);
+    window.addEventListener("resize", resized);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("resize", resized);
+    };
+  }, [contextAt]);
+
+  const isPanTrigger = (e: React.PointerEvent) =>
+    e.button === 1 ||
+    // The hand is the space bar made into a tool: for a finger, which
+    // has no space bar, and for a hand that would rather not hold one.
+    (e.button === 0 && (spaceRef.current || tool === "Hand")) ||
+    fingerPans(e);
+
+  /** Whether a pen has touched this screen, this visit. */
+  const penSeenRef = useRef(false);
+  /** One finger moving the page rather than drawing on it: always, if
+   * asked; and by default once a pen has touched the screen — the pen
+   * draws and the hand moves the page, as in every drawing app on a
+   * tablet, so a finger resting on the glass never makes a mark. */
+  const fingerPans = (e: React.PointerEvent) =>
+    e.pointerType === "touch" &&
+    e.button === 0 &&
+    (prefs.finger === "pan" || (prefs.finger === "auto" && penSeenRef.current));
+
+  /** Where a pointer is in the canvas's own coordinates — the space the
+   * view's own offset is written in, which is what a pinch has to work
+   * in to keep the page under the fingers. */
+  const canvasPoint = (e: {
+    clientX: number;
+    clientY: number;
+  }): [number, number] => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    return [e.clientX - (rect?.left ?? 0), e.clientY - (rect?.top ?? 0)];
+  };
+
+  /** A pinch, once it has begun: the fingers' distance and middle when it
+   * did, and the view it started from. Everything is worked out against
+   * these rather than step by step, so the zoom cannot drift over a long
+   * gesture. */
+  const pinchRef = useRef<{
+    dist: number;
+    mid: [number, number];
+    zoom: number;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  /** A second finger takes the gesture over. Whatever one finger had
+   * begun is abandoned — half a rect dragged out on the way to a pinch is
+   * not something anyone meant to draw — and the two carry the view
+   * instead, which is how every touch app behaves and the only way to
+   * zoom or pan a tablet, where there is no wheel and no space bar. */
+  const beginPinch = () => {
+    const pts = [...touchesRef.current.values()];
+    if (pts.length !== 2) return;
+    clearLong();
+    // The first finger's press put an anchor down before the second made
+    // it a pinch: the view's gesture, not the Pen's, so that anchor (and
+    // any handle it was pulling) goes, and the path drawn before stays.
+    const pen = penDragRef.current;
+    if (pen) {
+      penDragRef.current = null;
+      setPenPoints((ps) => ps.slice(0, pen.index));
+      setPenHandles((hs) => hs.slice(0, pen.index));
+    }
+    abandonGesture();
+    pinchRef.current = {
+      dist: Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1,
+      mid: [(pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2],
+      zoom: view.zoom,
+      x: view.x,
+      y: view.y,
+    };
+  };
+
+  /** Note where a finger is, and let the second one take the view over.
+   * One finger is the tool's, as a mouse is; two are the view's. Both the
+   * canvas and the room around it feed this, because the canvas keeps the
+   * pointer events it acts on to itself and a pinch may still begin on
+   * it. */
+  const trackTouch = (e: React.PointerEvent) => {
+    if (e.pointerType !== "touch" || touchesRef.current.has(e.pointerId)) return;
+    touchesRef.current.set(e.pointerId, canvasPoint(e));
+    tapsRef.current.down(e.pointerId, e.clientX, e.clientY, performance.now());
+    if (touchesRef.current.size === 2 && !pinchRef.current) beginPinch();
+  };
+
+  /** Whatever one pointer had begun on the canvas, let go of: the
+   * preview taken back, a band or a stroke dropped. */
+  // A path being drawn is kept when another tool is taken up, as Enter
+  // and Escape keep it — every way of changing tool used to throw it
+  // away. What the pen had down is remembered while it is in hand, since
+  // the switch has already let go of the anchors by the time this runs.
+  const penKept = useRef<{ pts: [number, number][]; hs: [number, number, number, number][] }>({ pts: [], hs: [] });
+  if (tool === "Pen") penKept.current = { pts: penPoints, hs: penHandles };
+  const toolWas = useRef(tool);
+  useEffect(() => {
+    const was = toolWas.current;
+    toolWas.current = tool;
+    if (was !== "Pen" || tool === "Pen") return;
+    const kept = penKept.current;
+    penKept.current = { pts: [], hs: [] };
+    if (kept.pts.length >= 2) finishPath(false, undefined, kept);
+  }, [tool]);
+
+  const abandonGesture = () => {
+    // A finger's press still being held back is let go of with it: it
+    // never reached the tool, so there is nothing to take back.
+    dropHeldPress();
+    cancelGesture(true);
+    // One that had reached it and dropped a text block, with nothing
+    // done since, takes the block back: a pinch is not a wish for text.
+    const dropped = justDropped.current;
+    justDropped.current = null;
+    // Only while the finger that dropped it is still down: a tap that
+    // has lifted put the block down for good, and a two-finger tap (undo)
+    // or a pinch a moment later took it, and the step before, away.
+    if (
+      session &&
+      dropped &&
+      dropped.pointer !== null &&
+      pointersDown.current.has(dropped.pointer) &&
+      performance.now() - dropped.at < 1000 &&
+      session.history_mark() === dropped.mark
+    ) {
+      typeIntoNewText.current = false;
+      setInlineText(null);
+      session.cancel_preview();
+      session.take_back();
+      setSelected(null);
+      refresh(session);
+    }
+    marqueeRef.current = null;
+    setMarquee(null);
+    paintingRef.current = null;
+    // Not the Pen's anchors: a pinch, a long press or a palm lets go of
+    // what the fingers were doing, not of a path half put down.
+  };
+
+  /** Palm rejection, asked first of every press. A pen landing takes the
+   * canvas from any finger already on it — the heel of the hand usually
+   * arrives before the nib — and lets go of what that finger had begun;
+   * a finger landing while a pen is down is a palm, and nothing hears
+   * it. True when the press is to be ignored. */
+  const rejectPalm = (e: React.PointerEvent): boolean => {
+    if (ignoredRef.current.has(e.pointerId)) return true;
+    if (e.pointerType === "pen") {
+      penSeenRef.current = true;
+      pensRef.current.add(e.pointerId);
+      if (touchesRef.current.size > 0) {
+        for (const id of touchesRef.current.keys()) {
+          ignoredRef.current.add(id);
+          tapsRef.current.spoil(id);
+        }
+        touchesRef.current.clear();
+        pinchRef.current = null;
+        // A finger moves the page once a pen has been seen, so the palm
+        // had begun a pan — and the pen's own travel then moved the page
+        // by that pan, the stroke landing under the heel of the hand.
+        panDragRef.current = null;
+        clearLong();
+        abandonGesture();
+      }
+      return false;
+    }
+    if (e.pointerType === "touch" && pensRef.current.size > 0) {
+      ignoredRef.current.add(e.pointerId);
+      return true;
+    }
+    return false;
+  };
+
+  /** Asked first by every handle on the canvas — corners, the knob, an
+   * anchor, a mask's or a gradient's handle: a palm on one is ignored as
+   * it is on the page, and a finger on one is counted, so a second
+   * finger makes it a pinch rather than a resize. A palm drifting over a
+   * corner resized the layer. True when the press is not the handle's. */
+  const handleRefuses = (e: React.PointerEvent): boolean => {
+    // A handle is for the plain press. The middle button, the space bar
+    // and the hand pan from it as from anywhere, and the right button
+    // asks for the menu: each of them resized the layer, and the right
+    // one opened the menu after as well. Let through to the canvas round
+    // it, which does what they mean.
+    if (e.pointerType !== "touch" && (e.button !== 0 || spaceRef.current || tool === "Hand")) return true;
+    if (rejectPalm(e)) {
+      e.stopPropagation();
+      return true;
+    }
+    trackTouch(e);
+    if (pinchRef.current) {
+      e.stopPropagation();
+      return true;
+    }
+    return false;
+  };
+
+  /** A pointer lifted or taken back by the system: forget it. */
+  const pointerGone = (e: React.PointerEvent) => {
+    pensRef.current.delete(e.pointerId);
+    ignoredRef.current.delete(e.pointerId);
+    if (longRef.current?.id === e.pointerId) clearLong();
+  };
+
+  const onHostPointerDown = (e: React.PointerEvent) => {
+    if (rejectPalm(e)) return;
+    trackTouch(e);
+    if (!isPanTrigger(e)) return;
+    // Once a pen has been used a finger moves the page, and the canvas
+    // never hears it — so the long press that opens the menu went with
+    // it, for the rest of the visit. A finger held still on the page
+    // still asks for it.
+    if (e.pointerType === "touch" && touchesRef.current.size === 1) startLong(e);
+    panDragRef.current = {
+      pointerId: e.pointerId,
+      pointerX: e.clientX,
+      pointerY: e.clientY,
+      viewX: view.x,
+      viewY: view.y,
+    };
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    e.preventDefault();
+  };
+
+  const onHostPointerMove = (e: React.PointerEvent) => {
+    if (ignoredRef.current.has(e.pointerId)) return;
+    const long = longRef.current;
+    if (long?.id === e.pointerId && Math.hypot(e.clientX - long.x, e.clientY - long.y) > LONG_PRESS_SLOP) {
+      clearLong();
+    }
+    if (e.pointerType === "touch" && touchesRef.current.has(e.pointerId)) {
+      tapsRef.current.move(e.pointerId, e.clientX, e.clientY);
+      touchesRef.current.set(e.pointerId, canvasPoint(e));
+      const pinch = pinchRef.current;
+      const pts = [...touchesRef.current.values()];
+      if (pinch && pts.length >= 2) {
+        const dist =
+          Math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) || 1;
+        const mid: [number, number] = [
+          (pts[0][0] + pts[1][0]) / 2,
+          (pts[0][1] + pts[1][1]) / 2,
+        ];
+        const zoom = Math.min(
+          MAX_ZOOM,
+          Math.max(MIN_ZOOM, (pinch.zoom * dist) / pinch.dist),
+        );
+        // The point the fingers began around stays under them: the view
+        // is scaled about it and then carried to where the middle is now,
+        // so a pinch pans as well as zooms, which is one gesture to a
+        // hand and should be one here.
+        const k = zoom / pinch.zoom;
+        setView({
+          zoom,
+          x: mid[0] - (pinch.mid[0] - pinch.x) * k,
+          y: mid[1] - (pinch.mid[1] - pinch.y) * k,
+        });
+        return;
+      }
+    }
+    if ((painting || cloning) && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      setBrushAt([e.clientX - rect.left, e.clientY - rect.top]);
+    }
+    const pan = panDragRef.current;
+    if (!pan) return;
+    // Only the pointer that began the pan moves the page. A pen hovering
+    // over the glass while a palm's pan stood moved it by the pen's way
+    // across — before the nib touched, so its landing could not undo it;
+    // a pen's hover ends a finger's pan, as its landing does.
+    if (pan.pointerId !== undefined && e.pointerId !== pan.pointerId) {
+      if (e.pointerType === "pen") panDragRef.current = null;
+      return;
+    }
+    setView((v) => ({
+      ...v,
+      x: pan.viewX + (e.clientX - pan.pointerX),
+      y: pan.viewY + (e.clientY - pan.pointerY),
+    }));
+  };
+
+  const onHostPointerUp = (e: React.PointerEvent) => {
+    const ignored = ignoredRef.current.has(e.pointerId);
+    pointerGone(e);
+    if (ignored) return;
+    panDragRef.current = null;
+    if (e.pointerType === "touch") {
+      touchesRef.current.delete(e.pointerId);
+      // The pinch ends with the first finger lifted rather than the last:
+      // carrying on with one would make the page jump to wherever that
+      // finger happens to be.
+      if (touchesRef.current.size < 2) pinchRef.current = null;
+      // Two fingers tapped and lifted is undo, three is redo — the
+      // gesture every drawing app on a tablet has taught. Their pinch
+      // has already let go of whatever the first finger had begun, so
+      // what is undone is the step before the tap, not half of it.
+      const tapped = tapsRef.current.up(e.pointerId, performance.now());
+      if (tapped === 2) undo();
+      else if (tapped === 3) redo();
+    }
+  };
+
+  const onHostPointerCancel = (e: React.PointerEvent) => {
+    if (e.pointerType === "touch") tapsRef.current.spoil(e.pointerId);
+    // A gesture the system took back is taken back: a finger's drag of a
+    // handle cancelled half way left its size on the layer with no step
+    // in the history, folded into whatever was done next.
+    //
+    // Only a drag that pointer was driving: the one pointer down, with a
+    // drag in flight. A second finger taken back wiped the Pen's anchors
+    // put down before it, and the crop frame and the knife's line with them.
+    if (
+      !ignoredRef.current.has(e.pointerId) &&
+      (handleHeld() || zoomBoxRef.current !== null) &&
+      [...pointersDown.current.keys()].every((id) => id === e.pointerId)
+    )
+      cancelGesture();
+    // An anchor the Pen put down on this press, taken back with it: the
+    // press is what the system cancelled, and its anchor stayed.
+    const pen = penDragRef.current;
+    if (pen && [...pointersDown.current.keys()].every((id) => id === e.pointerId)) {
+      penDragRef.current = null;
+      setPenPoints((pts) => pts.slice(0, pen.index));
+      setPenHandles((hs) => hs.slice(0, pen.index));
+    }
+    onHostPointerUp(e);
+  };
+
+  useEffect(() => {
+    if (!session) return;
+    const id = setTimeout(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = THUMB;
+      canvas.height = THUMB;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const draw = (px: Uint8Array) => {
+        ctx.clearRect(0, 0, THUMB, THUMB);
+        ctx.putImageData(
+          new ImageData(new Uint8ClampedArray(px), THUMB, THUMB),
+          0,
+          0,
+        );
+        return canvas.toDataURL();
+      };
+      const next: Record<number, string> = {};
+      const masks: Record<number, string> = {};
+      for (const l of layers) {
+        try {
+          const px = session.thumbnail(l.id, THUMB);
+          if (px.length === THUMB * THUMB * 4) next[l.id] = draw(px);
+          if (l.has_mask) {
+            const mp = session.mask_thumbnail(l.id, THUMB);
+            if (mp.length === THUMB * THUMB * 4) masks[l.id] = draw(mp);
+          }
+        } catch {
+          continue;
+        }
+      }
+      setThumbs(next);
+      setMaskThumbs(masks);
+    }, 350);
+    return () => clearTimeout(id);
+  }, [session, layers, saveTick]);
+
+  /** The ring follows the brush; nothing else needs it, and a stale ring
+   * left behind by a tool change or a pointer leaving the canvas would
+   * read as a brush that is still there. */
+  useEffect(() => {
+    if (!painting && !cloning) setBrushAt(null);
+  }, [tool]);
+
+  /** Commit the guide list, as one history entry. */
+  const setGuidesDoc = (next: DocGuide[]) =>
+    run({ SetGuides: { guides: next } });
+
+  /** Start dragging a guide: out of a ruler when `index` is null, or an
+   * existing one when it is not. The pointer is followed on the window so
+   * the drag survives crossing the canvas, the panel, or a ruler. */
+  const startGuideDrag = (
+    vertical: boolean,
+    index: number | null,
+    e: React.PointerEvent,
+  ) => {
+    if (e.button !== 0) return;
+    // Space held is the hand, here as on a handle: the press is left to
+    // the canvas to pan with, where it moved the guide.
+    if (index !== null && spaceRef.current) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const host = hostRef.current;
+    if (!host) return;
+    // A guide drawn out of the ruler is one to be seen: with guides
+    // hidden it went down unseen and unfelt.
+    if (!showGuides) setShowGuides(true);
+    const rect = host.getBoundingClientRect();
+    const positionOf = (ev: { clientX: number; clientY: number }) =>
+      vertical
+        ? (ev.clientX - rect.left - view.x) / view.zoom
+        : (ev.clientY - rect.top - view.y) / view.zoom;
+    // Dropping a guide back on a ruler is how one is thrown away, so the
+    // gesture has to know where the rulers are.
+    const overRuler = (ev: { clientX: number; clientY: number }) =>
+      vertical ? ev.clientX - rect.left < RULER : ev.clientY - rect.top < RULER;
+    setGuideDrag({ vertical, index, at: positionOf(e) });
+    const onMove = (ev: PointerEvent) =>
+      setGuideDrag((g) => (g ? { ...g, at: positionOf(ev) } : g));
+    const onCancel = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      setGuideDrag(null);
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      setGuideDrag(null);
+      const at = Math.round(positionOf(ev) * 100) / 100;
+      const limit = vertical ? docSizeRef.current[0] : docSizeRef.current[1];
+      const keep = !overRuler(ev) && at >= 0 && at <= limit;
+      const next = docGuides.filter((_, i) => i !== index);
+      if (keep) {
+        next.push(vertical ? { Vertical: at } : { Horizontal: at });
+      } else if (index === null) {
+        return; // dragged out of a ruler and dropped nowhere
+      }
+      setGuidesDoc(next);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    // Cancelled, the guide is left where it was (or not made at all).
+    window.addEventListener("pointercancel", onCancel);
+  };
+
+  /** A double-click on a picked text block opens it for typing in place. */
+  const onCanvasDoubleClick = (e: React.MouseEvent) => {
+    // A double-click ends a pen path where it is, as in Illustrator and
+    // Affinity: the first press put the last anchor down, and the
+    // second (refused at the press) is the word to stop.
+    if (tool === "Pen") {
+      if (penPoints.length >= 2) finishPath(false);
+      return;
+    }
+    // A double-click in a kept crop frame takes it.
+    if (tool === "Crop") {
+      if (cropFrame) applyCrop();
+      return;
+    }
+    if (tool !== "Move" || !session || selected === null) return;
+    // Double-clicking a picked path's outline puts an anchor on it,
+    // which is what the gesture means in every vector editor. A block of
+    // text has its own meaning for it, and takes precedence.
+    if (
+      selectedKind &&
+      typeof selectedKind === "object" &&
+      "Vector" in selectedKind &&
+      "Path" in selectedKind.Vector.shape
+    ) {
+      const [x, y] = docPoint(e);
+      try {
+        // Near the outline, in document units: an anchor goes on the
+        // path, so a double-click well inside the shape is not asking
+        // for one and falls through to what it otherwise means.
+        // The anchor just put on is the one last taken hold of: what
+        // Delete or a cut acts on next, and the indices after it moved.
+        pickedAnchorRef.current = {
+          id: selected,
+          idx: session.insert_anchor(selected, x, y, 10 / view.zoom),
+        };
+      } catch {
+        return;
+      }
+      refresh(session);
+      return;
+    }
+    if (!inlineText) beginInlineText();
+  };
+
+  /** A rubber band being dragged on empty canvas, in document
+   * coordinates, and whether it adds to the selection it started from. */
+  const marqueeRef = useRef<{
+    x0: number;
+    y0: number;
+    add: NodeId[];
+    band: [number, number, number, number];
+  } | null>(null);
+  const [marquee, setMarquee] = useState<
+    [number, number, number, number] | null
+  >(null);
+
+  /** Every top-level layer the band touches, topmost first. Nested layers
+   * are not offered: a band picks the objects on the page, and a group is
+   * one object. Locked layers, and the adjustment and filter layers that
+   * have no box of their own, are not picked. */
+  const layersInBand = (band: [number, number, number, number]): NodeId[] => {
+    if (!session) return [];
+    const [x0, y0, x1, y1] = band;
+    return layers
+      .filter(
+        (l) =>
+          l.depth === 0 &&
+          !l.locked &&
+          l.visible &&
+          l.kind !== "adjustment" &&
+          l.kind !== "filter",
+      )
+      .filter((l) => {
+        const b = session.bounds_of(l.id);
+        if (b.length !== 4) return false;
+        return b[0] < x1 && b[0] + b[2] > x0 && b[1] < y1 && b[1] + b[3] > y0;
+      })
+      .map((l) => l.id);
+  };
+
+  /** A brush stroke in flight: the engine holds the stroke itself, this
+   * only remembers that one is being drawn and how thick the last sample
+   * was, so the width eases rather than jumping sample to sample. */
+  const paintingRef = useRef<{ width: number; at: number } | null>(null);
+  /** The stroke in hand had to make what it lands on — a paint or clone
+   * layer, or a mask to rub into — which is a step of its own: when the
+   * stroke is kept the two are folded into one (one Undo takes the stroke
+   * and its layer away together, not the stroke and then an empty layer
+   * left behind), and when it is let go of, so is what it made. */
+  const strokeMade = useRef(false);
+
+  /** The layer a paint stroke should land on: the picked one when it is a
+   * paint layer, and a fresh one when it is not — so the first stroke of a
+   * session makes its own layer and every stroke after it joins that one. */
+  const paintTarget = (s: WasmSession, clone: boolean): NodeId | null => {
+    const want = clone ? "clone" : "paint";
+    const picked = layers.find((l) => l.id === selected);
+    if (picked && picked.kind === want && !picked.locked) return picked.id;
+    paintCount.current += 1;
+    try {
+      const id = (
+        clone
+          ? s.add_clone_layer(`Clone ${paintCount.current}`)
+          : s.add_paint_layer(`Paint ${paintCount.current}`)
+      ) as NodeId;
+      strokeMade.current = true;
+      setSelected(id);
+      setMultiSel([]);
+      return id;
+    } catch {
+      return null;
+    }
+  };
+
+  /** A finger's press on a tool that acts the moment it is pressed —
+   * drops text, fills, picks a colour, makes a paint layer — held back
+   * a moment, until the finger moves or lifts or the moment passes. No
+   * two fingers land at once: the first one's press used to run the
+   * tool before the second made it a pinch or a tap, and taking it back
+   * could not (a pinch left a "Text" layer; a two-finger undo undid that
+   * stray step instead of the last edit; the paint tools threw away what
+   * redo held). A second finger, a pen or a long press drops it. */
+  const heldPress = useRef<{ e: React.PointerEvent; timer: number } | null>(null);
+  const replaying = useRef(false);
+  const dropHeldPress = () => {
+    if (heldPress.current) window.clearTimeout(heldPress.current.timer);
+    heldPress.current = null;
+  };
+  const releaseHeldPress = () => {
+    const held = heldPress.current;
+    if (!held) return;
+    dropHeldPress();
+    if (pinchRef.current || ignoredRef.current.has(held.e.pointerId)) return;
+    replaying.current = true;
+    try {
+      onCanvasPointerDown(held.e);
+    } catch (err) {
+      // A capture asked for after the finger lifted.
+      console.warn("held press:", err);
+    } finally {
+      replaying.current = false;
+    }
+  };
+  const onCanvasPointerDown = (e: React.PointerEvent) => {
+    if (rejectPalm(e)) {
+      e.stopPropagation();
+      return;
+    }
+    // Before the guard below, and before this handler keeps the event
+    // from the one on the canvas's host: a finger landing here is what
+    // begins a pinch.
+    trackTouch(e);
+    if (pinchRef.current) return; // the second finger, or a third
+    if (!session || isPanTrigger(e) || e.button !== 0) return;
+    e.stopPropagation();
+    // Text being typed into is finished by a press anywhere else on the
+    // canvas, before that press starts anything of its own: the press
+    // used to let go of the block, which took the editor away without
+    // its blur, so the edit stayed an open preview and no other block
+    // could be opened for editing.
+    if (inlineText) closeInlineText(true);
+    // A finger alone on the page, held still, is asking for the menu a
+    // mouse's right button opens. Not while painting, where a finger held
+    // in one place is putting down paint, and is meant to.
+    // A pen held still asks the same: a Pencil has no button to ask with.
+    const alone = e.pointerType === "pen" || (e.pointerType === "touch" && touchesRef.current.size === 1);
+    if (alone && !replaying.current && !painting && !cloning && tool !== "Pen" && tool !== "Brush") {
+      // A finger asks at once, as a phone's long press does; a pen, which
+      // is held still a moment to place its nib before the drag it
+      // means, asks on the lift.
+      startLong(e, e.pointerType === "pen");
+    }
+    if (
+      e.pointerType === "touch" &&
+      !replaying.current &&
+      touchesRef.current.size === 1 &&
+      ACTS_ON_PRESS.includes(tool)
+    ) {
+      dropHeldPress();
+      heldPress.current = { e, timer: window.setTimeout(releaseHeldPress, TOUCH_SETTLE_MS) };
+      return;
+    }
+    const [x, y] = docPoint(e);
+    // Asked which pixel is grey, the next click on the page answers it
+    // and nothing else happens — the tool in hand waits its turn.
+    if (pickingNeutral) {
+      pickNeutral(x, y);
+      return;
+    }
+    // The zoom tool looks closer at where it is pressed, and steps back
+    // from there with alt held — the convention every editor shares.
+    if (tool === "Crop" && cropFrame) {
+      const [hx, hy] = canvasPoint(e);
+      const edges = cropEdgesAt(hx, hy);
+      if (edges) {
+        cropEditRef.current = { edges, from: [x, y], frame0: cropFrame };
+        (e.target as Element).setPointerCapture(e.pointerId);
+        return;
+      }
+    }
+    if (tool === "Zoom") {
+      const [hx, hy] = canvasPoint(e);
+      // Alt steps back at once. Otherwise the press waits to see whether
+      // it is a click, which steps in, or a drag, whose box is then
+      // filled with the window — Photoshop's and Illustrator's zoom.
+      if (e.altKey) {
+        zoomAt(hx, hy, 0.8);
+        return;
+      }
+      zoomBoxRef.current = [hx, hy, hx, hy];
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    // The gradient tool drags a ramp across a shape: the one under the
+    // press, else the one picked. The ramp runs from the ink in hand to
+    // white — the tool's colour is the colour in hand, as a brush's is —
+    // unless the shape already wears a gradient, whose stops are kept
+    // and only re-aimed. Alt makes it radial about the press; shift holds
+    // the angle to an eighth of a turn.
+    if (tool === "Gradient") {
+      const hit = session.hit_test(x, y);
+      let id: NodeId | null = null;
+      let vector: Extract<NodeKind, { Vector: unknown }>["Vector"] | null = null;
+      for (const c of [hit, selected]) {
+        if (c === undefined || c === null) continue;
+        const k = JSON.parse(session.kind_json(c)) as NodeKind;
+        if (typeof k === "object" && "Vector" in k) {
+          id = c;
+          vector = k.Vector;
+          break;
+        }
+      }
+      if (id === null || vector === null) return;
+      const lb = session.local_bounds_of(id);
+      if (lb.length !== 4) return;
+      const inv = inverseOf(toTransform(session.transform_of(id)));
+      const span = (a: number, b: number) => (Math.abs(b - a) < 1e-6 ? 1 : b - a);
+      const at = id;
+      const unit = (dx: number, dy: number): [number, number] => {
+        const [px, py] = layerPoint({ clientX: dx, clientY: dy }, at, true);
+        const [lx, ly] = inv ? inv(px, py) : [px, py];
+        return [(lx - lb[0]) / span(lb[0], lb[2]), (ly - lb[1]) / span(lb[1], lb[3])];
+      };
+      // The box's units on the page: its two sides through the layer's
+      // whole placing, scaled to the longer so the numbers stay near one.
+      const onPage = composeT(toTransform(session.parent_space_of(id)), toTransform(session.transform_of(id)));
+      const [bw, bh] = [span(lb[0], lb[2]), span(lb[1], lb[3])];
+      const p = [onPage.a * bw, onPage.c * bh, onPage.b * bw, onPage.d * bh];
+      const most = Math.max(Math.hypot(p[0], p[2]), Math.hypot(p[1], p[3]), 1e-9);
+      const axes = p.map((v) => v / most) as [number, number, number, number];
+      gradToolRef.current = { id, vector, unit, start: unit(x, y), from: [x, y], radial: e.altKey, axes };
+      if (id !== selected) {
+        setSelected(id);
+        setMultiSel([]);
+      }
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    // The knife draws a line; letting go cuts what it crosses.
+    if (tool === "Knife") {
+      knifeRef.current = [x, y];
+      setKnifeLine([x, y, x, y]);
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    // The node tool is for a shape's anchors, which the Move tool shows
+    // but nothing names. A press on a rectangle or an ellipse makes it a
+    // path, so its anchors come out; a press on the picked path's own
+    // outline puts an anchor there (Move wants a double-click for that);
+    // the anchors themselves answer to a drag and to alt, whatever the
+    // tool. A press on another layer picks it; on nothing, lets go.
+    if (tool === "Node") {
+      // On the picked path's outline first, from either side of it: the
+      // hit test is the fill, so a press just outside the edge found
+      // nothing and let the path go instead of putting an anchor there.
+      if (
+        selected !== null &&
+        !e.altKey &&
+        selectedKind &&
+        typeof selectedKind === "object" &&
+        "Vector" in selectedKind &&
+        "Path" in selectedKind.Vector.shape
+      ) {
+        try {
+          // The anchor just put on is the one last taken hold of: what
+          // Delete or a cut acts on next, and the indices after it moved.
+          pickedAnchorRef.current = {
+            id: selected,
+            idx: session.insert_anchor(selected, x, y, 10 / view.zoom),
+          };
+          refresh(session);
+          return;
+        } catch {
+          // Not near the outline: what the press is on decides.
+        }
+      }
+      const hit = session.hit_test(x, y);
+      if (hit === undefined) {
+        setSelected(null);
+        setMultiSel([]);
+        return;
+      }
+      const k = JSON.parse(session.kind_json(hit)) as NodeKind;
+      const isPath =
+        typeof k === "object" && "Vector" in k && "Path" in k.Vector.shape;
+      if (typeof k === "object" && "Vector" in k && !isPath) {
+        if (layers.find((l) => l.id === hit)?.locked) return;
+        try {
+          session.as_path(hit);
+        } catch (err) {
+          alert(`Node: ${said(err)}`);
+          return;
+        }
+        setSelected(hit);
+        setMultiSel([]);
+        refresh(session);
+        return;
+      }
+      if (hit === selected && isPath) {
+        // With alt, the scissors: the path is cut where it is pressed —
+        // the pair to alt on an anchor, which takes the anchor off.
+        if (e.altKey) {
+          try {
+            const parts = session.cut_path_at(hit, x, y, 10 / view.zoom);
+            setSelected(parts[parts.length - 1] ?? hit);
+            setMultiSel([]);
+          } catch {
+            // Not near the outline: nothing to cut.
+            return;
+          }
+          refresh(session);
+          return;
+        }
+        try {
+          // The anchor just put on is the one last taken hold of: what
+          // Delete or a cut acts on next, and the indices after it moved.
+          pickedAnchorRef.current = {
+            id: hit,
+            idx: session.insert_anchor(hit, x, y, 10 / view.zoom),
+          };
+        } catch {
+          // Not near the outline: a press inside the shape asks nothing.
+          return;
+        }
+        refresh(session);
+        return;
+      }
+      setSelected(hit);
+      setMultiSel([]);
+      return;
+    }
+    // The fill tool gives the layer under a press the ink in hand — a
+    // shape's fill (in place of any gradient), a block of text's, a
+    // frame's ground — or, with alt, a shape's stroke, adding one where
+    // there is none. A press on nothing that takes a colour, with a
+    // region picked out, fills the region instead, as a layer over it:
+    // the bucket poured into a selection, which is what a bucket is for
+    // on a photograph.
+    if (tool === "Fill") {
+      const hit = session.hit_test(x, y);
+      const ink = currentInk();
+      if (hit !== undefined && !layers.find((l) => l.id === hit)?.locked) {
+        const k = JSON.parse(session.kind_json(hit)) as NodeKind;
+        let next: NodeKind | null = null;
+        if (typeof k === "object") {
+          if ("Vector" in k) {
+            next = e.altKey
+              ? {
+                  Vector: {
+                    ...k.Vector,
+                    stroke: k.Vector.stroke
+                      ? { ...k.Vector.stroke, color: ink }
+                      : {
+                          color: ink,
+                          width: 4,
+                          widths: [],
+                          dash: [],
+                          cap: "Round",
+                          join: "Round",
+                          align: null,
+                          start_marker: "None",
+                          end_marker: "None",
+                        },
+                  },
+                }
+              : { Vector: { ...k.Vector, fill: ink, gradient: null } };
+          } else if ("Text" in k) {
+            next = { Text: { ...k.Text, fill: ink } };
+          } else if ("Artboard" in k) {
+            next = { Artboard: { ...k.Artboard, background: ink } };
+          }
+        }
+        if (next) {
+          run({ SetKind: { id: hit, kind: next } });
+          setSelected(hit);
+          setMultiSel([]);
+          return;
+        }
+      }
+      if (antRings.length > 0) fillSelection();
+      return;
+    }
+    // Asked for a line along something level, the next drag draws it.
+    if (levelling) {
+      const [hx, hy] = canvasPoint(e);
+      levelRef.current = [hx, hy, hx, hy];
+      setLevelLine([hx, hy, hx, hy]);
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    if (cloning) {
+      // Alt sets where the clone reads from, which is what that key does
+      // in every editor that has this tool.
+      if (e.altKey) {
+        setCloneFrom([x, y]);
+        return;
+      }
+      if (cloneFrom === null) {
+        alert("Alt-click the place to clone from first.");
+        return;
+      }
+      strokeMade.current = false;
+      const layer = paintTarget(session, true);
+      if (layer === null) return;
+      try {
+        session.paint_begin(
+          layer,
+          x,
+          y,
+          (paintSize / 2) * pressed(e),
+          JSON.stringify(currentInk()),
+          paintSoftness,
+          false,
+          false,
+        );
+        session.paint_source(cloneFrom[0] - x, cloneFrom[1] - y, healing);
+      } catch (err) {
+        alert(`Clone: ${said(err)}`);
+        return;
+      }
+      paintingRef.current = { width: pressed(e), at: performance.now() };
+      lastPaint.current = [x, y];
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      refresh(session);
+      return;
+    }
+    if (painting) {
+      // Alt takes the colour under the brush rather than laying any: the
+      // sampling every paint tool puts under that key, so the brush does
+      // not have to be put down to pick a colour up.
+      if (e.altKey) {
+        const hex = colorUnder(session, x, y);
+        if (hex) {
+          setFill(hex);
+          setInkFrom(null);
+        }
+        return;
+      }
+      // Rubbing at a layer that is not a paint layer takes a piece out
+      // of the layer rather than painting over it: the stroke goes into
+      // a mask, so the layer itself is untouched and the brush puts the
+      // piece back. Once a layer has such a mask the brush keeps working
+      // on it, which is how what was rubbed out is painted back in.
+      const picked = layers.find((l) => l.id === selected);
+      const onMask =
+        !!picked &&
+        picked.kind !== "paint" &&
+        !picked.locked &&
+        (erasing || picked.painted_mask);
+      let layer: NodeId | null;
+      // The eraser with nothing it can rub at — nothing picked, or a
+      // locked layer — does nothing; it used to make an empty paint layer
+      // and rub at that, which changed nothing anyone could see.
+      if (erasing && !onMask && !(picked && picked.kind === "paint" && !picked.locked)) {
+        // Said once a visit, rather than nothing at all: the stroke
+        // went nowhere and nothing said why.
+        if (!toldEraser) {
+          toldEraser = true;
+          alert(
+            picked?.locked
+              ? `The eraser rubs at the picked layer, and ${picked.name} is locked.`
+              : "The eraser rubs at the picked layer: pick one first. A paint layer is rubbed out; any other has a piece taken out of it, which the brush puts back.",
+          );
+        }
+        return;
+      }
+      strokeMade.current = false;
+      if (onMask) {
+        const hadMask = picked.painted_mask;
+        try {
+          if (!session.ensure_painted_mask(picked.id)) {
+            alert(`${picked.name} already carries a mask of another kind.`);
+            return;
+          }
+        } catch (err) {
+          alert(`Mask: ${said(err)}`);
+          return;
+        }
+        if (!hadMask) strokeMade.current = true;
+        layer = picked.id;
+      } else {
+        layer = paintTarget(session, false);
+      }
+      if (layer === null) return;
+      // Shift starts the stroke where the last one ended and runs it
+      // straight to here, which is how a brush draws a line it could not
+      // have drawn by hand.
+      const from = e.shiftKey ? strokeEnd.current : null;
+      const start = from ?? [x, y];
+      try {
+        session.paint_begin(
+          layer,
+          start[0],
+          start[1],
+          (paintSize / 2) * pressed(e),
+          JSON.stringify(currentInk()),
+          paintSoftness,
+          erasing,
+          onMask,
+        );
+        if (from) session.paint_extend(x, y, paintSize / 2);
+      } catch (err) {
+        alert(`Paint: ${said(err)}`);
+        return;
+      }
+      strokeEnd.current = [x, y];
+      if (from) {
+        // The line is the whole gesture; there is nothing to drag.
+        session.commit_preview();
+        if (strokeMade.current) session.merge_last();
+        strokeMade.current = false;
+        refresh(session);
+        return;
+      }
+      paintingRef.current = { width: pressed(e), at: performance.now() };
+      lastPaint.current = [x, y];
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+      refresh(session);
+      return;
+    }
+    if (tool === "Text") {
+      dropText(x, y);
+      // The finger that dropped it, for a pinch it goes on into to take
+      // the block back (`abandonGesture`).
+      if (justDropped.current) justDropped.current.pointer = e.pointerId;
+      return;
+    }
+    if (tool === "Wand") {
+      // The wand is a click, not a drag: the engine reads the page and
+      // spreads out from where it landed while the colour holds.
+      const how = e.shiftKey
+        ? e.altKey
+          ? "intersect"
+          : "union"
+        : e.altKey
+          ? "subtract"
+          : "replace";
+      try {
+        const before = session.history_mark();
+        const was = session.selection_json();
+        session.pick_similar(x, y, wandTolerance, wandTouching, how);
+        // Folded into the picking only when the picking was a step: the
+        // same region picked again is none, and the softness is its own.
+        const picked = session.history_mark() !== before;
+        if (newFeather() > 0 && session.feather_selection(newFeather()) && picked) session.merge_last();
+        // Picked sharp and softened again to just what it was: no step.
+        if (session.history_mark() !== before && session.selection_json() === was) session.take_back();
+        refresh(session);
+      } catch (err) {
+        // A click off the page has nothing to spread through: quiet, as
+        // a marquee dragged there is.
+        if (!String(err).includes("not on the page")) alert(`Select: ${said(err)}`);
+      }
+      return;
+    }
+    if (SELECT_TOOLS.includes(tool as never)) {
+      // Dragging from inside what is already picked out moves the region
+      // rather than starting another one — with no modifier, since
+      // shift and alt are how a second region is added or taken away.
+      if (!e.shiftKey && !e.altKey && session.selection_covers(x, y)) {
+        // Feather standing open beside it is let go of first, so the
+        // region carried is the one it puts back: a finger's drag (which
+        // does not let the window go, in case it is a pinch) carried the
+        // softness being tried.
+        if (featherOpenRef.current) cancelFeather();
+        const was = JSON.parse(session.selection_json()) as Mask | null;
+        if (was && regionMoved(was, 0, 0)) {
+          // A region carried across the page catches the same lines a
+          // layer carried across it does, and by its own edges and
+          // middle rather than by the pointer: what wants to land on
+          // the page's edge is the region's edge, not the place inside
+          // it the hand happened to take hold of.
+          const xs = antRings.flat().map((p) => p[0]);
+          const ys = antRings.flat().map((p) => p[1]);
+          const [sx, sy] = snapTargets([]);
+          toolDragRef.current = {
+            tool,
+            startX: x,
+            startY: y,
+            lastX: x,
+            lastY: y,
+            moved: false,
+            region: was,
+            b0: xs.length
+              ? [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
+              : undefined,
+            snapX: sx,
+            snapY: sy,
+          };
+          (e.target as Element).setPointerCapture(e.pointerId);
+          return;
+        }
+      }
+      // Picking a region out of the page: a box, an ellipse or a
+      // freehand outline. Nothing is drawn and no layer is made — what
+      // comes out is a region to hand to a layer.
+      //
+      // A marquee is a box dragged out like any other, and the lines a
+      // rectangle catches on are exactly the ones a region wants: the
+      // page's own edge, a guide, the edge of the layer being cut
+      // around. Where it starts is worth catching as much as where it
+      // ends, so the first point goes through them too. The lasso is
+      // left out — a hand-drawn outline has no corner to catch — and so
+      // is the wand, which drags nothing.
+      const catches = SNAPPED_REGIONS.has(tool);
+      const [snapX, snapY] = catches ? snapTargets([]) : [undefined, undefined];
+      const [sx, sy] =
+        catches && snapX && snapY
+          ? snapPoint(x, y, snapX, snapY, e.ctrlKey || e.metaKey)
+          : [x, y];
+      toolDragRef.current = {
+        tool,
+        startX: sx,
+        startY: sy,
+        lastX: sx,
+        lastY: sy,
+        moved: false,
+        // With a region already picked, Shift and Alt at the press say how
+        // the new one meets it; with none, they shape it from the start.
+        ...(antRings.length > 0 && (e.shiftKey || e.altKey)
+          ? {
+              fromCentre: false,
+              combine: e.shiftKey ? (e.altKey ? ("intersect" as const) : ("union" as const)) : ("subtract" as const),
+            }
+          : { fromCentre: e.altKey && tool !== "Lasso" }),
+        stroke: [[sx, sy]],
+        snapX,
+        snapY,
+      };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    if (tool === "Pen") {
+      // Clicking the first anchor again closes the path.
+      const closeRadius = 8 / view.zoom;
+      const first = penPoints[0];
+      if (
+        penPoints.length >= 3 &&
+        first &&
+        Math.hypot(x - first[0], y - first[1]) < closeRadius
+      ) {
+        finishPath(true);
+      } else {
+        // Shift holds the segment to eighths of a turn, which is what
+        // draws a level rule or a true diagonal by hand; without it, an
+        // anchor catches the same lines a shape's corner does.
+        const last = penPoints[penPoints.length - 1];
+        const [ax, ay] =
+          e.shiftKey && last
+            ? onEighths(last, [x, y])
+            : snapPoint(x, y, ...snapTargets([]), e.ctrlKey || e.metaKey);
+        // The second press of a double-click lands where the first did:
+        // it finishes the path (onCanvasDoubleClick) rather than adding
+        // an anchor on top of the last one.
+        if (last && e.detail >= 2 && Math.hypot(ax - last[0], ay - last[1]) < 4 / view.zoom) {
+          return;
+        }
+        setPenPoints((pts) => [...pts, [ax, ay]]);
+        setPenHandles((hs) => [...hs, [0, 0, 0, 0]]);
+        penDragRef.current = { index: penPoints.length, x: ax, y: ay };
+        (e.target as Element).setPointerCapture(e.pointerId);
+      }
+      return;
+    }
+    const drag: ToolDrag = {
+      tool,
+      startX: x,
+      startY: y,
+      lastX: x,
+      lastY: y,
+      moved: false,
+      stroke: tool === "Brush" ? [[x, y]] : undefined,
+      // A pen's first width is its first pressure: the stroke started at
+      // full width whatever the pen said and eased down to it.
+      widths: tool === "Brush" ? [pressed(e)] : undefined,
+      shift: e.shiftKey,
+      lastAt: performance.now(),
+    };
+    if (tool === "Eyedropper") {
+      // Take the colour the page shows there — the composite, not the
+      // layer under the cursor, which is what the eye is pointing at —
+      // and make it the colour to draw with. With a shape or a block of
+      // text picked, it becomes that layer's fill as well.
+      const hex = colorUnder(session, x, y);
+      if (hex) {
+        // In a CMYK document with a press profile, the inks that print
+        // what the page shows there, separated by the profile: the plain
+        // formula is not the profile's way back, and a colour picked,
+        // given and picked again drifted further at every hop.
+        const n = parseInt(hex.slice(1), 16);
+        const sep = cmyk ? session.separate(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255) : [];
+        const ink: AuthoredColor | undefined =
+          sep.length === 4 ? { Cmyk: { c: sep[0], m: sep[1], y: sep[2], k: sep[3], a: 1 } } : undefined;
+        applyColour(hex, undefined, ink);
+      }
+      setTool("Move");
+      return;
+    }
+    if (tool === "Move") {
+      const hit = session.hit_test(x, y);
+      if (hit === undefined) {
+        // Empty canvas: drag a band over what should be picked. Shift
+        // keeps what is already picked and adds to it.
+        marqueeRef.current = {
+          x0: x,
+          y0: y,
+          add: e.shiftKey ? selectionSet : [],
+          band: [x, y, x, y],
+        };
+        setMarquee([x, y, x, y]);
+        if (!e.shiftKey) {
+          setSelected(null);
+          setMultiSel([]);
+        }
+        (e.target as Element).setPointerCapture(e.pointerId);
+        return;
+      }
+      // Dragging inside a selected group moves the group. Hit testing only
+      // ever reports leaves, so without this a group could be selected in
+      // the panel and still not be draggable — you would grab whichever
+      // child happened to be under the cursor.
+      let target = inSelectedGroup(hit) ? selected! : hit;
+      // Shift adds what was clicked to the selection and takes it out
+      // again — the same thing shift does to a band dragged over the
+      // canvas, and what every editor does with it. It is shift rather
+      // than ctrl because ctrl is spoken for here: it drags free of the
+      // snapping, and a modifier cannot mean two things about the same
+      // gesture. Nothing is dragged by such a click: it is about what is
+      // picked, not about where anything goes.
+      if (e.shiftKey) {
+        (e.target as Element).setPointerCapture(e.pointerId);
+        if (selected === null) {
+          setSelected(target);
+          setMultiSel([]);
+        } else if (!selectionSet.includes(target)) {
+          setMultiSel((prev) => [...prev, target]);
+        } else {
+          // Out again. The primary can go too, and the next one picked
+          // takes its place, so a selection can be whittled down to any
+          // of its members.
+          const rest = selectionSet.filter((id) => id !== target);
+          setSelected(rest.length > 0 ? rest[0] : null);
+          setMultiSel(rest.slice(1));
+        }
+        return;
+      }
+      // Grabbing any member of a multi-selection drags the whole of it;
+      // grabbing anything else starts a fresh single selection.
+      // A locked layer among them stays where it is; the target itself is
+      // never locked, since the pick fell through anything that was.
+      let together =
+        selectionSet.length > 1 && selectionSet.includes(target)
+          ? movableSelection
+          : [target];
+      if (together.length === 1) setMultiSel([]);
+      // Alt drags a copy and leaves the original where it was: the copies
+      // are made where they stand, and the drag carries them off. Two
+      // commands, folded into one step when the drag ends, so one Undo
+      // takes the copy away rather than leaving it on the original.
+      if (e.altKey) {
+        try {
+          const copies = Array.from(
+            session.duplicate_nodes(new Float64Array(together), false),
+          );
+          drag.duplicated = true;
+          drag.copiedFrom = [target, ...together.filter((id) => id !== target)];
+          target = copies[Math.max(0, together.indexOf(target))];
+          together = copies;
+          setMultiSel(copies.length > 1 ? copies : []);
+          refresh(session);
+        } catch (err) {
+          alert(`Duplicate: ${said(err)}`);
+        }
+      }
+      drag.target = target;
+      drag.t0 = toTransform(session.transform_of(target));
+      drag.moving = together.map((id) => ({
+        id,
+        t0: toTransform(session.transform_of(id)),
+      }));
+      // Collect the snap lines once, while nothing is moving. What snaps
+      // is the box around everything being dragged, so several layers
+      // align as the one shape they look like.
+      const moved = unionBounds(together);
+      if (moved) {
+        drag.b0 = moved;
+        [drag.snapX, drag.snapY] = snapTargets(together);
+        drag.spacers = spacerBoxes(together);
+      }
+      setSelected(target);
+    }
+    if (BOX_TOOLS.has(tool) || tool === "Line") {
+      // Nothing is moving yet, so every layer is a line to catch on —
+      // and where a shape starts is worth catching as much as where it
+      // ends: a rect laid against the page's edge is drawn from that
+      // edge.
+      [drag.snapX, drag.snapY] = snapTargets([]);
+      [drag.startX, drag.startY] = snapPoint(
+        x,
+        y,
+        drag.snapX,
+        drag.snapY,
+        e.ctrlKey || e.metaKey,
+      );
+      [drag.lastX, drag.lastY] = [drag.startX, drag.startY];
+    }
+    toolDragRef.current = drag;
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  /** What a crop drag would actually take: the box dragged, clamped to
+   * the page — a crop can only ever take room away — and then held to
+   * the ratio asked for, as the largest box of that ratio inside what is
+   * left. Both the frame drawn while dragging and the crop committed on
+   * the way up ask this one function, so the frame cannot promise a
+   * square and hand back an oblong when the drag runs off the page. */
+  const cropBox = (drag: ToolDrag): [number, number, number, number] => {
+    const [x0, y0, w, h] = dragBox(drag);
+    const clamp = (v: number, hi: number) => Math.min(Math.max(v, 0), hi);
+    const x = clamp(x0, docSize[0]);
+    const y = clamp(y0, docSize[1]);
+    let cw = clamp(x0 + w, docSize[0]) - x;
+    let ch = clamp(y0 + h, docSize[1]) - y;
+    const ratio = cropRatioOf(cropRatio, docSize);
+    if (ratio && cw > 0 && ch > 0) {
+      if (cw / ch > ratio) cw = ch * ratio;
+      else ch = cw / ratio;
+    }
+    return [x, y, cw, ch];
+  };
+
+  /** Take the kept frame: the document becomes that rectangle and every
+   * layer shifts with it, so what was framed stays framed. One step to
+   * undo. */
+  const applyCrop = () => {
+    if (!session || !cropFrame) return;
+    // Held to the page: a crop only ever takes room away.
+    const [dw, dh] = docSizeRef.current;
+    const [bx, by, bw, bh] = cropFrame;
+    const cx = Math.max(0, Math.round(bx));
+    const cy = Math.max(0, Math.round(by));
+    const cw = Math.min(dw, Math.round(bx + bw)) - cx;
+    const ch = Math.min(dh, Math.round(by + bh)) - cy;
+    setCropFrame(null);
+    if (cw < 1 || ch < 1) return;
+    try {
+      session.resize_canvas(cw, ch, -cx, -cy);
+    } catch (err) {
+      alert(`Crop: ${said(err)}`);
+      return;
+    }
+    setDocumentSize(cw, ch);
+    refresh(session);
+    fitView();
+    setTool("Move");
+  };
+
+  /** What a press does to a kept crop frame: the edges a handle there
+   * moves, all four inside it (a move), or null outside (a new frame). */
+  const cropEdgesAt = (hx: number, hy: number) => {
+    if (!cropFrame) return null;
+    const [fx, fy] = [view.x + cropFrame[0] * view.zoom, view.y + cropFrame[1] * view.zoom];
+    const [fw, fh] = [cropFrame[2] * view.zoom, cropFrame[3] * view.zoom];
+    const reach = 8;
+    const near = (v: number, at: number) => Math.abs(v - at) <= reach;
+    const within = (v: number, lo: number, hi: number) => v >= lo - reach && v <= hi + reach;
+    if (!within(hx, fx, fx + fw) || !within(hy, fy, fy + fh)) return null;
+    const edges = {
+      l: near(hx, fx),
+      r: near(hx, fx + fw) && !near(hx, fx),
+      t: near(hy, fy),
+      b: near(hy, fy + fh) && !near(hy, fy),
+    };
+    // On an edge, anywhere along it, as in Photoshop — the handles mark
+    // the corners and middles but the whole edge is held. Anywhere else
+    // inside: the whole frame moves.
+    if (edges.l || edges.r || edges.t || edges.b) return edges;
+    if (hx >= fx && hx <= fx + fw && hy >= fy && hy <= fy + fh) {
+      return { l: true, r: true, t: true, b: true };
+    }
+    return null;
+  };
+
+  /** The frame as a press on it has dragged it: moved whole, or its
+   * edges carried, held to the page and to the ratio in hand. */
+  const editedCrop = (
+    edit: NonNullable<typeof cropEditRef.current>,
+    x: number,
+    y: number,
+  ): [number, number, number, number] => {
+    const [W, H] = docSize;
+    const [dx, dy] = [x - edit.from[0], y - edit.from[1]];
+    let [fx, fy, fw, fh] = edit.frame0;
+    const { l, r, t, b } = edit.edges;
+    if (l && r && t && b) {
+      fx = Math.min(Math.max(fx + dx, 0), W - fw);
+      fy = Math.min(Math.max(fy + dy, 0), H - fh);
+      return [fx, fy, fw, fh];
+    }
+    let [x0, y0, x1, y1] = [fx, fy, fx + fw, fy + fh];
+    if (l) x0 = Math.min(Math.max(x0 + dx, 0), x1 - 1);
+    if (r) x1 = Math.max(Math.min(x1 + dx, W), x0 + 1);
+    if (t) y0 = Math.min(Math.max(y0 + dy, 0), y1 - 1);
+    if (b) y1 = Math.max(Math.min(y1 + dy, H), y0 + 1);
+    const ratio = cropRatioOf(cropRatio, docSize);
+    if (ratio) {
+      // The side the handle moved decides; the other follows from the
+      // ratio, about the frame's middle when the handle was on an edge,
+      // and held inside the page.
+      const sideways = l || r;
+      let [w, h] = [x1 - x0, y1 - y0];
+      if (sideways && !(t || b)) h = w / ratio;
+      else if (!sideways) w = h * ratio;
+      else if (w / h > ratio) w = h * ratio;
+      else h = w / ratio;
+      const fit = Math.min(1, W / w, H / h);
+      [w, h] = [w * fit, h * fit];
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      x0 = l && !r ? x1 - w : r && !l ? x0 : cx - w / 2;
+      y0 = t && !b ? y1 - h : b && !t ? y0 : cy - h / 2;
+      x0 = Math.min(Math.max(x0, 0), W - w);
+      y0 = Math.min(Math.max(y0, 0), H - h);
+      return [x0, y0, w, h];
+    }
+    return [x0, y0, x1 - x0, y1 - y0];
+  };
+
+  /** The distances from what is picked to what is at `(x, y)`, with alt
+   * held and the Move tool in hand and nothing being dragged. Over
+   * another layer they are to that layer; over nothing, or over what is
+   * picked or anything travelling with it, to the frame the picked
+   * layers sit in, or to the page. */
+  const measureAt = (x: number, y: number, alt: boolean) => {
+    const clear = () => setMeasures((m) => (m ? null : m));
+    if (!session || !alt || tool !== "Move" || selectionSet.length === 0) return clear();
+    const a = union(
+      selectionSet.map((id) => boxOf(session.bounds_of(id))).filter((b): b is Box => b !== null),
+    );
+    if (!a) return clear();
+    const hit = session.hit_test(x, y) as NodeId | undefined;
+    let to: Box | null = null;
+    if (hit !== undefined && !selectionSet.some((id) => relatedTo(hit, id))) {
+      to = boxOf(session.bounds_of(hit));
+    }
+    if (!to) {
+      // The frame the picked layer sits in, found by going up from it —
+      // not by what is under its middle, which a locked frame or a layer
+      // laid over it answered with nothing, and the page was measured to.
+      const byId = new Map(layers.map((l) => [l.id as NodeId, l]));
+      const chain: NodeId[] = [];
+      let up = byId.get(selectionSet[0])?.parent as NodeId | undefined;
+      for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
+        const layer = byId.get(up);
+        if (!layer) break;
+        chain.push(up);
+        const next = layer.parent as NodeId | undefined;
+        if (next === up) break;
+        up = next;
+      }
+      // A frame picked along with what is in it — or one holding such a
+      // frame — is part of what is measured, not what it is measured to:
+      // only frames above the highest picked one count.
+      let from = 0;
+      chain.forEach((id, i) => {
+        if (selectionSet.includes(id)) from = i + 1;
+      });
+      const frame = chain.slice(from).find((id) => byId.get(id)?.kind === "artboard");
+      if (frame !== undefined) to = boxOf(session.bounds_of(frame));
+    }
+    to = to ?? [0, 0, docSize[0], docSize[1]];
+    setMeasures({ gaps: gapsBetween(a, to), to });
+  };
+
+  // Alt pressed over the canvas shows the distances where the pointer
+  // already is, and let go of, takes them away — without a move between.
+  useEffect(() => {
+    const onAlt = (e: KeyboardEvent) => {
+      if (e.key !== "Alt") return;
+      const at = lastPointer.current;
+      if (e.type === "keyup" || !at) {
+        setMeasures((m) => (m ? null : m));
+        return;
+      }
+      measureAt(at[0], at[1], true);
+    };
+    window.addEventListener("keydown", onAlt);
+    window.addEventListener("keyup", onAlt);
+    return () => {
+      window.removeEventListener("keydown", onAlt);
+      window.removeEventListener("keyup", onAlt);
+    };
+  });
+
+  const onCanvasPointerMove = (e: React.PointerEvent) => {
+    if (ignoredRef.current.has(e.pointerId)) return;
+    if (pinchRef.current) return; // two fingers are the view's, not a tool's
+    // A held press goes to the tool once the finger has moved off it.
+    const held = heldPress.current;
+    if (held && held.e.pointerId === e.pointerId) {
+      if (Math.hypot(e.clientX - held.e.clientX, e.clientY - held.e.clientY) < TOUCH_SLOP) return;
+      releaseHeldPress();
+    }
+    {
+      const at = docPoint(e);
+      lastPointer.current = at;
+      measureAt(at[0], at[1], e.altKey && e.buttons === 0);
+    }
+    if (cropEditRef.current) {
+      const [x, y] = docPoint(e);
+      setCropFrame(editedCrop(cropEditRef.current, x, y));
+      return;
+    }
+    if (zoomBoxRef.current) {
+      const [hx, hy] = canvasPoint(e);
+      const box: [number, number, number, number] = [zoomBoxRef.current[0], zoomBoxRef.current[1], hx, hy];
+      zoomBoxRef.current = box;
+      setZoomBox(box);
+      return;
+    }
+    if (tool === "Pen") {
+      const [x, y] = docPoint(e);
+      const pull = penDragRef.current;
+      if (pull) {
+        // Dragged further than a wobble, the anchor becomes smooth: the
+        // handle out follows the pointer and the one in mirrors it.
+        const [ox, oy] = [x - pull.x, y - pull.y];
+        if (Math.hypot(ox, oy) * view.zoom > 3) {
+          setPenHandles((hs) =>
+            hs.map((h, i) => (i === pull.index ? [-ox, -oy, ox, oy] : h)),
+          );
+        }
+        return;
+      }
+      const last = penPoints[penPoints.length - 1];
+      const line = penRubberRef.current;
+      if (line && last) {
+        line.setAttribute("x1", String(view.x + last[0] * view.zoom));
+        line.setAttribute("y1", String(view.y + last[1] * view.zoom));
+        line.setAttribute("x2", String(view.x + x * view.zoom));
+        line.setAttribute("y2", String(view.y + y * view.zoom));
+      }
+    }
+    const knifeFrom = knifeRef.current;
+    if (knifeFrom) {
+      let [x, y] = docPoint(e);
+      // Shift holds the line to an eighth of a turn, as it holds a line
+      // drawn with the line tool.
+      if (e.shiftKey) {
+        const [dx, dy] = [x - knifeFrom[0], y - knifeFrom[1]];
+        const step = Math.PI / 4;
+        const a = Math.round(Math.atan2(dy, dx) / step) * step;
+        const r = Math.hypot(dx, dy);
+        [x, y] = [knifeFrom[0] + r * Math.cos(a), knifeFrom[1] + r * Math.sin(a)];
+      }
+      setKnifeLine([knifeFrom[0], knifeFrom[1], x, y]);
+      return;
+    }
+    const gradTool = gradToolRef.current;
+    if (gradTool && session) {
+      if (e.buttons === 0) return;
+      let [x, y] = docPoint(e);
+      // Shift holds the line to an eighth of a turn on the page, as the
+      // line tool and the knife do: held in the shape's own box, a wide
+      // box turned 45° into 26.6° on the page.
+      if (e.shiftKey && !gradTool.radial) {
+        const [fx, fy] = gradTool.from;
+        const len = Math.hypot(x - fx, y - fy);
+        const eighth = Math.PI / 4;
+        const ang = Math.round(Math.atan2(y - fy, x - fx) / eighth) * eighth;
+        [x, y] = [fx + Math.cos(ang) * len, fy + Math.sin(ang) * len];
+      }
+      const [u, v] = gradTool.unit(x, y);
+      const [su, sv] = gradTool.start;
+      const had = gradTool.vector.gradient;
+      const white = inkOf("#ffffff");
+      const stops: GradientStop[] = had
+        ? gradientStops(had)
+        : [
+            { offset: 0, color: currentInk() },
+            { offset: 1, color: white },
+          ];
+      // Aimed again, a gradient keeps what else it says — how it spreads
+      // past its ends, a radial one's focus and axes — when it stays the
+      // same kind; it went back to padding and plain circles.
+      const same = (k: "Linear" | "Radial") =>
+        had && k in had ? ((had as Record<string, Record<string, unknown>>)[k] ?? {}) : {};
+      const gradient: Gradient = gradTool.radial
+        ? ({
+            Radial: {
+              ...same("Radial"),
+              center: [su, sv],
+              // A circle the length dragged on the page, not an ellipse
+              // squashed to the box: rings measured in the box's own
+              // units stood 40 out across a wide box and 13 down it.
+              axes: gradTool.axes,
+              radius: Math.max(0.02, Math.hypot(...throughAxes(gradTool.axes, u - su, v - sv))),
+              stops,
+            },
+          } as Gradient)
+        : (() => {
+            const [du, dv] = rampStored(gradTool.axes, [u - su, v - sv]);
+            return { Linear: { ...same("Linear"), from: [su, sv], to: [su + du, sv + dv], stops } } as Gradient;
+          })();
+      preview({
+        SetKind: {
+          id: gradTool.id,
+          kind: { Vector: { ...gradTool.vector, gradient } },
+        },
+      });
+      return;
+    }
+    if (levelRef.current) {
+      const [hx, hy] = canvasPoint(e);
+      levelRef.current = [
+        levelRef.current[0],
+        levelRef.current[1],
+        hx,
+        hy,
+      ];
+      setLevelLine(levelRef.current);
+      return;
+    }
+    const band = marqueeRef.current;
+    if (band) {
+      const [x, y] = docPoint(e);
+      // The gesture keeps the band itself; the state is only what the
+      // overlay draws, and a release that lands before React has painted
+      // must still pick what the pointer actually swept.
+      band.band = [
+        Math.min(band.x0, x),
+        Math.min(band.y0, y),
+        Math.max(band.x0, x),
+        Math.max(band.y0, y),
+      ];
+      setMarquee(band.band);
+      return;
+    }
+    {
+      const drag = toolDragRef.current;
+      if (drag?.region) {
+        const [x, y] = docPoint(e);
+        drag.moved = true;
+        let [mx, my] = [x - drag.startX, y - drag.startY];
+        const next: Guides = { x: [], y: [] };
+        if (drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
+          const tol = prefs.snap / view.zoom;
+          const b = drag.b0;
+          const sx = snapAxis(snapLines(b[0] + mx, b[2] + mx), drag.snapX, tol);
+          const sy = snapAxis(snapLines(b[1] + my, b[3] + my), drag.snapY, tol);
+          mx += sx.delta;
+          my += sy.delta;
+          if (sx.guide !== null) next.x.push(sx.guide);
+          if (sy.guide !== null) next.y.push(sy.guide);
+        }
+        setGuides((g) =>
+          g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next,
+        );
+        // Restated from where the region was when the drag began, not
+        // nudged along from where it is now: one entry in history for
+        // the whole drag, and an Escape that lands exactly back.
+        const moved = regionMoved(drag.region, mx, my);
+        if (moved) preview({ SetSelection: { selection: moved } });
+        return;
+      }
+      if (drag && SELECT_TOOLS.includes(drag.tool as never)) {
+        let [x, y] = docPoint(e);
+        // The same lines, and the same two ways out of them: ctrl says
+        // never mind, and shift wins outright because it is asking for
+        // a square — one nudged onto a line would be neither square nor
+        // on it.
+        if (drag.snapX && drag.snapY && !e.shiftKey) {
+          [x, y] = snapPoint(
+            x,
+            y,
+            drag.snapX,
+            drag.snapY,
+            e.ctrlKey || e.metaKey,
+          );
+        }
+        drag.lastX = x;
+        drag.lastY = y;
+        drag.moved = true;
+        // A lasso keeps every sample; a box keeps only where it is now.
+        if (drag.tool === "Lasso") {
+          const last = drag.stroke?.[drag.stroke.length - 1];
+          if (!last || Math.hypot(x - last[0], y - last[1]) > 0.75 / view.zoom) {
+            drag.stroke?.push([x, y]);
+          }
+        }
+        // A key held from the press is the combining, not the shape: only
+        // one pressed during the drag (or with nothing picked) shapes it.
+        drag.fromCentre = e.altKey && drag.tool !== "Lasso" && !drag.combine;
+        setRegionDrag(regionOutline(drag, e.shiftKey && drag.combine !== "union" && drag.combine !== "intersect"));
+        return;
+      }
+    }
+    const painting = paintingRef.current;
+    if (painting && session) {
+      const [px, py] = docPoint(e);
+      const now = performance.now();
+      // The same reading the vector brush takes: a pen's real pressure,
+      // and a mouse's speed standing in for it.
+      const step = Math.hypot(px - lastPaint.current[0], py - lastPaint.current[1]);
+      const want =
+        e.pointerType === "pen" && e.pressure > 0
+          ? 0.25 + e.pressure * 0.75
+          : speedWidth(step / Math.max(1, now - painting.at));
+      painting.width += (want - painting.width) * 0.35;
+      painting.at = now;
+      lastPaint.current = [px, py];
+      try {
+        session.paint_extend(px, py, (paintSize / 2) * painting.width);
+      } catch {
+        /* the layer went away under the stroke; the gesture ends below */
+      }
+      refresh(session);
+      return;
+    }
+    const drag = toolDragRef.current;
+    if (!drag) return;
+    [drag.lastX, drag.lastY] = docPoint(e);
+    // A shape being drawn catches the same lines a layer being moved
+    // does. Shift wins over them outright: it asks for an exact shape,
+    // and a square nudged onto a line would be neither square nor on
+    // it — so the guide never says a corner is somewhere it is not.
+    if (drag.snapX && drag.snapY && drag.tool !== "Move" && !e.shiftKey) {
+      [drag.lastX, drag.lastY] = snapPoint(
+        drag.lastX,
+        drag.lastY,
+        drag.snapX,
+        drag.snapY,
+        e.ctrlKey || e.metaKey,
+      );
+    }
+    // Shift squares off whatever box is being dragged out — a circle
+    // rather than an ellipse, a square page rather than a wide one.
+    // There is no shape yet to keep the proportions of, so shift is the
+    // only way to ask for the one shape worth naming.
+    // Alt makes the point the drag began at the box's middle rather than
+    // its corner, which is how a circle is put on a target rather than
+    // beside one. It is remembered on the drag, since the box is worked
+    // out again on the way up, when no event says whether alt was held.
+    drag.fromCentre = e.altKey && BOX_TOOLS.has(drag.tool);
+    if (e.shiftKey && drag.tool === "Line") {
+      [drag.lastX, drag.lastY] = onEighths(
+        [drag.startX, drag.startY],
+        [drag.lastX, drag.lastY],
+      );
+    }
+    // A crop held to a ratio follows the cursor on whichever side has
+    // travelled further and takes the other from the ratio, so the box
+    // grows with the drag rather than fighting it. The ratio is the whole
+    // ask, so shift has nothing left to say about the shape.
+    const ratio = drag.tool === "Crop" ? cropRatioOf(cropRatio, docSize) : null;
+    if (ratio) {
+      let [w, h] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+      const sign = (v: number) => (v < 0 ? -1 : 1);
+      if (Math.abs(w) / ratio > Math.abs(h)) h = (sign(h) * Math.abs(w)) / ratio;
+      else w = sign(w) * Math.abs(h) * ratio;
+      [drag.lastX, drag.lastY] = [drag.startX + w, drag.startY + h];
+    } else if (e.shiftKey && BOX_TOOLS.has(drag.tool)) {
+      const side = Math.max(
+        Math.abs(drag.lastX - drag.startX),
+        Math.abs(drag.lastY - drag.startY),
+      );
+      drag.lastX = drag.startX + Math.sign(drag.lastX - drag.startX) * side;
+      drag.lastY = drag.startY + Math.sign(drag.lastY - drag.startY) * side;
+    }
+    if (drag.stroke) {
+      // Only keep points that add something: a stroke sampled at screen
+      // resolution carries hundreds of anchors nobody can edit.
+      const last = drag.stroke[drag.stroke.length - 1];
+      const step = Math.hypot(drag.lastX - last[0], drag.lastY - last[1]);
+      if (step >= BRUSH_STEP) {
+        const now = performance.now();
+        // A pen reports real pressure; a mouse always reads 0.5, so fall
+        // back to speed — a fast stroke thins out, the way ink does.
+        const w =
+          e.pointerType === "pen" && e.pressure > 0
+            ? 0.25 + e.pressure * 0.75
+            : speedWidth(step / Math.max(1, now - (drag.lastAt ?? now)));
+        const prev = drag.widths?.[drag.widths.length - 1] ?? 1;
+        // Ease toward the new width: sample-to-sample jitter would show up
+        // as a lumpy edge.
+        drag.widths?.push(prev + (w - prev) * 0.35);
+        drag.lastAt = now;
+        drag.stroke.push([drag.lastX, drag.lastY]);
+        drag.moved = true;
+        setPenPoints([...drag.stroke]); // live line while drawing
+      }
+    }
+    if (drag.tool === "Crop") {
+      // The frame where it is being dragged, on the page; the overlay
+      // carries it to the screen.
+      setCropFrame(cropBox(drag));
+      drag.moved = true;
+      return;
+    }
+
+    // Move tool: live preview while dragging.
+    if (drag.tool === "Move" && drag.target !== undefined && drag.t0) {
+      // Snap the layer's edges and centre onto the page's and the other
+      // layers', in document space, before the delta is carried into the
+      // layer's own space. Ctrl (or Cmd) drags free of it.
+      let [mx, my] = [drag.lastX - drag.startX, drag.lastY - drag.startY];
+      const snapping =
+        drag.b0 && drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey);
+      const next: Guides = { x: [], y: [] };
+      const marks: Gap[] = [];
+      if (snapping) {
+        const tol = prefs.snap / view.zoom;
+        const b = drag.b0!;
+        const sx = snapAxis(snapLines(b[0] + mx, b[2] + mx), drag.snapX!, tol);
+        const sy = snapAxis(snapLines(b[1] + my, b[3] + my), drag.snapY!, tol);
+        mx += sx.delta;
+        my += sy.delta;
+        if (sx.guide !== null) next.x.push(sx.guide);
+        if (sy.guide !== null) next.y.push(sy.guide);
+        // Then equal spacing, along each axis an edge or a middle has not
+        // already caught: carried past a neighbour the layer leaves the
+        // gap that neighbour leaves to the next, and carried between two
+        // it sits in the middle. An axis that did catch a line still
+        // shows equal gaps when they are equal there — it just is not
+        // moved off the line to make them so.
+        for (const axis of ["x", "y"] as const) {
+          const caught = axis === "x" ? sx.guide !== null : sy.guide !== null;
+          const box: Box = [b[0] + mx, b[1] + my, b[2] + mx, b[3] + my];
+          const even = equalSpacing(box, drag.spacers ?? [], axis, caught ? 1e-6 : tol);
+          if (!even) continue;
+          if (axis === "x") mx += even.delta;
+          else my += even.delta;
+          marks.push(...even.marks);
+        }
+      }
+      setSpacing((was) =>
+        was.length === marks.length &&
+        was.every((g, i) => g.from[0] === marks[i].from[0] && g.from[1] === marks[i].from[1] && g.length === marks[i].length)
+          ? was
+          : marks,
+      );
+      // Only re-render when the guides actually change: this runs on every
+      // pointer sample.
+      setGuides((g) =>
+        g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next,
+      );
+      // The delta is in document space; each layer wants it in its own
+      // parent's, which differ once groups turn or scale.
+      const moves = translateAll(drag.moving ?? [], mx, my);
+      if (moves.length > 0) {
+        drag.moved = true;
+        preview(moves.length === 1 ? moves[0] : { Batch: moves });
+      } else if (drag.moved) {
+        // Back where it began: said as where it began. Sending nothing
+        // left the sample before standing, and a drag brought back to
+        // its press ended a pointer's step away from where it started.
+        const back: Command[] = (drag.moving ?? []).map(({ id, t0 }) => ({
+          SetTransform: { id, transform: t0 },
+        }));
+        if (back.length > 0) preview(back.length === 1 ? back[0] : { Batch: back });
+      }
+    }
+  };
+
+  /** The look of the picked layer, kept as JSON so it outlives the
+   * document it was taken from — the same way the layer clipboard does.
+   * Null until something has been copied. */
+  const styleClip = useRef<string | null>(null);
+
+  const copyStyle = () => {
+    if (!session || selected === null) return;
+    try {
+      styleClip.current = session.copy_style(selected);
+    } catch (err) {
+      alert(`Copy style: ${said(err)}`);
+    }
+  };
+
+  /** Keep the picked layer's look in the document under the next free
+   * name, the way a colour goes into the palette: named by what it is
+   * for later rather than asked for a name now, since a name typed into
+   * a prompt is a name nobody types. */
+  const keepStyle = (name?: string) => {
+    if (!session || selected === null) return;
+    const taken = new Set(styles.map((st) => st.name));
+    let n = styles.length + 1;
+    while (taken.has(`Style ${n}`)) n++;
+    try {
+      session.keep_style(name ?? `Style ${n}`, selected);
+    } catch (err) {
+      alert(`Keep style: ${said(err)}`);
+      return;
+    }
+    refresh(session);
+  };
+  /** Give a kept look to every picked layer. */
+  const applyStyle = (name: string) => {
+    if (!session || selectionSet.length === 0) return;
+    try {
+      session.apply_style(name, new Float64Array(selectionSet));
+    } catch (err) {
+      alert(`Style: ${said(err)}`);
+      return;
+    }
+    refresh(session);
+  };
+  const forgetStyle = (name: string) => {
+    if (!session) return;
+    try {
+      session.forget_style(name);
+    } catch (err) {
+      alert(`Forget style: ${said(err)}`);
+      return;
+    }
+    refresh(session);
+  };
+
+  const pasteStyle = () => {
+    if (!session || styleClip.current === null) return;
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    try {
+      session.paste_style(styleClip.current, new Float64Array(ids));
+    } catch (err) {
+      alert(`Paste style: ${said(err)}`);
+      return;
+    }
+    refresh(session);
+  };
+
+  // The release carries the modifier keys, and a select drag reads them:
+  // shift adds to what is picked out, alt takes from it.
+  const onCanvasPointerUp = (e?: React.PointerEvent) => {
+    if (e && ignoredRef.current.has(e.pointerId)) return;
+    // A tap: the press it began with reaches the tool first.
+    if (e && heldPress.current?.e.pointerId === e.pointerId) releaseHeldPress();
+    if (e?.pointerType === "touch") clearLong();
+    if (pinchRef.current) return;
+    if (penDragRef.current) {
+      penDragRef.current = null;
+      return;
+    }
+    if (cropEditRef.current) {
+      cropEditRef.current = null;
+      return;
+    }
+    const zb = zoomBoxRef.current;
+    if (zb) {
+      zoomBoxRef.current = null;
+      setZoomBox(null);
+      const [w, h] = [Math.abs(zb[2] - zb[0]), Math.abs(zb[3] - zb[1])];
+      const host = hostRef.current;
+      if (w < 6 || h < 6 || !host) {
+        zoomAt(zb[0], zb[1], 1.25);
+        return;
+      }
+      // The box, in the document's own units, filled with the window.
+      setView((v) => {
+        const [x0, y0] = [(Math.min(zb[0], zb[2]) - v.x) / v.zoom, (Math.min(zb[1], zb[3]) - v.y) / v.zoom];
+        const [dw, dh] = [w / v.zoom, h / v.zoom];
+        const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.min(host.clientWidth / dw, host.clientHeight / dh)));
+        return {
+          zoom,
+          x: host.clientWidth / 2 - (x0 + dw / 2) * zoom,
+          y: host.clientHeight / 2 - (y0 + dh / 2) * zoom,
+        };
+      });
+      return;
+    }
+    if (knifeRef.current) {
+      const line = knifeLine;
+      knifeRef.current = null;
+      setKnifeLine(null);
+      if (!session || !line || Math.hypot(line[2] - line[0], line[3] - line[1]) < 2 / view.zoom) {
+        return;
+      }
+      // What is picked, when anything is; else every shape it crosses.
+      try {
+        const made = session.knife(new Float64Array(selectionSet), line[0], line[1], line[2], line[3]);
+        if (made.length > 0) {
+          setSelected(made[made.length - 1]);
+          setMultiSel([...made]);
+          refresh(session);
+        } else if (selectionSet.length > 0) {
+          // Picked and left whole without a word, where Delete on the
+          // same shape asks: what the knife will not cut is said.
+          alert(
+            "Knife: nothing was cut. The knife cuts closed shapes that are not locked and that no live copy follows, along a line that crosses one from side to side.",
+          );
+        }
+      } catch (err) {
+        alert(`Knife: ${said(err)}`);
+      }
+      return;
+    }
+    if (gradToolRef.current && session) {
+      // A press that never moved previewed nothing, and commits nothing.
+      gradToolRef.current = null;
+      if (session.commit_preview()) refresh(session);
+      return;
+    }
+    const level = levelRef.current;
+    if (level) {
+      levelRef.current = null;
+      setLevelLine(null);
+      setLevelling(false);
+      const [dx, dy] = [level[2] - level[0], level[3] - level[1]];
+      // A line too short to have an angle was a click, not a drag.
+      if (Math.hypot(dx, dy) > 8) {
+        // Whichever it is nearer — level or upright — is what it is
+        // taken to be, so a doorframe does as well as a horizon. The
+        // page turns the other way by however far off it is.
+        let off = (Math.atan2(dy, dx) * 180) / Math.PI;
+        off = ((off % 180) + 180) % 180;
+        if (off > 90) off -= 180;
+        if (off > 45) off -= 90;
+        if (off < -45) off += 90;
+        setStraightenBy(-off);
+        previewStraighten(-off);
+      }
+      return;
+    }
+    if (paintingRef.current && session) {
+      paintingRef.current = null;
+      strokeEnd.current = lastPaint.current;
+      session.commit_preview();
+      if (strokeMade.current) session.merge_last();
+      strokeMade.current = false;
+      refresh(session);
+      return;
+    }
+    const band = marqueeRef.current;
+    if (band) {
+      marqueeRef.current = null;
+      const rect = band.band;
+      setMarquee(null);
+      // A band with no width or height is a click on empty canvas, which
+      // has already cleared the selection.
+      if (rect && (rect[2] - rect[0] > 1 || rect[3] - rect[1] > 1)) {
+        const caught = layersInBand(rect);
+        const picked = [
+          ...band.add,
+          ...caught.filter((id) => !band.add.includes(id)),
+        ];
+        // The topmost of them leads, so the panel and the properties
+        // follow the layer a second click would grab.
+        setSelected(picked.length > 0 ? picked[picked.length - 1] : null);
+        setMultiSel(picked.length > 1 ? picked : []);
+      }
+      return;
+    }
+    const drag = toolDragRef.current;
+    toolDragRef.current = null;
+    setGuides({ x: [], y: [] });
+    setSpacing([]);
+    if (!drag || !session) return;
+
+    if (drag.region) {
+      if (drag.moved && session.commit_preview()) refresh(session);
+      else session.cancel_preview();
+      return;
+    }
+    if (SELECT_TOOLS.includes(drag.tool as never)) {
+      setRegionDrag(null);
+      // Shift adds to what is picked out, alt takes from it, and both
+      // together keep only the overlap — the modifiers every editor
+      // uses, and the shape combinations this one already had.
+      const shift = e?.shiftKey ?? false;
+      const how = drag.combine ?? "replace";
+      const shape = regionOutline(drag, shift && how !== "union" && how !== "intersect");
+      if (!shape) {
+        // A click rather than a drag: with nothing added or taken away,
+        // it means let go of what is picked out.
+        if (how === "replace" && session.pick_none()) refresh(session);
+        return;
+      }
+      try {
+        const before = session.history_mark();
+        const was = session.selection_json();
+        session.pick_region(
+          REGION_KIND[drag.tool],
+          shape.x,
+          shape.y,
+          shape.w,
+          shape.h,
+          new Float64Array(shape.points ?? []),
+          how,
+        );
+        // The softness carries from one region to the next, the way a
+        // brush size does, rather than having to be set again each time.
+        // One step with the picking, not a second one to undo apart —
+        // when the picking was a step at all.
+        const picked = session.history_mark() !== before;
+        if (newFeather() > 0 && session.feather_selection(newFeather()) && picked) session.merge_last();
+        // Picked sharp and softened again to just what it was: no step.
+        if (session.history_mark() !== before && session.selection_json() === was) session.take_back();
+        refresh(session);
+      } catch (err) {
+        // A lasso drawn as a line, or too small to hold anything, picks
+        // out nothing: the same as a click, not an error to show.
+        if (String(err).includes("nothing was picked out")) {
+          if (how === "replace" && session.pick_none()) refresh(session);
+        } else {
+          alert(`Select: ${said(err)}`);
+        }
+      }
+      return;
+    }
+
+    if (drag.tool === "Move") {
+      // The document already holds the previewed position; seal the gesture.
+      if (drag.moved && session.commit_preview()) {
+        if (drag.duplicated) session.merge_last();
+        refresh(session);
+      } else if (drag.duplicated) {
+        // Alt and a click, or a drag that came back where it began: no
+        // copy was carried anywhere, so none is left lying on the
+        // original.
+        session.cancel_preview();
+        dropCopies(drag);
+      }
+      return;
+    }
+
+    if (drag.tool === "Brush") {
+      setPenPoints([]);
+      let stroke = drag.stroke ?? [];
+      let strokeWidths = drag.widths ?? [];
+      if (!drag.moved && stroke.length > 0) {
+        // A click, rather than a drag. With shift, a straight stroke from
+        // where the last one ended — how a rule is drawn with a brush in
+        // every painting program; without, a dot, which is what a brush
+        // put to the page and lifted leaves.
+        const [px, py] = stroke[0];
+        const from = brushEndRef.current;
+        stroke = drag.shift && from ? [from, [px, py]] : [[px, py], [px + 0.01, py]];
+        strokeWidths = [1, 1];
+      }
+      const kept = simplifyStroke(stroke, BRUSH_TOLERANCE);
+      if (kept.length < 2) return;
+      const pts = kept.map((i) => stroke[i]);
+      const widths = kept.map((i) => strokeWidths[i] ?? 1);
+      brushEndRef.current = pts[pts.length - 1];
+      // Anchors are stored relative to the stroke's own origin, like every
+      // other path, and the node's transform carries it there — into the
+      // frame it was drawn in, as a shape would be.
+      const local = pts;
+      const minX = Math.min(...local.map((p) => p[0]));
+      const minY = Math.min(...local.map((p) => p[1]));
+      const place = placeAt(minX, minY, local[0]);
+      shapeCount.current += 1;
+      // The stroke just drawn is the one picked, as a drawn shape is: the
+      // layer picked before stayed picked, and Delete took that instead.
+      const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
+      run({
+        AddNode: {
+          parent: place.parent,
+          index: place.index,
+          node: {
+          ...nodePayload(
+            `Stroke ${shapeCount.current}`,
+            {
+              Vector: {
+                shape: {
+                  Path: {
+                    subpaths: [],
+                    points: local.map(
+                      (p) => [p[0] - minX, p[1] - minY] as [number, number],
+                    ),
+                    closed: false,
+                    // Smoothed, so a hand-drawn line reads as a curve and
+                    // stays editable as a handful of anchors.
+                    smooth: true,
+                    handles: [],
+                  },
+                },
+                fill: null,
+                stroke: {
+                  color: currentInk(),
+                  width: brushSize,
+                  widths,
+                  dash: [],
+                  cap: "Round",
+                  join: "Round",
+                  start_marker: "None",
+                  end_marker: "None",
+                  align: null,
+                },
+                gradient: null,
+              },
+            },
+          ),
+          transform: place.at,
+          },
+        },
+      });
+      const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+      if (made) {
+        setSelected(made.id as NodeId);
+        setMultiSel([]);
+      }
+      return;
+    }
+
+    // Shape tools: commit the dragged bounds as a new object.
+    const [x0, y0, w, h] = dragBox(drag);
+    // A box needs both its sides; a line only needs its length. A
+    // horizontal line's box is a side high, so asking every shape for
+    // both sides would throw the line away as it was drawn.
+    const enough =
+      drag.tool === "Line"
+        ? Math.hypot(w, h) >= MIN_SIZE
+        : w >= MIN_SIZE && h >= MIN_SIZE;
+    if (drag.tool === "Crop") {
+      // The frame is kept, not taken: it can be moved and resized, and
+      // Enter, a double-click in it or the bar's Crop takes it. A press
+      // that drew nothing lets any frame go.
+      const box = cropBox(drag);
+      setCropFrame(enough && box[2] >= 1 && box[3] >= 1 ? box : null);
+      return;
+    }
+    if (!enough) return;
+    if (drag.tool === "Frame") {
+      // A frame is put on the page whole: its size is what was dragged,
+      // and it goes under everything already there so it does not cover
+      // loose layers. White ground, which is what a page is.
+      frameCount.current += 1;
+      try {
+        const id = session.add_artboard(
+          `Artboard ${frameCount.current}`,
+          Math.round(x0),
+          Math.round(y0),
+          Math.round(w),
+          Math.round(h),
+          JSON.stringify(hexColor("#ffffff")),
+        );
+        setSelected(id);
+        setMultiSel([]);
+        refresh(session);
+        setTool("Move");
+      } catch (err) {
+        alert(`Frame: ${said(err)}`);
+      }
+      return;
+    }
+    shapeCount.current += 1;
+    // Drawn inside a frame, it goes into that frame — in the frame's own
+    // coordinates, so it lands under the cursor rather than at the
+    // frame's offset. Both corners are carried across, so a frame that
+    // has been scaled gets a shape the size it was dragged.
+    const place = placeAt(x0, y0, [drag.startX, drag.startY]);
+    const [lw, lh] = [w, h];
+    // A polygon and a star come out as paths rather than as shapes of
+    // their own: every anchor is then draggable the moment it is drawn,
+    // and every exporter already knows what a path is.
+    const path = (points: [number, number][], closed: boolean) => ({
+      Path: { points, closed, smooth: false, handles: [], subpaths: [] },
+    });
+    const ink = currentInk();
+    let shape;
+    let paint: { fill: AuthoredColor | null; stroke: Stroke | null } = {
+      fill: ink,
+      stroke: null,
+    };
+    switch (drag.tool) {
+      case "Rect":
+        shape = { Rect: { width: lw, height: lh, radius: 0 } };
+        break;
+      case "Ellipse":
+        shape = { Ellipse: { rx: lw / 2, ry: lh / 2 } };
+        break;
+      // Both live: the count, and a star's depth, stay numbers to
+      // change on the panel rather than becoming anchors.
+      case "Polygon":
+        shape = {
+          Polygon: { rx: lw / 2, ry: lh / 2, points: polygonCount(sides), inner: 1, corner: 0 },
+        };
+        break;
+      case "Star":
+        shape = {
+          Polygon: {
+            rx: lw / 2,
+            ry: lh / 2,
+            points: polygonCount(sides),
+            inner: starDepth(polygonCount(sides)),
+            corner: 0,
+          },
+        };
+        break;
+      case "Shape": {
+        // One of the library's shapes, scaled to the box: a path like
+        // the polygon, with handles where the shape has curves.
+        const chosen =
+          SHAPE_PRESETS.find((p) => p.name === preset) ?? SHAPE_PRESETS[0];
+        const scaled = presetPath(chosen, lw, lh);
+        shape = {
+          Path: {
+            points: scaled.points,
+            closed: true,
+            smooth: false,
+            handles: scaled.handles,
+            subpaths: [],
+          },
+        };
+        break;
+      }
+      // A line is the drag itself, from end to end, rather than the box
+      // around it — and it is stroked, since an open line has no inside.
+      default: {
+        const [ax, ay] = [drag.startX - x0, drag.startY - y0];
+        const [bx, by] = [drag.lastX - x0, drag.lastY - y0];
+        shape = path(
+          [
+            [ax, ay],
+            [bx, by],
+          ],
+          false,
+        );
+        paint = {
+          fill: null,
+          stroke: {
+            color: ink,
+            width: 4,
+            widths: [],
+            dash: [],
+            cap: "Round",
+            join: "Round",
+            start_marker: "None",
+            end_marker: "None",
+            align: null,
+          },
+        };
+        break;
+      }
+    }
+    // The shape drawn is picked, as a frame or text drawn is: the layer
+    // picked before stayed picked, and Delete next took that instead.
+    const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
+    run({
+      AddNode: {
+        parent: place.parent,
+        index: place.index,
+        node: {
+          ...nodePayload(`${drag.tool} ${shapeCount.current}`, {
+            Vector: {
+              shape,
+              // CMYK documents author ink values so the press profile
+              // (and later export) drives their rendering.
+              ...paint,
+              gradient: null,
+            },
+          }),
+          transform: place.at,
+        },
+      },
+    });
+    const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
+    if (made) {
+      setSelected(made.id as NodeId);
+      setMultiSel([]);
+    }
+  };
+
+  /** A picture's corner being dragged: which picture, which corner, the
+   * four as they were, and the transform that carries its own space. */
+  const warpDragRef = useRef<{
+    id: NodeId;
+    index: number;
+    quad: [number, number][];
+    t0: Transform;
+  } | null>(null);
+  const startWarp = (e: React.PointerEvent, index: number) => {
+    if (handleRefuses(e)) return;
+    if (!session || selected === null || !selCorners) return;
+    e.stopPropagation();
+    warpDragRef.current = {
+      id: selected,
+      index,
+      quad: selCorners.quad,
+      t0: toTransform(session.transform_of(selected)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onWarpMove = (e: React.PointerEvent) => {
+    const drag = warpDragRef.current;
+    if (!drag || !session || e.buttons === 0) return;
+    const [px, py] = layerPoint(e, drag.id);
+    const inv = inverseOf(drag.t0);
+    const at = inv ? inv(px, py) : [px, py];
+    const quad = drag.quad.map((p, i) => (i === drag.index ? at : p));
+    try {
+      preview(JSON.parse(session.corners_command(drag.id, new Float32Array(quad.flat()))));
+    } catch {
+      // Four points that cross: the picture stays at the last quad it
+      // could lie on until the corner comes back.
+    }
+  };
+  const onWarpUp = () => {
+    warpDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+  /** The picked picture's corners back on its rectangle. */
+  const squareCorners = () => {
+    if (!session || selected === null || !selCorners?.moved) return;
+    run(JSON.parse(session.corners_command(selected, new Float32Array(0))));
+  };
+
+  // Resize handles: drag scales the node, anchored at the opposite corner.
+  const onHandlePointerDown = (e: React.PointerEvent, corner: Handle) => {
+    if (handleRefuses(e)) return;
+    if (!session || selected === null || !selLocal) return;
+    e.stopPropagation();
+    // A picture's corner held with Ctrl moves on its own: the picture is
+    // distorted, or put into perspective, rather than scaled. The corner
+    // that moves is the picture's own nearest this one of the box.
+    if (
+      (e.ctrlKey || e.metaKey) &&
+      !manyBox &&
+      selCorners &&
+      (HANDLES as readonly string[]).includes(corner)
+    ) {
+      const [x0, y0, x1, y1] = selLocal;
+      const [hx, hy] =
+        corner === "nw" ? [x0, y0] : corner === "ne" ? [x1, y0] : corner === "se" ? [x1, y1] : [x0, y1];
+      let index = 0;
+      selCorners.quad.forEach(([qx, qy], i) => {
+        const [bx, by] = selCorners!.quad[index];
+        if (Math.hypot(qx - hx, qy - hy) < Math.hypot(bx - hx, by - hy)) index = i;
+      });
+      startWarp(e, index);
+      return;
+    }
+    // Several picked: the whole lot scales about the box round them, so
+    // each layer's own transform and the space it is written in travel
+    // with the drag. A frame among them scales like anything else —
+    // only a frame on its own is resized rather than scaled.
+    if (manyBox) {
+      const many = movableSelection
+        .map((id) => {
+          const p = toTransform(session.parent_space_of(id));
+          const pinv = invertT(p);
+          return pinv
+            ? { id, t0: toTransform(session.transform_of(id)), p, pinv }
+            : null;
+        })
+        .filter((m): m is NonNullable<typeof m> => m !== null);
+      if (many.length === 0) return;
+      const [snapX, snapY] = snapTargets(movableSelection);
+      handleDragRef.current = {
+        corner,
+        id: selected,
+        t0: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },
+        b0: manyBox,
+        snapX,
+        snapY,
+        many,
+      };
+      handleDragRef.current.start =
+        boxPoint(handleDragRef.current, e) ?? undefined;
+      (e.target as Element).setPointerCapture(e.pointerId);
+      return;
+    }
+    const [snapX, snapY] = snapTargets([selected]);
+    const kind: NodeKind | null =
+      selectedLayer?.kind === "artboard"
+        ? (JSON.parse(session.kind_json(selected)) as NodeKind)
+        : null;
+    handleDragRef.current = {
+      corner,
+      id: selected,
+      t0: toTransform(session.transform_of(selected)),
+      b0: selLocal,
+      snapX,
+      snapY,
+      frame:
+        kind && typeof kind === "object" && "Artboard" in kind
+          ? { background: kind.Artboard.background }
+          : undefined,
+    };
+    handleDragRef.current.start =
+      boxPoint(handleDragRef.current, e) ?? undefined;
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  /** A pointer, in the space a handle drag's box is written in: the
+   * layer's own, or — several picked — the document's. */
+  const boxPoint = (
+    drag: HandleDrag,
+    e: { clientX: number; clientY: number },
+    snapped?: [number, number],
+  ): [number, number] | null => {
+    const [px, py] = snapped ?? docPoint(e);
+    const [dx, dy] = drag.many
+      ? [px, py]
+      : layerPoint({ clientX: px, clientY: py }, drag.id, true);
+    if (drag.many) return [dx, dy];
+    const t = drag.t0;
+    const det = t.a * t.d - t.b * t.c;
+    if (Math.abs(det) < 1e-9) return null;
+    const [ux, uy] = [dx - t.e, dy - t.f];
+    return [(t.d * ux - t.c * uy) / det, (t.a * uy - t.b * ux) / det];
+  };
+
+  const onHandlePointerMove = (e: React.PointerEvent) => {
+    if (warpDragRef.current) {
+      onWarpMove(e);
+      return;
+    }
+    const drag = handleDragRef.current;
+    if (!drag || !session) return;
+    if (e.buttons === 0) return;
+    const side = (SIDES as readonly string[]).includes(drag.corner);
+    // A side held with Ctrl slides along itself: a skew, which has no
+    // line to catch on, so it is the one handle drag that never snaps.
+    const skew = side && (e.ctrlKey || e.metaKey);
+    // The corner follows the cursor, so snapping the cursor snaps the
+    // corner — done in document space, where the lines are, and before
+    // the point is carried into the layer's own space.
+    let [px, py] = docPoint(e);
+    const next: Guides = { x: [], y: [] };
+    // Which axes caught a line: with the proportions locked, a caught
+    // axis is the one the corner has to land exactly on, and the other
+    // follows from the shape rather than from the cursor.
+    const caught = [false, false];
+    if (drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
+      const tol = prefs.snap / view.zoom;
+      const sx = snapAxis([px], drag.snapX, tol);
+      const sy = snapAxis([py], drag.snapY, tol);
+      px += sx.delta;
+      py += sy.delta;
+      if (sx.guide !== null) next.x.push(sx.guide);
+      if (sy.guide !== null) next.y.push(sy.guide);
+      caught[0] = sx.guide !== null;
+      caught[1] = sy.guide !== null;
+    }
+    setGuides((g) => (g.x[0] === next.x[0] && g.y[0] === next.y[0] ? g : next));
+    // Resize happens in the layer's own space: bring the cursor there,
+    // hold the opposite corner still, and scale about it. Doing it in
+    // document space would stretch a rotated layer along the wrong axes.
+    // Several picked, and the box is the document's own: the point is
+    // already in the space the box is written in.
+    const at = boxPoint(drag, e, [px, py]);
+    if (!at) return;
+    const [lx, ly] = at;
+    const t = drag.t0;
+
+    const [x0, y0, x1, y1] = drag.b0;
+    const c = drag.corner;
+    const west = c === "nw" || c === "sw" || c === "w";
+    const north = c === "nw" || c === "ne" || c === "n";
+    // What stays put: the far corner, or — with alt — the box's own
+    // middle, so a thing keeps its place while it changes size.
+    const [fx, fy] = e.altKey
+      ? [(x0 + x1) / 2, (y0 + y1) / 2]
+      : [west ? x1 : x0, north ? y1 : y0];
+    const span = (a: number, b: number) => Math.max(MIN_SIZE, Math.abs(a - b));
+    // What the corner started as far from the one holding still: the
+    // sides of the box being dragged, and the diagonal it runs along.
+    const [w0, h0] = [span(west ? x0 : x1, fx), span(north ? y0 : y1, fy)];
+    /** How far along that diagonal the cursor has come.
+     *
+     * A dragged corner keeps the shape's proportions unless shift is
+     * held, which is the way round that suits a picture: letting go of a
+     * photograph a little squashed is a mistake nobody notices until it
+     * is printed, and stretching one on purpose is the rarer ask. The
+     * corner follows the point on the diagonal nearest the cursor rather
+     * than either axis alone, so it tracks the line the shape's own
+     * proportions describe. */
+    const locked = (cx: number, cy: number) =>
+      Math.max(
+        MIN_SIZE / Math.max(w0, h0),
+        // A caught axis is exact — the corner is on that line and the
+        // other side follows from the shape. With neither caught, the
+        // diagonal decides.
+        caught[0]
+          ? span(cx, fx) / w0
+          : caught[1]
+            ? span(cy, fy) / h0
+            : (Math.abs(cx - fx) * w0 + Math.abs(cy - fy) * h0) /
+              (w0 * w0 + h0 * h0),
+      );
+    // A side moves one axis and leaves the other be, the way a side
+    // handle does everywhere; only a corner keeps the proportions.
+    const free = e.shiftKey || side;
+    const across = c === "e" || c === "w";
+    const along = c === "n" || c === "s";
+    if (drag.frame && !skew) {
+      // The frame becomes the dragged rectangle instead of being scaled
+      // into it, and the engine moves what is inside by how each layer is
+      // pinned. Its own box always starts at (0, 0), so pulling the west
+      // or north edge moves the frame's origin, which the engine takes up
+      // in the frame's transform.
+      const s = free ? 0 : locked(lx, ly);
+      const grip = e.altKey ? 2.0 : 1.0;
+      let [w, h] = free
+        ? [span(lx, fx) * grip, span(ly, fy) * grip]
+        : [w0 * s * grip, h0 * s * grip];
+      if (along) w = x1 - x0;
+      if (across) h = y1 - y0;
+      let [ox, oy] = e.altKey
+        ? [fx - w / 2, fy - h / 2]
+        : [west ? fx - w : fx, north ? fy - h : fy];
+      if (along) ox = x0;
+      if (across) oy = y0;
+      resizeFrame(drag.id, w, h, ox, oy, true);
+      return;
+    }
+    if (drag.frame) return;
+
+    /** The change, written in the space the box is in. */
+    let M: Transform;
+    if (skew) {
+      // The dragged side slides along itself by however far the cursor
+      // has come; the far side, or the middle with alt, stays.
+      const [sx0, sy0] = drag.start ?? [lx, ly];
+      if (along) {
+        const k = (lx - sx0) / ((north ? y0 : y1) - fy || 1);
+        M = { a: 1, b: 0, c: k, d: 1, e: -k * fy, f: 0 };
+      } else {
+        const k = (ly - sy0) / ((west ? x0 : x1) - fx || 1);
+        M = { a: 1, b: k, c: 0, d: 1, e: 0, f: -k * fx };
+      }
+    } else {
+      const s = free ? 0 : locked(lx, ly);
+      const sx = along ? 1 : free ? span(lx, fx) / w0 : s;
+      const sy = across ? 1 : free ? span(ly, fy) / h0 : s;
+      // A scale (sx, sy) about (fx, fy).
+      M = { a: sx, b: 0, c: 0, d: sy, e: (1 - sx) * fx, f: (1 - sy) * fy };
+    }
+
+    if (drag.many) {
+      // One change, written in the document, put back into each layer's
+      // own space: T' = P⁻¹ . M . P . T0. That is what carries a scale
+      // of the box round everything into a layer that is turned, or
+      // sits inside a group that is.
+      const cmds = drag.many.map((m) => ({
+        SetTransform: {
+          id: m.id,
+          transform: composeT(m.pinv, composeT(M, composeT(m.p, m.t0))),
+        },
+      }));
+      preview(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+      return;
+    }
+    // T' = T0 . M, composed in the layer's own space.
+    preview({
+      SetTransform: { id: drag.id, transform: composeT(t, M) },
+    });
+  };
+
+  /** Give a frame a new size (and, from a west or north edge, a new
+   * origin), moving what is in it by how each layer is pinned. The
+   * engine works out the whole thing as one command, so a drag previews
+   * it every move and records one entry when it lets go. */
+  const resizeFrame = (
+    id: NodeId,
+    width: number,
+    height: number,
+    dx: number,
+    dy: number,
+    gesture: boolean,
+  ) => {
+    if (!session) return;
+    try {
+      // A drag says where the frame is to be from where the drag began
+      // (its origin's shift, `dx`/`dy`, is from there), so each step is
+      // worked out from the frame as it was, not as the last step left
+      // it: from there, a pull on the west edge added each step's shift
+      // to the last and threw the frame across the page.
+      if (gesture) session.cancel_preview();
+      const cmd = JSON.parse(
+        session.artboard_resize(id, width, height, dx, dy),
+      ) as Command;
+      if (gesture) preview(cmd);
+      else run(cmd);
+    } catch (err) {
+      alert(`Frame: ${said(err)}`);
+    }
+  };
+
+  const onHandlePointerUp = () => {
+    if (warpDragRef.current) {
+      onWarpUp();
+      return;
+    }
+    handleDragRef.current = null;
+    setGuides({ x: [], y: [] });
+    setSpacing([]);
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  const ADJUSTMENT_PRESETS: Record<string, { name: string; kind: NodeKind }> = {
+    exposure: {
+      name: "Exposure",
+      kind: { Adjustment: { Exposure: { stops: 0 } } },
+    },
+    "brightness-contrast": {
+      name: "Brightness/Contrast",
+      kind: {
+        Adjustment: { BrightnessContrast: { brightness: 0, contrast: 0 } },
+      },
+    },
+    "hue-saturation": {
+      name: "Hue/Saturation",
+      kind: {
+        Adjustment: {
+          HueSaturation: { hue_degrees: 0, saturation: 0, lightness: 0, colorize: false },
+        },
+      },
+    },
+    "white-balance": {
+      name: "White balance",
+      kind: { Adjustment: { WhiteBalance: { temperature: 0, tint: 0 } } },
+    },
+    vibrance: {
+      name: "Vibrance",
+      kind: { Adjustment: { Vibrance: { amount: 0 } } },
+    },
+    "black-and-white": {
+      name: "Black & white",
+      kind: {
+        Adjustment: {
+          BlackAndWhite: { red: LUMA[0], green: LUMA[1], blue: LUMA[2] },
+        },
+      },
+    },
+    "gradient-map": {
+      name: "Gradient map",
+      kind: {
+        Adjustment: {
+          GradientMap: {
+            stops: [
+              { offset: 0, color: hexColor("#000000") },
+              { offset: 1, color: hexColor("#ffffff") },
+            ],
+          },
+        },
+      },
+    },
+    "colour-bands": {
+      name: "Colour bands",
+      kind: {
+        Adjustment: {
+          SelectiveHsl: {
+            bands: [
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+              [0, 0, 0],
+            ],
+          },
+        },
+      },
+    },
+    "shadows-highlights": {
+      name: "Shadows & highlights",
+      kind: {
+        Adjustment: { ShadowsHighlights: { shadows: 0.5, highlights: 0.5 } },
+      },
+    },
+    "colour-balance": {
+      name: "Colour balance",
+      kind: {
+        Adjustment: {
+          ColorBalance: {
+            shadows: [0, 0, 0],
+            midtones: [0, 0, 0],
+            highlights: [0, 0, 0],
+            // On, the way a correction is meant: moving colour should
+            // not also move the exposure.
+            preserve_luminosity: true,
+          },
+        },
+      },
+    },
+    "photo-filter": {
+      name: "Photo filter",
+      kind: {
+        Adjustment: {
+          PhotoFilter: {
+            // Photoshop's warming filter (85), at the strength it opens
+            // at, keeping the exposure where it was.
+            color: { Srgb: { r: 0.925, g: 0.541, b: 0, a: 1 } },
+            density: 0.25,
+            preserve_luminosity: true,
+          },
+        },
+      },
+    },
+    "channel-mixer": {
+      name: "Channel mixer",
+      kind: {
+        Adjustment: {
+          ChannelMixer: {
+            red: [1, 0, 0],
+            green: [0, 1, 0],
+            blue: [0, 0, 1],
+            constant: [0, 0, 0],
+            monochrome: false,
+          },
+        },
+      },
+    },
+    invert: {
+      name: "Invert",
+      kind: { Adjustment: { Invert: { amount: 1 } } },
+    },
+    posterize: {
+      name: "Posterize",
+      kind: { Adjustment: { Posterize: { levels: 4 } } },
+    },
+    threshold: {
+      name: "Threshold",
+      kind: { Adjustment: { Threshold: { level: 0.5 } } },
+    },
+    levels: {
+      name: "Levels",
+      kind: {
+        Adjustment: {
+          Levels: {
+            in_black: 0,
+            in_white: 1,
+            gamma: 1,
+            out_black: 0,
+            out_white: 1,
+          },
+        },
+      },
+    },
+    curves: {
+      name: "Curves",
+      kind: {
+        Adjustment: {
+          Curves: {
+            points: [
+              [0, 0],
+              [1, 1],
+            ],
+            red: [],
+            green: [],
+            blue: [],
+          },
+        },
+      },
+    },
+    blur: {
+      name: "Gaussian blur",
+      kind: { Filter: { GaussianBlur: { sigma: 4 } } },
+    },
+    pixelate: {
+      name: "Pixelate",
+      kind: { Filter: { Pixelate: { size: 12 } } },
+    },
+    median: {
+      name: "Reduce noise",
+      kind: { Filter: { Median: { radius: 1 } } },
+    },
+    surface: {
+      name: "Surface blur",
+      kind: { Filter: { SurfaceBlur: { radius: 4, threshold: 0.15 } } },
+    },
+    motion: {
+      name: "Motion blur",
+      kind: { Filter: { MotionBlur: { distance: 20, degrees: 0 } } },
+    },
+    radial: {
+      name: "Radial blur",
+      kind: { Filter: { RadialBlur: { amount: 0.2, spin: false, center: [0.5, 0.5] } } },
+    },
+    noise: {
+      name: "Noise",
+      kind: {
+        Filter: {
+          // A seed of its own, so two grain layers on one page do not
+          // land speck for speck on top of each other.
+          Noise: {
+            amount: 0.15,
+            grain: 1,
+            mono: true,
+            seed: Math.floor(Math.random() * 0xffffffff),
+          },
+        },
+      },
+    },
+    sharpen: {
+      name: "Sharpen",
+      kind: { Filter: { Sharpen: { sigma: 1.5, amount: 0.5 } } },
+    },
+    // The detail alone on grey: set to overlay over the picture, it
+    // sharpens by just that.
+    "high-pass": {
+      name: "High pass",
+      kind: { Filter: { HighPass: { sigma: 3 } } },
+    },
+    // A printer's dot screen, turned the way a black plate's is.
+    halftone: {
+      name: "Halftone",
+      kind: { Filter: { Halftone: { size: 8, degrees: 45 } } },
+    },
+    // A whirlpool and a squeeze about the middle of the page, each out
+    // to the largest circle the page holds.
+    twirl: {
+      name: "Twirl",
+      kind: { Filter: { Twirl: { degrees: 90, radius: 1, center: [0.5, 0.5] } } },
+    },
+    pinch: {
+      name: "Pinch",
+      kind: { Filter: { Pinch: { amount: 0.5, radius: 1, center: [0.5, 0.5] } } },
+    },
+    // A wide lens's outward bowing taken out, a little.
+    lens: {
+      name: "Lens correction",
+      kind: { Filter: { LensCorrection: { amount: 0.3 } } },
+    },
+    // Thick strokes: flat within the edges, the edges kept.
+    "oil-paint": {
+      name: "Oil paint",
+      kind: { Filter: { OilPaint: { radius: 4 } } },
+    },
+    // The picture's edges drawn dark on white.
+    "find-edges": {
+      name: "Find edges",
+      kind: { Filter: { FindEdges: { amount: 1 } } },
+    },
+    // Rippled glass: waves a few pixels high, a couple of dozen apart.
+    ripple: {
+      name: "Ripple",
+      kind: { Filter: { Ripple: { amplitude: 4, wavelength: 24 } } },
+    },
+    // Grey metal lit from the upper left, the way a relief is always lit.
+    emboss: {
+      name: "Emboss",
+      kind: { Filter: { Emboss: { degrees: 225, height: 2, amount: 1 } } },
+    },
+    vignette: {
+      name: "Vignette",
+      kind: { Filter: { Vignette: { amount: 0.5, radius: 0.4, softness: 1 } } },
+    },
+  };
+
+  /** Add an adjustment or filter. A key on its own puts it at the top,
+   * over everything; `only:` in front scopes it to the picked layer, which
+   * the engine does by grouping the two — a group isolates, and that is
+   * the whole trick. */
+  const addAdjustment = (value: string) => {
+    const only = value.startsWith("only:");
+    const key = only ? value.slice(5) : value;
+    // A colour lookup is a file before it is a layer: ask for the file,
+    // and the layer goes where this would have put it once it is read.
+    if (key === "lookup") {
+      lookupFor.current = only ? "only" : "over";
+      lookupInputRef.current?.click();
+      return;
+    }
+    // Dodge and burn are a layer and a brush: an exposure layer whose
+    // mask shows nothing yet, picked, with the brush in hand to paint
+    // the light (or the shade) in where it goes. Over everything below,
+    // which is where a photograph is dodged.
+    if (key === "dodge" || key === "burn") {
+      if (!session) return;
+      try {
+        const id = session.add_dodge_burn(session.root_id, session.child_count(session.root_id), key === "dodge") as NodeId;
+        setSelected(id);
+        setMultiSel([]);
+        setTool("Paint");
+        refresh(session);
+      } catch (err) {
+        alert(`Adjust: ${said(err)}`);
+      }
+      return;
+    }
+    const preset = ADJUSTMENT_PRESETS[key];
+    if (!preset) return;
+    // In a CMYK document the colours a preset starts with are inks, as a
+    // colour picked into it is: a gradient map's black and white went in
+    // as sRGB, and picking the same black in its well changed the page.
+    let kind = preset.kind;
+    if (cmyk && typeof kind === "object" && "Adjustment" in kind) {
+      const adj = kind.Adjustment;
+      if (typeof adj === "object" && "GradientMap" in adj) {
+        kind = {
+          Adjustment: {
+            GradientMap: {
+              ...adj.GradientMap,
+              stops: adj.GradientMap.stops.map((st) => ({ ...st, color: inkOf(colorToHex(st.color)) })),
+            },
+          },
+        };
+      } else if (typeof adj === "object" && "PhotoFilter" in adj) {
+        kind = { Adjustment: { PhotoFilter: { ...adj.PhotoFilter, color: inkOf(colorToHex(adj.PhotoFilter.color)) } } };
+      }
+    }
+    putAdjustment(only, preset.name, kind);
+  };
+
+  /** Put an adjustment on the page: over everything below, holding the
+   * region picked out if there is one, or only on the picked layer. */
+  const putAdjustment = (only: boolean, name: string, kind: NodeKind) => {
+    const preset = { name, kind };
+    if (!session) return;
+    if (only && selected !== null) {
+      try {
+        const group = session.adjust_node(
+          selected,
+          JSON.stringify(nodePayload(preset.name, preset.kind)),
+        );
+        // Pick the adjustment itself, so its controls are right there.
+        const rows = JSON.parse(session.layers_json()) as LayerInfo[];
+        const at = rows.findIndex((l) => l.id === group);
+        const inside = rows
+          .slice(at + 1)
+          .find((l) => l.parent === group && l.kind !== "group");
+        setSelected(inside ? inside.id : group);
+        setMultiSel([]);
+        refresh(session);
+      } catch (err) {
+        alert(`Adjust: ${said(err)}`);
+      }
+      return;
+    }
+    // A region picked out and an adjustment put over it are one wish:
+    // the region is why the layer is being added, and the graph its
+    // numbers are set against is already the region's own. So it
+    // arrives holding the region, in one entry.
+    try {
+      const id = session.add_over_selection(
+        session.root_id,
+        // The page's own count, not the rows at the top of the panel: a
+        // live copy's own layers are listed there too, and an adjustment
+        // asked for with one picked was put past the page's end.
+        session.child_count(session.root_id),
+        JSON.stringify(nodePayload(preset.name, preset.kind)),
+      ) as number;
+      setSelected(id as NodeId);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Adjust: ${said(err)}`);
+    }
+  };
+
+  /** Commit the running slider/drag gesture as one undo step. */
+  /** Which of an effect's controls the gesture now open is from. */
+  const effectGesture = useRef<string | null>(null);
+  const endGesture = () => {
+    effectGesture.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  /** Every text layer's block, read from the engine, beside its id. */
+  const textBlocks = (): { id: NodeId; spec: TextSpec }[] => {
+    if (!session) return [];
+    const out: { id: NodeId; spec: TextSpec }[] = [];
+    for (const l of layers) {
+      if (l.kind !== "text") continue;
+      try {
+        const kind = JSON.parse(session.kind_json(l.id)) as NodeKind;
+        if (typeof kind === "object" && "Text" in kind) out.push({ id: l.id as NodeId, spec: kind.Text });
+      } catch {
+        // A layer gone between the list and the read is not text to search.
+      }
+    }
+    return out;
+  };
+
+  /** How many times the words are in the document's text, and in how
+   * many layers, for the window to say before anything is replaced. */
+  const findInText = (find: string, opts: FindOptions): { matches: number; layers: number } => {
+    let [matches, inLayers] = [0, 0];
+    for (const { spec } of textBlocks()) {
+      const n = matchesIn(spec.text, find, opts).length;
+      matches += n;
+      if (n > 0) inLayers += 1;
+    }
+    return { matches, layers: inLayers };
+  };
+
+  /** Every match in every text layer replaced, as one step of history,
+   * each block's styling carried across its own replacements. How many
+   * were replaced. */
+  const replaceInText = (find: string, replace: string, opts: FindOptions): number => {
+    if (!session) return 0;
+    const cmds: Command[] = [];
+    let total = 0;
+    for (const { id, spec } of textBlocks()) {
+      const r = replaceIn(spec.text, spec.runs ?? [], find, replace, opts);
+      if (r.count === 0) continue;
+      total += r.count;
+      // "a" for "a" finds and changes nothing: no step for it.
+      if (r.text === spec.text && JSON.stringify(r.runs) === JSON.stringify(spec.runs ?? [])) continue;
+      cmds.push({ SetKind: { id, kind: { Text: { ...spec, text: r.text, runs: r.runs } } } });
+    }
+    if (cmds.length === 0) return total;
+    try {
+      session.apply_as(
+        JSON.stringify(cmds.length === 1 ? cmds[0] : { Batch: cmds }),
+        `Replace “${find}” with “${replace}”`,
+      );
+      refresh(session);
+    } catch (err) {
+      alert(`Replace: ${said(err)}`);
+      return 0;
+    }
+    return total;
+  };
+
+  /** Turn the page as the slider is dragged, so a crooked horizon can be
+   * laid level by eye. Every step starts from where the gesture began
+   * rather than from the last one — turning by a degree ten times is not
+   * turning by ten, and the page it is cropped back to has to be worked
+   * out from the page it started as. */
+  const previewStraighten = (degrees: number) => {
+    if (!session) return;
+    try {
+      session.cancel_preview();
+      if (degrees !== 0) {
+        const [w, h] = Array.from(session.straighten_size(degrees));
+        session.preview_held(
+          JSON.stringify({ StraightenCanvas: { degrees, width: w, height: h } }),
+        );
+      }
+      refresh(session);
+    } catch (err) {
+      alert(`Straighten: ${said(err)}`);
+    }
+  };
+
+  /** The text style buttons show what the selection says, and moving a
+   * selection is not a state change — so nothing would re-render them
+   * and a button would go on showing, and applying, what the last
+   * selection said. Only while a text box holds the caret, so a caret
+   * moving anywhere else costs nothing. */
+  const [, noteSelection] = useState(0);
+  useEffect(() => {
+    const onSelect = () => {
+      const el = document.activeElement;
+      if (
+        el instanceof HTMLTextAreaElement &&
+        TEXT_BOXES.includes(el.getAttribute("aria-label") ?? "")
+      ) {
+        noteSelection((n) => n + 1);
+      }
+    };
+    document.addEventListener("selectionchange", onSelect);
+    return () => document.removeEventListener("selectionchange", onSelect);
+  }, []);
+
+  /** Turn the page a quarter of the way round, carrying everything on it
+   * with it. The page's shape changes, so the view is fitted to it again
+   * — a page turned on its end would otherwise run off the screen. */
+  const turnPage = (quarters: number) => {
+    if (!session) return;
+    try {
+      session.turn_canvas(quarters);
+      setDocumentSize(session.width, session.height);
+      refresh(session);
+      fitView();
+    } catch (err) {
+      alert(`Turn: ${said(err)}`);
+    }
+  };
+
+  /** Mirror the page across its own middle. Its size does not change, so
+   * the view is left where it was. */
+  const mirrorPage = (acrossX: boolean) => {
+    if (!session) return;
+    try {
+      session.mirror_canvas(acrossX);
+      refresh(session);
+    } catch (err) {
+      alert(`Mirror: ${said(err)}`);
+    }
+  };
+
+  /** Give the page a new size, with one of its nine points staying where
+   * it is. Growing it is the only way to put room around a picture —
+   * cropping can only ever take room away. */
+  const resizePage = (w: number, h: number, dx: number, dy: number) => {
+    if (!session) return;
+    try {
+      session.resize_canvas(w, h, dx, dy);
+      setDocumentSize(session.width, session.height);
+      refresh(session);
+      fitView();
+    } catch (err) {
+      alert(`Canvas size: ${said(err)}`);
+    }
+  };
+
+  const [renaming, setRenaming] = useState<{
+    id: NodeId;
+    value: string;
+  } | null>(null);
+
+  /** Dragging a row of the layers list to reorder: which layer, the row
+   * under the pointer and where it would land relative to it. Pointer
+   * driven rather than HTML drag-and-drop, so it works the same with a
+   * mouse, a touch, and a test's synthetic pointer. */
+  const [layerDrag, setLayerDrag] = useState<{
+    id: NodeId;
+    over: NodeId | null;
+    where: "above" | "below" | "into";
+  } | null>(null);
+  const layerDragRef = useRef<{
+    id: NodeId;
+    startY: number;
+    active: boolean;
+    over: NodeId | null;
+    where: "above" | "below" | "into";
+    /** A finger's drag: false until it has been held still long enough
+     * to lift the row (`ROW_LIFT_MS`); till then moving is scrolling. A
+     * mouse's or a pen's is lifted from the start. */
+    lifted: boolean;
+    timer?: number;
+  } | null>(null);
+  const layerListRef = useRef<HTMLUListElement>(null);
+  /** The history list, kept scrolled to the step the document is at:
+   * past a dozen steps the newest had gone under the list's foot, out
+   * of sight as it was taken. */
+  const historyListRef = useRef<HTMLOListElement>(null);
+  /** When a drag last ended, so the click the release brings with it does
+   * not also pick the row. Timed rather than a flag that waits to be
+   * cleared: a drop can move the row out from under the pointer, and then
+   * no click follows at all — a flag left standing would eat someone's
+   * next click, minutes later. */
+  const layerDragDone = useRef(0);
+  const onRowPointerDown = (e: React.PointerEvent, id: NodeId) => {
+    if (e.button !== 0 || renaming) return;
+    // A finger on the list is first of all scrolling it: the rows are
+    // most of the list, and a swipe on one that reordered the layers
+    // left a phone with no way down to the rest. Held still a moment, the
+    // row lifts — with a tick under the finger — and from then on the
+    // finger carries it, as a phone's own lists are reordered.
+    const finger = e.pointerType === "touch";
+    const drag: NonNullable<typeof layerDragRef.current> = {
+      id,
+      startY: e.clientY,
+      active: false,
+      over: null,
+      where: "above",
+      lifted: !finger,
+    };
+    if (finger) {
+      drag.timer = window.setTimeout(() => {
+        if (layerDragRef.current !== drag) return;
+        drag.lifted = true;
+        navigator.vibrate?.(10);
+        setLayerDrag({ id, over: null, where: "above" });
+      }, ROW_LIFT_MS);
+    }
+    layerDragRef.current = drag;
+    /** The list's own scroll while the row is held at its edge, and where
+     * the pointer was last. */
+    let edge: number | null = null;
+    let lastY: number | null = null;
+    // Let go of, or taken by the browser for a scroll: either way over.
+    const onCancel = () => {
+      clearTimeout(drag.timer);
+      if (edge !== null) window.clearInterval(edge);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      if (layerDragRef.current === drag) layerDragRef.current = null;
+      setLayerDrag(null);
+    };
+    const onMove = (ev: PointerEvent) => {
+      const drag = layerDragRef.current;
+      if (!drag) return;
+      if (!drag.lifted) {
+        // Moved before it lifted: a scroll, which is the browser's.
+        if (Math.abs(ev.clientY - drag.startY) > 6) onCancel();
+        return;
+      }
+      if (!drag.active) {
+        if (Math.abs(ev.clientY - drag.startY) < 4) return;
+        drag.active = true;
+        // Held at the list's top or bottom edge, the list scrolls under
+        // the row — a long list had no way to the rows past its end but
+        // a wheel turned mid-drag.
+        edge = window.setInterval(() => {
+          const list = layerListRef.current;
+          if (!list || lastY === null) return;
+          const r = list.getBoundingClientRect();
+          const zone = 28;
+          const by =
+            lastY < r.top + zone ? -Math.ceil((r.top + zone - lastY) / 3) : lastY > r.bottom - zone ? Math.ceil((lastY - r.bottom + zone) / 3) : 0;
+          if (by !== 0) {
+            list.scrollTop += by;
+            onMove({ clientY: lastY } as PointerEvent);
+          }
+        }, 40);
+      }
+      lastY = ev.clientY;
+      let over: NodeId | null = null;
+      let where: "above" | "below" | "into" = "above";
+      for (const row of layerListRef.current?.querySelectorAll<HTMLLIElement>(
+        "li[data-id]",
+      ) ?? []) {
+        const r = row.getBoundingClientRect();
+        if (ev.clientY < r.top || ev.clientY >= r.bottom) continue;
+        over = Number(row.dataset.id);
+        const t = (ev.clientY - r.top) / r.height;
+        // The middle of a group's (or a frame's) row drops into it; the
+        // edges of any row drop beside it.
+        where =
+          HOLDS_CHILDREN.has(row.dataset.kind ?? "") && t > 0.3 && t < 0.7
+            ? "into"
+            : t < 0.5
+              ? "above"
+              : "below";
+      }
+      // A group cannot go inside itself: over one of its own layers no
+      // line is drawn, where one used to promise a drop that did nothing.
+      let up = over === null ? undefined : layers.find((l) => l.id === over)?.parent;
+      for (let hops = 0; up !== undefined && hops < 256; hops++) {
+        if (up === drag.id) {
+          over = null;
+          break;
+        }
+        up = layers.find((l) => l.id === up)?.parent;
+      }
+      drag.over = over;
+      drag.where = where;
+      setLayerDrag({ id: drag.id, over, where });
+    };
+    const onUp = () => {
+      clearTimeout(drag.timer);
+      if (edge !== null) window.clearInterval(edge);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      const drag2 = layerDragRef.current;
+      if (drag2 !== drag) return;
+      layerDragRef.current = null;
+      setLayerDrag(null);
+      // The drop is read from the ref, not a state updater: an updater is
+      // meant to be pure, and React may run it twice.
+      if (drag.active && drag.over !== null) {
+        layerDragDone.current = Date.now();
+        dropLayer(drag.id, drag.over, drag.where);
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+  };
+  // Once a row has lifted under a finger, the finger's movement is the
+  // row's and not a scroll: the rows let a vertical swipe scroll the list
+  // (`touch-action: pan-y`), and the one way to keep that swipe for the
+  // row is to decline the scroll as it begins.
+  useEffect(() => {
+    const list = layerListRef.current;
+    if (!list) return;
+    const hold = (e: TouchEvent) => {
+      if (layerDragRef.current?.lifted && e.cancelable) e.preventDefault();
+    };
+    list.addEventListener("touchmove", hold, { passive: false });
+    return () => list.removeEventListener("touchmove", hold);
+  });
+  /** Move `id` to where a drop over `over` asked for, as one MoveNode. The
+   * list runs top-first, so "above" a row is the slot past its index in
+   * painter's order, and a move within one group accounts for the slot
+   * the layer leaves behind. */
+  const dropLayer = (
+    id: NodeId,
+    over: NodeId,
+    where: "above" | "below" | "into",
+  ) => {
+    if (!session || id === over) return;
+    const me = layers.find((l) => l.id === id);
+    const target = layers.find((l) => l.id === over);
+    if (!me || !target) return;
+    let parent: NodeId;
+    let index: number;
+    if (where === "into") {
+      parent = target.id;
+      index = layers.filter((l) => l.parent === target.id).length;
+      if (me.parent === parent) index -= 1;
+    } else if (
+      where === "below" &&
+      layers.some((l) => l.parent === target.id) &&
+      !collapsed.includes(target.id)
+    ) {
+      // Just under an open group's row is where its top layer is, and
+      // the line is drawn there: the top of the group, not under it.
+      parent = target.id;
+      index = layers.filter((l) => l.parent === target.id).length;
+      if (me.parent === parent) index -= 1;
+    } else {
+      parent = target.parent;
+      index = where === "above" ? target.index + 1 : target.index;
+      if (me.parent === parent && me.index < index) index -= 1;
+    }
+    // Never into its own subtree.
+    for (
+      let cur: NodeId | undefined = parent;
+      cur !== undefined && cur !== session.root_id;
+    ) {
+      if (cur === id) return;
+      cur = layers.find((l) => l.id === cur)?.parent;
+    }
+    if (parent === me.parent && index === me.index) return;
+    try {
+      // Through the engine rather than a plain MoveNode: changing
+      // parents changes the space the layer's transform is written in,
+      // and the engine undoes that so the layer does not jump when it is
+      // dropped into a group or a frame that sits away from the origin.
+      session.reparent(id, parent, index);
+      refresh(session);
+    } catch (err) {
+      alert(`Move: ${said(err)}`);
+    }
+  };
+
+  /** Typing into a text block on the canvas: which block, and the text as
+   * typed so far. Every keystroke previews through the engine and the
+   * block records one history entry when the editor closes; Escape puts
+   * the old text back. */
+  const [inlineText, setInlineText] = useState<{
+    id: NodeId;
+    value: string;
+    /** Where the history stood when the Text tool had just put this
+     * block down: the typing then joins the step that added it, and
+     * letting it go unwritten takes the block away again. */
+    fresh?: number;
+  } | null>(null);
+  const inlineRef = useRef<HTMLTextAreaElement>(null);
+  // While text is typed on the canvas, the block stays in sight. An
+  // on-screen keyboard coming up shrinks the window under it, and the
+  // view did not move: the block went under the tool rail. The browser
+  // then scrolled the canvas's host itself (it hides its overflow but
+  // can still be scrolled to a focused field), which shifted the whole
+  // canvas off where the view says it is. So the host is held at the
+  // top, and the view is moved instead, enough to show the block above
+  // whatever now covers the bottom of the canvas.
+  const editing = inlineText !== null;
+  useEffect(() => {
+    if (!editing) return;
+    const host = hostRef.current;
+    const keepInSight = () => {
+      if (host && (host.scrollTop !== 0 || host.scrollLeft !== 0)) {
+        host.scrollTop = 0;
+        host.scrollLeft = 0;
+      }
+      const box = inlineRef.current?.getBoundingClientRect();
+      const room = host?.getBoundingClientRect();
+      if (!box || !room) return;
+      const seen = window.visualViewport;
+      let bottom = Math.min(room.bottom, seen ? seen.offsetTop + seen.height : window.innerHeight);
+      // On a phone the rail lies along the bottom, over the canvas.
+      const rail = document.querySelector(".toolbar");
+      const railBox = rail?.getBoundingClientRect();
+      if (
+        rail &&
+        railBox &&
+        getComputedStyle(rail).flexDirection === "row" &&
+        railBox.top > room.top &&
+        railBox.top < bottom
+      )
+        bottom = railBox.top;
+      const top = room.top;
+      const margin = 12;
+      const by =
+        box.bottom > bottom - margin
+          ? bottom - margin - box.bottom
+          : box.top < top + margin
+            ? top + margin - box.top
+            : 0;
+      if (by !== 0) setView((v) => ({ ...v, y: v.y + by }));
+    };
+    const settle = () => requestAnimationFrame(keepInSight);
+    window.visualViewport?.addEventListener("resize", settle);
+    window.addEventListener("resize", settle);
+    host?.addEventListener("scroll", settle);
+    settle();
+    return () => {
+      window.visualViewport?.removeEventListener("resize", settle);
+      window.removeEventListener("resize", settle);
+      host?.removeEventListener("scroll", settle);
+    };
+  }, [editing]);
+  const beginInlineText = (fresh = false) => {
+    if (
+      !session ||
+      !selectedLayer ||
+      !selectedKind ||
+      typeof selectedKind !== "object" ||
+      !("Text" in selectedKind)
+    )
+      return;
+    setInlineText({
+      id: selectedLayer.id,
+      value: selectedKind.Text.text,
+      fresh: fresh ? session.history_mark() : undefined,
+    });
+    setTimeout(() => {
+      inlineRef.current?.focus();
+      inlineRef.current?.select();
+    }, 0);
+  };
+  /** A block just dropped by the Text tool, to open for typing once it
+   * is the picked layer (the render after it was added). */
+  const typeIntoNewText = useRef(false);
+  useEffect(() => {
+    if (!typeIntoNewText.current) return;
+    // Asked once, in the render after the block was added: if it is not
+    // the picked layer then, nothing later is opened in its place.
+    typeIntoNewText.current = false;
+    if (selectedKind && typeof selectedKind === "object" && "Text" in selectedKind) beginInlineText(true);
+  });
+  /** The on-canvas editor's selection as it was before the latest
+   * keystroke, so the keystroke's edit is known exactly (`editOf`). */
+  const inlineSel = useRef<[number, number]>([0, 0]);
+  const typeInlineText = (value: string, caret?: number) => {
+    if (
+      !inlineText ||
+      !selectedKind ||
+      typeof selectedKind !== "object" ||
+      !("Text" in selectedKind)
+    )
+      return;
+    setInlineText({ ...inlineText, value });
+    const was = selectedKind.Text;
+    preview({
+      SetKind: {
+        id: inlineText.id,
+        kind: {
+          Text: {
+            ...was,
+            text: value,
+            runs: shiftRuns(
+              was.text,
+              value,
+              was.runs ?? [],
+              caret === undefined ? undefined : editOf(was.text, value, inlineSel.current, caret),
+            ),
+          },
+        },
+      },
+    });
+  };
+  const closeInlineText = (keep: boolean) => {
+    if (!inlineText) return;
+    setInlineText(null);
+    if (!session) return;
+    // A block the Text tool has only just put down, with nothing else
+    // done since: what is typed into it is part of putting it down, one
+    // step, and a block let go of unwritten (Escape, or every letter
+    // taken out) was never wanted.
+    const fresh =
+      inlineText.fresh !== undefined && session.history_mark() === inlineText.fresh;
+    if (fresh && (!keep || inlineText.value.trim() === "")) {
+      session.cancel_preview();
+      session.take_back();
+      if (selected === inlineText.id) setSelected(null);
+      refresh(session);
+    } else if (keep) {
+      if (session.commit_preview()) {
+        if (fresh) session.merge_last();
+        refresh(session);
+      }
+    } else if (session.cancel_preview()) {
+      refresh(session);
+    }
+  };
+
+  // Any other way the block is let go of (a row in the layers panel,
+  // Escape on the page, a layer deleted) finishes the typing the same.
+  useEffect(() => {
+    if (inlineText && selected !== inlineText.id) closeInlineText(true);
+  }, [selected]);
+
+  /** The name field is on the layer's row, so the panel is brought out
+   * for it: from the menus on a phone, with the panel put away, Rename…
+   * made a field nobody could see or type into. */
+  const startRename = (l: { id: NodeId; name: string }) => {
+    setPanelOpen(true);
+    setRenaming({ id: l.id, value: l.name });
+  };
+  const commitRename = () => {
+    const was = renaming ? layers.find((l) => l.id === renaming.id)?.name : undefined;
+    if (renaming && renaming.value.trim() && renaming.value.trim() !== was) {
+      run({ SetName: { id: renaming.id, name: renaming.value.trim() } });
+    }
+    setRenaming(null);
+  };
+
+  /** The picked layers with any that sit inside another of them left
+   * out. Removing a group takes what is in it along, so asking to
+   * remove both would fail on the second and roll the whole entry back;
+   * duplicating both would put the inner one down twice. */
+  const withoutNested = (ids: NodeId[]): NodeId[] => {
+    const up = new Map(
+      layers.map((l) => [l.id as NodeId, l.parent as NodeId]),
+    );
+    const picked = new Set(ids);
+    return ids.filter((id) => {
+      for (let at = up.get(id); at !== undefined; at = up.get(at)) {
+        if (picked.has(at)) return false;
+      }
+      return true;
+    });
+  };
+
+  /** What is picked is what goes: every one of them, in one history
+   * entry. Only the primary used to, which made Delete with three
+   * layers picked take one away and leave the picking in a state that
+   * matched nothing on the canvas. */
+  const deleteSelected = (only?: NodeId) => {
+    // With the node tool, an anchor taken hold of is what Delete takes
+    // away, as in every drawing program — not the whole shape round it.
+    const anchor = pickedAnchorRef.current;
+    if (tool === "Node" && session && anchor && anchor.id === selected) {
+      pickedAnchorRef.current = null;
+      try {
+        session.remove_anchor(anchor.id, anchor.idx);
+        refresh(session);
+      } catch (err) {
+        alert(`Remove anchor: ${said(err)}`);
+      }
+      return;
+    }
+    const ids = only !== undefined ? [only] : withoutNested(selectionSet);
+    if (ids.length === 0 || !session) return;
+    // A drag still going is let go of first: the layer it moves is about
+    // to be gone, and each move after threw "unknown node id".
+    cancelGesture();
+    // A layer live copies follow is asked about: gone, every copy of it
+    // shows nothing, and nothing said so.
+    const followed = session.copies_left_empty(new Float64Array(ids));
+    if (
+      followed > 0 &&
+      !window.confirm(
+        `${followed === 1 ? "A live copy follows" : `${followed} live copies follow`} what is being deleted, and will show nothing. Delete it anyway?`,
+      )
+    )
+      return;
+    try {
+      session.delete_layers(new Float64Array(ids));
+    } catch (err) {
+      alert(`Delete: ${said(err)}`);
+      return;
+    }
+    refresh(session);
+    // A row's own layer deleted keeps what was picked, less it: the
+    // panel went empty and the arrows moved nothing.
+    if (only !== undefined && selectionSet.length > 0) {
+      const up = new Map(layers.map((l) => [l.id as NodeId, l.parent as NodeId]));
+      const inside = (id: NodeId) => {
+        for (let at = up.get(id); at !== undefined; at = up.get(at)) if (at === only) return true;
+        return false;
+      };
+      const kept = selectionSet.filter((id) => id !== only && !inside(id));
+      setSelected(kept[0] ?? null);
+      setMultiSel(kept.slice(1));
+      return;
+    }
+    setSelected(null);
+    setMultiSel([]);
+  };
+
+  const copySelected = () => {
+    if (!session || selectionSet.length === 0) return;
+    try {
+      session.copy_nodes(new Float64Array(selectionSet));
+    } catch (err) {
+      alert(`Copy: ${said(err)}`);
+      return;
+    }
+    // And take the system clipboard with it. A picture copied in another
+    // application sits there until that application lets go of it, and a
+    // paste prefers a picture to the layers copied here — so without
+    // this, one old picture would win every paste for the rest of the
+    // session, however many layers had been copied since. What goes on
+    // is the names: pasted anywhere else they say what was taken, which
+    // is more use than nothing, and pasted back here they are not a
+    // picture, so the layers win.
+    const names = selectionSet.map(
+      (id) => layers.find((l) => l.id === id)?.name ?? "layer",
+    );
+    navigator.clipboard?.writeText(names.join(", ")).catch(() => {
+      /* a browser that will not have it goes on preferring the picture */
+    });
+    // Which tab copied last, for a paste in another to know its own copy
+    // is no longer the newest (`pasteClipboard`).
+    copiedHere = true;
+    try {
+      localStorage.setItem(COPIED_KEY, THIS_TAB);
+    } catch {
+      /* storage refused: each tab pastes its own copy, as before */
+    }
+  };
+
+  const pasteClipboard = () => {
+    if (!session) return;
+    // Copied last in another tab: the layers are that tab's — each page
+    // keeps its own — and what this one holds is an older copy, which
+    // was pasted in their place.
+    let copiedIn: string | null = null;
+    try {
+      copiedIn = localStorage.getItem(COPIED_KEY);
+    } catch {
+      copiedIn = null;
+    }
+    // A tab that has copied nothing has nothing stale to paste, and
+    // nothing to say: the mark outlives the tab that left it.
+    if (copiedHere && copiedIn !== null && copiedIn !== THIS_TAB) {
+      alert(
+        "Paste: those layers were copied in another tab, and layers paste only in the tab they were copied in. Save that document and place it here, or copy in this tab.",
+      );
+      return;
+    }
+    let ids: NodeId[];
+    try {
+      ids = Array.from(session.paste()) as NodeId[];
+    } catch (err) {
+      // A live copy whose original was not copied with it, say: refused
+      // in words, where it used to fail with nothing on the page.
+      alert(`Paste: ${said(err)}`);
+      return;
+    }
+    if (ids.length === 0) {
+      // Nothing here to paste, and layers copied in another tab: said,
+      // as it is to a tab whose own copy is older. Without a copy of its
+      // own this tab said nothing at all.
+      if (copiedIn !== null && copiedIn !== THIS_TAB) {
+        alert(
+          "Paste: those layers were copied in another tab, and layers paste only in the tab they were copied in. Save that document and place it here, or copy in this tab.",
+        );
+      }
+      return;
+    }
+    // Everything pasted is picked, which is what makes pasting a set of
+    // layers and dragging them somewhere one gesture rather than three.
+    setSelected(ids[0]);
+    setMultiSel(ids.slice(1));
+    refresh(session);
+  };
+
+  /** Paste from a menu row (Edit › Paste, the canvas's menu), as the
+   * keystroke pastes: a picture another application put on the system
+   * clipboard first, else the layers copied here. The rows pasted the
+   * layers alone, so a picture Ctrl+V placed was passed over for an
+   * older copy. A row has no paste event to read the clipboard from, so
+   * it asks for it — which a browser may ask the person about, and a
+   * refusal, or no answer in a moment, pastes the layers as before. */
+  const pasteFromMenu = () => {
+    const read = navigator.clipboard?.read?.bind(navigator.clipboard);
+    if (!read) {
+      pasteClipboard();
+      return;
+    }
+    const late = new Promise<null>((done) => setTimeout(() => done(null), 1500));
+    Promise.race([read(), late])
+      .then(async (items) => {
+        for (const item of items ?? []) {
+          const kind = item.types.find((t) => t.startsWith("image/"));
+          if (kind) {
+            const blob = await item.getType(kind);
+            placeImageFile(new File([blob], `image.${kind.slice(6).replace("+xml", "")}`, { type: kind }));
+            return;
+          }
+        }
+        pasteClipboard();
+      })
+      .catch(() => pasteClipboard());
+  };
+
+  // Layer shortcuts get their own listener, declared after the actions it
+  // calls: a closure over a `const` declared further down still throws
+  // when it runs, and TypeScript does not flag that inside a callback.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // A window's keys are its own: a layer chord or Delete pressed at
+      // the export window or a menu once reached the picked layer
+      // behind it, where the window's own undo could not take it back.
+      if (aWindowIsUp()) {
+        // Not the editor's, and not the browser's either: Ctrl+S at a
+        // window brought up the browser's "save page", Ctrl+J its
+        // downloads. A field's own keys (select all, copy, undo) stay
+        // the field's.
+        const held = chords.byChord[chordFromEvent(e)];
+        if (
+          held &&
+          (e.ctrlKey || e.metaKey) &&
+          !["select-all", "copy", "cut", "paste", "undo", "redo"].includes(held)
+        )
+          e.preventDefault();
+        return;
+      }
+      const typing = isTextEntry(e.target);
+      // One table, one lookup. These were a dozen nested tests on
+      // modifiers and letters, which is also why the more specific
+      // chord had to be checked before the less — clipping before
+      // grouping, since they differ by one modifier. A chord is one
+      // string now, so the two cannot be confused and the order of the
+      // rows does not matter.
+      const pressedNow = chordFromEvent(e);
+      const fired = chords.byChord[pressedNow];
+      if (fired && (!typing || (firesWhileTyping(fired) && !typesAlone(pressedNow)))) {
+        // Everything but paste, which asks for the event's own
+        // clipboard first and has to let it through.
+        if (fired !== "paste") e.preventDefault();
+        switch (fired) {
+          case "duplicate":
+            duplicateSelected();
+            return;
+          case "copy-style":
+            copyStyle();
+            return;
+          case "find-replace":
+            setFindOpen(true);
+            return;
+          case "paste-style":
+            pasteStyle();
+            return;
+          case "clip":
+            clipSelection();
+            return;
+          case "copy":
+            copySelected();
+            return;
+          case "cut":
+            copySelected();
+            deleteSelected();
+            return;
+          // Ctrl+V pastes the in-app clipboard a beat later, unless the
+          // paste event has already served a picture from another
+          // application by then — the one thing only the event can see.
+          // A webview that never fires the event on a non-editable
+          // target (WKWebView) reaches the same place by the same road.
+          case "paste":
+            pasteSeen.current = false;
+            window.setTimeout(() => {
+              if (!pasteSeen.current) pasteClipboard();
+            }, 80);
+            return;
+          case "group":
+            groupSelection();
+            return;
+          case "ungroup":
+            ungroupSelection();
+            return;
+          case "save":
+            saveFile();
+            return;
+          case "export":
+            exportPng();
+            return;
+          case "export-window":
+            setExportOpen(true);
+            return;
+          case "preferences":
+            setPrefsOpen(true);
+            return;
+          // A browser keeps Ctrl+N for itself and will not give it up to
+          // preventDefault, so New only fires from it in the desktop
+          // shell; Open's Ctrl+O reaches a page. Both are bound all the
+          // same, and the menu only *claims* a chord where it works
+          // (`browserKeeps`).
+          case "new":
+            if (mayDiscard()) setNewDocOpen(true);
+            return;
+          case "open":
+            openDocument();
+            return;
+          case "save-as":
+            if (isTauri()) saveFileAs();
+            return;
+          case "to-front":
+            orderSelected(true);
+            return;
+          case "to-back":
+            orderSelected(false);
+            return;
+          default:
+            break;
+        }
+      }
+      // Enter takes a kept crop frame.
+      if (!typing && e.key === "Enter" && tool === "Crop" && cropFrame) {
+        e.preventDefault();
+        applyCrop();
+        return;
+      }
+      // On a palette's chip or its "+", Delete is the chip's to answer
+      // (or nobody's): it went on to delete the picked layer, which the
+      // keys sheet's "Delete on a chip: forget it" does not say.
+      if (
+        (e.key === "Delete" || e.key === "Backspace") &&
+        e.target instanceof Element &&
+        e.target.closest(".palette")
+      ) {
+        return;
+      }
+      if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
+        e.preventDefault();
+        // With a path half drawn, the key takes back its last anchor —
+        // what it does in every pen tool — and never the picked layer.
+        if (tool === "Pen" && penPoints.length > 0) {
+          setPenPoints((pts) => pts.slice(0, -1));
+          setPenHandles((hs) => hs.slice(0, -1));
+          return;
+        }
+        // Pressed on one of the panel's controls for the picked layer —
+        // its blend, its opacity, its fill — the control goes with the
+        // layer and the focus fell to the page. It is handed to the
+        // layer's row first, which the panel keeps the focus near when
+        // a row goes (keepPanelFocus).
+        const from = e.target instanceof HTMLElement ? e.target : null;
+        if (from?.closest("aside.panel") && !from.closest(".layer-list")) {
+          document.querySelector<HTMLElement>("aside.panel .layer-list li.selected")?.focus();
+        }
+        // On a layer's row the keyboard has reached but not picked, Delete
+        // is that layer's, as Shift+F10 there is: it deleted the one
+        // picked elsewhere.
+        const row = from?.matches(".layer-list li[data-id]") ? from : null;
+        const rowId = row ? Number(row.getAttribute("data-id")) : NaN;
+        if (row && Number.isFinite(rowId) && !selectionSet.includes(rowId as NodeId)) {
+          deleteSelected(rowId as NodeId);
+          return;
+        }
+        deleteSelected();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  /** All picked layers: primary selection plus ctrl-clicked extras. */
+  const selectionSet =
+    selected === null
+      ? multiSel
+      : [selected, ...multiSel.filter((id) => id !== selected)];
+  /** What a move, an alignment or a flip acts on: a locked layer is
+   * picked and read like any other, but nothing shifts it, and a layer
+   * inside a picked group is already travelling with the group — acting
+   * on it again moves it twice, which is a nudge of two pixels for every
+   * one asked and a flip that flips it back. */
+  /** Whether the picked layers can be grouped: they share a parent. */
+  const groupable =
+    new Set(withoutNested(selectionSet).map((id) => layers.find((l) => l.id === id)?.parent)).size <= 1;
+  /** Whether a layer is held still: locked itself, or inside a locked
+   * group or frame, whose lock holds what is in it. Read off the layer's
+   * own lock alone, a child of a locked group still took handles,
+   * nudges, flips and alignment. */
+  const heldByLock = (id: NodeId | null): boolean => {
+    let at = layers.find((l) => l.id === id);
+    for (let depth = 0; at && depth < 256; depth++) {
+      if (at.locked) return true;
+      const up = at.parent;
+      at = layers.find((l) => l.id === up);
+    }
+    return false;
+  };
+  const movableSelection = withoutNested(selectionSet).filter((id) => !heldByLock(id));
+
+  /** What one layer's alignment is measured against: the frame it sits
+   * in, or the page. Only the word, for what the buttons say — the
+   * engine works out the box. */
+  const alignGround = (): string => {
+    const [id] = movableSelection;
+    if (id === undefined) return "page";
+    const up = new Map(layers.map((l) => [l.id as NodeId, l]));
+    for (
+      let at = up.get(id)?.parent as NodeId | undefined;
+      at !== undefined;
+      at = up.get(at)?.parent as NodeId | undefined
+    ) {
+      if (up.get(at)?.kind === "artboard") return "frame";
+    }
+    return "page";
+  };
+
+  /** Align or distribute everything picked. Two or more line up with
+   * each other; one on its own lines up with what it sits in, since it
+   * has nothing else to line up with and centring one thing on the page
+   * is the alignment most often asked for. Spacing evenly is a statement
+   * about the gaps between layers, so it still wants two. */
+  const alignSelection = (mode: string) => {
+    const least = mode.startsWith("distribute") ? 2 : 1;
+    if (!session || movableSelection.length < least) return;
+    // What they line up with: each other, the page, or the key — the
+    // picked layer wearing the handles, which stays put. One layer on its
+    // own has no others and is its own key, so it goes to what it sits
+    // in whichever is chosen.
+    const alone = selectionSet.length < 2;
+    const to = alone ? "selection" : prefs.alignTo;
+    const key = to === "key" && selected !== null ? selected : -1;
+    try {
+      session.align_nodes_to(new Float64Array(movableSelection), mode, to, key);
+      refresh(session);
+    } catch (err) {
+      alert(`Align: ${said(err)}`);
+    }
+  };
+
+  /** Arrow keys nudge whatever is picked; shift makes it a coarse step.
+   * Declared after `selectionSet` for the same reason the layer shortcuts
+   * are declared after their actions. */
+  useEffect(() => {
+    const STEPS: Record<string, [number, number]> = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const step = STEPS[e.key];
+      // Any form control gets its arrows first: they step a slider, open a
+      // select, move a caret. Only a bare canvas nudges the layer.
+      const inControl =
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLSelectElement ||
+        isTextEntry(e.target);
+      if (!step || !session || inControl || selectionSet.length === 0 || aWindowIsUp()) {
+        return;
+      }
+      e.preventDefault();
+      const k = e.shiftKey ? prefs.nudgeBig : prefs.nudge;
+      const moving = movableSelection.map((id) => ({
+        id,
+        t0: toTransform(session.transform_of(id)),
+      }));
+      const cmds = translateAll(moving, step[0] * k, step[1] * k);
+      if (cmds.length > 0) run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
+
+  /** Mirror the picked layers about their shared box, one history
+   * entry: a pair flips as a pair, a lone layer flips in place. */
+  const flipSelection = (horizontal: boolean) => {
+    if (!session || movableSelection.length === 0) return;
+    try {
+      session.flip_nodes(new Float64Array(movableSelection), horizontal);
+      refresh(session);
+    } catch (err) {
+      alert(`Flip: ${said(err)}`);
+    }
+  };
+
+  /** Combine the picked shapes into one compound path. */
+  /** Whether to go on with something that takes `ids` away when live
+   * copies follow them: they would show nothing, and only Delete and Cut
+   * asked — ungrouping a component emptied every copy of it unsaid. */
+  const copiesAllow = (ids: NodeId[], doing: string, onlyThese = false): boolean => {
+    if (!session) return false;
+    // Ungrouping takes away the group alone: what is in it stays, and so
+    // do copies of it. Everything else takes what is inside too.
+    const followed = onlyThese
+      ? ids.reduce((n, id) => n + session.copies_following(id), 0)
+      : session.copies_left_empty(new Float64Array(ids));
+    return (
+      followed === 0 ||
+      window.confirm(
+        `${followed === 1 ? "A live copy follows" : `${followed} live copies follow`} what ${doing} takes away, and will show nothing. Go on?`,
+      )
+    );
+  };
+
+  const combineSelection = (op: string) => {
+    if (!session || selectionSet.length < 2) return;
+    if (!copiesAllow(selectionSet, "combining")) return;
+    try {
+      const id = session.boolean_nodes(new Float64Array(selectionSet), op);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Combine: ${said(err)}`);
+    }
+  };
+
+  /** Cut the picked path at the anchor last pressed: a closed path opens
+   * there, an open one is cut in two. */
+  const cutPath = () => {
+    if (!session || selected === null) return;
+    const anchor = pickedAnchorRef.current;
+    if (!anchor || anchor.id !== selected) {
+      alert("Split at anchor: press the anchor to split at first");
+      return;
+    }
+    try {
+      const parts = session.split_path(selected, anchor.idx);
+      pickedAnchorRef.current = null;
+      setSelected(parts[parts.length - 1] ?? selected);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Split at anchor: ${said(err)}`);
+    }
+  };
+
+  /** Join the two picked paths at their nearest ends, or close one. */
+  const joinPaths = () => {
+    if (!session || selectionSet.length === 0 || selectionSet.length > 2) {
+      alert("Join: pick one open path to close, or two to join");
+      return;
+    }
+    const [a, b] = [selectionSet[0], selectionSet[1] ?? selectionSet[0]];
+    // The second path is taken into the first and goes: a live copy of it
+    // would show nothing, and is asked about as Delete asks.
+    if (a !== b && !copiesAllow([b], "joining the paths", true)) return;
+    try {
+      const id = session.join_paths(a, b);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Join: ${said(err)}`);
+    }
+  };
+
+  /** Step and repeat the picked layers: the window asks how, and the
+   * copies are picked after it. */
+  const repeatSelection = () => {
+    if (!session || selectionSet.length === 0) return;
+    setRepeatFor([...selectionSet]);
+  };
+  const repeatAs = (step: RepeatStep) => {
+    if (!session || !repeatFor) return;
+    try {
+      const made = session.repeat_nodes(
+        new Float64Array(repeatFor),
+        step.copies,
+        step.dx,
+        step.dy,
+        step.degrees,
+        step.scale / 100,
+        step.px,
+        step.py,
+      );
+      setRepeatFor(null);
+      const last = made[made.length - 1];
+      if (last !== undefined) setSelected(last);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Repeat: ${said(err)}`);
+    }
+  };
+
+  /** Round the corners of what is picked, by `radius`: each shape the
+   * way it keeps a corner — a rectangle's and a polygon's as their own
+   * live radius, a path's sharp corners rewritten as arcs. With the
+   * anchor tool's last-pressed anchor on the one picked path, only that
+   * corner. One step. */
+  const roundCorners = (radius: number) => {
+    if (!session || selectionSet.length === 0) return;
+    const anchor = pickedAnchorRef.current;
+    const only =
+      anchor && selectionSet.length === 1 && anchor.id === selectionSet[0] ? anchor.idx : -1;
+    try {
+      const n = session.round_corners(new Float64Array(selectionSet), radius, only);
+      if (n === 0) {
+        alert("Round the corners: nothing picked has a sharp corner between straight sides");
+        return;
+      }
+      if (only >= 0) pickedAnchorRef.current = null;
+      refresh(session);
+    } catch (err) {
+      alert(`Round the corners: ${said(err)}`);
+    }
+  };
+
+  /** The shapes between the two picked ones, as many as asked, in a
+   * group between them; the group is picked after it. */
+  const blendSelection = () => {
+    if (!session) return;
+    if (selectionSet.length !== 2) {
+      alert("Blend: pick exactly two shapes");
+      return;
+    }
+    const answer = window.prompt("How many shapes between the two? (1 to 100)", "5");
+    if (answer === null) return;
+    const typed = typedNumber(answer);
+    const steps = typed === null ? NaN : Math.round(typed);
+    if (!Number.isFinite(steps) || steps < 1) {
+      alert(`Blend: “${answer}” is not a number of shapes — type one or more, such as 5.`);
+      return;
+    }
+    // A hundred at the most, said rather than quietly made instead.
+    if (steps > 100) {
+      alert(`Blend: ${steps} is more shapes than a blend makes — a hundred at the most.`);
+      return;
+    }
+    try {
+      const id = session.blend_shapes(selectionSet[0], selectionSet[1], Math.min(steps, 100));
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Blend: ${said(err)}`);
+    }
+  };
+
+  /** Turn the picked shape's stroke into a shape of its own — the line
+   * filled in its colour, which can then be given a gradient, combined
+   * or reshaped. One step in the history; the layer that took its place
+   * is picked after it. */
+  const outlineStroke = () => {
+    if (!session || selected === null) return;
+    if (!copiesAllow([selected], "making a shape of the stroke")) return;
+    try {
+      const id = session.outline_stroke(selected);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Stroke to shape: ${said(err)}`);
+    }
+  };
+
+  /** A copy of the picked shape with its outline moved out (or in, for
+   * a negative distance), put just above it — a sticker's border, a
+   * keyline round a logo. Asked for in page pixels; the copy is picked
+   * after it. */
+  const offsetPath = () => {
+    if (!session || selected === null) return;
+    // Refused before the question, not after an answer it cannot use.
+    if (!(typeof selectedKind === "object" && selectedKind !== null && "Vector" in selectedKind)) {
+      alert("Offset path: only a shape has an outline to move.");
+      return;
+    }
+    const answer = window.prompt(
+      "Move the outline out by how many pixels? (A negative number moves it in.)",
+      "8",
+    );
+    if (answer === null) return;
+    const by = typedNumber(answer);
+    if (by === 0) {
+      alert("Offset path: an outline moved by nothing is the outline it was — type a number of pixels, such as 8 or -4.");
+      return;
+    }
+    if (by === null) {
+      alert(`Offset path: “${answer}” is not a distance — type a number of pixels, such as 8 or -4.`);
+      return;
+    }
+    // A billion pixels was taken, and made a shape a billion pixels out.
+    if (Math.abs(by) > 10000) {
+      alert("Offset path: at most 10,000 pixels either way.");
+      return;
+    }
+    try {
+      const id = session.offset_path(selected, by);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Offset path: ${said(err)}`);
+    }
+  };
+
+  /** The picked picture traced into flat shapes, in a group just above
+   * it: its colours brought down to as many as asked, each traced and
+   * fitted with curves. The picture stays where it was; the group is
+   * picked after it. */
+  const tracePicture = () => {
+    if (!session || selected === null) return;
+    const layer = layers.find((l) => l.id === selected);
+    if (!layer || layer.kind !== "raster") {
+      alert("Trace the picture: pick a picture first");
+      return;
+    }
+    setTraceFor({ id: selected, name: layer.name });
+  };
+
+  /** Lay the trace the window settled on: one step, the group picked
+   * after it. */
+  const traceAs = (id: number, colours: number, smoothing: number) => {
+    if (!session) return;
+    try {
+      const group = session.trace_picture(id, colours, smoothing);
+      setTraceFor(null);
+      setSelected(group);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Trace the picture: ${said(err)}`);
+    }
+  };
+
+  /** Say the picked path in as few anchors as stay within a distance
+   * of it — the step after outlining, offsetting or combining, which
+   * leave hundreds of short steps nobody can reshape by hand. */
+  const simplifyPath = () => {
+    if (!session || selected === null) return;
+    if (!(typeof selectedKind === "object" && selectedKind !== null && "Vector" in selectedKind && "Path" in selectedKind.Vector.shape)) {
+      alert("Simplify path: only a path has anchors to spare.");
+      return;
+    }
+    const answer = window.prompt(
+      "How far may the simpler outline stray from this one, in pixels?",
+      "0.5",
+    );
+    if (answer === null) return;
+    const tolerance = typedNumber(answer);
+    if (tolerance === null || tolerance <= 0) {
+      alert(`Simplify path: “${answer}” is not a distance — type a number of pixels above nought, such as 0.5 or 2.`);
+      return;
+    }
+    try {
+      session.simplify_path(selected, tolerance);
+      refresh(session);
+    } catch (err) {
+      alert(`Simplify path: ${said(err)}`);
+    }
+  };
+
+  /** Turn the picked text into shapes, a letter each, grouped where the
+   * text was — what a print shop asks for, and what lets a letter be
+   * reshaped. The group is picked after it. */
+  const textToShapes = () => {
+    if (!session || selected === null) return;
+    if (!copiesAllow([selected], "turning the text into shapes")) return;
+    try {
+      const id = session.text_to_outlines(selected);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Text to shapes: ${said(err)}`);
+    }
+  };
+
+  /** Draw the picked layers into one picture that takes their place —
+   * merging, and with one layer picked, turning it into pixels that can
+   * be painted on. The picture is picked after it. */
+  const mergeLayers = () => {
+    if (!session || selectionSet.length === 0) return;
+    if (!copiesAllow(selectionSet, "merging")) return;
+    try {
+      const id = session.merge_layers(new Float64Array(selectionSet));
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Merge: ${said(err)}`);
+    }
+  };
+
+  const BOOLEAN_BUTTONS: [string, IconName, string][] = [
+    ["union", "union", "Unite shapes"],
+    ["subtract", "subtract", "Subtract the shapes above"],
+    ["intersect", "intersect", "Keep only the overlap"],
+    ["exclude", "exclude", "Keep everything but the overlap"],
+  ];
+
+  /** Copy the picked layer and take it out, as the shortcut does. */
+  const cutSelected = () => {
+    copySelected();
+    deleteSelected();
+  };
+
+  /** Frame the picked layers, or the whole page when nothing is picked. */
+  const zoomToSelection = () => {
+    const host = hostRef.current;
+    if (!host) return;
+    // What is picked out of the page first, as Fill selection and Crop to
+    // selection read "selection"; the picked layers where there is none.
+    const region = session?.region_export_box(-1) ?? [];
+    const box: [number, number, number, number] | null =
+      region.length === 4
+        ? [region[0], region[1], region[0] + region[2], region[1] + region[3]]
+        : selectionSet.length > 0
+          ? unionBounds(selectionSet)
+          : null;
+    if (!box) {
+      fitView();
+      return;
+    }
+    const [w, h] = [Math.max(1, box[2] - box[0]), Math.max(1, box[3] - box[1])];
+    const zoom = Math.min(
+      8,
+      Math.max(
+        0.05,
+        Math.min(host.clientWidth / w, host.clientHeight / h) * 0.8,
+      ),
+    );
+    setView({
+      zoom,
+      x: host.clientWidth / 2 - (box[0] + w / 2) * zoom,
+      y: host.clientHeight / 2 - (box[1] + h / 2) * zoom,
+    });
+  };
+
+  const ALIGN_BUTTONS: [string, IconName, string][] = [
+    ["left", "alignLeft", "Align left edges"],
+    ["center-h", "alignCenterH", "Align horizontal centres"],
+    ["right", "alignRight", "Align right edges"],
+    ["top", "alignTop", "Align top edges"],
+    ["middle-v", "alignMiddleV", "Align vertical centres"],
+    ["bottom", "alignBottom", "Align bottom edges"],
+    ["distribute-h", "distributeH", "Space evenly across"],
+    ["distribute-v", "distributeV", "Space evenly down"],
+  ];
+
+  const groupSelection = () => {
+    if (!session || selectionSet.length === 0 || !groupable) return;
+    try {
+      // Numbered after the groups this document has, not a count kept
+      // across documents (and of tries that failed).
+      const taken = new Set(layers.map((l) => l.name));
+      let n = layers.filter((l) => l.kind === "group").length + 1;
+      while (taken.has(`Group ${n}`)) n++;
+      const id = session.group_nodes(
+        new Float64Array(selectionSet),
+        `Group ${n}`,
+      );
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Group: ${said(err)}`);
+    }
+  };
+
+  /** Confine the picked layers to the layer below each of them, or let
+   * them out again — one entry however many are picked. The whole
+   * selection follows the first one's state, so a mixed selection ends up
+   * agreeing rather than each flipping past the others. The bottom layer
+   * of a parent has nothing under it and is left alone. */
+  const clipSelection = () => {
+    if (!session || selectionSet.length === 0) return;
+    const rows = layers.filter(
+      (l) => selectionSet.includes(l.id) && l.index > 0,
+    );
+    if (rows.length === 0) return;
+    const clipped = !rows[0].clipped;
+    const cmds = rows.map((l) => ({
+      SetClipped: { id: l.id, clipped },
+    }));
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+
+  /** A live copy of the picked layer, beside it: it draws whatever that
+   * layer holds, wherever the copy is put, so changing the original
+   * changes every copy of it. */
+  const instanceSelected = () => {
+    if (!session || selected === null) return;
+    try {
+      const id = session.make_instance(selected);
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Copy: ${said(err)}`);
+    }
+  };
+
+  const ungroupSelection = () => {
+    if (!session || selected === null) return;
+    // The chord pressed over a layer that is not a group asks nothing:
+    // an alert box saying so was a window to dismiss for a no-op.
+    if (layers.find((l) => l.id === selected)?.kind !== "group") return;
+    if (!copiesAllow([selected], "ungrouping", true)) return;
+    try {
+      session.ungroup_node(selected);
+      setSelected(null);
+      setMultiSel([]);
+      refresh(session);
+    } catch (err) {
+      alert(`Ungroup: ${said(err)}`);
+    }
+  };
+
+  /** Anchor editing: index of the path anchor being dragged, with the
+   * path's points and transform captured at drag start (each move derives
+   * from these, so renormalization never accumulates drift). */
+  /** The anchor last pressed, on which layer: where Cut the path cuts. */
+  const pickedAnchorRef = useRef<{ id: number; idx: number } | null>(null);
+
+  const anchorDragRef = useRef<{
+    idx: number;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+    t0: Transform;
+  } | null>(null);
+
+  const onAnchorPointerDown = (e: React.PointerEvent, idx: number) => {
+    if (handleRefuses(e)) return;
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    e.stopPropagation();
+    // A locked path's anchors are as held as the rest of it.
+    if (selectedLocked()) return;
+    // The anchor last taken hold of is the one a cut is made at.
+    pickedAnchorRef.current = { id: selected, idx };
+    // Alt takes the anchor off rather than moving it — the gesture that
+    // pairs with double-clicking the outline to put one on.
+    if (e.altKey) {
+      try {
+        session.remove_anchor(selected, idx);
+      } catch (err) {
+        alert(`Remove anchor: ${said(err)}`);
+        return;
+      }
+      refresh(session);
+      return;
+    }
+    anchorDragRef.current = {
+      idx,
+      vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
+      t0: toTransform(session.transform_of(selected)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onAnchorPointerMove = (e: React.PointerEvent) => {
+    const drag = anchorDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    if (!("Path" in drag.vector.shape)) return;
+    const [dx, dy] = layerPoint(e);
+    const { t0 } = drag;
+    const path = drag.vector.shape.Path;
+    const pts = path.points.map((p) => [...p] as [number, number]);
+    // Into the path's own space through the whole of its transform, a
+    // turn and a skew as well as a scale.
+    const own = inverseOf(t0);
+    if (!own) return;
+    pts[drag.idx] = own(dx, dy);
+    // Keep anchors normalized to a (0,0) origin; the shift moves into the
+    // node transform so bounds and handles stay correct.
+    const minX = Math.min(...pts.map((p) => p[0]));
+    const minY = Math.min(...pts.map((p) => p[1]));
+    const norm = pts.map((p) => [p[0] - minX, p[1] - minY] as [number, number]);
+    // A compound path's other rings are in the same space: they move by
+    // the same shift, or every hole slid with the corner being dragged.
+    const subpaths = (path.subpaths ?? []).map((ring) =>
+      ring.map((p) => [p[0] - minX, p[1] - minY] as [number, number]),
+    );
+    preview({
+      Batch: [
+        {
+          SetKind: {
+            id: selected,
+            kind: {
+              Vector: {
+                ...drag.vector,
+                shape: {
+                  Path: { ...path, points: norm, subpaths },
+                },
+              },
+            },
+          },
+        },
+        {
+          SetTransform: {
+            id: selected,
+            transform: {
+              ...t0,
+              e: t0.e + minX * t0.a + minY * t0.c,
+              f: t0.f + minX * t0.b + minY * t0.d,
+            },
+          },
+        },
+      ],
+    });
+  };
+
+  const onAnchorPointerUp = () => {
+    anchorDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  /** Curve-handle editing. Same capture-at-drag-start discipline as
+   * anchors; unlike anchors, handles are offsets from their anchor, so
+   * nothing needs renormalizing and the transform is left alone. */
+  const curveDragRef = useRef<{
+    idx: number;
+    /** 0 = incoming handle, 2 = outgoing (index into the [in, out] pair). */
+    side: 0 | 2;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+    t0: Transform;
+  } | null>(null);
+
+  const onCurveHandleDown = (
+    e: React.PointerEvent,
+    idx: number,
+    side: 0 | 2,
+  ) => {
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    // Middle button, Space and the Hand pan from here, as from any handle.
+    if (handleRefuses(e)) return;
+    e.stopPropagation();
+    if (selectedLocked()) return;
+    curveDragRef.current = {
+      idx,
+      side,
+      vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
+      t0: toTransform(session.transform_of(selected)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onCurveHandleMove = (e: React.PointerEvent) => {
+    const drag = curveDragRef.current;
+    if (!drag || !session || selected === null) return;
+    // A pointermove with no button down is a hover, not a drag. Without
+    // this a hover over any handle after a drag re-applies that drag's
+    // captured state, quietly undoing whatever happened since.
+    if (e.buttons === 0) return;
+
+    if (!("Path" in drag.vector.shape)) return;
+    const [dx, dy] = layerPoint(e);
+    const { t0, idx, side } = drag;
+    const path = drag.vector.shape.Path;
+    const anchor = path.points[idx];
+    // Offsets are in the path's own space, like the anchors themselves.
+    const own = inverseOf(t0);
+    if (!own) return;
+    const [lx, ly] = own(dx, dy);
+    const ox = lx - anchor[0];
+    const oy = ly - anchor[1];
+    const handles = withHandles(path).map(
+      (h, i) => (i === idx ? [...h] : h) as [number, number, number, number],
+    );
+    handles[idx][side] = ox;
+    handles[idx][side + 1] = oy;
+    // The pair points opposite ways so the curve stays smooth through its
+    // anchor, which is what dragging one of a pair is understood to mean.
+    // Alt breaks the pairing and moves only the handle under the cursor —
+    // how a corner gets made.
+    if (!e.altKey) {
+      handles[idx][side === 0 ? 2 : 0] = -ox;
+      handles[idx][side === 0 ? 3 : 1] = -oy;
+    }
+    preview({
+      SetKind: {
+        id: selected,
+        kind: {
+          Vector: {
+            ...drag.vector,
+            shape: { Path: { ...path, handles } },
+          },
+        },
+      },
+    });
+  };
+
+  /** Rotation: the knob above the selection turns the node about the
+   * centre of its bounds. Composed onto the transform captured at drag
+   * start, so the gesture is one rotation rather than an accumulation of
+   * small ones that drift. */
+  const rotateDragRef = useRef<{
+    t0: Transform;
+    centre: [number, number];
+    start: number;
+  } | null>(null);
+
+  const onRotatePointerDown = (e: React.PointerEvent) => {
+    if (handleRefuses(e)) return;
+    if (!session || selected === null || !selBounds || selBounds.length !== 4)
+      return;
+    e.stopPropagation();
+    const inv = inverseOf(toTransform(session.parent_space_of(selected)));
+    const docCentre: [number, number] = [
+      selBounds[0] + selBounds[2] / 2,
+      selBounds[1] + selBounds[3] / 2,
+    ];
+    const centre: [number, number] = inv ? inv(...docCentre) : docCentre;
+    const [px, py] = layerPoint(e);
+    rotateDragRef.current = {
+      t0: toTransform(session.transform_of(selected)),
+      centre,
+      start: Math.atan2(py - centre[1], px - centre[0]),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onRotatePointerMove = (e: React.PointerEvent) => {
+    const drag = rotateDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    const [px, py] = layerPoint(e);
+    const [cx, cy] = drag.centre;
+    let d = Math.atan2(py - cy, px - cx) - drag.start;
+    // Shift snaps to 15 degrees, the usual courtesy for straightening up.
+    if (e.shiftKey) d = Math.round(d / (Math.PI / 12)) * (Math.PI / 12);
+    const [cos, sin] = [Math.cos(d), Math.sin(d)];
+    const t = drag.t0;
+    preview({
+      SetTransform: {
+        id: selected,
+        transform: {
+          a: cos * t.a - sin * t.b,
+          b: sin * t.a + cos * t.b,
+          c: cos * t.c - sin * t.d,
+          d: sin * t.c + cos * t.d,
+          e: cos * (t.e - cx) - sin * (t.f - cy) + cx,
+          f: sin * (t.e - cx) + cos * (t.f - cy) + cy,
+        },
+      },
+    });
+  };
+
+  const onRotatePointerUp = () => {
+    rotateDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  /** The angle the picked layer is turned by, in degrees. Read off its
+   * transform's own first column, which is where a rotation lives: a
+   * layer that has also been sheared has no single angle, and this is
+   * the one its own x axis sits at. */
+  const selAngle = (): number => {
+    if (!session || selected === null) return 0;
+    const t = toTransform(session.transform_of(selected));
+    return (Math.atan2(t.b, t.a) * 180) / Math.PI;
+  };
+
+  /** Turn the picked layer to an angle rather than by one: the knob is
+   * for turning by eye, and this is for the times a thing has to be at
+   * forty-five degrees exactly. About the middle of its own box, like
+   * the knob, so typing an angle turns it where it stands. */
+  /** Whether the layer the panel shows is locked: nothing moves it, as
+   * nothing nudges, flips or aligns it. */
+  const selectedLocked = () => heldByLock(selected);
+  const setAngle = (degrees: number) => {
+    if (!session || selected === null || !selBounds || selBounds.length !== 4 || selectedLocked()) {
+      return;
+    }
+    const t = toTransform(session.transform_of(selected));
+    const d = (degrees * Math.PI) / 180 - Math.atan2(t.b, t.a);
+    if (!Number.isFinite(d) || Math.abs(d) < 1e-6) return;
+    const inv = inverseOf(toTransform(session.parent_space_of(selected)));
+    const docCentre: [number, number] = [
+      selBounds[0] + selBounds[2] / 2,
+      selBounds[1] + selBounds[3] / 2,
+    ];
+    const [cx, cy] = inv ? inv(...docCentre) : docCentre;
+    const [cos, sin] = [Math.cos(d), Math.sin(d)];
+    run({
+      SetTransform: {
+        id: selected,
+        transform: {
+          a: cos * t.a - sin * t.b,
+          b: sin * t.a + cos * t.b,
+          c: cos * t.c - sin * t.d,
+          d: sin * t.c + cos * t.d,
+          e: cos * (t.e - cx) - sin * (t.f - cy) + cx,
+          f: sin * (t.e - cx) + cos * (t.f - cy) + cy,
+        },
+      },
+    });
+  };
+
+  /** How far the picked layer's sides lean off its own upright, in
+   * degrees — positive with the top to the right, the way italic
+   * leans. A transform is a turn, then a lean, then a scale — the angle
+   * above is the turn — and the lean is what is left of the second axis
+   * once the turn is taken out: how far it runs along the first,
+   * against how far it runs across it. */
+  const selSkew = (): number => {
+    if (!session || selected === null) return 0;
+    const t = toTransform(session.transform_of(selected));
+    const th = Math.atan2(t.b, t.a);
+    const [cos, sin] = [Math.cos(th), Math.sin(th)];
+    const along = cos * t.c + sin * t.d;
+    const across = -sin * t.c + cos * t.d;
+    if (Math.abs(across) < 1e-9) return 0;
+    // Down the page is +y, so a top that leans right runs back along x.
+    return (Math.atan(-along / across) * 180) / Math.PI;
+  };
+
+  /** Lean the picked layer's sides to an angle, keeping its turn, its
+   * scale and the middle of its box where they are. */
+  const setSkew = (degrees: number) => {
+    if (!session || selected === null || selectedLocked()) return;
+    const lb = session.local_bounds_of(selected);
+    if (lb.length !== 4) return;
+    const d = Math.max(-85, Math.min(85, degrees));
+    const t = toTransform(session.transform_of(selected));
+    const th = Math.atan2(t.b, t.a);
+    const [cos, sin] = [Math.cos(th), Math.sin(th)];
+    const across = -sin * t.c + cos * t.d;
+    if (Math.abs(across) < 1e-9) return;
+    const along = -across * Math.tan((d * Math.PI) / 180);
+    const next: Transform = {
+      a: t.a,
+      b: t.b,
+      c: cos * along - sin * across,
+      d: sin * along + cos * across,
+      e: 0,
+      f: 0,
+    };
+    if (Math.abs(next.c - t.c) < 1e-9 && Math.abs(next.d - t.d) < 1e-9) return;
+    // The middle of its own box stays where it is on the page.
+    const [mx, my] = [(lb[0] + lb[2]) / 2, (lb[1] + lb[3]) / 2];
+    next.e = t.a * mx + t.c * my + t.e - (next.a * mx + next.c * my);
+    next.f = t.b * mx + t.d * my + t.f - (next.b * mx + next.d * my);
+    run({ SetTransform: { id: selected, transform: next } });
+  };
+
+  /** Gradient geometry on the canvas: the ends of a linear ramp, the centre
+   * and rim of a radial one, and each stop's position along the line.
+   * Coordinates are the gradient's own — the shape's box, normalized — so
+   * dragging maps the cursor back through the layer and its box. */
+  const gradDragRef = useRef<{
+    part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number;
+    vector: Extract<NodeKind, { Vector: unknown }>["Vector"];
+  } | null>(null);
+
+  /** A pointer position in gradient coordinates: 0..1 across the selected
+   * layer's own bounding box. */
+  const gradPoint = (e: {
+    clientX: number;
+    clientY: number;
+  }): [number, number] => {
+    const [px, py] = layerPoint(e);
+    if (!session || selected === null || !selLocal) return [0, 0];
+    const inv = inverseOf(toTransform(session.transform_of(selected)));
+    const [lx, ly] = inv ? inv(px, py) : [px, py];
+    const [x0, y0, x1, y1] = selLocal;
+    const span = (a: number, b: number) => (Math.abs(b - a) < 1e-6 ? 1 : b - a);
+    return [(lx - x0) / span(x0, x1), (ly - y0) / span(y0, y1)];
+  };
+
+  const onGradHandleDown = (
+    e: React.PointerEvent,
+    part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number,
+  ) => {
+    if (handleRefuses(e)) return;
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    e.stopPropagation();
+    // Nor is it the start of a text selection: Shift held down on a knob
+    // would otherwise stretch the page's selection to it, and the next
+    // drag would pick that up and carry it off — a native drag, which
+    // cancels the pointer after its first move.
+    e.preventDefault();
+    gradDragRef.current = {
+      // Shift on the centre pulls the focus out of it, which sits under
+      // the centre until it has been moved somewhere of its own.
+      part: part === "centre" && e.shiftKey ? "focus" : part,
+      vector: JSON.parse(JSON.stringify(selectedKind.Vector)),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onGradHandleMove = (e: React.PointerEvent) => {
+    const drag = gradDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    const g = drag.vector.gradient;
+    if (!g) return;
+    const [u, v] = gradPoint(e);
+    let next = g;
+    if ("Linear" in g) {
+      const lin = g.Linear;
+      // Each end is dragged where it is seen, and the other stays where
+      // it is seen; what is stored is the box's ramp for that (`rampStored`).
+      const axes = selLocal && selToScreen ? boxAxes((a, b) => selToScreen!(selLocal![0] + a * (selLocal![2] - selLocal![0]), selLocal![1] + b * (selLocal![3] - selLocal![1]))) : null;
+      const seenEnd = (): [number, number] => {
+        const [d0, d1] = axes ? rampSeen(axes, [lin.to[0] - lin.from[0], lin.to[1] - lin.from[1]]) : [lin.to[0] - lin.from[0], lin.to[1] - lin.from[1]];
+        return [lin.from[0] + d0, lin.from[1] + d1];
+      };
+      const aimed = (from: [number, number], end: [number, number]) => {
+        const seen: [number, number] = [end[0] - from[0], end[1] - from[1]];
+        const [d0, d1] = axes ? rampStored(axes, seen) : seen;
+        return { Linear: { ...lin, from, to: [from[0] + d0, from[1] + d1] as [number, number] } };
+      };
+      if (drag.part === "from") next = aimed([u, v], seenEnd());
+      else if (drag.part === "to") next = aimed(lin.from, [u, v]);
+      else if (typeof drag.part === "number") {
+        // Project the cursor onto the ramp's line: a stop only has a
+        // position along it, not a position in the plane.
+        const [dx, dy] = [lin.to[0] - lin.from[0], lin.to[1] - lin.from[1]];
+        const len2 = dx * dx + dy * dy;
+        const t =
+          len2 < 1e-9
+            ? 0
+            : ((u - lin.from[0]) * dx + (v - lin.from[1]) * dy) / len2;
+        const stops = lin.stops.map((st, i) =>
+          i === drag.part ? { ...st, offset: Math.min(1, Math.max(0, t)) } : st,
+        );
+        next = { Linear: { ...lin, stops } };
+      }
+    } else if ("Conic" in g) {
+      // Its centre, or where round it the ramp starts.
+      const con = g.Conic;
+      if (drag.part === "centre") next = { Conic: { ...con, center: [u, v] } };
+      else if (drag.part === "angle") {
+        const deg = (Math.atan2(v - con.center[1], u - con.center[0]) * 180) / Math.PI;
+        next = { Conic: { ...con, angle: Math.round(deg < 0 ? deg + 360 : deg) } };
+      }
+    } else {
+      const rad = g.Radial;
+      if (drag.part === "centre") {
+        // The focus goes with the centre, keeping where it is from it.
+        const f = rad.focus;
+        const focus: [number, number] | null = f
+          ? [f[0] + u - rad.center[0], f[1] + v - rad.center[1]]
+          : null;
+        next = { Radial: { ...rad, center: [u, v], focus } };
+      } else if (drag.part === "focus") {
+        // Brought back onto the centre, there is no focus of its own.
+        const home = Math.hypot(u - rad.center[0], v - rad.center[1]) < 0.02;
+        next = { Radial: { ...rad, focus: home ? null : [u, v] } };
+      } else if (drag.part === "radius") {
+        const r = Math.hypot(...throughAxes(rad.axes, u - rad.center[0], v - rad.center[1]));
+        next = { Radial: { ...rad, radius: Math.max(0.02, r) } };
+      }
+    }
+    preview({
+      SetKind: {
+        id: selected,
+        kind: { Vector: { ...drag.vector, gradient: next } },
+      },
+    });
+  };
+
+  const onGradHandleUp = () => {
+    gradDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  /** Mask editing on the canvas. An ellipse mask is the box
+   * [0, 2rx] × [0, 2ry] of its own space, carried into the layer's parent
+   * space by its transform — which is turned when the mask came through
+   * a turned group, so the drags work in the mask's own space and keep
+   * the turn: worked out as an upright box from the translation alone,
+   * the knobs stood somewhere else and a nudge threw the turn away. */
+  const maskDragRef = useRef<{
+    corner: Handle | "move";
+    mask: Mask;
+    box: [number, number, number, number];
+    transform: Transform;
+    start: [number, number];
+  } | null>(null);
+
+  /** The ellipse's box in its own space, and the transform carrying it. */
+  const maskBox = (m: Mask | null): { box: [number, number, number, number]; transform: Transform } | null => {
+    if (!m || !("Vector" in m.kind)) return null;
+    const { shape, transform } = m.kind.Vector;
+    if (!("Ellipse" in shape)) return null;
+    return { box: [0, 0, shape.Ellipse.rx * 2, shape.Ellipse.ry * 2], transform };
+  };
+
+  const onMaskHandleDown = (e: React.PointerEvent, corner: Handle | "move") => {
+    if (handleRefuses(e)) return;
+    if (!session || selected === null || !selectedMask) return;
+    const held = maskBox(selectedMask);
+    if (!held || !invertT(held.transform)) return;
+    e.stopPropagation();
+    maskDragRef.current = {
+      corner,
+      mask: JSON.parse(JSON.stringify(selectedMask)),
+      box: held.box,
+      transform: held.transform,
+      start: layerPoint(e),
+    };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+
+  const onMaskHandleMove = (e: React.PointerEvent) => {
+    const drag = maskDragRef.current;
+    if (!drag || !session || selected === null) return;
+    if (e.buttons === 0) return;
+    const [px, py] = layerPoint(e);
+    const t = drag.transform;
+    let [x0, y0, x1, y1] = drag.box;
+    let transform: Transform;
+    if (drag.corner === "move") {
+      // Moved in the parent's space, as the pointer goes.
+      const [dx, dy] = [px - drag.start[0], py - drag.start[1]];
+      transform = { ...t, e: t.e + dx, f: t.f + dy };
+    } else {
+      // The pointer read in the mask's own space, where the box is
+      // upright; the corner across from the one held stays put.
+      const inv = invertT(t)!;
+      const [qx, qy] = [inv.a * px + inv.c * py + inv.e, inv.b * px + inv.d * py + inv.f];
+      const west = drag.corner === "nw" || drag.corner === "sw";
+      const north = drag.corner === "nw" || drag.corner === "ne";
+      const [fx, fy] = [west ? x1 : x0, north ? y1 : y0];
+      [x0, x1] = [Math.min(qx, fx), Math.max(qx, fx)];
+      [y0, y1] = [Math.min(qy, fy), Math.max(qy, fy)];
+      transform = { ...t, e: t.a * x0 + t.c * y0 + t.e, f: t.b * x0 + t.d * y0 + t.f };
+    }
+    preview({
+      SetMask: {
+        id: selected,
+        mask: {
+          ...drag.mask,
+          kind: {
+            Vector: {
+              shape: {
+                Ellipse: {
+                  rx: Math.max(MIN_SIZE, x1 - x0) / 2,
+                  ry: Math.max(MIN_SIZE, y1 - y0) / 2,
+                },
+              },
+              transform,
+            },
+          },
+        },
+      },
+    });
+  };
+
+  const onMaskHandleUp = () => {
+    maskDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  /** A gradient mask's two points, dragged on the canvas: either end on
+   * its own, or — by the line between them — both together. Previewed
+   * live, one step in the history. */
+  const gradMaskRef = useRef<{
+    end: "from" | "to" | "both";
+    mask: Mask;
+    start: [number, number];
+  } | null>(null);
+  const onGradMaskDown = (e: React.PointerEvent, end: "from" | "to" | "both") => {
+    if (!session || selected === null || !selectedMask || !("Gradient" in selectedMask.kind)) return;
+    if (handleRefuses(e)) return;
+    e.stopPropagation();
+    gradMaskRef.current = { end, mask: JSON.parse(JSON.stringify(selectedMask)), start: layerPoint(e) };
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onGradMaskMove = (e: React.PointerEvent) => {
+    const drag = gradMaskRef.current;
+    if (!drag || !session || selected === null || e.buttons === 0) return;
+    if (!("Gradient" in drag.mask.kind)) return;
+    const g = drag.mask.kind.Gradient;
+    const [px, py] = layerPoint(e);
+    const [dx, dy] = [px - drag.start[0], py - drag.start[1]];
+    const moved = (p: [number, number]): [number, number] => [p[0] + dx, p[1] + dy];
+    const from = drag.end === "to" ? g.from : moved(g.from);
+    const to = drag.end === "from" ? g.to : moved(g.to);
+    preview({ SetMask: { id: selected, mask: { ...drag.mask, kind: { Gradient: { ...g, from, to } } } } });
+  };
+  const onGradMaskUp = () => {
+    gradMaskRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  const onCurveHandleUp = () => {
+    handleDragRef.current = null;
+    // Let go of, or Ctrl+Z after it would take it for a drag still held.
+    curveDragRef.current = null;
+    if (session?.commit_preview()) refresh(session);
+  };
+
+  const jumpHistory = (delta: number) => {
+    if (!session || delta === 0) return;
+    const fromList = !!document.activeElement?.closest(".history");
+    session.jump(delta);
+    setSelected(null);
+    setMultiSel([]);
+    refresh(session);
+    // From the keyboard, the focus goes with the step now current: the
+    // rows are drawn afresh, and it stayed on the row in the same place,
+    // which is another step, so a second Enter stepped again.
+    if (fromList) {
+      requestAnimationFrame(() =>
+        historyListRef.current?.querySelector<HTMLElement>("button.current")?.focus({ preventScroll: true }),
+      );
+    }
+  };
+
+  // A layer picked on the canvas inside a folded group has its row shown:
+  // the groups above it unfold. Picked with no row, it had handles and a
+  // panel of numbers and nothing in the list said which it was.
+  // Only when what is picked changes: folding the group round a picked
+  // layer by its own button unfolded it again at once.
+  const unfoldedFor = useRef<NodeId | null>(null);
+  useEffect(() => {
+    if (selected === unfoldedFor.current) return;
+    unfoldedFor.current = selected;
+    if (selected === null || collapsed.length === 0) return;
+    const at = layers.findIndex((l) => l.id === selected);
+    if (at < 0) return;
+    const above: number[] = [];
+    let depth = layers[at].depth;
+    for (let i = at - 1; i >= 0 && depth > 0; i--) {
+      if (layers[i].depth < depth) {
+        above.push(layers[i].id as number);
+        depth = layers[i].depth;
+      }
+    }
+    if (above.some((id) => collapsed.includes(id))) {
+      setCollapsed((prev) => prev.filter((id) => !above.includes(id)));
+    }
+  }, [selected, layers, collapsed]);
+
+  /** Which layers hold others: the list runs parent-first, so a layer
+   * has children exactly when the row after it is one level deeper. */
+  const hasChildren = new Set(
+    layers
+      .filter((l, i) => layers[i + 1]?.depth === l.depth + 1)
+      .map((l) => l.id),
+  );
+  /** The rows the panel shows: everything, less what is inside something
+   * folded shut. Depth-first and parent-first, so one pass does it.
+   *
+   * Searched — by a word in the name, by a kind, or both — it is the
+   * layers that match and the groups they are in, folded or not, since
+   * a layer found inside a folded group is still the layer looked for
+   * and the groups are where it is. */
+  const LAYER_KINDS: Record<string, LayerInfo["kind"][]> = {
+    shapes: ["vector"],
+    pictures: ["raster", "paint", "clone"],
+    text: ["text"],
+    adjustments: ["adjustment", "filter"],
+    groups: ["group", "artboard", "instance"],
+  };
+  const searching = layerQuery.trim() !== "" || layerKind !== "";
+  const found = new Set<number>();
+  const around = new Set<number>();
+  if (searching) {
+    const q = layerQuery.trim().toLowerCase();
+    const byId = new Map(layers.map((l) => [l.id as number, l]));
+    for (const l of layers) {
+      const named = q === "" || l.name.toLowerCase().includes(q);
+      const kinded = layerKind === "" || (LAYER_KINDS[layerKind] ?? []).includes(l.kind);
+      if (named && kinded) {
+        found.add(l.id as number);
+        let up = l.parent as number | null;
+        while (up !== null && up !== undefined && byId.has(up)) {
+          around.add(up);
+          up = byId.get(up)!.parent as number | null;
+        }
+      }
+    }
+  }
+  const panelRows = (() => {
+    if (searching) {
+      return layers.filter((l) => found.has(l.id as number) || around.has(l.id as number));
+    }
+    const out: LayerInfo[] = [];
+    let hidingBelow: number | null = null;
+    for (const l of layers) {
+      if (hidingBelow !== null && l.depth > hidingBelow) continue;
+      hidingBelow = null;
+      out.push(l);
+      if (collapsed.includes(l.id)) hidingBelow = l.depth;
+    }
+    return out;
+  })();
+
+  const selectedLayer = layers.find((l) => l.id === selected) ?? null;
+  /** For a picked copy: the original's layers, and whether this copy
+   * already has one of its own in place of each. */
+  const overridable: { name: string; own: boolean }[] =
+    session && selectedLayer && selectedLayer.copies !== 0
+      ? (JSON.parse(session.overridable_json(selectedLayer.id)) as {
+          name: string;
+          own: boolean;
+        }[])
+      : [];
+  // Pinning is only a question inside a frame; a layer on the page has
+  // no edges to be measured from.
+  const inFrame =
+    selectedLayer !== null &&
+    layers.some(
+      (l) => l.id === selectedLayer.parent && l.kind === "artboard",
+    );
+  // Something has to be under a layer for it to be clipped to it, so the
+  // bottom-most layer of a parent cannot be.
+  const clippable = layers.some(
+    (l) => selectionSet.includes(l.id) && l.index > 0,
+  );
+  // Adjustment and filter layers act on everything below them and have no
+  // box of their own; everything else, groups included, can be moved,
+  // scaled and turned.
+  const resizable =
+    selectedLayer !== null &&
+    selectedLayer.kind !== "adjustment" &&
+    selectedLayer.kind !== "filter";
+  /** A locked layer keeps its outline — it is still the picked layer —
+   * but offers nothing to grab: it is not to be moved from the canvas. */
+  const movable = resizable && !heldByLock(selectedLayer.id);
+  /** Handles sit over the layer they belong to, which is exactly where a
+   * brush wants to paint, so the brush takes them off the canvas while it
+   * is the tool in hand. The outline stays: it still says what is picked. */
+  /** Whether the picked layer offers its resize handles. Only the move
+   * tool does: with any other up, the pointer is there to draw, paint or
+   * crop, and a handle sitting over the corner where a rect was about to
+   * start would resize what is picked instead of drawing anything. */
+  const grabbable = movable && tool === "Move";
+  const selBounds =
+    session && selected !== null && resizable
+      ? session.bounds_of(selected)
+      : null;
+  /** The selection box in the layer's own axes: its local bounds mapped
+   * through its transform, as four screen-space corners. Drawn instead of
+   * an axis-aligned box so it turns with a rotated layer, and so the resize
+   * handles sit on the corners they actually move. */
+  let selQuad: [number, number][] | null = null;
+  let selLocal: [number, number, number, number] | null = null;
+  /** One layer's own box as four screen-space corners, or null where it
+   * has no box to draw. */
+  const quadOf = (id: NodeId): [number, number][] | null => {
+    if (!session) return null;
+    const lb = session.local_bounds_of(id);
+    if (lb.length !== 4) return null;
+    const t = composeT(
+      toTransform(session.parent_space_of(id)),
+      toTransform(session.transform_of(id)),
+    );
+    const to = (x: number, y: number): [number, number] => [
+      view.x + (t.a * x + t.c * y + t.e) * view.zoom,
+      view.y + (t.b * x + t.d * y + t.f) * view.zoom,
+    ];
+    return [
+      to(lb[0], lb[1]),
+      to(lb[2], lb[1]),
+      to(lb[2], lb[3]),
+      to(lb[0], lb[3]),
+    ];
+  };
+  /** The document-space box round everything picked, when more than one
+   * layer is. Several layers resize as one about it — each carries its
+   * own turn and its own group, so the box the handles sit on is the
+   * upright one round the lot rather than any single layer's axes. */
+  const manyBox = ((): [number, number, number, number] | null => {
+    if (!session || movableSelection.length < 2) return null;
+    let box: [number, number, number, number] | null = null;
+    for (const id of movableSelection) {
+      const b = session.bounds_of(id);
+      if (b.length !== 4) continue;
+      const [x0, y0, x1, y1] = [b[0], b[1], b[0] + b[2], b[1] + b[3]];
+      box = box
+        ? [
+            Math.min(box[0], x0),
+            Math.min(box[1], y0),
+            Math.max(box[2], x1),
+            Math.max(box[3], y1),
+          ]
+        : [x0, y0, x1, y1];
+    }
+    return box;
+  })();
+  /** Maps a point in the selected layer's own space to screen. */
+  let selToScreen: ((x: number, y: number) => [number, number]) | null = null;
+  /** The selected layer's parent space — the space its own transform, and
+   * its mask's, are written against. */
+  let selParent: Transform | null = null;
+  if (session && selected !== null && resizable) {
+    const lb = session.local_bounds_of(selected);
+    if (lb.length === 4) {
+      selLocal = [lb[0], lb[1], lb[2], lb[3]];
+      // Draw against the document, so a layer inside a moved group is
+      // outlined where it actually is.
+      selParent = toTransform(session.parent_space_of(selected));
+      const t = composeT(
+        selParent,
+        toTransform(session.transform_of(selected)),
+      );
+      const toScreen = (x: number, y: number): [number, number] => [
+        view.x + (t.a * x + t.c * y + t.e) * view.zoom,
+        view.y + (t.b * x + t.d * y + t.f) * view.zoom,
+      ];
+      selToScreen = toScreen;
+      selQuad = [
+        toScreen(lb[0], lb[1]),
+        toScreen(lb[2], lb[1]),
+        toScreen(lb[2], lb[3]),
+        toScreen(lb[0], lb[3]),
+      ];
+    }
+  }
+  /** The picked picture's four corners in its own space — top left round
+   * to bottom left — and whether any has been moved off its rectangle.
+   * Ctrl on a corner handle moves the nearest of them, and once one has
+   * moved each wears a pin of its own. */
+  let selCorners: { quad: [number, number][]; moved: boolean } | null = null;
+  if (session && selected !== null && selToScreen && selectedLayer?.kind === "raster") {
+    const c = session.raster_corners(selected);
+    if (c.length === 9) {
+      selCorners = {
+        quad: [
+          [c[0], c[1]],
+          [c[2], c[3]],
+          [c[4], c[5]],
+          [c[6], c[7]],
+        ],
+        moved: c[8] === 1,
+      };
+    }
+  }
+  /** With more than one layer picked the handles sit on the box round
+   * the lot instead, and resize all of it. Everything else about the
+   * selection — the mask's grips, a gradient's, the geometry fields —
+   * goes on describing the one layer whose properties the panel shows,
+   * so only the quad changes here. */
+  if (manyBox) {
+    const to = (x: number, y: number): [number, number] => [
+      view.x + x * view.zoom,
+      view.y + y * view.zoom,
+    ];
+    selQuad = [
+      to(manyBox[0], manyBox[1]),
+      to(manyBox[2], manyBox[1]),
+      to(manyBox[2], manyBox[3]),
+      to(manyBox[0], manyBox[3]),
+    ];
+  }
+
+  let selectedKind: NodeKind | null = null;
+  let selectedMask: Mask | null = null;
+  let selectedEffects: Effect[] = [];
+  if (session && selectedLayer) {
+    try {
+      selectedKind = JSON.parse(
+        session.kind_json(selectedLayer.id),
+      ) as NodeKind;
+      selectedMask = JSON.parse(
+        session.mask_json(selectedLayer.id),
+      ) as Mask | null;
+      selectedEffects = JSON.parse(
+        session.effects_json(selectedLayer.id),
+      ) as Effect[];
+    } catch {
+      selectedKind = null;
+    }
+  }
+  /** The space the picked layer's mask is written in, for drawing it:
+   * wanted whether or not the layer has a box of its own, since an
+   * adjustment has none and a mask on one is a local adjustment. */
+  const maskParent: Transform | null =
+    session && selected !== null && selectedMask ? toTransform(session.parent_space_of(selected)) : null;
+
+  /** The tones behind the graphs that read them. Counted only while a
+   * layer that has such a graph is picked, and only once the document
+   * has settled: it costs a render of its own, and a slider being
+   * dragged would ask for one on every frame. */
+  useEffect(() => {
+    if (!session || selected === null) {
+      setHistogram(null);
+      return;
+    }
+    const wanted =
+      selectedKind !== null &&
+      typeof selectedKind === "object" &&
+      "Adjustment" in selectedKind &&
+      ("Curves" in selectedKind.Adjustment || "Levels" in selectedKind.Adjustment);
+    if (!wanted) {
+      setHistogram(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      try {
+        setHistogram(session.histogram(selected));
+      } catch {
+        setHistogram(null);
+      }
+    }, 250);
+    return () => clearTimeout(id);
+  }, [session, selected, selectedKind, layers, saveTick]);
+
+  /** The colour to draw in: what the colour well says, standing for the
+   * palette entry it came out of when it came out of one. */
+  /** A colour from the well or the palette as the document holds one.
+   * In a CMYK document with a press profile, the inks the profile
+   * separates it into: the plain formula is not the profile's way, so
+   * #20a040 picked in the well was drawn as #0f836a, and an eyedropped
+   * colour kept in the palette became another ink. */
+  // Every chip, well and tip shows an ink as this document draws it.
+  showInksWith(session);
+
+  const inkOf = (hex: string): AuthoredColor => {
+    if (!cmyk) return hexColor(hex);
+    const n = parseInt(hex.slice(1, 7), 16);
+    const sep = session ? session.separate(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255) : [];
+    return sep.length === 4 ? { Cmyk: { c: sep[0], m: sep[1], y: sep[2], k: sep[3], a: 1 } } : hexToCmykColor(hex);
+  };
+
+  const currentInk = (): AuthoredColor => {
+    const flat = inkOf(fill);
+    return inkFrom ? { Named: { name: inkFrom, means: flat } } : flat;
+  };
+
+  /** The palette entry the picked layer's colour stands for, if it stands
+   * for one. Shown on the entry itself: a colour reached for by name has
+   * to look different from the same colour typed in, since only one of
+   * them follows the palette. */
+  const linkedSwatch = ((): string | null => {
+    if (!selectedKind || typeof selectedKind !== "object") return null;
+    const paint =
+      "Vector" in selectedKind
+        ? selectedKind.Vector.fill
+        : "Text" in selectedKind
+          ? selectedKind.Text.fill
+          : null;
+    return paint ? swatchName(paint) : null;
+  })();
+
+  /** Give the picked shape or block of text a colour, and draw with it
+   * from here on. With `named`, the colour stands for that palette entry
+   * rather than being a copy of it: change the entry later and this layer
+   * follows. */
+  /** The rail's fill well. Its `change` is when the system's picker is
+   * put away with a colour chosen, which is when a colour has been
+   * used; React's own `onChange` is every step of a drag through the
+   * picker, and the row would fill with the colours passed on the way. */
+  const fillWell = useRef<HTMLInputElement>(null);
+  const usedColourRef = useRef<(hex: string) => void>(() => {});
+  useEffect(() => {
+    const well = fillWell.current;
+    if (!well) return;
+    const chosen = () => usedColourRef.current(well.value);
+    well.addEventListener("change", chosen);
+    return () => well.removeEventListener("change", chosen);
+  }, []);
+  /** A colour that has been used goes to the front of the recent row. */
+  const usedColour = (hex: string) =>
+    setPrefs((p) => ({ recentColors: withRecentColor(p.recentColors, hex) }));
+  usedColourRef.current = usedColour;
+  const applyColour = (hex: string, named?: string, ink?: AuthoredColor) => {
+    usedColour(hex);
+    setFill(hex);
+    setInkFrom(named ?? null);
+    const flat = ink ?? inkOf(hex);
+    const colour: AuthoredColor = named
+      ? { Named: { name: named, means: flat } }
+      : flat;
+    // Every picked layer that holds a fill takes it, as one step in the
+    // history — picking every layer in one colour and giving them
+    // another is what "select the same fill" is for. A layer with no
+    // fill to take (a picture, an adjustment) is passed over.
+    if (!session) return;
+    const ids = [...new Set([...(selected !== null ? [selected] : []), ...multiSel])];
+    const cmds: Command[] = ids.flatMap((id): Command[] => {
+      const kind =
+        id === selected && selectedKind
+          ? selectedKind
+          : (JSON.parse(session.kind_json(id)) as NodeKind);
+      if (!kind || typeof kind !== "object") return [];
+      if ("Vector" in kind) {
+        return [{ SetKind: { id, kind: { Vector: { ...kind.Vector, fill: colour, gradient: null } } } }];
+      }
+      if ("Text" in kind) {
+        // Part of one block picked: that part takes it, as the panel's
+        // own colour gives it — a swatch recoloured the whole block.
+        const t = kind.Text;
+        const range = ids.length === 1 ? textRange(t) : null;
+        if (range) {
+          const runs = styleRange(t.text, t.runs ?? [], range[0], range[1], { fill: colour }, {
+            fill: t.fill,
+            bold: !!t.bold,
+            italic: !!t.italic,
+            underline: !!t.underline,
+            strike: !!t.strike,
+            font: t.font ?? "",
+            size: t.size,
+            baseline: 0,
+          });
+          return [{ SetKind: { id, kind: { Text: { ...t, runs } } } }];
+        }
+        return [{ SetKind: { id, kind: { Text: { ...t, fill: colour } } } }];
+      }
+      return [];
+    });
+    if (cmds.length === 1) run(cmds[0]);
+    else if (cmds.length > 1) run({ Batch: cmds });
+  };
+
+  /** Replace the selected layer's effect list. Slider drags preview, so a
+   * whole drag is one history entry. */
+  const setEffects = (effects: Effect[], gesture = false) => {
+    if (!selectedLayer) return;
+    const cmd: Command = { SetEffects: { id: selectedLayer.id, effects } };
+    if (gesture) preview(cmd);
+    else run(cmd);
+  };
+
+  /** The effect list with two entries exchanged. */
+  const swapEffects = (a: number, b: number): Effect[] => {
+    const next = [...selectedEffects];
+    [next[a], next[b]] = [next[b], next[a]];
+    return next;
+  };
+
+  /** Rewrite one field of the effect at `at`, keeping its variant. */
+  /** An effect moved by its button keeps the focus on the same button
+   * of the effect where it went: its row is drawn afresh in its new
+   * place, and the focus fell to the layer's row, where a second Enter
+   * picked the row rather than moving the effect again. */
+  const keepEffectFocus = (to: number, label: string) => {
+    requestAnimationFrame(() => {
+      const row = document.querySelectorAll<HTMLElement>(".effects > .effect")[to];
+      const button = row?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+      if (button && !button.disabled) button.focus({ preventScroll: true });
+      else row?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus({ preventScroll: true });
+    });
+  };
+  const tuneEffect = (
+    at: number,
+    patch: Record<string, number | AuthoredColor>,
+    gesture = false,
+  ) => {
+    const current = selectedEffects[at];
+    if (!current) return;
+    // Another control's gesture is that control's step: a colour picked
+    // in a well that kept the focus, then a slider moved, was one step,
+    // and one undo took both back.
+    if (gesture) {
+      const key = `${at}:${Object.keys(patch).sort().join()}`;
+      if (effectGesture.current !== null && effectGesture.current !== key) endGesture();
+      effectGesture.current = key;
+    }
+    const kind = effectKind(current);
+    const next = [...selectedEffects];
+    next[at] = { [kind]: { ...effectBody(current), ...patch } } as Effect;
+    setEffects(next, gesture);
+  };
+
+  /** The selected layer's visual box in document pixels, [x, y, w, h] —
+   * what the geometry fields show and edit. */
+  /** The picked layer is one that works on the whole page under it. */
+  const wholePageLayer =
+    selectedLayer?.kind === "adjustment" || selectedLayer?.kind === "filter";
+  const selBox = ((): [number, number, number, number] | null => {
+    if (!session || selected === null) return null;
+    const b = session.bounds_of(selected);
+    return b.length === 4 ? [b[0], b[1], b[2], b[3]] : null;
+  })();
+
+  /** A frame's own size — how many pixels it exports — which is what its
+   * W and H say and what typing them sets. The box round a turned frame is
+   * another number: shown, it read 367 straight after 300 was typed. */
+  const frameOwn = ((): [number, number] | null => {
+    if (!session || selected === null || selectedLayer?.kind !== "artboard") return null;
+    const k = JSON.parse(session.kind_json(selected)) as NodeKind;
+    return typeof k === "object" && "Artboard" in k
+      ? [k.Artboard.width, k.Artboard.height]
+      : null;
+  })();
+
+  /** Type an exact position or size. Moving is a translation in the
+   * layer's own parent space; resizing scales it about its own top-left,
+   * exactly as dragging the south-east handle does. For a turned layer the
+   * box is the one around it, so a size typed there is the size of that
+   * box rather than of the layer's own axes. */
+  const setGeometry = (field: "x" | "y" | "w" | "h", value: number) => {
+    if (!session || selected === null || !selBox || selectedLocked()) return;
+    const [x, y, w, h] = selBox;
+    const t0 = toTransform(session.transform_of(selected));
+    if (field === "x" || field === "y") {
+      const [dx, dy] = layerVector(
+        selected,
+        field === "x" ? value - x : 0,
+        field === "y" ? value - y : 0,
+      );
+      if (dx === 0 && dy === 0) return;
+      run({
+        SetTransform: {
+          id: selected,
+          transform: { ...t0, e: t0.e + dx, f: t0.f + dy },
+        },
+      });
+      return;
+    }
+    const from = field === "w" ? w : h;
+    if (from <= 0 || value <= 0 || !selLocal) return;
+    // A tenth of a pixel at the least: shrunk to a millionth, a layer's
+    // transform had no precision left to grow back with, and typing its
+    // width again came to half of it, or to nothing ever after.
+    value = Math.max(value, 0.1);
+    // A frame is given the size rather than scaled into it: what its
+    // width means is how many pixels it exports, so typing one has to
+    // change that number and leave its contents the size they are.
+    const kind: NodeKind | null =
+      selectedLayer?.kind === "artboard"
+        ? (JSON.parse(session.kind_json(selected)) as NodeKind)
+        : null;
+    if (kind && typeof kind === "object" && "Artboard" in kind) {
+      resizeFrame(
+        selected,
+        field === "w" ? value : kind.Artboard.width,
+        field === "h" ? value : kind.Artboard.height,
+        0,
+        0,
+        false,
+      );
+      return;
+    }
+    const ratio = value / from;
+    // With the two sides tied, typing one scales the other by the same
+    // amount, so the shape keeps its proportions rather than being
+    // squashed by a number typed into one field.
+    const [sx, sy] = keepRatio
+      ? [ratio, ratio]
+      : field === "w"
+        ? [ratio, 1]
+        : [1, ratio];
+    // Turned or leaning on the page, the box the fields show is the
+    // page's, not the layer's own: the stretch is made along the page's
+    // sides, about the box's corner, so the box comes out the size typed
+    // and stays where it was. Made along the layer's own sides, a layer
+    // turned a quarter typed 40 wide grew 40 tall instead.
+    const parent = toTransform(session.parent_space_of(selected));
+    const placed = composeT(parent, t0);
+    const back = invertT(parent);
+    // So too flipped or turned half round: along its own sides, its far
+    // edge stayed put and X jumped.
+    if ((Math.abs(placed.b) > 1e-9 || Math.abs(placed.c) > 1e-9 || placed.a < 0 || placed.d < 0) && back) {
+      const stretch: Transform = { a: sx, b: 0, c: 0, d: sy, e: (1 - sx) * x, f: (1 - sy) * y };
+      run({ SetTransform: { id: selected, transform: composeT(back, composeT(stretch, placed)) } });
+      return;
+    }
+    const [fx, fy] = [selLocal[0], selLocal[1]];
+    const [tx, ty] = [(1 - sx) * fx, (1 - sy) * fy];
+    run({
+      SetTransform: {
+        id: selected,
+        transform: {
+          a: t0.a * sx,
+          b: t0.b * sx,
+          c: t0.c * sy,
+          d: t0.d * sy,
+          e: t0.a * tx + t0.c * ty + t0.e,
+          f: t0.b * tx + t0.d * ty + t0.f,
+        },
+      },
+    });
+  };
+
+  /** Copy the selected layer and its contents, and select the copy — the
+   * copy is what you want to move next. */
+  const duplicateSelected = () => {
+    const ids = withoutNested(selectionSet);
+    if (!session || ids.length === 0) return;
+    try {
+      const copies = Array.from(
+        session.duplicate_nodes(new Float64Array(ids), true),
+      ) as NodeId[];
+      // The copies are what is picked afterwards, all of them: a
+      // duplicate is usually about to be moved somewhere.
+      setSelected(copies[0] ?? null);
+      setMultiSel(copies.slice(1));
+      refresh(session);
+    } catch (err) {
+      alert(`Duplicate: ${said(err)}`);
+    }
+  };
+
+  /** Attach an ellipse mask inscribed in the layer's current bounds. */
+  const addMask = (kind: "ellipse" | "rect" | "linear" | "radial") => {
+    if (!session || !selectedLayer) return;
+    // A mask is written in the layer's parent space, so inscribe it in the
+    // layer's bounds *there* — mapping its own box through its own
+    // transform — rather than in document bounds, which only agree while
+    // the layer sits at the top level.
+    // An adjustment or a filter has no picture of its own and so no box:
+    // it works on the whole page, which is the box its mask is laid in —
+    // the case that matters most, since an adjustment wearing a mask is a
+    // local adjustment. (It used to give up here, and a mask could not be
+    // added to one at all.)
+    const own = session.local_bounds_of(selectedLayer.id);
+    const lb = own.length === 4 ? own : [0, 0, docSize[0], docSize[1]];
+    const t =
+      own.length === 4
+        ? toTransform(session.transform_of(selectedLayer.id))
+        : { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+    // All four corners: two opposite ones give the box of a layer that
+    // is not turned, and a corner-to-corner sliver of one that is.
+    const corners = [
+      [lb[0], lb[1]],
+      [lb[2], lb[1]],
+      [lb[2], lb[3]],
+      [lb[0], lb[3]],
+    ];
+    const xs = corners.map(([x, y]) => t.a * x + t.c * y + t.e);
+    const ys = corners.map(([x, y]) => t.b * x + t.d * y + t.f);
+    const [x0, x1] = [Math.min(...xs), Math.max(...xs)];
+    const [y0, y1] = [Math.min(...ys), Math.max(...ys)];
+    const [w, h] = [x1 - x0, y1 - y0];
+    if (kind === "linear" || kind === "radial") {
+      // A graduated filter starts at the top and has faded by the middle,
+      // which is what a sky wants; a radial one sits in the middle, a
+      // little smaller than the layer. Both are moved by their two points
+      // on the canvas.
+      const cx = (x0 + x1) / 2;
+      run({
+        SetMask: {
+          id: selectedLayer.id,
+          mask: {
+            kind: {
+              Gradient:
+                kind === "linear"
+                  ? { radial: false, from: [cx, y0], to: [cx, (y0 + y1) / 2] }
+                  : { radial: true, from: [cx, (y0 + y1) / 2], to: [cx + w * 0.3, (y0 + y1) / 2 + h * 0.3] },
+            },
+            invert: false,
+          },
+        },
+      });
+      return;
+    }
+    run({
+      SetMask: {
+        id: selectedLayer.id,
+        mask: {
+          kind: {
+            Vector: {
+              // The layer's own box, turned and scaled with it: a box
+              // mask on a turned layer is that layer's outline, and an
+              // ellipse fits inside it rather than inside its bounds.
+              shape:
+                kind === "rect"
+                  ? { Rect: { width: lb[2] - lb[0], height: lb[3] - lb[1], radius: 0 } }
+                  : { Ellipse: { rx: (lb[2] - lb[0]) / 2, ry: (lb[3] - lb[1]) / 2 } },
+              transform: composeT(t, { a: 1, b: 0, c: 0, d: 1, e: lb[0], f: lb[1] }),
+            },
+          },
+          invert: false,
+        },
+      },
+    });
+  };
+
+  /** Make the picked shape the mask of the layer under it: the shape
+   * itself goes away and its outline becomes what shows of the layer.
+   * A mask is written in its owner's parent space, and both layers share
+   * a parent, so the shape's own transform carries over unchanged. */
+  const maskWithSelectedShape = () => {
+    if (!session || selected === null || !selectedKind) return;
+    if (typeof selectedKind !== "object" || !("Vector" in selectedKind)) return;
+    const parent = layers.find((l) => l.id === selected)?.parent;
+    const siblings = layers.filter((l) => l.parent === parent);
+    // The panel lists topmost first, so the layer below is the next row.
+    const at = siblings.findIndex((l) => l.id === selected);
+    const below = siblings[at + 1];
+    if (!below) {
+      alert("Masking needs a layer underneath the shape.");
+      return;
+    }
+    // Named for what it did: "Multiple edits" said nothing.
+    const masked: Command = {
+      Batch: [
+        {
+          SetMask: {
+            id: below.id,
+            mask: {
+              kind: {
+                Vector: {
+                  shape: selectedKind.Vector.shape,
+                  transform: toTransform(session.transform_of(selected)),
+                },
+              },
+              invert: false,
+            },
+          },
+        },
+        { RemoveNode: { id: selected } },
+      ],
+    } as Command;
+    try {
+      session.apply_as(JSON.stringify(masked), `Mask ${below.name} with ${selectedLayer?.name ?? "the shape"}`);
+    } catch (err) {
+      alert(`Mask: ${said(err)}`);
+    }
+    refresh(session);
+    setSelected(below.id);
+  };
+
+  let history: { past: string[]; future: string[] } = { past: [], future: [] };
+  if (session) {
+    try {
+      history = JSON.parse(session.history_json());
+    } catch {
+      // keep empty history on parse issues
+    }
+  }
+  /** The history as it stands, for the History list's one handler: each
+   * row's own handler held the history of the render that drew it, and
+   * a row React never redraws kept it — four thousand steps held
+   * millions of copies of their labels (memory grew as the square). */
+  const historyNow = useRef(history);
+  historyNow.current = history;
+  /** Whether there is work here that has not been saved. */
+  // Measured by which step the history stands at, not how long it is:
+  // saved, undone and edited otherwise, it is as long as it was and is
+  // not what was saved.
+  const unsaved = session ? session.history_mark() !== savedAt : false;
+  // The step the document is at stays in sight in the history list.
+  useEffect(() => {
+    // The list's own box is scrolled and nothing else: scrollIntoView
+    // scrolls every box around it as well, the panel among them, which
+    // moved a text block's settings under a hand that was picking out
+    // part of its text.
+    const list = historyListRef.current;
+    const box = list?.parentElement;
+    const row = list?.querySelector<HTMLElement>("button.current");
+    if (!box || !row) return;
+    const top = row.offsetTop - box.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+  }, [history.past.length, history.future.length]);
+
+  // A layer picked on the canvas has its row brought into sight, as the
+  // history keeps its step: with sixty layers, the row of one clicked on
+  // the page sat far below the list's end and nothing said which it was.
+  // The box that scrolls is moved, and nothing round it.
+  useEffect(() => {
+    const list = layerListRef.current;
+    if (selected === null || !list) return;
+    const row = list.querySelector<HTMLElement>(`li[data-id="${selected}"]`);
+    let box: HTMLElement | null = list;
+    while (box && !(box.scrollHeight > box.clientHeight && /auto|scroll/.test(getComputedStyle(box).overflowY))) {
+      box = box.parentElement;
+    }
+    if (!row || !box) return;
+    const top = row.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    const bottom = top + row.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+  }, [selected]);
+
+  const setKind = (kind: NodeKind, gesture: boolean) => {
+    if (!selectedLayer) return;
+    const cmd: Command = { SetKind: { id: selectedLayer.id, kind } };
+    if (gesture) preview(cmd);
+    else run(cmd);
+  };
+
+  /** Set the picked levels layer's input points to where the picture it
+   * sees actually starts and stops — the answer to "use the whole range"
+   * that most work on a photograph begins with. The engine reads it off
+   * the same histogram the panel draws, and it lands as one entry in the
+   * history, since it is one decision. */
+  const autoLevels = () => {
+    if (!session || selected === null) return;
+    const kind = selectedKind;
+    if (!kind || typeof kind !== "object" || !("Adjustment" in kind)) return;
+    const adj = kind.Adjustment;
+    if (!("Levels" in adj)) return;
+    let points: Float32Array;
+    try {
+      points = session.auto_levels(selected);
+    } catch (err) {
+      alert(`Auto levels: ${said(err)}`);
+      return;
+    }
+    if (points.length !== 2) return;
+    setKind(
+      {
+        Adjustment: {
+          Levels: { ...adj.Levels, in_black: points[0], in_white: points[1] },
+        },
+      },
+      false,
+    );
+  };
+
+  /** Take each channel of the picked curves layer to its own ends: a
+   * picture under a coloured light has one channel reaching further than
+   * another, and stretching each to where its own tones stop is the same
+   * picture without the light. Written as two points a channel, which is
+   * the plainest curve that says it, and left alone where a channel has
+   * nothing to stretch. */
+  const autoColour = () => {
+    if (!session || selected === null) return;
+    const kind = selectedKind;
+    if (!kind || typeof kind !== "object" || !("Adjustment" in kind)) return;
+    const adj = kind.Adjustment;
+    if (!("Curves" in adj)) return;
+    let ends: Float32Array;
+    try {
+      ends = session.auto_color(selected);
+    } catch (err) {
+      alert(`Auto colour: ${said(err)}`);
+      return;
+    }
+    if (ends.length !== 6) return;
+    const channel = (i: number): [number, number][] => {
+      const [lo, hi] = [ends[i * 2], ends[i * 2 + 1]];
+      // A channel with nothing to stretch is written as nothing at all,
+      // which is what the engine reads as the identity.
+      return hi - lo > 1e-3 && (lo > 0 || hi < 1)
+        ? [
+            [lo, 0],
+            [hi, 1],
+          ]
+        : [];
+    };
+    setKind(
+      {
+        Adjustment: {
+          Curves: {
+            ...adj.Curves,
+            red: channel(0),
+            green: channel(1),
+            blue: channel(2),
+          },
+        },
+      },
+      false,
+    );
+  };
+
+  /** Take the balance from a pixel that is meant to be grey: the engine
+   * reads what the layer is given at that point and answers the
+   * temperature and tint that would neutralize it. One entry, since it
+   * is one decision, and the picking stops whether or not there was
+   * anything there to read. */
+  const pickNeutral = (x: number, y: number) => {
+    setPickingNeutral(false);
+    if (!session || selected === null) return;
+    const kind = selectedKind;
+    if (!kind || typeof kind !== "object" || !("Adjustment" in kind)) return;
+    const adj = kind.Adjustment;
+    if (!("WhiteBalance" in adj)) return;
+    let read: Float32Array;
+    try {
+      read = session.neutral_balance(selected, x, y);
+    } catch (err) {
+      alert(`White balance: ${said(err)}`);
+      return;
+    }
+    if (read.length !== 2) return; // nothing there to balance
+    setKind(
+      { Adjustment: { WhiteBalance: { temperature: read[0], tint: read[1] } } },
+      false,
+    );
+  };
+
+  /** Reorder within the parent group: +1 raises toward the top. */
+  /** One step up or down, for everything picked. A run of layers moves
+   * as a run: the one nearest the end goes first, and any that are
+   * already against it hold the ones behind them, so a pair at the top
+   * stays a pair at the top instead of swapping places with each other. */
+  const reorderCommands = (direction: 1 | -1): Command[] => {
+    const ids = selectionSet;
+    if (ids.length === 0) return [];
+    const cmds: Command[] = [];
+    const rows = layers.filter((l) => ids.includes(l.id as NodeId));
+    for (const parent of new Set(rows.map((l) => l.parent))) {
+      const run_ = rows
+        .filter((l) => l.parent === parent)
+        .sort((a, b) => (direction > 0 ? b.index - a.index : a.index - b.index));
+      // How far the next one may go: the end of the list to begin with,
+      // then wherever the one ahead of it came to rest.
+      let limit = direction > 0 ? run_[0].sibling_count : -1;
+      for (const row of run_) {
+        const want = row.index + direction;
+        const to = direction > 0 ? Math.min(want, limit - 1) : Math.max(want, limit + 1);
+        if (to === row.index || to < 0 || to >= row.sibling_count) {
+          limit = row.index;
+          continue;
+        }
+        cmds.push({ MoveNode: { id: row.id, parent: row.parent, index: to } });
+        limit = to;
+      }
+    }
+    return cmds;
+  };
+
+  /** A step the engine may refuse in words, said: thrown from `run`, the
+   * refusal of a reorder among a copy's own layers was a page error, and
+   * the person saw nothing happen. */
+  const runOrSay = (what: string, cmd: Command) => {
+    try {
+      run(cmd);
+    } catch (err) {
+      alert(`${what}: ${said(err)}`);
+    }
+  };
+  const reorderSelected = (direction: 1 | -1) => {
+    const cmds = reorderCommands(direction);
+    if (cmds.length > 0) runOrSay("Move", cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+
+  /** The group or frame the picked layer sits in, when it sits in one.
+   * Hit testing only ever reports leaves, so a group is reachable from
+   * the canvas only by asking for the one a layer is in. */
+  const parentGroup = (): NodeId | null => {
+    if (!selectedLayer) return null;
+    const up = selectedLayer.parent as NodeId;
+    const row = layers.find((l) => l.id === up);
+    return row && HOLDS_CHILDREN.has(row.kind) ? up : null;
+  };
+
+  /** Lock or hide everything picked, in one entry: what the panel's own
+   * buttons do to one layer, offered where the layers are. */
+  const setLockedAll = (locked: boolean) => {
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    const cmds = ids.map((id) => ({ SetLocked: { id, locked } }) as Command);
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+  const setVisibleAll = (visible: boolean) => {
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    const cmds = ids.map((id) => ({ SetVisible: { id, visible } }) as Command);
+    run(cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+
+  /** All the way to the top of its own group, or all the way under it.
+   * Stepping there is as many clicks as there are layers in the way, and
+   * as many entries in the history; this is one of each. A layer already
+   * at that end is left alone rather than recorded as a move to where it
+   * already is. */
+  const orderSelected = (toFront: boolean) => {
+    const ids = selectionSet;
+    if (ids.length === 0) return;
+    const cmds: Command[] = [];
+    const rows = layers.filter((l) => ids.includes(l.id as NodeId));
+    for (const parent of new Set(rows.map((l) => l.parent))) {
+      const run_ = rows
+        .filter((l) => l.parent === parent)
+        .sort((a, b) => a.index - b.index);
+      // Already sitting together at that end, in that order: nothing to
+      // record, which is what keeps pressing it twice from filling the
+      // history with moves to where things already are.
+      const top = run_[0].sibling_count - run_.length;
+      if (run_.every((row, i) => row.index === (toFront ? top + i : i))) {
+        continue;
+      }
+      // Each in turn to the end, so the run comes out in the order it
+      // went in: bottom-first towards the front, top-first towards the
+      // back.
+      for (const row of toFront ? run_ : [...run_].reverse()) {
+        cmds.push({
+          MoveNode: {
+            id: row.id,
+            parent: row.parent,
+            index: toFront ? Math.max(0, row.sibling_count - 1) : 0,
+          },
+        });
+      }
+    }
+    if (cmds.length > 0) runOrSay("Move", cmds.length === 1 ? cmds[0] : { Batch: cmds });
+  };
+
+  /** Opacity and blend reach every picked layer, not only the one whose
+   * properties the panel happens to be showing — one history entry for
+   * the lot, named after how many it touched. */
+  const commitOpacity = () => {
+    if (opacityDraft !== null && session && selectionSet.length > 0) {
+      // What the drag showed goes back, and comes again as the one step
+      // named for how many layers it touched.
+      session.cancel_preview();
+      session.set_opacity_of(new Float64Array(selectionSet), opacityDraft);
+      refresh(session);
+    }
+    setOpacityDraft(null);
+  };
+
+  const dropOpacity = () => {
+    if (opacityDraft !== null && session) {
+      session.cancel_preview();
+      refresh(session);
+    }
+    setOpacityDraft(null);
+  };
+
+  /** Whether a layer can be blended: an adjustment or a filter rewrites
+   * what is under it and has nothing of its own to blend. */
+  const blends = (id: NodeId) => {
+    const kind = layers.find((l) => l.id === id)?.kind;
+    return kind !== "adjustment" && kind !== "filter";
+  };
+  const setBlendOfSelection = (blend: BlendMode) => {
+    // Given to the picked layers that can take it: a mode written onto
+    // an adjustment picked beside a shape did nothing, and stayed.
+    const ids = selectionSet.filter(blends);
+    if (!session || ids.length === 0) return;
+    session.set_blend_of(new Float64Array(ids), blend);
+    refresh(session);
+  };
+
+  /** The document's name as a file's: trimmed, and never empty. */
+  const fileName = () =>
+    docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled";
+  /** The document's part of an export's name: sixty at most, so a long
+   * document name leaves room for the region, comp or frame the file was
+   * made from. A save keeps the whole name — it is the document's. */
+  const exportName = () => graphemes(fileName()).slice(0, 60).join("").trim() || "untitled";
+
+  /** Every path that writes a file goes through here. Making the bytes
+   * can fail — a picture too big to hold at that multiple, a profile
+   * that will not load — and a failure that says nothing looks exactly
+   * like a browser that quietly refused the download. So each one is
+   * named, and says so. Answers whether the file was actually made. */
+  const saveMany = async (what: string, files: Outgoing[]): Promise<boolean> => {
+    try {
+      return await writeFiles(what, files, docPath);
+    } catch (err) {
+      alert(`${what} failed: ${said(err)}`);
+      return false;
+    }
+  };
+  const saveAs = (what: string, name: string, type: string, make: () => Uint8Array) =>
+    saveMany(what, [{ name, type, make }]);
+
+  /** A document opened or saved by path goes to the top of File › Open
+   * recent. */
+  const remember = (path: string) =>
+    setPrefs((p) => ({ recent: withRecent(p.recent, path) }));
+  const forget = (path: string) =>
+    setPrefs((p) => ({ recent: p.recent.filter((r) => r !== path) }));
+
+  /** One save at a time: a second press of Ctrl+S while the panel of the
+   * first is still up would otherwise put up a second panel. */
+  const saving = useRef(false);
+  /** Save the document, to `path` or, with none, to wherever the save
+   * panel says. Only the desktop shell has paths. */
+  const saveToPath = async (path: string | null) => {
+    if (!session || saving.current) return;
+    letHeldGo();
+    saving.current = true;
+    try {
+      // What is saved is the document as it is now, so it is now that
+      // is marked saved, whatever is done while the panel is up.
+      const at = session.history_mark();
+      const bytes = session.save();
+      const target =
+        path ?? (await chooseToSave("Save", `${fileName()}.chitra`, docPath, DOCUMENTS));
+      if (!target) return;
+      await writePath(target, bytes);
+      setDocPath(target);
+      // A name chosen in the panel is the document's name from now on.
+      // Saving back to the file it already has leaves alone whatever
+      // has been typed in the bar since.
+      if (!path && saysItsName(target)) setDocName(baseName(target).replace(/\.chitra$/i, ""));
+      setSavedAt(at);
+      remember(target);
+    } catch (err) {
+      alert(`Save failed: ${said(err)}`);
+    } finally {
+      saving.current = false;
+    }
+  };
+
+  const saveFile = async () => {
+    if (!session) return;
+    letHeldGo();
+    if (isTauri()) return saveToPath(docPath);
+    const at = session.history_mark();
+    const written = await saveAs(
+      "Save",
+      `${fileName()}.chitra`,
+      "application/zip",
+      () => session.save(),
+    );
+    if (written) setSavedAt(at);
+  };
+  /** Save somewhere else, and carry on there. Only where there is a
+   * somewhere: a browser's every save is already a new file. */
+  const saveFileAs = () => saveToPath(null);
+
+  const exportPng = () => {
+    if (!session) return;
+    letHeldGo();
+    saveAs("PNG export", `${exportName()}.png`, "image/png", () =>
+      session.export_png(),
+    );
+  };
+
+  /** Every frame on the page, each as its own PNG at its own size —
+   * what having frames is for. Named after the frame, so a page of them
+   * comes out as a set of named pictures. */
+  /** What a frame exports at, and what to call the file: the frame says
+   * which multiple it wants, and the name carries it the way every
+   * export of a screen has been named since screens had two of them. */
+  const frameScale = (id: NodeId): number => {
+    if (!session) return 1;
+    try {
+      const kind = JSON.parse(session.kind_json(id)) as NodeKind;
+      if (kind && typeof kind === "object" && "Artboard" in kind) {
+        const at = kind.Artboard.export_scale;
+        return Number.isFinite(at) && at > 0 ? at : 1;
+      }
+    } catch {
+      /* a frame that has gone exports at its own size */
+    }
+    return 1;
+  };
+  const frameFile = (name: string, at: number) =>
+    `${exportName()} - ${name}${at !== 1 ? `@${at}x` : ""}.png`;
+
+  /** The picked frame on its own, at its own size — one screen out of a
+   * page of them.
+   *
+   * This is a row on the menu and not a choice in the export window,
+   * because the multiple it comes out at is the *frame's* own
+   * (`export_scale`, saved with the document and carried to whoever
+   * opens it) and so is the name. The window offers a scale of its own,
+   * and the two multiplied together is not a thing anybody means. */
+  const exportArtboard = () => {
+    if (!session || selected === null) return;
+    const board = layers.find((l) => l.id === selected);
+    if (!board || board.kind !== "artboard") return;
+    const at = frameScale(board.id as NodeId);
+    saveAs("PNG export", frameFile(board.name, at), "image/png", () =>
+      session.export_artboard_png(board.id, at),
+    );
+  };
+
+  const exportArtboards = () => {
+    if (!session) return;
+    const boards = layers.filter((l) => l.kind === "artboard");
+    if (boards.length === 0) return;
+    // One frame that will not come out stops the set: a page of
+    // half-written files is worse than a page that says why.
+    saveMany(
+      "PNG export",
+      boards.map((board) => {
+        const at = frameScale(board.id as NodeId);
+        return {
+          name: frameFile(board.name, at),
+          type: "image/png",
+          make: () => session.export_artboard_png(board.id, at),
+        };
+      }),
+    );
+  };
+
+  /** Every frame as a page of one PDF, in the order they sit on the
+   * document — a brochure laid out as artboards comes out a brochure. */
+  const exportPdfFrames = () => {
+    if (!session) return;
+    saveAs("PDF export", `${exportName()}-pages.pdf`, "application/pdf", () =>
+      // The bleed and marks the export window was last left asking for:
+      // a brochure goes to the same press as its pages.
+      session.export_pdf_marked(true, prefs.pdfBleed, prefs.pdfCropMarks),
+    );
+  };
+
+  /** A PNG on the system clipboard, for pasting into other applications
+   * — the in-app clipboard carries layers, which nothing outside can
+   * read. Pasting it back here places it as an image, which is what a
+   * picture on the clipboard is.
+   *
+   * A region picked out of the page is what goes, when there is one: it
+   * is the more particular of the two, it is drawn on screen so nobody
+   * can be surprised by it, and it goes in the shape it was picked in
+   * rather than as the rectangle round that — which is the only way a
+   * lasso or a softened edge reaches another application at all.
+   * Otherwise the picked layers' box, as before. */
+  const copyAsImage = async () => {
+    if (!session) return;
+    const region = antRings.length > 0;
+    if (!region && selectionSet.length === 0) return;
+    const box = region ? null : unionBounds(selectionSet);
+    if (!region && !box) return;
+    const [x, y, w, h] = box
+      ? [box[0], box[1], box[2] - box[0], box[3] - box[1]]
+      : [0, 0, 0, 0];
+    if (!region && !(w > 0 && h > 0)) return;
+    try {
+      const png = region
+        ? session.selection_png(1)
+        : session.export_png_at(1, x, y, w, h);
+      const blob = new Blob([png as BlobPart], { type: "image/png" });
+      await navigator.clipboard.write([
+        new ClipboardItem({ "image/png": blob }),
+      ]);
+    } catch (err) {
+      alert(`Copy as image: ${said(err)}`);
+    }
+  };
+
+  /** Open a .chitra from its bytes, whether chosen or dropped. */
+  const openDocumentBytes = (
+    bytes: Uint8Array,
+    name?: string,
+    parts?: Map<string, Uint8Array>,
+  ): boolean => {
+    try {
+      const s = guardSession(WasmSession.open(bytes));
+      // Opened — a file, or a draft taken back from a closed tab, whose
+      // old slot lets it go — it is kept in this tab's slot straight away.
+      untouchedStart.current = false;
+      // A draft's pictures and originals, kept beside it, put back before
+      // anything is drawn.
+      for (const [part, b] of parts ?? []) s.restore_part(part, b);
+      fitSession(s, s.width, s.height);
+      // Faces the file carried are registered by the open; offer them.
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      // Its name without what it was called by: a document named .png
+      // (it is one whatever it is called) kept ".png", and was saved as
+      // "….png.chitra".
+      if (name) setDocName(name.replace(/\.[a-z0-9]{1,8}$/i, ""));
+      setDocDpi(s.dpi);
+      setSession(s);
+      setDocumentSize(s.width, s.height);
+      setCmyk(s.cmyk);
+      setSelected(null);
+      setHasIcc(s.has_cmyk_profile);
+      setProofing(false);
+      setGamutWarn(false);
+      setSavedAt(0);
+      // Bytes come with no path; one opened by path is given it back by
+      // the caller.
+      setDocPath(null);
+      // A picture the file names and does not hold is said, rather than
+      // opening as a blank layer that saving then writes down for good.
+      // And a font of the file's kept under a name of its own, because
+      // another face here already answers to its name.
+      const missing = JSON.parse(s.missing_pictures()) as string[];
+      const notes = [
+        ...missing.map((part) => `${part}, which the file names but does not hold`),
+        ...(JSON.parse(s.import_notes()) as string[]),
+      ];
+      setImportNotes(notes.length > 0 ? { name: name ?? "This document", notes } : null);
+      refresh(s);
+      fitView();
+      return true;
+    } catch (err) {
+      // Named, when there is a name: with several dropped, "the
+      // document" did not say which.
+      alert(`Could not open ${name ? name : "the document"}: ${said(err)}`);
+      return false;
+    }
+  };
+
+  /** Open a document by its path, in the desktop shell. A path that no
+   * longer opens — moved, deleted, a disk not there — is taken off the
+   * recent list, since offering it again would only fail again. */
+  /** Open a file by its path; whether a document of the editor's own
+   * opened from it. */
+  const openPath = async (path: string): Promise<boolean> => {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readPath(path);
+    } catch (err) {
+      alert(`Could not open ${baseName(path)}: ${said(err)}`);
+      forget(path);
+      return false;
+    }
+    if (importKind(path, bytes.subarray(0, 1024)) !== "document") {
+      openForeign(new File([bytes as BlobPart], baseName(path), { type: imageType(path) ?? "" }));
+      return false;
+    }
+    if (openDocumentBytes(bytes, baseName(path))) {
+      setDocPath(path);
+      remember(path);
+      return true;
+    }
+    return false;
+  };
+
+  /** Open something that is not a document of the editor's own — a
+   * Photoshop file, a PDF, a photograph: a new document, into which it
+   * is placed, and placing into an empty page gives the page its size.
+   * The place waits for the new session to be the one in hand. It has
+   * no file to save back to, so Save asks where, as a .chitra. */
+  const pendingOpen = useRef<File | null>(null);
+  /** The document an Open of another program's file replaced, kept until
+   * the file is read, to go back to if it cannot be. */
+  const openedOver = useRef<{
+    session: WasmSession;
+    name: string;
+    path: string | null;
+    savedAt: number;
+    proofing: boolean;
+    gamutWarn: boolean;
+  } | null>(null);
+  const openForeign = (file: File) => {
+    pendingOpen.current = file;
+    openedOver.current = session
+      ? { session, name: docName, path: docPath, savedAt, proofing, gamutWarn }
+      : null;
+    // The page it is opened onto is not something done until the file
+    // lands on it: a file that could not be read, or a window for it let
+    // go of, wrote that empty page over the draft the bar was offering.
+    const untouched = untouchedStart.current;
+    newDocument(false);
+    untouchedStart.current = untouched;
+    setDocName(file.name.replace(/\.[a-z0-9]+$/i, "") || "untitled");
+  };
+
+  /** Open, the way the platform opens: the system's panel in the shell,
+   * the browser's file input otherwise. */
+  const openDocument = async () => {
+    if (!mayDiscard()) return;
+    if (!isTauri()) {
+      pick(openInputRef);
+      return;
+    }
+    try {
+      const path = await chooseToOpen("Open", [
+        { name: "Everything Chitrakar opens", extensions: ["chitra", ...PLACE_EXTENSIONS] },
+        ...DOCUMENTS,
+      ]);
+      if (path) await openPath(path);
+    } catch (err) {
+      alert(`Open failed: ${said(err)}`);
+    }
+  };
+
+  // Closing the tab on work nobody has written down: the browser's own
+  // question is the only one that can be asked at that point, and it is
+  // only asked when there is something to ask about.
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [unsaved]);
+
+  /** Ask before throwing away work nobody has written down. The draft
+   * kept in the browser is a net for a crash, not for this: starting
+   * another document overwrites it a breath later, so this is the only
+   * moment at which anything can be said. */
+  const mayDiscard = () =>
+    !unsaved ||
+    window.confirm(
+      "This document has changes that have not been saved. Opening another leaves them behind.",
+    );
+
+  const openFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    file.arrayBuffer().then((buf) => {
+      const bytes = new Uint8Array(buf);
+      if (importKind(file.name, bytes.subarray(0, 1024), file.type) === "document") {
+        openDocumentBytes(bytes, file.name);
+      } else {
+        openForeign(file);
+      }
+    });
+  };
+
+  /** A file being read that takes a while — a camera's raw file is
+   * developed, a Photoshop file unpacked layer by layer — named in a
+   * line across the top while it is, so a pause is not taken for a
+   * hang. */
+  const [importing, setImporting] = useState<string | null>(null);
+  /** What a file had that did not come across as itself (a Photoshop
+   * file's effects, adjustments, drawn shapes), said once it is in. */
+  const [importNotes, setImportNotes] = useState<{ name: string; notes: string[] } | null>(null);
+  /** A PDF or Illustrator file waiting to be told which page, and at
+   * what resolution, it comes in as. */
+  const [pdfAsk, setPdfAsk] = useState<{
+    name: string;
+    bytes: Uint8Array;
+    sizes: [number, number][];
+  } | null>(null);
+
+  /** After it is placed: pick it, and frame the page if the page took
+   * the picture's size with it. */
+  const placed = useCallback(
+    (id: number, was: [number, number]) => {
+      if (!session) return;
+      setSelected(id);
+      setMultiSel([]);
+      refresh(session);
+      // A picture that took the page's size with it was a picture
+      // being opened, and the view was framed for the page that is
+      // gone: without this a photograph opens showing a corner of
+      // itself, which is the thing this was supposed to stop.
+      if (session.width !== was[0] || session.height !== was[1]) {
+        fitView();
+      }
+    },
+    [session, refresh, fitView],
+  );
+
+  /** Files brought in are read one after another, so several dropped
+   * together are placed (and their raw files waiting) in the order they
+   * came, not in whichever order their reads finished. */
+  const placing = useRef<Promise<void>>(Promise.resolve());
+
+  /** Bring a file in as a layer and pick it — whichever way it arrived:
+   * the file dialog, a drop on the canvas, a share, or a paste. Which
+   * road it takes is `importKind`'s to say: an SVG comes in as shapes, a
+   * Photoshop file as its layers, a PDF as a page drawn at a resolution
+   * asked for, a camera's raw file developed, anything else as pixels. */
+  const placeImageFile = useCallback(
+    (
+      file: File,
+      /** An Open, not a Place: what to do when the file cannot be read,
+       * which is put back the document it was opened over. */
+      undoOpen?: () => void,
+    ) => {
+      if (!session) return;
+      const name = file.name || "Pasted image";
+      const verb = undoOpen ? "open" : "place";
+      /** Whether the document this was asked for has gone meanwhile:
+       * then it is said, and goes nowhere. */
+      const gone = () => {
+        if (liveSession.current === session) return false;
+        alert(`${name} was not ${verb === "open" ? "opened" : "placed"}: the document it was going into was closed while it was read.`);
+        return true;
+      };
+      placing.current = placing.current.then(() => file.arrayBuffer()).then(async (buf) => {
+        if (gone()) return;
+        const raw = new Uint8Array(buf);
+        const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
+        setImportNotes(null);
+        if (kind === "pdf") {
+          // The PDF reader is fetched the first time one is opened.
+          setImporting(`Reading ${name}…`);
+          try {
+            const pdf = await pdfReader();
+            const sizes = JSON.parse(pdf.page_sizes(raw)) as [number, number][];
+            setImporting(null);
+            // Its question waits behind a window already up: asked under
+            // Preferences, the first Escape cancelled it unseen.
+            while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+              await new Promise((r) => setTimeout(r, 200));
+            }
+            // The files after it wait for its answer: two PDFs dropped
+            // together each ask in turn, where the second's question
+            // used to replace the first's and the first was lost.
+            // An Open waits on the window's answer: put away, or failing,
+            // the document it was opened over comes back.
+            pdfUndoOpen.current = undoOpen ?? null;
+            await new Promise<void>((answered) => {
+              pdfAnswered.current = answered;
+              setPdfAsk({ name, bytes: raw, sizes });
+            });
+          } catch (err) {
+            alert(`Could not open ${name}: ${said(err)}`);
+            undoOpen?.();
+          } finally {
+            setImporting(null);
+          }
+          return;
+        }
+        // The engine works on the page's own thread, so the line has to
+        // be drawn before the reading starts or it is never seen.
+        // A camera's raw file goes to the develop window, one at a time:
+        // several dropped together wait their turn.
+        if (kind === "raw") {
+          rawQueue.current.push({ name, bytes: raw, undoOpen, into: liveSession.current });
+          setRawWaiting(rawQueue.current.length);
+          if (!rawBusy.current) void openNextRawRef.current();
+          return;
+        }
+        const slow = kind === "psd" || raw.length > 24e6;
+        if (slow) {
+          setImporting(`Reading ${name}…`);
+          await nextPaint();
+        }
+        try {
+          const was: [number, number] = [session.width, session.height];
+          let id: number;
+          if (kind === "svg") id = session.place_svg(raw, file.name || "Pasted drawing");
+          else if (kind === "psd") id = session.place_psd(raw, name);
+          else {
+            const picture = await enginePicture(raw, file.type);
+            if (gone()) return;
+            id = session.place_image(picture, name);
+          }
+          placed(id, was);
+          if (kind === "psd" || kind === "picture" || kind === "svg") {
+            const notes = JSON.parse(session.import_notes()) as string[];
+            setImportNotes(notes.length > 0 ? { name, notes } : null);
+          }
+        } catch (err) {
+          alert(kind === "picture" ? unreadable(name, raw, err, verb) : `Could not ${verb} ${name}: ${said(err)}`);
+          undoOpen?.();
+        } finally {
+          if (slow) setImporting(null);
+        }
+      }).catch((err) => {
+        alert(`Could not read ${name}: ${said(err)}`);
+        undoOpen?.();
+      });
+    },
+    [session, placed],
+  );
+
+  useEffect(() => {
+    const file = pendingOpen.current;
+    if (!file || !session) return;
+    pendingOpen.current = null;
+    const before = openedOver.current;
+    openedOver.current = null;
+    placeImageFile(
+      file,
+      before
+        ? () => {
+            // A file that could not be read leaves the document it was
+            // opened over, rather than an empty page named after it.
+            const s = before.session;
+            setSession(s);
+            setDocumentSize(s.width, s.height);
+            setCmyk(s.cmyk);
+            setDocDpi(s.dpi);
+            setHasIcc(s.has_cmyk_profile);
+            setDocName(before.name);
+            setDocPath(before.path);
+            setSavedAt(before.savedAt);
+            // The session kept its proof; the buttons say so again.
+            setProofing(before.proofing);
+            setGamutWarn(before.gamutWarn);
+            setSelected(null);
+            setMultiSel([]);
+            refresh(s);
+            fitView();
+          }
+        : undefined,
+    );
+  }, [session, placeImageFile]);
+
+  /** A camera's raw file in the develop window: being placed (`layer`
+   * null) or developed again (the layer it is). */
+  const [developing, setDeveloping] = useState<{
+    name: string;
+    info: RawInfo;
+    initial: RawSettings;
+    layer: number | null;
+  } | null>(null);
+
+  /** The window's settings, developed in full: placed, or given to the
+   * layer as its new picture in one step of history. */
+  /** Raw files waiting for the develop window, in the order they came,
+   * and whether it is in use — a ref, since several files arrive before
+   * any state has been set. */
+  /** The raws waiting, each with the document it was asked into: a raw
+   * placed after File › New while another developed was dropped with the
+   * old document's queue. */
+  const rawQueue = useRef<
+    { name: string; bytes: Uint8Array; undoOpen?: () => void; into: WasmSession | null }[]
+  >([]);
+  /** The raw file in the develop window was an Open: what puts back the
+   * document it was opened over, if the window is put away. */
+  const rawUndoOpen = useRef<(() => void) | null>(null);
+  const rawBusy = useRef(false);
+  const [rawWaiting, setRawWaiting] = useState(0);
+  /** How many have gone through the window in this run, for "2 of 3". */
+  const rawDone = useRef(0);
+
+  /** The open raw file's packed mosaic, for the develop worker to develop
+   * in full when the window's settings are taken (`developer.ts`). */
+  const rawPacked = useRef<Uint8Array | null>(null);
+  /** A packed mosaic developed in full with `json` by the develop worker,
+   * or `null` where it cannot be (the page's own engine develops it). */
+  const developedElsewhere = async (packed: Uint8Array | null, name: string, json: string) =>
+    packed ? developElsewhere(packed, name, json, await lensProfileTexts()) : null;
+
+  /** The next raw file waiting, read and shown in the develop window. */
+  const openNextRaw = async () => {
+    // Those asked into a document that has since gone are let go of, and
+    // said; the rest are this document's, opened in turn.
+    const stale = rawQueue.current.filter((q) => q.into !== session);
+    if (stale.length > 0) {
+      rawQueue.current = rawQueue.current.filter((q) => q.into === session);
+      alert(
+        `${stale.map((q) => q.name).join(", ")} not opened: the document ${stale.length > 1 ? "they were" : "it was"} going into was closed.`,
+      );
+    }
+    const next = rawQueue.current.shift();
+    setRawWaiting(rawQueue.current.length);
+    if (!session || !next) {
+      rawBusy.current = false;
+      rawDone.current = 0;
+      return;
+    }
+    rawBusy.current = true;
+    setImporting(`Reading ${next.name}…`);
+    await nextPaint();
+    try {
+      const packed = await readRaw(next.bytes);
+      // The develop window waits its turn behind a window already up —
+      // it came up under Preferences with the keys, and an arrow meant
+      // for a preference changed the white balance unseen — and opens
+      // only on the document it was asked for.
+      setImporting(null);
+      while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      if (liveSession.current !== session) {
+        // This one, and any others asked into the same document; those
+        // asked into the new one go on, there.
+        const dropped = [next.name, ...rawQueue.current.filter((q) => q.into === session).map((q) => q.name)];
+        rawQueue.current = rawQueue.current.filter((q) => q.into !== session);
+        setRawWaiting(rawQueue.current.length);
+        rawBusy.current = false;
+        rawDone.current = 0;
+        alert(`${dropped.join(", ")} not opened: the document ${dropped.length > 1 ? "they were" : "it was"} going into was closed while ${dropped.length > 1 ? "they were" : "it was"} read.`);
+        if (rawQueue.current.length > 0) void openNextRawRef.current();
+        return;
+      }
+      await giveLensProfiles(session);
+      const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
+      rawPacked.current = packed;
+      rawUndoOpen.current = next.undoOpen ?? null;
+      // The pool's workers start while the sliders are moved.
+      void startDeveloper();
+      setDeveloping({ name: next.name, info, initial: RAW_DEFAULTS, layer: null });
+    } catch (err) {
+      // The reader is fetched the first time a raw file is opened; with
+      // no network and no copy kept, it is the reader that is missing,
+      // not the file that is wrong.
+      // A file whose parts point outside it (or back at themselves) is
+      // damaged, said as such: it was "a camera this editor does not
+      // know yet", and the browser's own words after it.
+      alert(
+        navigator.onLine === false
+          ? `Could not open ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
+          : /outside the bounds/i.test(String(err))
+            ? `Could not open ${next.name}: the file is damaged (its parts point outside it).`
+            : `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
+      );
+      next.undoOpen?.();
+      rawDone.current += 1;
+      void openNextRawRef.current();
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  /** The window's settings, developed in full: placed, or given to the
+   * layer as its new picture in one step of history. With `all`, every
+   * raw file still waiting is placed with the same settings too — the
+   * same light and exposure for a run of photographs taken together. */
+  /** Whether a Develop again is under way, from its window to its
+   * development landing (`rawBusy` is a first development's). */
+  const againBusy = useRef(false);
+  /** The newest `openNextRaw`, which reads the document in hand: one
+   * kept from before File › New read the old one. */
+  const openNextRawRef = useRef(openNextRaw);
+  openNextRawRef.current = openNextRaw;
+  const finishDevelop = async (given: RawSettings, all = false) => {
+    const d = developing;
+    setDeveloping(null);
+    if (!session || !d) {
+      againBusy.current = false;
+      return;
+    }
+    // The lens profile it is developed with, written down beside the
+    // settings (or taken off, where there is none now).
+    const { lens_profile: _, ...unprofiled } = given;
+    const settings: RawSettings =
+      d.info.lensProfile && !given.uncorrected ? { ...unprofiled, lens_profile: d.info.lensProfile } : unprofiled;
+    const json = JSON.stringify(settings);
+    const left = all ? rawQueue.current.splice(0) : [];
+    const total = rawDone.current + 1 + rawQueue.current.length + left.length;
+    const of = (n: number) => (total > 1 ? ` (${n} of ${total})` : "");
+    setImporting(`Developing ${d.name}${of(rawDone.current + 1)}…`);
+    await nextPaint();
+    try {
+      const was: [number, number] = [session.width, session.height];
+      const got = await developedElsewhere(rawPacked.current, d.name, json);
+      // Another document took the editor while this was developed (a
+      // file opened from elsewhere): said, rather than placed into a
+      // session nobody is looking at, or lost without a word.
+      if (liveSession.current !== session) {
+        setImporting(null);
+        rawQueue.current = rawQueue.current.filter((q) => q.into !== session);
+        setRawWaiting(rawQueue.current.length);
+        rawBusy.current = false;
+        rawDone.current = 0;
+        againBusy.current = false;
+        if (rawQueue.current.length > 0) void openNextRawRef.current();
+        alert(
+          d.layer === null
+            ? `${d.name} was not placed: the document it was going into was closed while it was developed.`
+            : `${d.name} was not developed again: its document was closed while it was developed.`,
+        );
+        return;
+      }
+      if (d.layer === null) {
+        placed(
+          got
+            ? session.place_raw_pixels(got.rgba, got.width, got.height, json)
+            : session.place_raw(json),
+          was,
+        );
+        rawDone.current += 1;
+      } else {
+        if (got) session.redevelop_pixels(d.layer, got.rgba, got.width, got.height, json);
+        else session.redevelop(d.layer, json);
+        refresh(session);
+      }
+    } catch (err) {
+      alert(`Could not develop ${d.name}: ${said(err)}`);
+      // An Open that came to nothing: the document it was opened over.
+      if (d.layer === null) {
+        rawUndoOpen.current?.();
+        rawUndoOpen.current = null;
+      }
+    } finally {
+      session.raw_close();
+      rawPacked.current = null;
+    }
+    for (const next of left) {
+      setImporting(`Developing ${next.name}${of(rawDone.current + 1)}…`);
+      await nextPaint();
+      try {
+        const was: [number, number] = [session.width, session.height];
+        const packed = await readRaw(next.bytes);
+        await giveLensProfiles(session);
+        session.raw_open(packed, next.bytes, next.name);
+        const got = await developedElsewhere(packed, next.name, json);
+        // The document went while this one was developed (File › New, an
+        // Open): what is left is not placed into a page nobody can see,
+        // whose layers then came back over the new one.
+        if (liveSession.current !== session) {
+          const lost = [next.name, ...left.slice(left.indexOf(next) + 1).map((q) => q.name)];
+          alert(`${lost.join(", ")} not placed: the document ${lost.length > 1 ? "they were" : "it was"} going into was closed while ${lost.length > 1 ? "they were" : "it was"} developed.`);
+          break;
+        }
+        placed(
+          got
+            ? session.place_raw_pixels(got.rgba, got.width, got.height, json)
+            : session.place_raw(json),
+          was,
+        );
+      } catch (err) {
+        alert(`Could not develop ${next.name}: ${said(err)}`);
+      } finally {
+        session.raw_close();
+        rawDone.current += 1;
+      }
+    }
+    setImporting(null);
+    againBusy.current = false;
+    // Developed and placed: the Open is done, nothing to go back to.
+    rawUndoOpen.current = null;
+    if (d.layer === null) void openNextRawRef.current();
+  };
+  const cancelDevelop = () => {
+    const d = developing;
+    setDeveloping(null);
+    againBusy.current = false;
+    session?.raw_close();
+    rawPacked.current = null;
+    if (d?.layer === null) {
+      // A raw file opened, put away undeveloped: the document it was
+      // opened over comes back, not an empty page named after it.
+      rawUndoOpen.current?.();
+      rawUndoOpen.current = null;
+      rawDone.current += 1;
+      void openNextRawRef.current();
+    }
+  };
+  /** Open the picked layer's raw file in the develop window again, with
+   * the settings it was developed with. */
+  const developAgain = async () => {
+    const layer = layers.find((l) => l.id === selected);
+    if (!session || !layer?.developed) return;
+    // Busy as a first development is, until it lands or is put away: a
+    // document dropped meanwhile opened the moment the window went, and
+    // the new development was lost.
+    againBusy.current = true;
+    // The file the document kept is read again by the raw module: the
+    // engine develops, it does not read raw files.
+    setImporting(`Reading ${layer.name}…`);
+    try {
+      const file = session.raw_original(layer.id);
+      const packed = await readRaw(file);
+      // Behind a window already up (Preferences, New document) it waits,
+      // as a first development does: opened under one, its arrow keys
+      // turned the white balance unseen.
+      setImporting(null);
+      while (document.querySelector(".modal-scrim, .sheet-scrim")) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      // Another document came while the file was read: the window would
+      // open on a layer that is not in it.
+      if (liveSession.current !== session) {
+        againBusy.current = false;
+        alert(`${layer.name} was not developed again: its document was closed while its raw file was read.`);
+        return;
+      }
+      await giveLensProfiles(session);
+      session.raw_open(packed, file, layer.name);
+      rawPacked.current = packed;
+      void startDeveloper();
+      const got = JSON.parse(session.raw_open_layer(layer.id)) as {
+        info: RawInfo;
+        settings: Partial<RawSettings>;
+      };
+      setDeveloping({
+        name: layer.name,
+        info: got.info,
+        // What the layer was developed with, as it was: a picture
+        // developed before there was a base curve has none.
+        initial: { ...withDefaults(got.settings), curve: got.settings.curve === true },
+        layer: layer.id,
+      });
+    } catch (err) {
+      againBusy.current = false;
+      alert(`${said(err)}`);
+    } finally {
+      setImporting(null);
+    }
+  };
+
+  /** The other picked layers developed from raw files, which the picked
+   * one's settings can be given to. */
+  const developedOthers = layers.filter(
+    (l) => l.developed && l.id !== selected && multiSel.includes(l.id),
+  );
+  /** Give the picked layer's develop settings to the other picked raw
+   * layers — Lightroom's Sync: a run of photographs taken under one light
+   * wants one development. Each file the document kept is read again by
+   * the raw module in turn and developed; all of them go into the history
+   * as one step. */
+  const developOthersLikeThis = async () => {
+    const source = layers.find((l) => l.id === selected);
+    if (!session || !source?.developed || developedOthers.length === 0) return;
+    const settings = session.developed_settings(source.id);
+    const others = developedOthers;
+    // Busy as a development is, so a file that arrives meanwhile waits:
+    // opened at once, it took the editor, and the panel then showed this
+    // document's layers over it — one deleted there was some other layer.
+    againBusy.current = true;
+    const gone = () => liveSession.current !== session;
+    try {
+      for (const [i, t] of others.entries()) {
+        if (gone()) break;
+        // A layer deleted meanwhile is passed over, not the end of the run.
+        if (!(JSON.parse(session.layers_json()) as LayerInfo[]).some((l) => l.id === t.id)) continue;
+        setImporting(`Developing ${t.name} (${i + 1} of ${others.length})…`);
+        await nextPaint();
+        const file = session.raw_original(t.id);
+        const packed = await readRaw(file);
+        await giveLensProfiles(session);
+        const info = JSON.parse(session.raw_open(packed, file, t.name)) as RawInfo;
+        // The lens profile each was developed with is its own, as its
+        // opening found it: the source's went on to a Fuji that never
+        // used it, which then said the profile was missing.
+        const { lens_profile: _, ...unprofiled } = JSON.parse(settings) as RawSettings;
+        const own = JSON.stringify(
+          info.lensProfile && !unprofiled.uncorrected ? { ...unprofiled, lens_profile: info.lensProfile } : unprofiled,
+        );
+        const got = await developedElsewhere(packed, t.name, own);
+        // Deleted while it was being developed: passed over, as one
+        // deleted before its turn is, rather than ending the run.
+        if (!(JSON.parse(session.layers_json()) as LayerInfo[]).some((l) => l.id === t.id)) continue;
+        if (got) session.stage_redevelop_pixels(t.id, got.rgba, got.width, got.height, own);
+        else session.stage_redevelop(t.id, own);
+      }
+    } catch (err) {
+      alert(`Could not develop every picture: ${said(err)}`);
+    } finally {
+      // What was developed before anything failed still goes in, as one step.
+      try {
+        if (!gone()) session.commit_staged_develop();
+      } finally {
+        session.raw_close();
+        setImporting(null);
+        againBusy.current = false;
+        // Drawn only if it is still the document in hand; said if not.
+        if (!gone()) refresh(session);
+        else alert("The develop settings were not given to the other pictures: their document was closed while they were developed.");
+      }
+    }
+  };
+
+  /** The PDF waiting for its page and resolution has been answered — or
+   * put away — and the files dropped after it may come in. */
+  const pdfAnswered = useRef<(() => void) | null>(null);
+  /** The PDF waiting was an Open: what puts back the document it was
+   * opened over, should the window be put away or the page not drawn. */
+  const pdfUndoOpen = useRef<(() => void) | null>(null);
+  const answerPdf = () => {
+    const go = pdfAnswered.current;
+    pdfAnswered.current = null;
+    go?.();
+  };
+  /** The page asked for, drawn at the resolution asked for. */
+  const placePdf = async (page: number, dpi: number) => {
+    const ask = pdfAsk;
+    setPdfAsk(null);
+    if (!session || !ask) {
+      answerPdf();
+      return;
+    }
+    setImporting(`Reading ${ask.name}…`);
+    await nextPaint();
+    try {
+      const was: [number, number] = [session.width, session.height];
+      const pdf = await pdfReader();
+      const drawn = unpackPage(pdf.render_page(ask.bytes, page, dpi));
+      // Named after the file and, for a file of more than one page, the page.
+      const label = ask.sizes.length > 1 ? `${ask.name} — page ${page + 1}` : ask.name;
+      placed(session.place_rgba(drawn.width, drawn.height, drawn.rgba, label), was);
+      pdfUndoOpen.current = null;
+    } catch (err) {
+      alert(`Could not ${pdfUndoOpen.current ? "open" : "place"} ${ask.name}: ${said(err)}`);
+      pdfUndoOpen.current?.();
+      pdfUndoOpen.current = null;
+    } finally {
+      setImporting(null);
+      answerPdf();
+    }
+  };
+
+  const placeImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) placeImageFile(file);
+  };
+
+  /** Files dropped on the canvas: images become layers, a .chitra opens.
+   * A drop that holds both opens the document and leaves the images —
+   * placing them would put them into the session the open just replaced. */
+  const onHostDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    takeFiles(Array.from(e.dataTransfer.files));
+  };
+
+  /** Files handed to the page — dropped on it, shared to it from another
+   * app, opened with it from a phone's files: a document opens, and
+   * every picture is placed. */
+  const takeFiles = (files: File[]) => {
+    // A file whose name says nothing — no extension, no type, as a share
+    // or a download often leaves it — is asked by its first bytes, as
+    // File › Open asks; one the editor cannot read is said, where it
+    // used to be dropped without a word.
+    void (async () => {
+      // And for the raws in hand to be developed and placed: the window
+      // goes before the development is placed, and a document opened in
+      // that moment took the session it was going into. Having waited,
+      // it is handed to the editor as it is *now*: this one was made
+      // when the file arrived, and asked whether there was unsaved work
+      // as the page was then — a photograph placed meanwhile was thrown
+      // away without the question.
+      if (mustWait(() => rawBusy.current || againBusy.current)) {
+        await windowsClosed(() => rawBusy.current || againBusy.current);
+        await nextPaint();
+        takeFilesRef.current(files);
+        return;
+      }
+      const kinds: (string | null)[] = [];
+      // By its bytes always, as File › Open goes: a document named .png
+      // was refused as no picture, and a PNG named .chitra as a damaged
+      // document, which then claimed to have opened.
+      for (const file of files) {
+        const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+        kinds.push(importKind(file.name, head, file.type));
+      }
+      const named = (f: File) => f.name || "a file";
+      let at = kinds.indexOf("document");
+      let opened = false;
+      if (at >= 0) {
+        // Opening by dropping is still opening: what has not been saved
+        // is asked about the same as by any other way in.
+        if (!mayDiscard()) return;
+      }
+      // A document that would not open has said so and is let go of; the
+      // next one dropped beside it is tried, where it was told it could
+      // not open "one at a time" after nothing had. What came with them
+      // is placed as though it had come alone if none opens.
+      while (at >= 0 && !opened) {
+        const doc = files[at];
+        opened = openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
+        if (!opened) {
+          files = files.filter((_, i) => i !== at);
+          kinds.splice(at, 1);
+          at = kinds.indexOf("document");
+        }
+      }
+      if (at >= 0 && opened) {
+        const doc = files[at];
+        // What came with it is not placed into it unasked — a document
+        // is opened onto a page of its own — but it is said, where it
+        // was left behind without a word. A document found by its bytes
+        // as much as one by its name.
+        const rest = files.map((f, i) => [f, kinds[i]] as const).filter(([f]) => f !== doc);
+        const docs = rest.filter(([, k]) => k === "document").map(([f]) => named(f));
+        const pictures = rest.filter(([, k]) => k && k !== "document").map(([f]) => named(f));
+        const unread = rest.filter(([, k]) => !k).map(([f]) => named(f));
+        const told: string[] = [];
+        if (pictures.length > 0) {
+          const many = pictures.length > 1;
+          told.push(
+            `${pictures.join(", ")} ${many ? "were" : "was"} not placed: drop ${many ? "them" : "it"} again onto the document to place ${many ? "them" : "it"}.`,
+          );
+        }
+        // A document is opened one at a time: a second dropped beside it
+        // was told to be dropped again "to place it", which opens it.
+        if (docs.length > 0) {
+          told.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+        }
+        if (unread.length > 0) {
+          told.push(`${unread.join(", ")} ${unread.length > 1 ? "are" : "is"} not something the editor can read.`);
+        }
+        if (told.length > 0) alert(`Opened ${named(doc)}. ${told.join(" ")}`);
+        return;
+      }
+      const unread: string[] = [];
+      const unopened: string[] = [];
+      files.forEach((file, i) => {
+        if (kinds[i] === "document") unopened.push(named(file));
+        else if (kinds[i]) placeImageFile(file);
+        else unread.push(named(file));
+      });
+      if (unread.length > 0) {
+        alert(
+          `${unread.length === 1 ? `${unread[0]} is not` : `${unread.join(", ")} are not`} a picture, a drawing or a document the editor can read.`,
+        );
+      }
+      // Another document beside one that would not open: one at a time.
+      if (unopened.length > 0) {
+        alert(`${unopened.join(", ")} ${unopened.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+      }
+    })();
+  };
+
+  /** Files dropped on the desktop shell's window. The shell takes a drop
+   * of files itself rather than handing it to the page — which would
+   * otherwise never see it at all — and says where they are, so a
+   * document dropped on the window has its file the way one opened from
+   * the panel does, and Save writes back to it. */
+  const onShellDrop = async (paths: string[]): Promise<void> => {
+    if (mustWait(() => rawBusy.current || againBusy.current)) {
+      await windowsClosed(() => rawBusy.current || againBusy.current);
+      await nextPaint();
+      return onShellDropRef.current(paths);
+    }
+    // As a drop on the page goes: the bytes decide where the name would
+    // mislead (a document named .png, a file named nothing at all), one
+    // document opens and what came with it is said, and a file nobody can
+    // read is named rather than skipped without a word.
+    // Read one at a time and let go of: a shoot of a hundred raws held
+    // whole at once was gigabytes in the webview before any was placed.
+    // A file is read again when its turn to be placed comes.
+    // Every file is read, as a drop on the page is: it is read to be
+    // placed anyway, and a document saved as "card.png" was placed as a
+    // picture by its name.
+    const kindOf = async (path: string) => {
+      try {
+        const bytes = await readPath(path);
+        return importKind(baseName(path), bytes.subarray(0, 1024));
+      } catch {
+        return null;
+      }
+    };
+    const kinds: (string | null)[] = [];
+    for (const path of paths) kinds.push(await kindOf(path));
+    let rest = paths.map((p, i) => [p, kinds[i]] as const);
+    if (kinds.includes("document")) {
+      if (!mayDiscard()) return;
+      // Each document in turn until one opens: one that would not has
+      // said so, and the next is not then told "one at a time".
+      let at = "";
+      let opened = false;
+      for (const [p, k] of rest) {
+        if (k !== "document") continue;
+        at = p;
+        opened = await openPath(p);
+        rest = rest.filter(([q]) => q !== p);
+        if (opened) break;
+      }
+      if (opened) {
+        if (rest.length > 0) {
+          const docs = rest.filter(([, k]) => k === "document").map(([p]) => baseName(p));
+          const others = rest.filter(([, k]) => k !== "document").map(([p]) => baseName(p));
+          const told: string[] = [];
+          if (others.length > 0)
+            told.push(
+              `${others.join(", ")} ${others.length > 1 ? "were" : "was"} not placed: drop ${others.length > 1 ? "them" : "it"} again onto the document to place ${others.length > 1 ? "them" : "it"}.`,
+            );
+          if (docs.length > 0)
+            told.push(`${docs.join(", ")} ${docs.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+          alert(`Opened ${baseName(at)}. ${told.join(" ")}`);
+        }
+        return;
+      }
+    }
+    const unread: string[] = [];
+    const unopened: string[] = [];
+    for (const [path, kind] of rest) {
+      if (kind === "document") {
+        unopened.push(baseName(path));
+        continue;
+      }
+      if (!kind) {
+        unread.push(baseName(path));
+        continue;
+      }
+      const type = imageType(path) ?? "";
+      try {
+        const bytes = await readPath(path);
+        placeImageFile(new File([bytes as BlobPart], baseName(path), { type }));
+      } catch (err) {
+        alert(`Could not place ${baseName(path)}: ${said(err)}`);
+      }
+    }
+    if (unread.length > 0)
+      alert(
+        `${unread.length === 1 ? `${unread[0]} is not` : `${unread.join(", ")} are not`} a picture, a drawing or a document the editor can read.`,
+      );
+    if (unopened.length > 0)
+      alert(`${unopened.join(", ")} ${unopened.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
+  };
+  const onShellDropRef = useRef(onShellDrop);
+  const takeFilesRef = useRef(takeFiles);
+  takeFilesRef.current = takeFiles;
+  // Files dropped anywhere in the window — on the panel, the rail, the
+  // bar — are taken as a drop on the canvas is: there they did nothing,
+  // and the browser was left to open the picture in place of the editor.
+  // Not over a window (its own fields take what they take) or a field.
+  useEffect(() => {
+    const over = (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes("Files")) return;
+      e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      if (e.defaultPrevented || !e.dataTransfer?.files.length) return;
+      e.preventDefault();
+      if (aWindowIsUp() || isTextEntry(e.target)) return;
+      takeFilesRef.current(Array.from(e.dataTransfer.files));
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
+    };
+  }, []);
+
+  // Files given to the app as an app on a phone or a desktop: shared to
+  // it from another app's share sheet (the service worker keeps them and
+  // opens the page with `?shared`), or opened with it from the system's
+  // files (the launch queue). Taken once there is an engine to take them.
+  const tookGiven = useRef(false);
+  useEffect(() => {
+    if (isTauri() || !session || tookGiven.current) return;
+    tookGiven.current = true;
+    takeShared()
+      .then((files) => files.length > 0 && takeFilesRef.current(files))
+      .catch((err) => console.warn("shared files:", err));
+    onLaunch((files) => takeFilesRef.current(files));
+  }, [session]);
+  onShellDropRef.current = onShellDrop;
+  /** Whether there is work nobody has written down, for a question asked
+   * from outside a render — the window being closed. */
+  const unsavedRef = useRef(false);
+  unsavedRef.current = unsaved;
+  useEffect(() => {
+    if (!isTauri()) return;
+    const gone: (() => void)[] = [];
+    let left = false;
+    (async () => {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      const keep = (un: () => void) => (left ? un() : gone.push(un));
+      // Closing the window: a browser tab asks through beforeunload, and
+      // a window closed from its title bar never fires it — so without
+      // this, the close box threw work away without a word.
+      keep(
+        await getCurrentWindow().onCloseRequested((e) => {
+          if (
+            unsavedRef.current &&
+            !window.confirm(
+              "This document has changes that have not been saved. Closing the window leaves them behind.",
+            )
+          ) {
+            e.preventDefault();
+          }
+        }),
+      );
+      keep(
+        await getCurrentWebview().onDragDropEvent((e) => {
+          if (e.payload.type === "drop") onShellDropRef.current(e.payload.paths);
+        }),
+      );
+    })().catch((err) => console.warn("the shell's window events were not available:", err));
+    return () => {
+      left = true;
+      gone.forEach((un) => un());
+    };
+  }, []);
+  // Files the system asked the app to open: double-clicked, or sent
+  // with "Open with". They wait in the shell until there is an engine to
+  // open them with, so they are asked for once it is up, and again each
+  // time the shell says more have come — on macOS a file opened while
+  // the app runs arrives that way. A document opens with its file, a
+  // picture is placed, exactly as a drop on the window.
+  const hearingOpened = useRef(false);
+  useEffect(() => {
+    if (!isTauri() || !session || hearingOpened.current) return;
+    hearingOpened.current = true;
+    const take = () =>
+      openedFiles()
+        .then((paths) => {
+          if (paths.length > 0) return onShellDropRef.current(paths);
+        })
+        .catch((err) => console.warn("files asked to be opened:", err));
+    import("@tauri-apps/api/event")
+      .then(({ listen }) => listen("chitrakar://opened", () => take()))
+      .then(() => take())
+      .catch((err) => console.warn("files asked to be opened:", err));
+  }, [session]);
+
+  // The window is called what the document is, with a mark while there
+  // is work to save — what every desktop editor's title bar says.
+  useEffect(() => {
+    if (!isTauri()) return;
+    import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow }) =>
+        getCurrentWindow().setTitle(`${unsaved ? "• " : ""}${docName || "untitled"} — Chitrakar`),
+      )
+      .catch(() => {});
+  }, [docName, unsaved]);
+
+  // A picture from another application becomes a layer, and the paste
+  // *event* is what serves it: only the event can see what another
+  // application put on the clipboard. Nothing else is served here — the
+  // in-app clipboard is the keystroke's own business (see the Ctrl+V
+  // keydown, which pastes it a beat later unless this has already served
+  // the paste).
+  //
+  // Because a paste event is not always somebody asking to paste. On X11
+  // the middle button pastes the primary selection, and the middle button
+  // is this app's own way of carrying the view — so dragging the view
+  // delivered a paste event with nothing in it at all, and an in-app
+  // clipboard holding a layer meant a stray copy of that layer every
+  // time. Preventing the default on the gesture does not stop the event
+  // arriving; not acting on an empty one does.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTextEntry(e.target)) return;
+      const image = Array.from(e.clipboardData?.files ?? []).find((f) =>
+        f.type.startsWith("image/"),
+      );
+      if (!image) return;
+      pasteSeen.current = true;
+      e.preventDefault();
+      placeImageFile(image);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  });
+
+  const [hasIcc, setHasIcc] = useState(false);
+  /** Whether the screen's own profile is in force. A view setting: it
+   * belongs to the machine rather than the document, so it survives a
+   * new document and is saved with nothing. */
+  const [hasScreenIcc, setHasScreenIcc] = useState(false);
+  const [proofing, setProofing] = useState(false);
+  const [gamutWarn, setGamutWarn] = useState(false);
+
+  const applyProofing = (proof: boolean, gamut: boolean) => {
+    if (!session) return;
+    try {
+      session.set_proofing(proof, gamut);
+      setProofing(proof);
+      setGamutWarn(gamut);
+      refresh(session);
+    } catch (err) {
+      alert(`Soft proofing: ${proofingTrouble(err)}`);
+    }
+  };
+
+  /** Register a font file under its own name, offer it in the Text panel,
+   * and set the picked text layer in it — which is what loading one is
+   * usually for. A font stays for the page's lifetime, and a saved .chitra
+   * carries the faces its text is set in, so the document reads the same
+   * wherever it is opened next. */
+  const loadFont = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    const name = file.name.replace(/\.(ttf|otf)$/i, "");
+    file.arrayBuffer().then((buf) => {
+      try {
+        WasmSession.register_font(name, new Uint8Array(buf));
+      } catch (err) {
+        alert(`Could not load font: ${said(err)}`);
+        return;
+      }
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      if (
+        selectedKind &&
+        typeof selectedKind === "object" &&
+        "Text" in selectedKind
+      ) {
+        run({
+          SetKind: {
+            id: selectedLayer!.id,
+            kind: { Text: { ...selectedKind.Text, font: name } },
+          },
+        });
+      }
+    });
+  };
+
+  /** A `.cube` file read into the document as a colour lookup's table,
+   * and the layer that reads it put where it was asked for. */
+  const loadLookup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    file.text().then((text) => {
+      let kind: NodeKind;
+      try {
+        kind = JSON.parse(session.color_lookup_kind(text, file.name.replace(/\.cube$/i, "")));
+      } catch (err) {
+        alert(`Could not read ${file.name}: ${said(err)}`);
+        return;
+      }
+      if (lookupFor.current === "replace") setKind(kind, false);
+      else putAdjustment(lookupFor.current === "only", "Colour lookup", kind);
+    });
+  };
+
+  const loadIccProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    file.arrayBuffer().then((buf) => {
+      try {
+        session.set_cmyk_profile(new Uint8Array(buf));
+        setHasIcc(true);
+        // Not a step in the history, but the file it is saved to changes
+        // with it — its TIFF and PDF come out in other inks — so it is
+        // work to save, and asked about before it is thrown away.
+        setSavedAt(-1);
+        refresh(session);
+      } catch (err) {
+        alert(`Could not use ICC profile: ${said(err)}`);
+        return;
+      }
+      // Said now rather than at every press of Proof: a profile that
+      // turns colours into inks but cannot be printed through (a
+      // scanner's, an input profile) was taken in silence and then
+      // answered each Proof with an error from the colour engine.
+      try {
+        session.set_proofing(true, false);
+        session.set_proofing(proofing, gamutWarn);
+      } catch (err) {
+        try {
+          session.set_proofing(false, false);
+        } catch {
+          // Off is always possible.
+        }
+        setProofing(false);
+        setGamutWarn(false);
+        alert(`The profile is loaded for the inks, but ${proofingTrouble(err)}`);
+      }
+    });
+  };
+
+  /** The screen's own profile. Everything shown is taken from sRGB to
+   * that display's numbers, so a wide-gamut monitor draws the picture as
+   * it is rather than as far out as its own red will go. Nothing else
+   * moves: not the document, not an export, not a colour picked off the
+   * page. */
+  const loadScreenProfile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !session) return;
+    file.arrayBuffer().then((buf) => {
+      try {
+        session.set_display_profile(new Uint8Array(buf));
+        setHasScreenIcc(true);
+        refresh(session);
+      } catch (err) {
+        alert(`Could not use monitor profile: ${said(err)}`);
+      }
+    });
+  };
+
+  const clearScreenProfile = () => {
+    if (!session) return;
+    session.clear_display_profile();
+    setHasScreenIcc(false);
+    refresh(session);
+  };
+
+  /** Every menu as data, so the bar in the window and the desktop
+   * shell's native bar are two renderings of one list rather than two
+   * lists that drift. */
+  /** Whether a preset is an adjustment (a change to colour and tone) or
+   * a filter (a change to the pixels' neighbourhood). The panel's one
+   * list holds both; the two menus hold one each, since that is how
+   * every editor divides them and where a hand goes looking. */
+  const presetIs = (kind: NodeKind, what: "Adjustment" | "Filter") =>
+    typeof kind === "object" && kind !== null && what in kind;
+  const presetRows = (what: "Adjustment" | "Filter", icon: IconName) => {
+    const presets: Record<string, { name: string }> = {
+      ...Object.fromEntries(
+        Object.entries(ADJUSTMENT_PRESETS).filter(([, p]) => presetIs(p.kind, what)),
+      ),
+      // A colour lookup is a file to choose rather than numbers to start
+      // from, so it is a row of its own among the colour adjustments;
+      // dodge and burn are layers to paint, rows of their own too.
+      ...(what === "Adjustment"
+        ? {
+            lookup: { name: "Colour lookup…" },
+            dodge: { name: "Dodge (paint to lighten)" },
+            burn: { name: "Burn (paint to darken)" },
+          }
+        : {}),
+    };
+    // In families, a line between each, as Photoshop's and Affinity's
+    // menus have them: eighteen rows in one run, every one with the
+    // same mark, had to be read top to bottom to find anything. A
+    // preset no family names yet goes at the end, so a new one is never
+    // missing from the menu.
+    const families = PRESET_FAMILIES[what];
+    const named = new Set(families.flat());
+    const groups = [
+      ...families.map((f) => f.filter((key) => key in presets)),
+      Object.keys(presets).filter((key) => !named.has(key)),
+    ].filter((g) => g.length > 0);
+    const rows = (make: (key: string, name: string) => MenuEntry, skip: string[] = []) =>
+      groups
+        .map((g) => g.filter((key) => !skip.includes(key)))
+        .filter((g) => g.length > 0)
+        .flatMap((g, i) => [
+          ...(i > 0 ? [SEP] : []),
+          ...g.map((key) => make(key, presets[key].name)),
+        ]);
+    const over = rows((key, name) => item(`${what}-${key}`, icon, name, () => addAdjustment(key)));
+    // The same list again, scoped to the picked layer — which the
+    // engine does by grouping the two, a group being what isolates.
+    // Not offered on an adjustment or a filter, which have nothing of
+    // their own to be scoped to.
+    const scoped =
+      selectedLayer &&
+      selectedLayer.kind !== "adjustment" &&
+      selectedLayer.kind !== "filter"
+        ? [
+            SEP,
+            sub(
+              `${what}-only`,
+              icon,
+              `Only on ${clipName(selectedLayer.name)}`,
+              // Dodge and burn paint over everything below; a layer of
+              // its own has nothing for them to do.
+              rows(
+                (key, name) =>
+                  item(`${what}-only-${key}`, icon, name, () => addAdjustment(`only:${key}`)),
+                ["dodge", "burn"],
+              ),
+            ),
+          ]
+        : [];
+    return [...over, ...scoped];
+  };
+
+  const menus: (MenuSpec & { id: MenuId })[] = [
+    {
+      id: "file",
+      label: "File",
+      entries: [
+        // The hint only where the key can actually arrive: a browser
+        // keeps Ctrl+N and Ctrl+O and never passes them on, and a menu
+        // that names a key the app will not answer to is worse than one
+        // that names none.
+        item(
+          "new-doc",
+          "newDoc",
+          "New document…",
+          () => {
+            if (mayDiscard()) setNewDocOpen(true);
+          },
+          isTauri() || !browserKeeps(chords.of["new"]) ? hint("new") : undefined,
+        ),
+        SEP,
+        item(
+          "open",
+          "open",
+          "Open…",
+          openDocument,
+          isTauri() || !browserKeeps(chords.of["open"]) ? hint("open") : undefined,
+        ),
+        // Only where there are paths to remember: a browser is never
+        // told where a file it was handed came from.
+        ...(isTauri() && prefs.recent.length > 0
+          ? [
+              sub("open-recent", "open", "Open recent", [
+                  ...prefs.recent.map((path, i) => {
+                    // Two files of one name are told apart by their
+                    // folders, and only then: the name is what people
+                    // look for.
+                    const name = baseName(path);
+                    const twin = prefs.recent.some(
+                      (other) => other !== path && baseName(other) === name,
+                    );
+                    return item(
+                      `recent-${i}`,
+                      "open",
+                      twin ? `${name} — ${folderName(path)}` : name,
+                      () => {
+                        if (mayDiscard()) openPath(path);
+                      },
+                    );
+                  }),
+                  SEP,
+                  item("recent-clear", "trash", "Clear the list", () =>
+                    setPrefs({ recent: [] }),
+                  ),
+              ]),
+            ]
+          : []),
+        item("save", "save", "Save", saveFile, hint("save")),
+        // Save in a browser is already a new file every time.
+        ...(isTauri()
+          ? [item("save-as", "save", "Save as…", saveFileAs, hint("save-as"))]
+          : []),
+        SEP,
+        // Bringing something in is its own kind of act — neither opening
+        // a document nor saving one — so it sits between them rather
+        // than in the middle of them, which is where it was.
+        // Place takes whatever Open can read — a photograph, a camera's
+        // raw file, a PDF, a Photoshop file — so it is not "image".
+        item("place-image", "image", "Place…", () => pick(placeInputRef)),
+        item("load-font", "text", "Add font…", () => pick(fontInputRef)),
+        SEP,
+        // Thirteen rows lived here: PNG, PNG at 2×, at 3×, the same
+        // three for what is picked, this artboard, every artboard,
+        // JPEG, SVG, PDF, the frames as pages, TIFF. Every combination
+        // anybody might want, guessed in advance and frozen into a row
+        // — and still no way to ask for JPEG at 80, or a PNG at half
+        // size. That is a dialog's job, and it is one now.
+        item("export", "export", "Export…", () => setExportOpen(true), hint("export-window")),
+        // A shoot out in one go: raw files developed with one setting
+        // and written as JPEGs, none of them opened on the page.
+        item("batch-export", "export", "Develop and export raws…", () => pick(batchInputRef)),
+        // Kept beside it because it is the one people press without
+        // looking: the whole page, as it is, right now.
+        // Photoshop's Quick Export as PNG.
+        item("export-png", "export", "Quick export as PNG", exportPng, hint("export")),
+        // These stay rows because they are not one file. The window
+        // exports a picture; these write a file per frame and a page per
+        // frame, which is a different act with a different result. One
+        // row on the menu, named with the word the panel and the tool
+        // use for them — a frame — rather than three that said
+        // "artboard" and "frame" for the same thing.
+        ...(layers.some((l) => l.kind === "artboard")
+          ? [
+              sub("export-frames", "frame", "Export frames", [
+                ...(selectedLayer?.kind === "artboard"
+                  ? [item("export-artboard", "frame", "This frame", exportArtboard)]
+                  : []),
+                item("export-artboards", "frame", "Each frame as a picture", exportArtboards),
+                item("export-pdf-frames", "frame", "All frames as a PDF", exportPdfFrames,
+                  "a page each",
+                ),
+              ]),
+            ]
+          : []),
+        // The press profile used to sit here, under the exports. It is
+        // the document's own — what the page will be printed through —
+        // and is on the Page menu now, with the page's other properties.
+      ],
+    },
+    {
+      id: "edit",
+      label: "Edit",
+      entries: [
+        // Only the verbs every application has, in the order every
+        // application has them. What used to be here as well — arranging
+        // layers, picking regions out of the page — was neither, and is
+        // now in the two menus named after those things.
+        item("undo", "undo", "Undo", undo, hint("undo")),
+        item("redo", "redo", "Redo", redo, hint("redo")),
+        SEP,
+        item("cut", "cut", "Cut", cutSelected, hint("cut")),
+        item("copy", "copy", "Copy", copySelected, hint("copy")),
+        ...(selectionSet.length > 0 || antRings.length > 0
+          ? [item("copy-as-image", "copy", "Copy as image", copyAsImage)]
+          : []),
+        item("paste", "paste", "Paste", pasteFromMenu, hint("paste")),
+        SEP,
+        item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
+        // Affinity's Duplicate Linked: a copy that follows the original.
+        item("instance", "instance", "Duplicate linked", instanceSelected),
+        item("delete", "trash", "Delete", () => deleteSelected(), "Del"),
+        SEP,
+        // What a selection is filled or outlined with, as Photoshop's
+        // Edit menu has them.
+        item("fill-picked", "fill", "Fill selection", fillSelection),
+        item("stroke-picked", "pen", "Stroke selection…", openStroke),
+        SEP,
+        item("copy-style", "copy", "Copy style", copyStyle, hint("copy-style")),
+        item("paste-style", "paste", "Paste style", pasteStyle, hint("paste-style")),
+        SEP,
+        item("find-replace", "text", "Find and replace…", () => setFindOpen(true), hint("find-replace")),
+        SEP,
+        // How the application is set up for the person, at the foot of
+        // Edit as Photoshop has them (Toolbar…, Keyboard Shortcuts…,
+        // Preferences) — not on View, which is about the document. A
+        // Mac's shell also has Settings on the application's own menu.
+        item("tools", "brush", "Toolbar…", () => openPrefs("tools")),
+        item("shortcuts", "text", "Keyboard shortcuts…", () => openPrefs("keys")),
+        item("prefs", "units", "Preferences…", () => openPrefs("general"), hint("preferences")),
+      ],
+    },
+    {
+      id: "select",
+      label: "Select",
+      entries: [
+        // Short names in the order Photoshop and Affinity put them, a
+        // word or two each. Layers are picked in the panel or with All
+        // layers; a *selection* is a region picked out of the page,
+        // which Deselect lets go of first. What is done with a
+        // selection lives where those programs keep it: Fill and
+        // Stroke in Edit, the two masks in Layer › Mask, Crop in Page.
+        item("select-all", "selectAll", "All layers", selectAll, hint("select-all")),
+        item("deselect", "check", "Deselect", deselectAll, hint("deselect")),
+        item("pick-inverse", "marqueeEllipse", "Inverse", pickInverse, hint("pick-inverse")),
+        item("pick-page", "marquee", "Whole page", pickWholePage),
+        SEP,
+        item("pick-subject", "wand", "Subject", pickSubject),
+        sub("similar", "layers", "Similar layers", [
+          item("same-fill", "fill", "Same fill colour", () => selectAlike("fill")),
+          item("same-stroke", "line", "Same stroke colour", () => selectAlike("stroke")),
+          item("same-kind", "layers", "Same kind of layer", () => selectAlike("kind")),
+        ]),
+        sub("from-layer", "marquee", "From layer", [
+          item("pick-from-layer", "wand", "Layer's shape", pickFromLayer),
+          item("pick-layer-mask", "mask", "Layer's mask", pickLayerMask),
+        ]),
+        SEP,
+        sub("modify", "feather", "Modify", [item("feather", "mask", "Feather…", openFeather)]),
+      ],
+    },
+    {
+      id: "layer",
+      label: "Layer",
+      entries: [
+        // The layer menu in sections, each of a kind, and a family of
+        // rows behind one row wherever there are more than two of a
+        // kind — as Photoshop's Layer, Affinity's Layer and Arrange, and
+        // Illustrator's Object menus hold theirs. It had been fourteen
+        // rows in one run, each a sentence ("Cut the path at the
+        // anchor", "Put the picture's corners back"); the ids are kept,
+        // so a key anybody gave one still reaches it.
+        item("group", "group", "Group", groupSelection, hint("group")),
+        item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),
+        sub("arrange", "raise", "Arrange", [
+          item("bring-front", "raise", "Bring to front", () => orderSelected(true), hint("to-front")),
+          item("bring-forward", "raise", "Bring forward", () => reorderSelected(1)),
+          item("send-backward", "lower", "Send backward", () => reorderSelected(-1)),
+          item("send-back", "lower", "Send to back", () => orderSelected(false), hint("to-back")),
+        ]),
+        sub(
+          "align",
+          "alignLeft",
+          "Align",
+          ALIGN_BUTTONS.map(([mode, icon, label]) =>
+            item(`align-${mode}`, icon, label, () => alignSelection(mode)),
+          ),
+        ),
+        sub("transform", "flipH", "Transform", [
+          item("flip-h", "flipH", "Flip horizontal", () => flipSelection(true)),
+          item("flip-v", "flipV", "Flip vertical", () => flipSelection(false)),
+          SEP,
+          // A picture whose corners were dragged into perspective, put
+          // square again.
+          item("square-corners", "image", "Reset corners", squareCorners),
+        ]),
+        SEP,
+        sub("mask", "mask", "Mask", [
+          item("mask-rect", "mask", "Add rectangle mask", () => addMask("rect")),
+          item("mask-ellipse", "mask", "Add ellipse mask", () => addMask("ellipse")),
+          // Lightroom's graduated and radial filters: an adjustment layer
+          // wearing one of these is a local adjustment.
+          item("mask-linear", "gradient", "Add graduated mask", () => addMask("linear")),
+          item("mask-radial", "gradient", "Add radial mask", () => addMask("radial")),
+          SEP,
+          // Photoshop's Reveal and Hide Selection.
+          item("mask-from-picked", "mask", "Reveal selection", () => maskFromSelection(false)),
+          item("hide-picked", "trash", "Hide selection", () => maskFromSelection(true)),
+          ...(selectedLayer && selectedMask !== null
+            ? [
+                SEP,
+                item("mask-remove", "trash", "Delete mask", () =>
+                  run({ SetMask: { id: selectedLayer.id, mask: null } }),
+                ),
+              ]
+            : []),
+        ]),
+        item("clip", "clip", "Clip to layer below", clipSelection, hint("clip")),
+        // The looks kept by name: the panel's strip has them as chips,
+        // and this has them as names.
+        sub("styles", "copy", "Styles", [
+          item("keep-style", "copy", "New style from layer", () => keepStyle()),
+          ...(styles.length > 0
+            ? [
+                SEP,
+                ...styles.map((st) =>
+                  item(`style-${st.name}`, "paste", `Apply ${st.name}`, () =>
+                    applyStyle(st.name),
+                  ),
+                ),
+              ]
+            : []),
+        ]),
+        SEP,
+        // What is done to shapes: put together, reworked as paths, made
+        // many of, or turned into something else.
+        sub(
+          "combine",
+          "union",
+          "Combine shapes",
+          BOOLEAN_BUTTONS.map(([op, icon, label]) =>
+            item(`combine-${op}`, icon, label, () => combineSelection(op)),
+          ),
+        ),
+        sub("path", "node", "Path", [
+          item("join-paths", "node", "Join paths", joinPaths),
+          item("cut-path", "node", "Split at anchor", cutPath),
+          SEP,
+          item("offset-path", "shapes", "Offset path…", offsetPath),
+          item("simplify-path", "node", "Simplify path…", simplifyPath),
+        ]),
+        sub("add-shape", "rect", "Add", [
+          item("add-rect", "rect", "Rectangle", () => addInView("Rect")),
+          item("add-ellipse", "ellipse", "Ellipse", () => addInView("Ellipse")),
+          item("add-line", "line", "Line", () => addInView("Line")),
+          item("add-text", "text", "Text", () => addInView("Text")),
+          item("add-frame", "frame", "Frame", () => addInView("Frame")),
+        ]),
+        item("repeat", "duplicate", "Repeat…", repeatSelection),
+        item("blend-shapes", "shapes", "Blend shapes…", blendSelection),
+        sub("convert", "shapes", "Convert", [
+          item("text-to-shapes", "text", "Text to shapes", textToShapes),
+          item("outline-stroke", "line", "Stroke to shape", outlineStroke),
+          item("trace-picture", "image", "Picture to shapes…", tracePicture),
+        ]),
+        item("merge-layers", "image", "Merge layers", mergeLayers),
+        ...(selectedLayer?.developed
+          ? [
+              SEP,
+              item("develop-again", "image", "Develop again…", developAgain),
+              ...(developedOthers.length > 0
+                ? [
+                    item(
+                      "develop-others",
+                      "image",
+                      `Apply develop settings to ${developedOthers.length} other${developedOthers.length > 1 ? "s" : ""}`,
+                      developOthersLikeThis,
+                    ),
+                  ]
+                : []),
+            ]
+          : []),
+        SEP,
+        // Said as what pressing it will do, since a row that says
+        // "Lock" over a locked layer is a row that lies.
+        item(
+          "lock",
+          selectedLayer?.locked ? "unlock" : "lock",
+          selectedLayer?.locked ? "Unlock" : "Lock",
+          () => setLockedAll(!selectedLayer?.locked),
+        ),
+        item(
+          "hide",
+          selectedLayer && !selectedLayer.visible ? "eye" : "eyeOff",
+          selectedLayer && !selectedLayer.visible ? "Show" : "Hide",
+          () => setVisibleAll(!(selectedLayer?.visible ?? true)),
+        ),
+        item("rename", "text", "Rename…", () => {
+          if (selectedLayer) startRename(selectedLayer);
+        }),
+      ],
+    },
+    {
+      // Photoshop keeps these under Image > Adjustments and Affinity
+      // under Layer > New Adjustment; both are two menus deep for the
+      // first thing anyone does to a photograph. Here they were only on
+      // the panel's "+FX" list, which is no menus deep and nowhere a
+      // person looks. One menu, named after what it holds.
+      id: "adjust",
+      label: "Adjust",
+      entries: presetRows("Adjustment", "adjust"),
+    },
+    {
+      id: "filter",
+      label: "Filter",
+      entries: presetRows("Filter", "filter"),
+    },
+    {
+      id: "page",
+      label: "Page",
+      entries: [
+        item("canvas-size", "crop", "Canvas size…", () => setCanvasSizeOpen(true)),
+        // Canvas size is the same artwork on a page of another size;
+        // this is the same design at another size — Photoshop's Image
+        // Size, Canva's Resize — and the two are asked for differently.
+        item("scale-page", "fit", "Resize page…", () => setScalePageOpen(true)),
+        // Cut away the edge round the artwork: clear pixels where the
+        // corner is clear, the corner's colour where it is painted.
+        item("crop-to-picked", "crop", "Crop to selection", cropToSelection),
+        item("trim-page", "crop", "Trim empty edges", () => {
+          if (!session) return;
+          try {
+            if (session.trim_page()) {
+              refresh(session);
+              fitView();
+            }
+          } catch (err) {
+            alert(`Trim: ${said(err)}`);
+          }
+        }),
+        SEP,
+        // Photoshop's Image Rotation: the whole page turned or flipped,
+        // where Layer › Transform turns what is picked.
+        sub("rotate-page", "turnRight", "Rotate and flip", [
+          item("turn-right", "turnRight", "Rotate 90° clockwise", () => turnPage(1)),
+          item("turn-left", "turnLeft", "Rotate 90° anticlockwise", () => turnPage(3)),
+          item("turn-over", "turnRight", "Rotate 180°", () => turnPage(2)),
+          SEP,
+          item("mirror-h", "flipH", "Flip page horizontal", () => mirrorPage(true)),
+          item("mirror-v", "flipV", "Flip page vertical", () => mirrorPage(false)),
+        ]),
+        item("straighten", "turnLeft", "Straighten…", () => {
+          setStraightenBy(0);
+          setLevelling(false);
+          setStraightenOpen(true);
+        }),
+        SEP,
+        // The press profile is the document's own — what it will be
+        // printed through — so it belongs with the document's other
+        // properties. How this screen shows colour is not about the
+        // document at all, and is in Preferences with the other things
+        // that are only about looking.
+        item(
+          "press-profile",
+          hasIcc ? "check" : "profile",
+          hasIcc ? "Replace press profile…" : "Load press profile…",
+          () => pick(iccInputRef),
+        ),
+      ],
+    },
+    {
+      id: "view",
+      label: "View",
+      entries: [
+        // Zoom first, together and in the order a hand thinks of them.
+        item("zoom-in", "zoomIn", "Zoom in", () => zoomBy(1.25), hint("zoom-in")),
+        item("zoom-out", "zoomOut", "Zoom out", () => zoomBy(0.8), hint("zoom-out")),
+        item("actual-size", "actualSize", "Actual size", () => zoomTo(1), hint("zoom-actual")),
+        item("fit", "fit", "Fit on screen", fitView, hint("zoom-fit")),
+        item("zoom-selection", "selectAll", "Zoom to selection", zoomToSelection),
+        SEP,
+        // The picture as it was before the work: the bar's eye, named.
+        item(
+          "before",
+          untouched ? "check" : "eye",
+          "Before adjustments",
+          () => {
+            if (!session) return;
+            session.set_untouched(!untouched);
+            setUntouched(!untouched);
+            refresh(session);
+          },
+          untouched ? "✓" : undefined,
+        ),
+        // The bar's Proof and Gamut, here too, so a narrow bar can give
+        // them up without the proof going out of reach.
+        ...(hasIcc
+          ? [
+              item("soft-proof", proofing ? "check" : "proof", "Soft proof", () => applyProofing(!proofing, false), proofing ? "✓" : undefined),
+              item(
+                "gamut-warning",
+                gamutWarn ? "check" : "gamut",
+                "Gamut warning",
+                () => (gamutWarn ? applyProofing(proofing, false) : applyProofing(true, true)),
+                gamutWarn ? "✓" : undefined,
+              ),
+            ]
+          : []),
+        SEP,
+        item(
+          "guides",
+          showGuides ? "check" : "fit",
+          showGuides ? "Hide guides" : "Show guides",
+          () => setShowGuides((v) => !v),
+        ),
+        // Nothing to clear is nothing done: it was a step in the history
+        // every time it was pressed on a page with no guides.
+        item("clear-guides", "trash", "Clear guides", () => {
+          if (docGuides.length > 0) setGuidesDoc([]);
+        }),
+        // A grid is a view setting and a set of lines to catch on, so it
+        // is offered by the size it should be rather than as a switch
+        // with a number hidden somewhere else — four of them, behind one
+        // row, beside the units, which are the same kind of choice.
+        sub("grid", "fit", "Grid", [
+          item("grid-none", grid === 0 ? "check" : "fit", "No grid", () => setGrid(0),
+            grid === 0 ? "✓" : undefined),
+          ...[8, 16, 32].map((size) =>
+            item(
+              `grid-${size}`,
+              grid === size ? "check" : "fit",
+              `Grid of ${size} px`,
+              () => setGrid(size),
+              grid === size ? "✓" : undefined,
+            ),
+          ),
+        ]),
+        sub(
+          "units",
+          "units",
+          "Units",
+          (["px", "mm", "in"] as Units[]).map((u) =>
+            item(`units-${u}`, "units", UNIT_LABELS[u], () => setUnits(u), units === u ? "✓" : undefined),
+          ),
+        ),
+        // The monitor profile is in Preferences, under Colour, and only
+        // there; Preferences, the toolbar and the keys are at the foot
+        // of Edit, where Photoshop keeps them.
+      ],
+    },
+    {
+      // Every editor ends its bar with this one, and the keys sheet had
+      // been standing in for it from the wrong end of View. Two rows:
+      // what the app answers to, and what the app is.
+      id: "help",
+      label: "Help",
+      entries: [
+        item("keys", "text", "Keys and gestures", () => setShowKeys(true), hint("keys-sheet")),
+        SEP,
+        item("about", "check", "About Chitrakar…", () => setShowAbout(true)),
+      ],
+    },
+  ];
+
+  // The desktop shell shows the menu on the system bar instead, built
+  // from the list above. Rebuilding it on every render would tear it
+  // down under the pointer, so it is rebuilt only when what it shows
+  // changes — and the rows call back through a ref, since the menu
+  // outlives the render that built it.
+  markMenuKeys(
+    menus.flatMap((m) => m.entries),
+    chords.menuOf,
+  );
+  markNeedsALayer(
+    menus.flatMap((m) => m.entries),
+    selectionSet.length === 0,
+  );
+  {
+    const noRegion = antRings.length === 0;
+    markNothingToDo(menus.flatMap((m) => m.entries), {
+      undo: history.past.length === 0,
+      redo: history.future.length === 0,
+      "fill-picked": noRegion,
+      "stroke-picked": noRegion,
+      "crop-to-picked": noRegion,
+      "zoom-selection": noRegion && selectionSet.length === 0,
+      "clear-guides": docGuides.length === 0,
+      "paste-style": styleClip.current === null,
+      feather: noRegion,
+      "pick-subject": selected === null && !layers.some((l) => l.kind === "raster" && l.visible),
+    });
+  }
+  /** Which of the bar's Undo and Redo was pressed last, until the history
+   * it changed has been drawn: one that greys itself out under the focus
+   * — the last step undone — hands the focus to the other, which the
+   * same press made live. Left alone, the focus fell to the page and
+   * the next Tab began again from the top. */
+  const historyPressed = useRef<"undo" | "redo" | null>(null);
+  useEffect(() => {
+    const which = historyPressed.current;
+    historyPressed.current = null;
+    if (!which) return;
+    const buttons = [
+      ...document.querySelectorAll<HTMLButtonElement>('.chrome-group[aria-label="History"] button'),
+    ];
+    const [pressed, other] = which === "undo" ? buttons : [...buttons].reverse();
+    if (!pressed?.disabled || !other || other.disabled) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body || at === pressed) other.focus({ preventScroll: true });
+  }, [history.past.length, history.future.length]);
+  const menusRef = useRef(menus);
+  menusRef.current = menus;
+  // A chord a person gave a menu row runs that row, from wherever the
+  // row is in the menus — the same lookup the system menu bar uses —
+  // and not while a field has the caret, like every chord but undo.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (isTextEntry(e.target) || e.target instanceof HTMLSelectElement || aWindowIsUp()) return;
+      const row = chords.menuByChord[chordFromEvent(e)];
+      if (!row) return;
+      for (const m of menusRef.current) {
+        const entry = findEntry(m.entries, row);
+        if (entry) {
+          e.preventDefault();
+          entry.run();
+          return;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chords]);
+  const menuShape = menuSignature(menus);
+  // If the system bar will not take the menu, the one in the window comes
+  // back: an app with no menu at all is worse than an app with two.
+  const [nativeMenuFailed, setNativeMenuFailed] = useState(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    setNativeMenu(
+      menusRef.current,
+      (id) => {
+        for (const m of menusRef.current) {
+          const row = findEntry(m.entries, id);
+          if (row) {
+            row.run();
+            return;
+          }
+        }
+      },
+      "Chitrakar",
+    ).catch((err) => {
+      console.error("native menu:", err);
+      setNativeMenuFailed(true);
+    });
+  }, [menuShape]);
+
+  return (
+    <div className="editor">
+      {importing && (
+        <div className="recover importing" role="status" aria-label="Reading">
+          <span>{importing}</span>
+        </div>
+      )}
+      {importNotes && (
+        <div className="recover import-notes" role="status" aria-label="Import notes">
+          <span>
+            {importNotes.name}: {importNotes.notes.join("; ")}
+          </span>
+          <button type="button" onClick={() => setImportNotes(null)}>
+            OK
+          </button>
+        </div>
+      )}
+      {engineFailed && (
+        <div className="engine-failed" role="alert">
+          <h1>Chitrakar cannot start here</h1>
+          <p>{engineFailed}</p>
+        </div>
+      )}
+      {recoverable && (
+        <div className="recover" role="status">
+          <span>A draft from your last session is here.</span>
+          <button
+            type="button"
+            onClick={async () => {
+              // In place of what is on the page, so what is there and
+              // not saved is asked about first, as New and Open ask.
+              if (!mayDiscard()) return;
+              const draft = recoverable;
+              const parts = await getDraftParts(draft.parts);
+              setRecoverable(null);
+              if (!openDocumentBytes(draft.bytes, draft.name ?? undefined, parts)) return;
+              // Back with the file it had, so Save writes there again;
+              // and, unless that file already held it, as work still to
+              // save — it is a draft because it was not written down,
+              // and coming back must not make it look as if it had been.
+              setDocPath(draft.path);
+              if (!draft.saved) setSavedAt(-1);
+              // A closed tab's draft is this tab's now, kept in its slot
+              // from the next change; the old slot lets it go, leaving
+              // the pictures for this tab's draft to take over.
+              if (draft.slot !== draftSlot)
+                void clearDraft(draft.slot, true).then(() => releaseMovedSlot(draft.slot));
+              offerNextDraft(draft.slot);
+            }}
+          >
+            Restore
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const slot = recoverable.slot;
+              setRecoverable(null);
+              // The pictures are left for the next draft written to
+              // sort out: one this tab is about to write may share them.
+              // The draft let go of was this tab's own last session's, and
+              // the slot by now holds what has been done since the page
+              // opened: cleared, a crash took that too, since nothing
+              // wrote it again until the next change. So it is kept again
+              // at once (unless nothing has been done on this page).
+              void clearDraft(slot, true).then(() => {
+                releaseMovedSlot(slot);
+                offerNextDraft(slot);
+                if (slot === draftSlot) setSaveTick((n) => n + 1);
+              });
+            }}
+          >
+            Discard
+          </button>
+        </div>
+      )}
+      <header
+        className={
+          (!isTauri() || nativeMenuFailed) && !compact ? "topbar" : "topbar one-row"
+        }
+      >
+        {/* The menus' row: the menus, and the document's name and facts.
+            Where the menus are a drawer (a phone) or on the system's own
+            bar (the desktop app), there is no row of menus to sit under,
+            and the two rows are one (`one-row`). */}
+        <div className="topbar-menus">
+        <span className="brand">Chitrakar</span>
+        {/* The desktop shell puts these on the system menu bar, where a
+            Mac app's menus belong; in a browser they are here. */}
+        {/* On a phone the menus are one button and a drawer: nine labels
+            are two rows of a bar that a phone held on its side has no
+            room for, and a label is a small thing to hit with a thumb. */}
+        {(!isTauri() || nativeMenuFailed) && compact && (
+          <button
+            className="chrome-button icon-only menu-sheet-toggle"
+            onClick={() => setMenuSheet(true)}
+            title="Menus"
+            aria-label="Menus"
+            aria-expanded={menuSheet}
+          >
+            <Icon name="menu" />
+          </button>
+        )}
+        {(!isTauri() || nativeMenuFailed) && !compact && (
+          <nav className="menubar" aria-label="Main menu">
+            {menus.map((m) => (
+              <MenuButton
+                key={m.id}
+                label={m.label}
+                open={openMenu === m.id}
+                onOpen={() => setOpenMenu(openMenu === m.id ? null : m.id)}
+                onHover={() => openMenu && setOpenMenu(m.id)}
+                onClose={() => setOpenMenu(null)}
+              >
+                <MenuRows entries={m.entries} />
+              </MenuButton>
+            ))}
+          </nav>
+        )}
+
+        {/* The name of what is open, at the end of the menus' row,
+            where an application's title sits. */}
+        <input
+          className="doc-name"
+          value={docName}
+          onChange={(e) => setDocName(e.target.value)}
+          // What it was called when the box was come to: Escape puts it
+          // back, and a name left empty is that name again rather than
+          // a blank box every save is named after.
+          onFocus={(e) => (e.currentTarget.dataset.was = docName)}
+          onBlur={(e) => {
+            if (docName.trim() === "") setDocName(e.currentTarget.dataset.was || "untitled");
+          }}
+          onKeyDown={(e) => {
+            if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+            if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") {
+              setDocName(e.currentTarget.dataset.was || docName);
+              e.currentTarget.blur();
+            }
+          }}
+          spellCheck={false}
+          data-own-undo=""
+          title="What this document is called; every save and export is named after it"
+          aria-label="Document name"
+        />
+        {/* A dot for work that has not been saved, where the name is. */}
+        {unsaved && (
+          <span
+            className="unsaved-dot"
+            role="img"
+            title="This document has changes that have not been saved"
+            aria-label="Unsaved changes"
+          >
+            •
+          </span>
+        )}
+        <span className="doc-chip">
+          {hasIcc && (
+            <span className="icc-badge" title="A CMYK press profile is loaded">
+              ICC ✓
+            </span>
+          )}
+          {hasScreenIcc && (
+            <span
+              className="icc-badge"
+              title="What is shown is going through this screen's own profile"
+            >
+              Screen ✓
+            </span>
+          )}
+          {/* The facts about the document, in a span of their own so a
+              window with no room for them can drop them and keep the
+              badges, which say something the panel does not. */}
+          <span className="doc-facts">
+            {cmyk ? "CMYK" : "RGB"}, {docSize[0]}×{docSize[1]}
+            {units !== "px" && (
+              <>
+                {" "}
+                ({inUnits(docSize[0], units, docDpi)}×
+                {inUnits(docSize[1], units, docDpi)} {units})
+              </>
+            )}{" "}
+            · {docDpi} dpi
+          </span>
+        </span>
+      </div>
+      {/* The buttons, a row of their own under the menus, as every
+          editor of this kind has them: beside the Help menu they read as
+          one more menu that had lost its words. */}
+      <div className="topbar-tools" role="toolbar" aria-label="Toolbar">
+        {/* The handful of things reached for constantly. All of them
+            were in the menus and nowhere else, which is two presses and
+            a read for something like zooming out — and the icons for
+            every one of them already existed, drawn for the menu rows
+            they sit in. Left of the spacer, where a document's own
+            actions belong; the view's are next to them because zoom is
+            the other thing a hand returns to without thinking.
+
+            Both groups go when the window is narrow, alongside the
+            wordmark and the document chip and for the same reason: the
+            bar has to stay short enough to leave a canvas, and the
+            menus still hold all of it. */}
+        {prefs.barDocument && (
+        <div className="chrome-group wide-only" role="group" aria-label="Document">
+          <button
+            className="chrome-button icon-only"
+            onClick={() => {
+              if (mayDiscard()) setNewDocOpen(true);
+            }}
+            title="New document…"
+            aria-label="New document"
+          >
+            <Icon name="newDoc" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={openDocument}
+            title="Open…"
+            aria-label="Open"
+          >
+            <Icon name="open" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => pick(placeInputRef)}
+            title="Place…"
+            aria-label="Place"
+          >
+            <Icon name="image" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={saveFile}
+            title={tip("Save", "save")}
+            aria-label="Save"
+          >
+            <Icon name="save" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={exportPng}
+            title="Quick export as PNG"
+            aria-label="Quick export as PNG"
+          >
+            <Icon name="export" />
+          </button>
+        </div>
+        )}
+
+        {/* What is picked out of the page. These were on the Select
+            menu and nowhere else, and picking a region is not a thing
+            done once — it is adjusted, inverted, softened, thrown away
+            and begun again, several times over, while looking at the
+            picture. A menu is the wrong distance away for that.
+
+            The icons for three of them are new. The menu could lend its
+            own, but a menu row has a name beside it and a toolbar
+            button has nothing: an ellipse marquee standing for "the
+            rest instead", or a lasso for "nothing", says the wrong
+            thing outright once the words are gone. */}
+        {prefs.barSelection && (
+        <div className="chrome-group wide-only" role="group" aria-label="Selection">
+          <button
+            className="chrome-button icon-only"
+            onClick={pickWholePage}
+            title="Select the whole page"
+            aria-label="Select the whole page"
+          >
+            <Icon name="marquee" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={pickInverse}
+            title={tip("Inverse — select what the selection leaves out", "pick-inverse")}
+            aria-label="Inverse"
+          >
+            <Icon name="selectInverse" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={deselectAll}
+            title={tip("Deselect", "deselect")}
+            aria-label="Deselect"
+          >
+            <Icon name="selectNone" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={pickSubject}
+            disabled={selected === null && !layers.some((l) => l.kind === "raster" && l.visible)}
+            title="Select the subject of this picture"
+            aria-label="Subject"
+          >
+            <Icon name="wand" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={openFeather}
+            disabled={antRings.length === 0}
+            title="Feather — soften the selection's edge…"
+            aria-label="Feather"
+          >
+            <Icon name="feather" />
+          </button>
+        </div>
+        )}
+
+        {prefs.barZoom && (
+        <div className="chrome-group wide-only" role="group" aria-label="Zoom">
+          <button
+            className="chrome-button icon-only"
+            onClick={() => zoomBy(0.8)}
+            title={tip("Zoom out", "zoom-out")}
+            aria-label="Zoom out"
+          >
+            <Icon name="zoomOut" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={fitView}
+            title={tip("Fit on screen", "zoom-fit")}
+            aria-label="Fit to window"
+          >
+            <Icon name="fit" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => zoomTo(1)}
+            title={tip("Actual size", "zoom-actual")}
+            aria-label="Actual size"
+          >
+            <Icon name="actualSize" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => zoomBy(1.25)}
+            title={tip("Zoom in", "zoom-in")}
+            aria-label="Zoom in"
+          >
+            <Icon name="zoomIn" />
+          </button>
+        </div>
+        )}
+
+        <span className="spacer" />
+        {/* Where the pointer is on the page, in the units the rulers
+            read in: what a ruler can only be squinted at for. Written
+            straight into the element on every move rather than through
+            the editor's state, which would redraw the whole chrome as
+            often as a mouse reports. */}
+        <span
+          className="cursor-readout"
+          ref={readoutRef}
+          aria-label="Pointer position"
+          title="Where the pointer is on the page, measured from its top-left corner"
+        />
+
+        {/* The picture as it was before the work. The question a
+            photograph asks every few minutes, and the only way to ask
+            it was to hide each adjustment by hand and undo them all
+            again — edits the file would remember, for a glance nobody
+            meant to keep. */}
+        <div className="chrome-group" role="group" aria-label="Before">
+          <button
+            // Icon-only, like undo and redo: the bar has to hold in a
+            // window narrow enough to put the layers away, and a word
+            // costs more room there than the whole of this control is
+            // worth.
+            className={`chrome-button icon-only${untouched ? " toggled" : ""}`}
+            onClick={() => {
+              if (!session) return;
+              session.set_untouched(!untouched);
+              setUntouched(!untouched);
+              refresh(session);
+            }}
+            title="Show the picture as it was before the adjustments and filters"
+            aria-pressed={untouched}
+            aria-label="Before"
+          >
+            <Icon name="eye" />
+          </button>
+        </div>
+
+        {hasIcc && (
+          <div className="chrome-group" role="group" aria-label="Soft proofing">
+            <button
+              className={proofing ? "chrome-button toggled" : "chrome-button"}
+              onClick={() => applyProofing(!proofing, false)}
+              title="Soft proof: preview what the press can reproduce"
+              aria-pressed={proofing}
+            >
+              <Icon name="proof" />
+              Proof
+            </button>
+            <button
+              className={gamutWarn ? "chrome-button toggled" : "chrome-button"}
+              onClick={() =>
+                gamutWarn
+                  ? applyProofing(proofing, false)
+                  : applyProofing(true, true)
+              }
+              title="Mark out-of-gamut pixels grey"
+              aria-pressed={gamutWarn}
+            >
+              <Icon name="gamut" />
+              Gamut
+            </button>
+          </div>
+        )}
+
+        <div className="chrome-group" role="group" aria-label="History">
+          <button
+            className="chrome-button icon-only"
+            onClick={() => {
+              historyPressed.current = "undo";
+              undo();
+            }}
+            title={tip("Undo", "undo")}
+            disabled={history.past.length === 0}
+          >
+            <Icon name="undo" />
+          </button>
+          <button
+            className="chrome-button icon-only"
+            onClick={() => {
+              historyPressed.current = "redo";
+              redo();
+            }}
+            title={tip("Redo", "redo")}
+            disabled={history.future.length === 0}
+          >
+            <Icon name="redo" />
+          </button>
+        </div>
+
+        {/* The zoom is read and set in the same place: "show me this at
+            four hundred percent" is a thing people say, and a wheel
+            cannot answer it. Outside the chip beside it, since that chip
+            goes when the window is narrow and this is a control. */}
+        <label className="zoom-field">
+          <input
+            type="number"
+            // No least: the browser steps from it, and from 1 its own
+            // stepping (the wheel's) went 100 to 101. The view holds its
+            // own least (`zoomTo`), and a number under it comes back.
+            max={Math.round(MAX_ZOOM * 100)}
+            step={5}
+            // Keyed by what the view actually is, so wheeling or fitting
+            // re-reads rather than leaving a stale draft in the field.
+            key={Math.round(view.zoom * 1000)}
+            defaultValue={Math.round(view.zoom * 100)}
+            onKeyDown={(e) => {
+              // The arrows go by fives, to the next five: the browser's own
+              // went from the box's least (1) by fives, 123 to 126 to 131.
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                e.preventDefault();
+                const el = e.currentTarget;
+                const v = Number(el.value);
+                const at = Number.isFinite(v) && v > 0 ? v : Math.round(view.zoom * 100);
+                const next = e.key === "ArrowUp" ? Math.floor(at / 5) * 5 + 5 : Math.ceil(at / 5) * 5 - 5;
+                el.value = String(Math.min(Math.round(MAX_ZOOM * 100), Math.max(Math.round(MIN_ZOOM * 100), next)));
+                return;
+              }
+              fieldKeys(e);
+            }}
+            onBlur={(e) => {
+              if (asGiven(e.currentTarget)) return;
+              const el = e.currentTarget;
+              const v = Number(el.value);
+              if (el.value.trim() !== "" && Number.isFinite(v) && v > 0) zoomTo(v / 100);
+              // What is not a zoom is not kept in the box — nor a number
+              // held to the limit the view is already at, which changes
+              // nothing and so draws the box nowhere afresh ("5000%" at
+              // 800%): the box says what the view is, once it has moved.
+              requestAnimationFrame(() => {
+                if (el.isConnected) el.value = el.defaultValue;
+              });
+            }}
+            aria-label="Zoom"
+            title="How far in the view is, as a percentage"
+          />
+          %
+        </label>
+
+        {/* The file inputs live here, outside the menus, so they stay mounted
+            whether or not a menu is open; the menu items just click them. */}
+        <input
+          ref={openInputRef}
+          type="file"
+          accept={OPEN_ACCEPT}
+          onChange={openFile}
+          hidden
+        />
+        <input
+          ref={placeInputRef}
+          type="file"
+          accept={PLACE_ACCEPT}
+          onChange={placeImage}
+          hidden
+        />
+        <input
+          ref={batchInputRef}
+          type="file"
+          multiple
+          accept={RAW_EXTENSIONS.map((e) => `.${e}`).join(",")}
+          onChange={async (e) => {
+            const chosen = Array.from(e.target.files ?? []);
+            e.target.value = "";
+            const raws = chosen.filter((f) => importKind(f.name) === "raw");
+            if (raws.length === 0) return;
+            setBatch(raws.map((f) => ({ name: f.name, read: async () => new Uint8Array(await f.arrayBuffer()) })));
+          }}
+          aria-label="Raw files to develop and export"
+          hidden
+        />
+        <input
+          ref={iccInputRef}
+          type="file"
+          accept=".icc,.icm"
+          onChange={loadIccProfile}
+          hidden
+        />
+        <input
+          ref={lookupInputRef}
+          type="file"
+          accept=".cube"
+          onChange={loadLookup}
+          aria-label="Colour lookup file"
+          hidden
+        />
+        <input
+          ref={screenIccInputRef}
+          type="file"
+          accept=".icc,.icm"
+          onChange={loadScreenProfile}
+          aria-label="Monitor profile"
+          hidden
+        />
+        <input
+          ref={fontInputRef}
+          type="file"
+          accept=".ttf,.otf"
+          onChange={loadFont}
+          hidden
+        />
+        {/* Where the panel comes over the canvas rather than sitting
+            beside it, there has to be a way to ask for it back. */}
+        {narrow && (
+          <button
+            className={panelOpen ? "panel-toggle on" : "panel-toggle"}
+            onClick={() => setPanelOpen((open) => !open)}
+            title="Show or hide the layers"
+            aria-label="Layers panel"
+            aria-expanded={panelOpen}
+          >
+            <Icon name="layers" size={16} />
+          </button>
+        )}
+        </div>
+      </header>
+      {menuSheet && compact && <MenuSheet menus={menus} onClose={() => setMenuSheet(false)} />}
+      {showKeys && (
+        <KeysDialog
+          hint={TOOL_HINT}
+          chordOf={chords.of}
+          own={keyableRows(menus)
+            .filter((r) => chords.menuOf[r.id])
+            .map((r) => [chordLabel(chords.menuOf[r.id]), `${r.path} › ${r.label}`])}
+          nudge={[prefs.nudge, prefs.nudgeBig]}
+          onClose={() => setShowKeys(false)}
+        />
+      )}
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
+      {contextAt && (
+        <div
+          className="menu-pop context-menu"
+          ref={contextRef}
+          role="menu"
+          aria-label="Layer"
+          style={{ left: contextAt[0], top: contextAt[1] }}
+          onClickCapture={(e) => {
+            if (contextHeldBy.current === null) return;
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+          onClick={() => setContextAt(null)}
+          onKeyDown={(e) => menuKeyDown(e.nativeEvent, e.currentTarget, () => setContextAt(null))}
+        >
+          {selectionSet.length > 0 ? (
+            <>
+              <MenuItem icon="cut" onClick={cutSelected} hint={hint("cut")}>
+                Cut
+              </MenuItem>
+              <MenuItem icon="copy" onClick={copySelected} hint={hint("copy")}>
+                Copy
+              </MenuItem>
+              <MenuItem
+                icon="duplicate"
+                onClick={duplicateSelected}
+                hint={hint("duplicate")}
+              >
+                Duplicate
+              </MenuItem>
+              <hr />
+              <MenuItem
+                icon="raise"
+                onClick={() => orderSelected(true)}
+                hint={hint("to-front")}
+              >
+                Bring to front
+              </MenuItem>
+              <MenuItem
+                icon="lower"
+                onClick={() => orderSelected(false)}
+                hint={hint("to-back")}
+              >
+                Send to back
+              </MenuItem>
+              <hr />
+              {parentGroup() !== null && (
+                <MenuItem
+                  icon="foldOpen"
+                  onClick={() => {
+                    const up = parentGroup();
+                    if (up === null) return;
+                    setSelected(up);
+                    setMultiSel([]);
+                  }}
+                >
+                  Select the group this is in
+                </MenuItem>
+              )}
+              <MenuItem
+                icon={selectedLayer?.locked ? "unlock" : "lock"}
+                onClick={() => setLockedAll(!selectedLayer?.locked)}
+              >
+                {selectedLayer?.locked ? "Unlock" : "Lock"}
+              </MenuItem>
+              <MenuItem
+                icon={selectedLayer?.visible ? "eyeOff" : "eye"}
+                onClick={() => setVisibleAll(!selectedLayer?.visible)}
+              >
+                {selectedLayer?.visible ? "Hide" : "Show"}
+              </MenuItem>
+              <hr />
+              {selectionSet.length > 1 && (
+                <MenuItem icon="group" onClick={groupSelection}>
+                  Group
+                </MenuItem>
+              )}
+              {selectedLayer?.kind === "group" && (
+                <MenuItem icon="ungroup" onClick={ungroupSelection}>
+                  Ungroup
+                </MenuItem>
+              )}
+              {selectionSet.length === 1 && selectedLayer && (
+                <MenuItem
+                  icon="text"
+                  onClick={() => startRename(selectedLayer)}
+                >
+                  Rename…
+                </MenuItem>
+              )}
+              <MenuItem icon="trash" onClick={() => deleteSelected()} hint="Del">
+                Delete
+              </MenuItem>
+            </>
+          ) : (
+            <>
+              <MenuItem icon="paste" onClick={pasteFromMenu} hint={hint("paste")}>
+                Paste
+              </MenuItem>
+              <MenuItem icon="selectAll" onClick={selectAll} hint={hint("select-all")}>
+                Select all
+              </MenuItem>
+              <MenuItem icon="fit" onClick={fitView} hint={hint("zoom-fit")}>
+                Fit on screen
+              </MenuItem>
+            </>
+          )}
+        </div>
+      )}
+      {scalePageOpen && (
+        <ScalePageDialog
+          width={docSize[0]}
+          height={docSize[1]}
+          units={units}
+          dpi={docDpi}
+          onCancel={() => setScalePageOpen(false)}
+          onScale={(factor) => {
+            setScalePageOpen(false);
+            if (!session) return;
+            try {
+              session.scale_canvas(factor);
+              setDocumentSize(session.width, session.height);
+              refresh(session);
+              fitView();
+            } catch (err) {
+              alert(`Resize page: ${said(err)}`);
+            }
+          }}
+        />
+      )}
+      {canvasSizeOpen && (
+        <CanvasSizeDialog
+          width={docSize[0]}
+          height={docSize[1]}
+          units={units}
+          dpi={docDpi}
+          onCancel={() => setCanvasSizeOpen(false)}
+          onResize={(w, h, dx, dy) => {
+            setCanvasSizeOpen(false);
+            resizePage(w, h, dx, dy);
+          }}
+        />
+      )}
+      {featherOpen && (
+        <FeatherDialog
+          radius={selectionFeather}
+          onRadius={(r) => {
+            setSelectionFeather(r);
+            previewFeather(r);
+          }}
+          onCancel={cancelFeather}
+          onApply={() => {
+            setFeatherOpen(false);
+            session?.commit_preview();
+            refresh(session!);
+          }}
+        />
+      )}
+      {subjectOffer !== null && (
+        <div
+          className="modal-scrim"
+          onPointerDown={() => {
+            // Put away like any other window, except while the model is
+            // on its way down.
+            if (subjectFetched !== null) return;
+            setSubjectOffer(null);
+            setSubjectAskNoMore(false);
+          }}
+        >
+          <div
+            className="modal subject-offer"
+            role="dialog"
+            aria-label="Select subject"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <h2>Select subject</h2>
+            <p>
+              To select a subject the way a person would — the whole person with
+              their hair and hands, a white shirt against a white wall, everyone in
+              a group — the editor can use a subject model. It is{" "}
+              {Math.round(SUBJECT_MODEL.bytes / 1e6)} MB, downloaded once and kept
+              in this browser.
+            </p>
+            <p className="modal-aside">
+              Without it the subject is picked by colour, which is quicker but can
+              miss parts that look like the background. The model is U²-Net
+              (Apache-2.0), fetched from Hugging Face.
+            </p>
+            {subjectFetched !== null ? (
+              <div className="row" aria-label="Downloading the subject model">
+                <progress max={1} value={subjectFetched} />
+                <span className="hint">{Math.round(subjectFetched * 100)}%</span>
+              </div>
+            ) : (
+              <label className="row check">
+                <input
+                  type="checkbox"
+                  checked={subjectAskNoMore}
+                  onChange={(e) => setSubjectAskNoMore(e.target.checked)}
+                  aria-label="Don't ask again"
+                />
+                Don't ask again — pick by colour
+              </label>
+            )}
+            <div className="modal-actions">
+              <button
+                disabled={subjectFetched !== null}
+                onClick={() => {
+                  setSubjectOffer(null);
+                  setSubjectAskNoMore(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                disabled={subjectFetched !== null}
+                onClick={() => {
+                  const id = subjectOffer;
+                  setSubjectOffer(null);
+                  if (subjectAskNoMore) setPrefs({ subjectQuick: true });
+                  setSubjectAskNoMore(false);
+                  subjectByColour(id);
+                }}
+              >
+                Pick by colour
+              </button>
+              <button
+                className="primary"
+                disabled={subjectFetched !== null || subjectAskNoMore}
+                onClick={async () => {
+                  const id = subjectOffer;
+                  setSubjectFetched(0);
+                  try {
+                    await fetchSubjectModel(setSubjectFetched);
+                  } catch (err) {
+                    setSubjectFetched(null);
+                    setSubjectOffer(null);
+                    alert(`The subject model could not be downloaded: ${said(err)}. The subject is picked by colour instead.`);
+                    subjectByColour(id);
+                    return;
+                  }
+                  setSubjectFetched(null);
+                  setSubjectOffer(null);
+                  if (!(await subjectFromModel(id))) subjectByColour(id);
+                }}
+              >
+                Download ({Math.round(SUBJECT_MODEL.bytes / 1e6)} MB)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {findOpen && (
+        <FindReplaceDialog
+          count={findInText}
+          onReplace={(find, replace, opts) => {
+            const n = replaceInText(find, replace, opts);
+            if (n > 0) setFindOpen(false);
+          }}
+          onCancel={() => setFindOpen(false)}
+        />
+      )}
+      {straightenOpen && (
+        <StraightenDialog
+          degrees={straightenBy}
+          levelling={levelling}
+          onAngle={(d) => {
+            setStraightenBy(d);
+            previewStraighten(d);
+          }}
+          onLevel={() => setLevelling((on) => !on)}
+          onCancel={cancelStraighten}
+          onApply={() => {
+            setStraightenOpen(false);
+            setLevelling(false);
+            endGesture();
+          }}
+        />
+      )}
+      {developing && session && (
+        <RawDevelopDialog
+          session={session}
+          name={developing.name}
+          info={developing.info}
+          initial={developing.initial}
+          action={developing.layer === null ? "Place" : "Develop"}
+          historyKey={(e) => {
+            const fired = chords.byChord[chordFromEvent(e)];
+            return fired === "undo" || fired === "redo" ? fired : undefined;
+          }}
+          presets={prefs.developPresets}
+          onPresets={(developPresets) => setPrefs({ developPresets })}
+          folded={prefs.developFolded}
+          onFolded={(developFolded) => setPrefs({ developFolded })}
+          count={
+            developing.layer === null && rawDone.current + 1 + rawWaiting > 1
+              ? [rawDone.current + 1, rawDone.current + 1 + rawWaiting]
+              : undefined
+          }
+          onCancel={cancelDevelop}
+          onDone={finishDevelop}
+        />
+      )}
+      {batch && (
+        <BatchDialog
+          files={batch}
+          presets={prefs.developPresets}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          write={(files) => writeFiles("Export", files, docPath)}
+          onClose={() => setBatch(null)}
+        />
+      )}
+      {pdfAsk && (
+        <PdfDialog
+          name={pdfAsk.name}
+          sizes={pdfAsk.sizes}
+          onCancel={() => {
+            setPdfAsk(null);
+            pdfUndoOpen.current?.();
+            pdfUndoOpen.current = null;
+            answerPdf();
+          }}
+          onPlace={placePdf}
+        />
+      )}
+      {strokeOpen && (
+        <StrokeDialog onCancel={() => setStrokeOpen(false)} onStroke={strokeSelection} />
+      )}
+      {repeatFor && (
+        <RepeatDialog
+          count={repeatFor.length}
+          onCancel={() => setRepeatFor(null)}
+          onRepeat={repeatAs}
+        />
+      )}
+      {traceFor && session && (
+        <TraceDialog
+          session={session}
+          id={traceFor.id}
+          name={traceFor.name}
+          onCancel={() => setTraceFor(null)}
+          onTrace={(colours, smoothing) => traceAs(traceFor.id, colours, smoothing)}
+        />
+      )}
+      {exportOpen && session && (
+        <ExportDialog
+          session={session}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          fileName={exportName}
+          write={(files) => writeFiles("Export", files, docPath)}
+          share={canShareFiles() ? (files) => shareFiles(fileName(), files) : undefined}
+          hasRegion={antRings.length > 0}
+          selectionBounds={() => {
+            // A region is what leaves when there is one, so the box the
+            // engine exports it in is what the window should be sizing
+            // — the picked layers' box, with their shadows and glows,
+            // only answers when no region is up.
+            if (antRings.length > 0) {
+              const b = session.region_export_box(-1);
+              if (b.length === 4) return [b[0], b[1], b[0] + b[2], b[1] + b[3]];
+            }
+            return unionBounds(selectionSet, true);
+          }}
+          hasIcc={hasIcc}
+          keptRegions={kept}
+          keptComps={comps.map((c) => c.name)}
+          onClose={() => setExportOpen(false)}
+        />
+      )}
+      {prefsOpen && (
+        <PreferencesDialog
+          initialGroup={prefsGroup}
+          menuRows={keyableRows(menus)}
+          prefs={prefs}
+          setPrefs={setPrefs}
+          resetPrefs={resetPrefs}
+          hasScreenIcc={hasScreenIcc}
+          onLoadScreenIcc={() => pick(screenIccInputRef)}
+          onDisplayP3={() => {
+            if (!session) return;
+            try {
+              session.set_display_profile(display_p3_profile());
+              setHasScreenIcc(true);
+              refresh(session);
+            } catch (err) {
+              alert(`Could not use monitor profile: ${said(err)}`);
+            }
+          }}
+          onClearScreenIcc={clearScreenProfile}
+          lensFiles={lensList}
+          onListLensFiles={() => void lensFiles(session).then(setLensList)}
+          onAddLensFiles={async (picked) => {
+            if (!session) return;
+            const { refused } = await addLensFiles(session, picked);
+            setLensList(await lensFiles(session));
+            if (refused.length > 0)
+              alert(
+                `${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} not one of lensfun's database files, and ${refused.length === 1 ? "was" : "were"} not added.`,
+              );
+          }}
+          onForgetLensFile={async (name) => {
+            await forgetLensFile(name);
+            setLensList(await lensFiles(session));
+          }}
+          onClose={() => setPrefsOpen(false)}
+        />
+      )}
+      {newDocOpen && (
+        <NewDocDialog
+          startW={prefs.newWidth}
+          startH={prefs.newHeight}
+          startDpi={prefs.newDpi}
+          onCancel={() => setNewDocOpen(false)}
+          onCreate={(w, h, useCmyk, dpi) => {
+            setNewDocOpen(false);
+            newDocument(useCmyk, w, h, dpi);
+          }}
+        />
+      )}
+      <div className="workspace">
+        <nav
+          ref={railRef}
+          className={floating ? "toolbar floating" : "toolbar"}
+          aria-label="Tools"
+          // As tall as the window leaves below where it was put: held to
+          // the window's height, it ran past the bottom by its own top.
+          style={
+            // Its height through the stylesheet, which a phone's
+            // layout overrides: written here, it held a rail put back in
+            // the flow on a short window to a few tools.
+            floatingAt
+              ? ({
+                  left: floatingAt[0],
+                  top: floatingAt[1],
+                  "--float-top": `${floatingAt[1]}px`,
+                } as React.CSSProperties)
+              : undefined
+          }
+        >
+          {/* Picked up by its grip and put down anywhere; dropped back
+              against the left edge, or double-clicked, it docks again. */}
+          <button
+            className="tool grip"
+            aria-label="Move the toolbar"
+            title="Drag to move the toolbar, double-click to dock it"
+            onPointerDown={onGripDown}
+            onDoubleClick={() => setFloating(null)}
+          >
+            <Icon name="grip" size={20} />
+          </button>
+          {/* The rail, in sections with a line between them, less the
+              tools put away in Preferences. A section with nothing left
+              in it goes, and so does its line. */}
+          {railSections.map((section, i) => (
+            <Fragment key={i}>
+              {i > 0 && <span className="tool-sep" role="separator" />}
+              {section.map((t) =>
+                t === "Select" ? (
+                  // The four that pick a region share this slot, the way
+                  // the shapes share theirs.
+                  <div className="tool-group" key="selects">
+                    <button
+                      className={
+                        SELECT_TOOLS.includes(tool as never) && shown(tool)
+                          ? "tool active"
+                          : "tool"
+                      }
+                      aria-pressed={SELECT_TOOLS.includes(tool as never) && shown(tool)}
+                      onClick={() => {
+                        setTool(selectSlot);
+                        setPenPoints([]);
+                      }}
+                      title={toolTitle(selectSlot)}
+                      aria-label={selectSlot}
+                    >
+                      <Icon name={TOOL_ICONS[selectSlot]} size={20} />
+                    </button>
+                    {shownSelects.length > 1 && (
+                      <button
+                        className="tool-more"
+                        aria-label="More ways to select"
+                        aria-expanded={selectsOpen}
+                        title="The other ways to pick a region"
+                        data-flyout
+                        onClick={() => {
+                          setShapesOpen(false);
+                          setMoreOpen(false);
+                          setSelectsOpen((open) => !open);
+                        }}
+                      />
+                    )}
+                    {selectsOpen && (
+                      <div
+                        className="tool-flyout"
+                        role="group"
+                        aria-label="Ways to select"
+                        ref={pinFlyout}
+                      >
+                        {shownSelects.map((s) => (
+                          <button
+                            key={s}
+                            className={s === tool ? "tool active" : "tool"}
+                            aria-pressed={s === tool}
+                            onClick={() => {
+                              setSelectTool(s);
+                              setTool(s);
+                              setPenPoints([]);
+                              setSelectsOpen(false);
+                            }}
+                            title={toolTitle(s)}
+                            aria-label={s}
+                          >
+                            <Icon name={TOOL_ICONS[s]} size={20} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : t === "Rect" ? (
+                  // The shape tools share this slot: the one last used sits
+                  // in it, and the rest are behind the corner.
+                  <div className="tool-group" key="shapes">
+                    <button
+                      className={
+                        SHAPE_TOOLS.includes(tool as never) && shown(tool)
+                          ? "tool active"
+                          : "tool"
+                      }
+                      aria-pressed={SHAPE_TOOLS.includes(tool as never) && shown(tool)}
+                      onClick={() => {
+                        setTool(shapeSlot);
+                        setPenPoints([]);
+                      }}
+                      title={toolTitle(shapeSlot)}
+                      aria-label={shapeSlot}
+                    >
+                      <Icon name={TOOL_ICONS[shapeSlot]} size={20} />
+                    </button>
+                    {shownShapes.length > 1 && (
+                      <button
+                        className="tool-more"
+                        aria-label="More shapes"
+                        aria-expanded={shapesOpen}
+                        title="The other shapes"
+                        data-flyout
+                        onClick={() => {
+                          setSelectsOpen(false);
+                          setMoreOpen(false);
+                          setShapesOpen((open) => !open);
+                        }}
+                      />
+                    )}
+                    {shapesOpen && (
+                      <div className="tool-flyout" role="group" aria-label="Shapes" ref={pinFlyout}>
+                        {shownShapes.map((s) => (
+                          <button
+                            key={s}
+                            className={s === tool ? "tool active" : "tool"}
+                            aria-pressed={s === tool}
+                            onClick={() => {
+                              setShapeTool(s);
+                              setTool(s);
+                              setPenPoints([]);
+                              setShapesOpen(false);
+                            }}
+                            title={toolTitle(s)}
+                            aria-label={s}
+                          >
+                            <Icon name={TOOL_ICONS[s]} size={20} />
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button
+                    key={t}
+                    className={t === tool ? "tool active" : "tool"}
+                            aria-pressed={t === tool}
+                    onClick={() => {
+                      setTool(t);
+                      setPenPoints([]);
+                    }}
+                    title={toolTitle(t)}
+                    aria-label={t}
+                  >
+                    <Icon name={TOOL_ICONS[t]} size={20} />
+                  </button>
+                ),
+              )}
+            </Fragment>
+          ))}
+          {/* The tools put away, behind one slot at the end — the way
+              Photoshop keeps its own. Put away is not gone: a key still
+              picks one, and the slot then shows it in hand. */}
+          {hiddenTools.length > 0 && (
+            <>
+              <span className="tool-sep" role="separator" />
+              <div className="tool-group" key="more">
+                <button
+                  className={
+                    hiddenTools.includes(tool) ? "tool active" : "tool"
+                  }
+                  data-flyout
+                  onClick={() => {
+                    setShapesOpen(false);
+                    setSelectsOpen(false);
+                    setMoreOpen((open) => !open);
+                  }}
+                  aria-expanded={moreOpen}
+                  // A tool put away and in hand is said as the one in hand.
+                  title={
+                    hiddenTools.includes(tool)
+                      ? `${tool}, put away from the rail — the others are here too`
+                      : "The tools put away from the rail"
+                  }
+                  aria-label={hiddenTools.includes(tool) ? `More tools: ${tool}` : "More tools"}
+                  aria-pressed={hiddenTools.includes(tool)}
+                >
+                  <Icon name={hiddenTools.includes(tool) ? TOOL_ICONS[tool] : "more"} size={20} />
+                </button>
+                {moreOpen && (
+                  <div className="tool-flyout" role="group" aria-label="Tools put away" ref={pinFlyout}>
+                    {hiddenTools.map((s) => (
+                      <button
+                        key={s}
+                        className={s === tool ? "tool active" : "tool"}
+                            aria-pressed={s === tool}
+                        onClick={() => {
+                          setTool(s);
+                          setPenPoints([]);
+                          setMoreOpen(false);
+                        }}
+                        title={toolTitle(s)}
+                        aria-label={s}
+                      >
+                        <Icon name={TOOL_ICONS[s]} size={20} />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+          {/* How far the edge of what is picked is softened over. Shown
+              while a region-picking tool is in hand, since that is when
+              it is being decided — and it is the same number the mask
+              panel shows, set before the region is handed to a layer
+              rather than after. */}
+          {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
+            <NumberField
+              className="tool-number"
+              min={0}
+              max={200}
+              step={1}
+              value={Math.round(selectionFeather)}
+              title="How far the edge is softened over, in page pixels"
+              aria-label="Selection feather"
+              onValue={(want) => {
+                setSelectionFeather(want);
+                if (session?.feather_selection(want)) refresh(session);
+              }}
+            />
+          )}
+          {/* The regions this document has kept by name. Clicking one
+              picks it out, with the modifiers a marquee takes, since it
+              is a region arriving the same way. Ctrl-click forgets one,
+              which is free of the three the combining already uses. */}
+          {SELECT_TOOLS.includes(tool as never) && (
+            <div className="palette" role="group" aria-label="Kept regions">
+              {chipNames(kept).map((short, i) => [kept[i], short] as const).map(([name, short], i) => (
+                <button
+                  key={i}
+                  className="kept"
+                  title={`${name} — shift adds it, alt takes it away, ctrl-click (or Delete) forgets it`}
+                  aria-label={`Kept region ${name}`}
+                  onKeyDown={chipKeys(() => forgetRegion(i))}
+                  onClick={(e) => {
+                    if (e.ctrlKey || e.metaKey) {
+                      forgetRegion(i);
+                      return;
+                    }
+                    pickKept(
+                      i,
+                      e.shiftKey
+                        ? e.altKey
+                          ? "intersect"
+                          : "union"
+                        : e.altKey
+                          ? "subtract"
+                          : "replace",
+                    );
+                  }}
+                >
+                  {short}
+                </button>
+              ))}
+              {antRings.length > 0 && (
+                <button
+                  className="swatch add"
+                  onClick={keepSelection}
+                  title="Keep what is picked out, under a name"
+                  aria-label="Keep what is picked"
+                >
+                  +
+                </button>
+              )}
+            </div>
+          )}
+          {/* Whether to show what is picked as a wash rather than only
+              as an outline. The ants cannot say how soft an edge is or
+              which side of it is picked; this can. */}
+          {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
+            <button
+              className={`chrome-button icon-only${veilOn ? " active" : ""}`}
+              aria-label="Show what is picked as a wash"
+              aria-pressed={veilOn}
+              title="Show what is picked as a wash over the rest"
+              onClick={() => {
+                showVeil.current = !veilOn;
+                setVeilOn(!veilOn);
+                if (session) refresh(session);
+              }}
+            >
+              <Icon name="mask" />
+            </button>
+          )}
+          {/* How much further out — or, with a minus sign, further in —
+              the region reaches. Applied on Enter rather than as it is
+              typed: each press is an edit of its own, so "grow by two"
+              twice is four, and 2 on the way to 20 is not. */}
+          {SELECT_TOOLS.includes(tool as never) && antRings.length > 0 && (
+            <NumberField
+              className="tool-number"
+              min={-200}
+              max={200}
+              step={1}
+              integer
+              value={growBy}
+              title="Press Enter to take what is picked this many page pixels further out; a minus sign takes it in"
+              aria-label="Grow what is picked"
+              onValue={setGrowBy}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                try {
+                  if (session?.grow_selection(growBy)) refresh(session);
+                } catch (err) {
+                  alert(`Select: ${said(err)}`);
+                }
+              }}
+            />
+          )}
+          {/* How far the wand's colour may stray. Only while it is the
+              tool in hand, like the sides box below. */}
+          {tool === "Wand" && (
+            <NumberField
+              className="tool-number"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(wandTolerance * 100)}
+              title="How far the colour may stray, in percent"
+              aria-label="Wand tolerance"
+              onValue={(v) => setWandTolerance(v / 100)}
+            />
+          )}
+          {/* And whether it is a question about the run of pixels the
+              click landed in or about the colour wherever it is. */}
+          {tool === "Wand" && (
+            <select
+              className="tool-ratio"
+              value={wandTouching ? "touching" : "anywhere"}
+              onChange={(e) => setWandTouching(e.target.value === "touching")}
+              onKeyDown={(e) => e.stopPropagation()}
+              title="Whether to keep to the run of pixels clicked, or take that colour wherever it is on the page"
+              aria-label="Wand reach"
+            >
+              <option value="touching">Touching</option>
+              <option value="anywhere">Anywhere</option>
+            </select>
+          )}
+          {/* Picking the subject out of a photograph, and how far a
+              colour may stray from one the picture's edge shows and
+              still be background. The two sit together because a number
+              on its own says nothing about what presses it, and neither
+              waits for a region to exist: this is how one is made. */}
+          {SELECT_TOOLS.includes(tool as never) && (
+            <button
+              className="chrome-button icon-only"
+              aria-label="Select subject"
+              title="Select the subject of this picture"
+              onClick={pickSubject}
+            >
+              <Icon name="wand" />
+            </button>
+          )}
+          {SELECT_TOOLS.includes(tool as never) && (
+            <NumberField
+              className="tool-number"
+              min={0}
+              max={100}
+              step={1}
+              value={Math.round(subjectTolerance * 100)}
+              title="How readily a colour counts as background, in percent — half leaves the decision to the picture, higher leaves less of it a subject"
+              aria-label="Subject tolerance"
+              onValue={(v) => setSubjectTolerance(v / 100)}
+            />
+          )}
+          {/* How many sides, or points, the next one has. Only while one
+              of the two tools that asks is in hand. */}
+          {/* The library, while the Shape tool is in hand: each shape
+              drawn small as itself, the one chosen marked. */}
+          {tool === "Shape" && (
+            <div className="palette shape-library" role="group" aria-label="Shapes">
+              {SHAPE_PRESETS.map((p) => {
+                const d =
+                  p.points
+                    .map(([u, v], i) => `${i === 0 ? "M" : "L"}${(u * 14 + 1).toFixed(1)} ${(v * 14 + 1).toFixed(1)}`)
+                    .join(" ") + " Z";
+                return (
+                  <button
+                    key={p.name}
+                    className={p.name === preset ? "swatch shape-chip active" : "swatch shape-chip"}
+                    onClick={() => setPreset(p.name)}
+                    title={p.name}
+                    aria-label={`Shape ${p.name}`}
+                    aria-pressed={p.name === preset}
+                  >
+                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                      <path d={d} fill="currentColor" />
+                    </svg>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          {(tool === "Polygon" || tool === "Star") && (
+            <NumberField
+              className="tool-number"
+              min={3}
+              max={24}
+              integer
+              value={sides}
+              onValue={setSides}
+              title={tool === "Star" ? "Points" : "Sides"}
+              aria-label={tool === "Star" ? "Points" : "Sides"}
+            />
+          )}
+          {/* What the crop is held to. Only while the crop tool is in
+              hand, like the number of sides above it. */}
+          {tool === "Crop" && (
+            <select
+              className="tool-ratio"
+              value={cropRatio}
+              onChange={(e) => setCropRatio(e.target.value)}
+              onKeyDown={(e) => e.stopPropagation()}
+              title="Hold the crop to a ratio"
+              aria-label="Crop ratio"
+            >
+              {Object.keys(CROP_RATIOS).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          )}
+          {/* A kept frame is taken, or let go, here as well as by Enter
+              and Escape — for a hand without a keyboard. */}
+          {tool === "Crop" && cropFrame && (
+            <>
+              <button type="button" className="tool-commit primary" onClick={applyCrop} title="Crop to the frame (Enter)">
+                Crop
+              </button>
+              <button type="button" className="tool-commit" onClick={() => setCropFrame(null)} title="Let the frame go (Escape)">
+                Cancel
+              </button>
+            </>
+          )}
+          <input
+            ref={fillWell}
+            type="color"
+            value={fill}
+            onChange={(e) => {
+              setFill(e.target.value);
+              setInkFrom(null);
+            }}
+            title="Fill color"
+            aria-label="Fill colour"
+            className="fill-swatch"
+          />
+          {/* The document's own colours, kept by name and saved with it:
+              a page's palette is chosen once and reached for, rather than
+              typed again every time. Clicking one draws with it — and
+              gives it to the picked shape or block of text, which then
+              stands for the entry rather than holding a copy of it, so
+              shift-clicking the entry later to say what it now means
+              recolours everything that reached for it. That is the whole
+              of what a palette is for: one decision in one place, not the
+              same colour typed into a dozen layers. Alt-clicking takes it
+              out of the palette, and the layers that used it keep the
+              colour they were drawn in. */}
+          <div className="palette" role="group" aria-label="Palette">
+            {/* What the row is, said once: a lone "+" under the colour
+                in hand said nothing, and a second one under it for the
+                styles said less. */}
+            <span className="palette-caption">Palette</span>
+            {swatches.map((sw, i) => (
+              <button
+                key={i}
+                className="swatch"
+                style={{ background: colorToHex(sw.color) }}
+                title={`${sw.name} (${colorToHex(sw.color)}) — shift-click to make it mean the colour in hand, alt-click (or Delete) to take it out`}
+                aria-label={`Colour ${sw.name}, ${colorToHex(sw.color)}`}
+                aria-pressed={linkedSwatch === sw.name}
+                onKeyDown={chipKeys(() => setPalette(swatches.filter((_, j) => j !== i)))}
+                onClick={(e) => {
+                  if (e.altKey) {
+                    setPalette(swatches.filter((_, j) => j !== i));
+                    return;
+                  }
+                  if (e.shiftKey) {
+                    // The same colour again is nothing to keep.
+                    if (colorToHex(sw.color).toLowerCase() === fill.toLowerCase()) return;
+                    setPalette(
+                      swatches.map((other, j) =>
+                        j === i
+                          ? {
+                              name: other.name,
+                              color: inkOf(fill),
+                            }
+                          : other,
+                      ),
+                    );
+                    return;
+                  }
+                  // The entry's own ink, not one worked back out of the hex.
+                  applyColour(colorToHex(sw.color), sw.name, flatColor(sw.color));
+                }}
+              />
+            ))}
+            <button
+              className="swatch add"
+              onClick={() => {
+                // A name no colour in the document stands for: named by
+                // its hex, two of the same colour were one name (the
+                // second's change moved both), and a colour let go of
+                // from an entry taken out was picked up again by the
+                // next entry of that hex.
+                let taken: string[] = [];
+                try {
+                  taken = session ? (JSON.parse(session.colour_names_in_use()) as string[]) : [];
+                } catch {
+                  taken = [];
+                }
+                const used = new Set([...taken, ...swatches.map((sw) => sw.name)]);
+                let n = swatches.length + 1;
+                while (used.has(`Swatch ${n}`)) n++;
+                setPalette([
+                  ...swatches,
+                  {
+                    name: `Swatch ${n}`,
+                    color: inkOf(fill),
+                  },
+                ]);
+              }}
+              title="Keep this colour in the document's palette"
+              aria-label="Add to the palette"
+            >
+              +
+            </button>
+          </div>
+          {/* The colours used most lately, newest first — chosen in the
+              system's picker or given to a layer — and kept across
+              documents, since they are the person's habit rather than
+              the file's. A click uses one again, as a palette entry is
+              used, but by value: nothing stands for it, so nothing
+              follows it when it changes. */}
+          {prefs.recentColors.length > 0 && (
+            <div className="palette recent" role="group" aria-label="Recent colours">
+              {prefs.recentColors.map((hex) => (
+                <button
+                  key={hex}
+                  className="swatch"
+                  style={{ background: hex }}
+                  title={`${hex} — used lately`}
+                  aria-label={`Recent colour ${hex}`}
+                  onKeyDown={chipKeys(() =>
+                    setPrefs((p) => ({ recentColors: p.recentColors.filter((c) => c !== hex) })),
+                  )}
+                  onClick={() => applyColour(hex)}
+                />
+              ))}
+            </div>
+          )}
+          {/* The looks kept by name, as chips: pressed, one is given to
+              the picked layers; shift-pressed, it is re-kept from the
+              picked layer; alt-pressed, it is forgotten. A look is a
+              whole made of a fill, a stroke, effects, a fade and a
+              blend, and a chip can show only the first of those, so it
+              says the name as well. */}
+          {(styles.length > 0 || selected !== null) && (
+            <div className="palette styles" role="group" aria-label="Styles">
+              <span className="palette-caption">Styles</span>
+              {styles.map((st) => (
+                <button
+                  key={st.name}
+                  className={
+                    selectedLayer?.style === st.name ? "swatch style-chip followed" : "swatch style-chip"
+                  }
+                  style={{
+                    background: st.look.fill ? colorToHex(st.look.fill) : "transparent",
+                    borderColor: st.look.stroke ? colorToHex(st.look.stroke.color) : undefined,
+                  }}
+                  title={`${st.name} — give this look to what is picked${
+                    st.look.text
+                      ? `, and set text in ${st.look.text.size}px${st.look.text.bold ? " bold" : ""}${
+                          st.look.text.italic ? " italic" : ""
+                        }`
+                      : ""
+                  }; shift-click to keep the picked layer's look under this name, alt-click (or Delete) to forget it`}
+                  aria-label={`Style ${st.name}`}
+                  aria-pressed={selectedLayer?.style === st.name}
+                  onKeyDown={chipKeys(() => forgetStyle(st.name))}
+                  onClick={(e) => {
+                    if (e.altKey) forgetStyle(st.name);
+                    else if (e.shiftKey) keepStyle(st.name);
+                    else applyStyle(st.name);
+                  }}
+                >
+                  {/* A style taken off text says so the way text would:
+                      its name in that weight and slant. */}
+                  <span
+                    style={
+                      st.look.text
+                        ? {
+                            fontWeight: st.look.text.bold ? 700 : 400,
+                            fontStyle: st.look.text.italic ? "italic" : "normal",
+                          }
+                        : undefined
+                    }
+                  >
+                    {st.name.replace(/^Style /, "")}
+                  </span>
+                </button>
+              ))}
+              {selected !== null && (
+                <button
+                  className="swatch add"
+                  onClick={() => keepStyle()}
+                  title="Keep the picked layer's look as a style"
+                  aria-label="Keep as a style"
+                >
+                  +
+                </button>
+              )}
+            </div>
+          )}
+        </nav>
+        <main
+          className={`canvas-host${
+            painting || cloning
+              ? " painting"
+              : tool === "Hand"
+                ? " handing"
+                : tool === "Zoom"
+                  ? " zooming"
+                  : tool === "Gradient"
+                    ? " grading"
+                    : tool === "Fill"
+                      ? " filling"
+                      : tool === "Text"
+                        ? " texting"
+                        : ""
+          }`}
+          ref={hostRef}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={onHostDrop}
+          // A number typed into the panel is taken before the press does
+          // anything: the press picks another layer, the field is drawn
+          // afresh for it, and the typing went with the old one, unsaid.
+          onPointerDownCapture={() => {
+            const typed = document.activeElement;
+            if (typed instanceof HTMLInputElement && settlesOnLeave.has(typed) && typed.value !== typed.defaultValue)
+              typed.blur();
+          }}
+          onPointerDown={onHostPointerDown}
+          onPointerMove={onHostPointerMove}
+          onPointerUp={onHostPointerUp}
+          onPointerCancel={onHostPointerCancel}
+          onContextMenu={onCanvasContextMenu}
+          onPointerLeave={() => setBrushAt(null)}
+        >
+          {/* What the tool in hand can be told, said in words at the top
+              of the canvas. It had been squeezed into the foot of the
+              rail as a bare number and an unlabelled slider, two and a
+              half rem wide. A press here never reaches the canvas. */}
+          {(painting || cloning || tool === "Brush") && (
+            <div
+              className="tool-options"
+              role="toolbar"
+              aria-label="Tool options"
+              onPointerDown={(e) => e.stopPropagation()}
+              onContextMenu={(e) => e.stopPropagation()}
+            >
+              {(painting || cloning) && (
+                <>
+                  <label className="tool-option">
+                    Width
+                    <NumberField
+                      min={1}
+                      max={200}
+                      value={paintSize}
+                      onValue={setPaintSize}
+                      title="Brush width"
+                      aria-label="Paint width"
+                      // What is typed here is not a step: its own undo takes it back.
+                      data-own-undo=""
+                      className="brush-size"
+                    />
+                    px
+                  </label>
+                  <label className="tool-option">
+                    Softness
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={Math.round(paintSoftness * 100)}
+                      onChange={(e) => setPaintSoftness(Number(e.target.value) / 100)}
+                      title="How soft the brush's edge is"
+                      aria-label="Brush softness"
+                      className="paint-softness"
+                    />
+                    <span className="tool-option-value">
+                      {Math.round(paintSoftness * 100)}%
+                    </span>
+                  </label>
+                  <span className="tool-option-sep" />
+                  <span className="tool-option-name">Brushes</span>
+              {/* The brushes kept by name: a press takes one up, alt
+                  forgets it, and the + keeps the numbers in hand under
+                  the next free name. A chip is drawn as the brush it
+                  stands for — its width as a dot, its softness as the
+                  dot's edge — since that is what a hand is choosing by. */}
+              <div className="palette brushes" role="group" aria-label="Brushes">
+                {prefs.brushes.map((br) => {
+                  const inHand =
+                    br.size === paintSize && Math.abs(br.softness - paintSoftness) < 0.005;
+                  return (
+                    <button
+                      key={br.name}
+                      className={inHand ? "swatch brush-chip active" : "swatch brush-chip"}
+                      title={`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click (or Delete) to forget it`}
+                      aria-label={/^brush\b/i.test(br.name) ? br.name : `Brush ${br.name}`}
+                      aria-pressed={inHand}
+                      onKeyDown={chipKeys(() =>
+                        setPrefs({ brushes: prefs.brushes.filter((o) => o.name !== br.name) }),
+                      )}
+                      onClick={(e) => {
+                        if (e.altKey) {
+                          setPrefs({ brushes: prefs.brushes.filter((o) => o.name !== br.name) });
+                          return;
+                        }
+                        setPaintSize(br.size);
+                        setPaintSoftness(br.softness);
+                      }}
+                    >
+                      <span
+                        className="brush-dot"
+                        style={{
+                          width: `${Math.max(3, Math.min(20, Math.sqrt(br.size) * 1.9))}px`,
+                          height: `${Math.max(3, Math.min(20, Math.sqrt(br.size) * 1.9))}px`,
+                          filter: `blur(${(br.softness * 2.5).toFixed(1)}px)`,
+                        }}
+                      />
+                    </button>
+                  );
+                })}
+                <button
+                  className="swatch add"
+                  onClick={() => {
+                    // The brush in hand kept already is kept once: pressed
+                    // twice, it made two chips alike, both marked in hand.
+                    const same = prefs.brushes.find((o) => o.size === paintSize && o.softness === paintSoftness);
+                    if (same) {
+                      alert(`This brush is kept already, as ${same.name}.`);
+                      return;
+                    }
+                    const taken = new Set(prefs.brushes.map((o) => o.name));
+                    let n = prefs.brushes.length + 1;
+                    while (taken.has(`Brush ${n}`)) n++;
+                    setPrefs({
+                      brushes: [
+                        ...prefs.brushes,
+                        { name: `Brush ${n}`, size: paintSize, softness: paintSoftness },
+                      ],
+                    });
+                  }}
+                  title="Keep this brush — its width and softness — by name"
+                  aria-label="Keep this brush"
+                >
+                  +
+                </button>
+              </div>
+                </>
+              )}
+              {tool === "Brush" && (
+                <label className="tool-option">
+                  Width
+                  <NumberField
+                    min={1}
+                    max={64}
+                    value={brushSize}
+                    onValue={setBrushSize}
+                    title="Brush width"
+                    aria-label="Brush width"
+                    // What is typed here is not a step: its own undo takes it back.
+                    data-own-undo=""
+                    className="brush-size"
+                  />
+                  px
+                </label>
+              )}
+            </div>
+          )}
+          {/* Rulers along the top and left edges, marked in document
+              units and following the view. Dragging out of one places a
+              guide; dropping a guide back on one throws it away. */}
+          {(() => {
+            // Ticks are chosen in the unit the rulers read in, then
+            // placed in pixels: a step is the first that puts ticks at
+            // least sixty screen pixels apart.
+            const unitPx = 1 / perPixel(units, docDpi);
+            const candidates = UNIT_TICKS[units];
+            const step =
+              candidates.find((s) => s * unitPx * view.zoom >= 60) ??
+              candidates[candidates.length - 1];
+            const ticks = (vertical: boolean) => {
+              const span = vertical ? viewport[1] : viewport[0];
+              const origin = vertical ? view.y : view.x;
+              const first =
+                Math.floor(-origin / view.zoom / unitPx / step) * step;
+              const last = (span - origin) / view.zoom / unitPx;
+              const out: number[] = [];
+              for (let v = first; v <= last; v += step)
+                out.push(Math.round(v * 1000) / 1000);
+              return out;
+            };
+            const ruler = (vertical: boolean) => (
+              <div
+                className={vertical ? "ruler ruler-left" : "ruler ruler-top"}
+                role="img"
+                aria-label={vertical ? "Vertical ruler" : "Horizontal ruler"}
+                onPointerDown={(e) => startGuideDrag(vertical, null, e)}
+              >
+                {/* Its numbers are the ruler's picture, not its name. */}
+                <svg aria-hidden="true">
+                  {ticks(vertical).map((v) => {
+                    const at =
+                      (vertical ? view.y : view.x) + v * unitPx * view.zoom;
+                    return vertical ? (
+                      <g key={v}>
+                        <line x1={RULER - 5} y1={at} x2={RULER} y2={at} />
+                        {/* Turned a quarter to read up the ruler. The
+                            rotation puts the glyphs to the left of their
+                            anchor, so the anchor sits clear of the edge or
+                            they fall off it. */}
+                        <text
+                          x={RULER - 6}
+                          y={at + 3}
+                          transform={`rotate(-90 ${RULER - 6} ${at + 3})`}
+                        >
+                          {v}
+                        </text>
+                      </g>
+                    ) : (
+                      <g key={v}>
+                        <line x1={at} y1={RULER - 5} x2={at} y2={RULER} />
+                        <text x={at + 3} y={RULER - 7}>
+                          {v}
+                        </text>
+                      </g>
+                    );
+                  })}
+                </svg>
+              </div>
+            );
+            return (
+              <>
+                {ruler(false)}
+                {ruler(true)}
+                <div className="ruler-corner" />
+              </>
+            );
+          })()}
+          {/* Guides: the ones placed, plus the one being dragged. */}
+          {grid > 0 && (
+            <svg className="grid-overlay" aria-hidden="true">
+              {/* Only the lines the page has room for at this zoom: a
+                  grid finer than the screen can draw is a grey wash, and
+                  a grey wash is not a grid. */}
+              {grid * view.zoom >= 4 &&
+                (() => {
+                  const lines = [];
+                  for (let x = 0; x <= docSize[0]; x += grid) {
+                    const at = view.x + x * view.zoom;
+                    lines.push(
+                      <line
+                        key={`gx${x}`}
+                        className="grid-line"
+                        x1={at}
+                        y1={view.y}
+                        x2={at}
+                        y2={view.y + docSize[1] * view.zoom}
+                      />,
+                    );
+                  }
+                  for (let y = 0; y <= docSize[1]; y += grid) {
+                    const at = view.y + y * view.zoom;
+                    lines.push(
+                      <line
+                        key={`gy${y}`}
+                        className="grid-line"
+                        x1={view.x}
+                        y1={at}
+                        x2={view.x + docSize[0] * view.zoom}
+                        y2={at}
+                      />,
+                    );
+                  }
+                  return lines;
+                })()}
+            </svg>
+          )}
+          {showGuides && (
+            <svg className={tool === "Move" ? "guide-overlay grabbable" : "guide-overlay"} aria-hidden="true">
+              {docGuides.map((g, i) => {
+                const vertical = guideIsVertical(g);
+                const at =
+                  (vertical ? view.x : view.y) + guideAt(g) * view.zoom;
+                const hidden = guideDrag?.index === i;
+                const ends = {
+                  x1: vertical ? at : 0,
+                  y1: vertical ? 0 : at,
+                  x2: vertical ? at : viewport[0],
+                  y2: vertical ? viewport[1] : at,
+                };
+                return hidden ? null : (
+                  <g key={`${vertical}${i}`}>
+                    {/* A hairline is hard to catch with a pointer, so the
+                        line that takes the grab is wider and invisible. */}
+                    <line
+                      className="guide-hit"
+                      {...ends}
+                      data-guide={
+                        vertical ? `v${guideAt(g)}` : `h${guideAt(g)}`
+                      }
+                      onPointerDown={(e) => startGuideDrag(vertical, i, e)}
+                    />
+                    <line className="guide" {...ends} />
+                  </g>
+                );
+              })}
+              {guideDrag && (
+                <line
+                  className="guide dragging"
+                  x1={
+                    guideDrag.vertical ? view.x + guideDrag.at * view.zoom : 0
+                  }
+                  y1={
+                    guideDrag.vertical ? 0 : view.y + guideDrag.at * view.zoom
+                  }
+                  x2={
+                    guideDrag.vertical
+                      ? view.x + guideDrag.at * view.zoom
+                      : viewport[0]
+                  }
+                  y2={
+                    guideDrag.vertical
+                      ? viewport[1]
+                      : view.y + guideDrag.at * view.zoom
+                  }
+                />
+              )}
+            </svg>
+          )}
+          {/* The page itself: white, with the shadow that lifts it off
+              the desk. The canvas no longer is the page — it is a window
+              onto it, covering the whole viewport — so the page's own
+              extent has to be drawn. */}
+          <div
+            id="engine-page"
+            style={{
+              left: view.x,
+              top: view.y,
+              width: docSize[0] * view.zoom,
+              height: docSize[1] * view.zoom,
+            }}
+          />
+          <canvas
+            id="engine-canvas"
+            ref={canvasRef}
+            width={Math.round(viewport[0] * dpr)}
+            height={Math.round(viewport[1] * dpr)}
+            /* Where the document's origin sits in the backing store, and
+               how many of its pixels one document pixel takes — published
+               so anything reading it can convert into it. */
+            data-origin-x={engineOrigin(engineViewRef.current, view, viewport, dpr).x}
+            data-origin-y={engineOrigin(engineViewRef.current, view, viewport, dpr).y}
+            data-frame-scale={view.zoom * dpr}
+            style={{ width: viewport[0], height: viewport[1] }}
+            onDoubleClick={onCanvasDoubleClick}
+            onPointerDown={onCanvasPointerDown}
+            onPointerMove={onCanvasPointerMove}
+            onPointerUp={onCanvasPointerUp}
+          />
+          {cropFrame && (() => {
+            // The frame on the screen, from where it is on the page, so it
+            // stays on the picture as the view is zoomed and moved.
+            const cropRect = [
+              view.x + cropFrame[0] * view.zoom,
+              view.y + cropFrame[1] * view.zoom,
+              view.x + (cropFrame[0] + cropFrame[2]) * view.zoom,
+              view.y + (cropFrame[1] + cropFrame[3]) * view.zoom,
+            ];
+            const [mx, my] = [(cropRect[0] + cropRect[2]) / 2, (cropRect[1] + cropRect[3]) / 2];
+            return (
+            <svg className="crop-overlay" aria-hidden="true">
+              {/* Four panels dimming everything the crop would discard,
+                  which is how the framing reads at a glance. */}
+              {(
+                [
+                  [0, 0, "100%", cropRect[1]],
+                  [0, cropRect[3], "100%", "100%"],
+                  [0, cropRect[1], cropRect[0], cropRect[3] - cropRect[1]],
+                  [cropRect[2], cropRect[1], "100%", cropRect[3] - cropRect[1]],
+                ] as [number, number, number | string, number | string][]
+              ).map(([x, y, w, h], i) => (
+                <rect
+                  key={i}
+                  className="crop-shade"
+                  x={x}
+                  y={y}
+                  // A frame zoomed past the view's edge leaves a panel
+                  // with nothing in it, not a negative one.
+                  width={typeof w === "number" ? Math.max(0, w) : w}
+                  height={typeof h === "number" ? Math.max(0, h) : h}
+                />
+              ))}
+              <rect
+                className="crop-frame"
+                x={cropRect[0]}
+                y={cropRect[1]}
+                width={cropRect[2] - cropRect[0]}
+                height={cropRect[3] - cropRect[1]}
+              />
+              {/* Thirds: where a horizon or a face is put by anyone who
+                  has been told where to put one, and the reason a crop is
+                  worth watching while it is dragged. */}
+              {[1, 2].map((n) => (
+                <line
+                  key={`v${n}`}
+                  className="crop-third"
+                  x1={cropRect[0] + ((cropRect[2] - cropRect[0]) * n) / 3}
+                  y1={cropRect[1]}
+                  x2={cropRect[0] + ((cropRect[2] - cropRect[0]) * n) / 3}
+                  y2={cropRect[3]}
+                />
+              ))}
+              {[1, 2].map((n) => (
+                <line
+                  key={`h${n}`}
+                  className="crop-third"
+                  x1={cropRect[0]}
+                  y1={cropRect[1] + ((cropRect[3] - cropRect[1]) * n) / 3}
+                  x2={cropRect[2]}
+                  y2={cropRect[1] + ((cropRect[3] - cropRect[1]) * n) / 3}
+                />
+              ))}
+              {/* The eight handles, at the corners and the edges' middles. */}
+              {[
+                [cropRect[0], cropRect[1]], [mx, cropRect[1]], [cropRect[2], cropRect[1]],
+                [cropRect[0], my], [cropRect[2], my],
+                [cropRect[0], cropRect[3]], [mx, cropRect[3]], [cropRect[2], cropRect[3]],
+              ].map(([hx, hy], i) => (
+                <rect key={`k${i}`} className="crop-handle" x={hx - 4} y={hy - 4} width={8} height={8} />
+              ))}
+            </svg>
+            );
+          })()}
+          {levelLine && (
+            <svg className="level-overlay" aria-hidden="true">
+              <line
+                className="level-line"
+                x1={levelLine[0]}
+                y1={levelLine[1]}
+                x2={levelLine[2]}
+                y2={levelLine[3]}
+              />
+            </svg>
+          )}
+          {marquee && (
+            <svg className="marquee-overlay" aria-hidden="true">
+              <rect
+                x={view.x + marquee[0] * view.zoom}
+                y={view.y + marquee[1] * view.zoom}
+                width={(marquee[2] - marquee[0]) * view.zoom}
+                height={(marquee[3] - marquee[1]) * view.zoom}
+              />
+            </svg>
+          )}
+          {/* How big the brush is, and how much of that is its fade: the
+              outer ring is where it stops, the inner one where its solid
+              core ends. An eraser's ring is dashed, since what it does to
+              the canvas is the opposite of what the colour says. */}
+          {cloning && cloneFrom && (
+            <svg className="brush-ring clone-source" aria-hidden="true">
+              <circle
+                cx={view.x + cloneFrom[0] * view.zoom}
+                cy={view.y + cloneFrom[1] * view.zoom}
+                r={Math.max(3, (paintSize / 2) * view.zoom)}
+              />
+              <path
+                d={`M${view.x + cloneFrom[0] * view.zoom - 7} ${
+                  view.y + cloneFrom[1] * view.zoom
+                } h14 M${view.x + cloneFrom[0] * view.zoom} ${
+                  view.y + cloneFrom[1] * view.zoom - 7
+                } v14`}
+              />
+            </svg>
+          )}
+          {(painting || cloning) && brushAt && (
+            <svg
+              className={`brush-ring${erasing ? " erasing" : ""}`}
+              aria-hidden="true"
+            >
+              <circle
+                cx={brushAt[0]}
+                cy={brushAt[1]}
+                r={Math.max(1, (paintSize / 2) * view.zoom)}
+              />
+              {paintSoftness > 0.05 && (
+                <circle
+                  className="core"
+                  cx={brushAt[0]}
+                  cy={brushAt[1]}
+                  r={Math.max(
+                    0.5,
+                    (paintSize / 2) * (1 - paintSoftness) * view.zoom,
+                  )}
+                />
+              )}
+            </svg>
+          )}
+          {(guides.x.length > 0 || guides.y.length > 0) && (
+            <svg className="snap-overlay" aria-hidden="true">
+              {guides.x.map((x) => (
+                <line
+                  key={`x${x}`}
+                  x1={view.x + x * view.zoom}
+                  y1={view.y}
+                  x2={view.x + x * view.zoom}
+                  y2={view.y + docSize[1] * view.zoom}
+                />
+              ))}
+              {guides.y.map((y) => (
+                <line
+                  key={`y${y}`}
+                  x1={view.x}
+                  y1={view.y + y * view.zoom}
+                  x2={view.x + docSize[0] * view.zoom}
+                  y2={view.y + y * view.zoom}
+                />
+              ))}
+            </svg>
+          )}
+          {zoomBox && (
+            <div
+              className="zoom-box"
+              aria-hidden="true"
+              style={{
+                left: Math.min(zoomBox[0], zoomBox[2]),
+                top: Math.min(zoomBox[1], zoomBox[3]),
+                width: Math.abs(zoomBox[2] - zoomBox[0]),
+                height: Math.abs(zoomBox[3] - zoomBox[1]),
+              }}
+            />
+          )}
+          {penPoints.length > 0 && (
+            <svg className="pen-overlay" aria-hidden="true">
+              {tool === "Pen" ? (
+                <>
+                  {/* The path as it will be, curves and all. */}
+                  <path
+                    className="pen-path"
+                    d={penPoints
+                      .map((p, i) => {
+                        const sx = (q: [number, number]) =>
+                          `${view.x + q[0] * view.zoom},${view.y + q[1] * view.zoom}`;
+                        if (i === 0) return `M${sx(p)}`;
+                        const prev = penPoints[i - 1];
+                        const out = penHandles[i - 1] ?? [0, 0, 0, 0];
+                        const inn = penHandles[i] ?? [0, 0, 0, 0];
+                        if (out.every((v) => v === 0) && inn.every((v) => v === 0)) return `L${sx(p)}`;
+                        return `C${sx([prev[0] + out[2], prev[1] + out[3]])} ${sx([p[0] + inn[0], p[1] + inn[1]])} ${sx(p)}`;
+                      })
+                      .join(" ")}
+                  />
+                  <line ref={penRubberRef} className="pen-rubber" x1={-9} y1={-9} x2={-9} y2={-9} />
+                  {penPoints.map((p, i) => {
+                    const h = penHandles[i];
+                    const [cx, cy] = [view.x + p[0] * view.zoom, view.y + p[1] * view.zoom];
+                    return (
+                      <g key={i}>
+                        {h && h.some((v) => v !== 0) && (
+                          <>
+                            <line className="pen-handle" x1={cx + h[0] * view.zoom} y1={cy + h[1] * view.zoom}
+                              x2={cx + h[2] * view.zoom} y2={cy + h[3] * view.zoom} />
+                            <circle className="pen-knob" cx={cx + h[0] * view.zoom} cy={cy + h[1] * view.zoom} r={3} />
+                            <circle className="pen-knob" cx={cx + h[2] * view.zoom} cy={cy + h[3] * view.zoom} r={3} />
+                          </>
+                        )}
+                        <rect className="pen-anchor" x={cx - 3} y={cy - 3} width={6} height={6} />
+                      </g>
+                    );
+                  })}
+                </>
+              ) : (
+                <polyline
+                  points={penPoints
+                    .map(
+                      (p) =>
+                        `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
+                    )
+                    .join(" ")}
+                />
+              )}
+              {/* Only the pen closes a path by clicking its first anchor;
+                  a brush stroke reuses the preview line but not that mark. */}
+              {tool === "Pen" && (
+                <circle
+                  className="pen-first"
+                  cx={view.x + penPoints[0][0] * view.zoom}
+                  cy={view.y + penPoints[0][1] * view.zoom}
+                  r={5}
+                />
+              )}
+            </svg>
+          )}
+          {session &&
+            selected !== null &&
+            selectedKind &&
+            typeof selectedKind === "object" &&
+            "Vector" in selectedKind &&
+            "Path" in selectedKind.Vector.shape &&
+            (() => {
+              // Through the whole transform, the layer's and its parents':
+              // a path turned or in a moved group had its dots drawn
+              // where it would be unturned and at the page's origin.
+              const t = composeT(
+                toTransform(session.parent_space_of(selected)),
+                toTransform(session.transform_of(selected)),
+              );
+              const path = selectedKind.Vector.shape.Path;
+              const handles = withHandles(path);
+              // The dots are the Move and Node tools' to drag. With any
+              // other tool in hand a press on them is that tool's: the
+              // Pen's click there was swallowed (three clicks made two
+              // points), and a marquee, a fill or a crop begun on one
+              // moved the old path's anchor.
+              const drawing = tool !== "Move" && tool !== "Node";
+              const screen = (x: number, y: number) => ({
+                left: view.x + (t.a * x + t.c * y + t.e) * view.zoom,
+                top: view.y + (t.b * x + t.d * y + t.f) * view.zoom,
+              });
+              const reach = drawing ? ("none" as const) : undefined;
+              return path.points.flatMap((p, i) => {
+                const at = screen(p[0], p[1]);
+                const dots = [
+                  <div
+                    key={`a${i}`}
+                    className="anchor"
+                    data-anchor={i}
+                    style={{ left: at.left, top: at.top, pointerEvents: reach }}
+                    onPointerDown={(e) => onAnchorPointerDown(e, i)}
+                    onPointerMove={onAnchorPointerMove}
+                    onPointerUp={onAnchorPointerUp}
+                  />,
+                ];
+                // Only handles that are actually out from their anchor get a
+                // dot: one sitting on the anchor would cover it and swallow
+                // its drags. "Convert to curves" is what brings them out.
+                for (const side of [0, 2] as const) {
+                  const [ox, oy] = [handles[i][side], handles[i][side + 1]];
+                  if (ox === 0 && oy === 0) continue;
+                  const hx = p[0] + ox;
+                  const hy = p[1] + oy;
+                  const h = screen(hx, hy);
+                  dots.push(
+                    <div
+                      key={`h${i}-${side}`}
+                      className="curve-handle"
+                      data-handle={`${i}-${side}`}
+                      style={{ left: h.left, top: h.top, pointerEvents: reach }}
+                      onPointerDown={(e) => onCurveHandleDown(e, i, side)}
+                      onPointerMove={onCurveHandleMove}
+                      onPointerUp={onCurveHandleUp}
+                    />,
+                  );
+                }
+                return dots;
+              });
+            })()}
+          {inlineText &&
+            session &&
+            selected === inlineText.id &&
+            selLocal &&
+            selParent &&
+            selectedKind &&
+            typeof selectedKind === "object" &&
+            "Text" in selectedKind &&
+            (() => {
+              // The editor lives in the block's own coordinates: one CSS
+              // matrix — the layer's transform through its parents and
+              // the view — puts it over the block however the block is
+              // turned or scaled, and sizes its type with it.
+              const t = composeT(
+                selParent,
+                toTransform(session.transform_of(selected)),
+              );
+              const z = view.zoom;
+              const spec = selectedKind.Text;
+              const fill = spec.fill;
+              const caret =
+                "Srgb" in fill
+                  ? `rgb(${fill.Srgb.r * 255}, ${fill.Srgb.g * 255}, ${fill.Srgb.b * 255})`
+                  : "currentColor";
+              // A textarea sets every line in one size and stacks them
+              // evenly, so over a block with a run at a size of its own,
+              // or with space after its paragraphs, the caret would be a
+              // line out from the letters drawn under it. Such a block is
+              // typed as plain text in a box of its own, where caret and
+              // letters agree, and set properly when the typing ends.
+              const mirrored =
+                !((spec.paragraph_spacing ?? 0) > 0) &&
+                (spec.list ?? "None") === "None" &&
+                !(spec.runs ?? []).some((r) => r.size != null || r.baseline != null);
+              return (
+                <textarea
+                  ref={inlineRef}
+                  className={mirrored ? "inline-text" : "inline-text as-typed"}
+                  aria-label="Text on canvas"
+                  value={inlineText.value}
+                  spellCheck={false}
+                  style={{
+                    transform: `matrix(${t.a * z}, ${t.b * z}, ${t.c * z}, ${t.d * z}, ${view.x + t.e * z}, ${view.y + t.f * z})`,
+                    width:
+                      Math.max(spec.width, selLocal[2] - selLocal[0]) +
+                      spec.size,
+                    height: selLocal[3] - selLocal[1] + spec.size,
+                    fontFamily: `"${spec.font || "DejaVu Sans"}", sans-serif`,
+                    // The document's size is the ascent-to-descent height;
+                    // CSS wants the em, which in these faces is 0.86 of it.
+                    fontSize: spec.size * 0.86,
+                    lineHeight: `${spec.size * spec.line_height}px`,
+                    letterSpacing: spec.letter_spacing * spec.size,
+                    textAlign:
+                      spec.align === "Center"
+                        ? "center"
+                        : spec.align === "Right"
+                          ? "right"
+                          : spec.align === "Justify" && spec.width > 0
+                            ? "justify"
+                            : "left",
+                    whiteSpace: spec.width > 0 ? "pre-wrap" : "pre",
+                    // Each paragraph reads the way its first strong
+                    // letter does, as the page lays it out: a line
+                    // starting in Hebrew was set left to right here, and
+                    // the caret and a selection stood over other letters.
+                    unicodeBidi: "plaintext",
+                    // A justified paragraph's last line is set at the
+                    // left on the page, whichever way it reads; read
+                    // right to left here it went to the right.
+                    textAlignLast: spec.align === "Justify" && spec.width > 0 ? "left" : undefined,
+                    fontStyle: spec.italic ? "italic" : "normal",
+                    fontWeight: spec.bold ? "bold" : "normal",
+                    caretColor: caret,
+                    ...(mirrored ? {} : { color: caret }),
+                  }}
+                  onChange={(e) => {
+                    typeInlineText(e.target.value, e.target.selectionEnd);
+                    inlineSel.current = [e.target.selectionStart, e.target.selectionEnd];
+                  }}
+                  onSelect={(e) => {
+                    inlineSel.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd];
+                  }}
+                  onBlur={(e) => {
+                    // A press on Bold (or any of the panel's styling)
+                    // takes the caret, and the editor closes before the
+                    // press is heard: what was picked in it is kept a
+                    // moment so the press styles that, not the block.
+                    const el = e.currentTarget;
+                    lastInlinePick =
+                      el.selectionStart !== el.selectionEnd
+                        ? {
+                            range: [
+                              byteAt(el.value, Math.min(el.selectionStart, el.selectionEnd)),
+                              byteAt(el.value, Math.max(el.selectionStart, el.selectionEnd)),
+                            ],
+                            text: el.value,
+                            at: Date.now(),
+                          }
+                        : null;
+                    closeInlineText(true);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      closeInlineText(false);
+                    } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      closeInlineText(true);
+                    }
+                    if (!passesChord(e)) e.stopPropagation();
+                  }}
+                />
+              );
+            })()}
+          {/* Everything else picked is outlined too, more faintly: with
+              three layers picked the canvas used to show one box, so
+              there was no way to see from the artwork what a drag or a
+              Delete was about to act on. The handles stay on the
+              primary, which is the one they resize. */}
+          {selectionSet
+            .filter((id) => id !== selected)
+            .map((id) => [id, quadOf(id)] as const)
+            .filter(([, q]) => q !== null)
+            .map(([id, q]) => (
+              <svg key={id} className="sel-outline also" aria-hidden="true">
+                <polygon points={q!.map((p) => p.join(",")).join(" ")} />
+              </svg>
+            ))}
+          {/* The wash over what is not picked, under the ants: the
+              coverage itself, laid over the page where the page is. */}
+          {veil && (
+            <img
+              className="veil"
+              alt=""
+              aria-hidden="true"
+              src={veil}
+              style={{
+                left: view.x,
+                top: view.y,
+                width: docSize[0] * view.zoom,
+                height: docSize[1] * view.zoom,
+              }}
+            />
+          )}
+          {/* The marching ants: what is picked out of the page, and what
+              is being dragged out at this moment. Two strokes over each
+              other — a pale one under a dark dashed one — so the edge
+              reads on a dark picture and on a light one, which one
+              colour cannot do. */}
+          {antRings.length > 0 && (
+            <svg className="ants" aria-label="What is picked out">
+              {antRings.map((ring, i) => (
+                <polygon
+                  key={i}
+                  points={ring
+                    .map(
+                      (p) =>
+                        `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
+                    )
+                    .join(" ")}
+                />
+              ))}
+            </svg>
+          )}
+          {spacing.length > 0 && (
+            <svg className="measures spacing" aria-label="Equal spacing">
+              {spacing.map((g, i) => {
+                const [x1, y1] = [view.x + g.from[0] * view.zoom, view.y + g.from[1] * view.zoom];
+                const [x2, y2] = [view.x + g.to[0] * view.zoom, view.y + g.to[1] * view.zoom];
+                const label = String(inUnits(g.length, units, docDpi));
+                const [mx, my] = [(x1 + x2) / 2, (y1 + y2) / 2];
+                const w = label.length * 7 + 8;
+                return (
+                  <g key={i} className="measure">
+                    <line x1={x1} y1={y1} x2={x2} y2={y2} />
+                    <rect x={mx - w / 2} y={my - 8} width={w} height={16} rx={3} />
+                    <text x={mx} y={my + 4}>
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          )}
+          {measures && (
+            <svg className="measures" aria-label="Distances">
+              <rect
+                className="measure-to"
+                x={view.x + measures.to[0] * view.zoom}
+                y={view.y + measures.to[1] * view.zoom}
+                width={(measures.to[2] - measures.to[0]) * view.zoom}
+                height={(measures.to[3] - measures.to[1]) * view.zoom}
+              />
+              {measures.gaps.map((g, i) => {
+                const [x1, y1] = [view.x + g.from[0] * view.zoom, view.y + g.from[1] * view.zoom];
+                const [x2, y2] = [view.x + g.to[0] * view.zoom, view.y + g.to[1] * view.zoom];
+                const label = String(inUnits(g.length, units, docDpi));
+                const [mx, my] = [(x1 + x2) / 2, (y1 + y2) / 2];
+                const w = label.length * 7 + 8;
+                return (
+                  <g key={i} className="measure">
+                    <line x1={x1} y1={y1} x2={x2} y2={y2} />
+                    <rect x={mx - w / 2} y={my - 8} width={w} height={16} rx={3} />
+                    <text x={mx} y={my + 4}>
+                      {label}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          )}
+          {knifeLine && (
+            <svg className="ants drawing knife-line" aria-hidden="true">
+              <line
+                x1={view.x + knifeLine[0] * view.zoom}
+                y1={view.y + knifeLine[1] * view.zoom}
+                x2={view.x + knifeLine[2] * view.zoom}
+                y2={view.y + knifeLine[3] * view.zoom}
+              />
+            </svg>
+          )}
+          {regionDrag && (
+            <svg className="ants drawing" aria-hidden="true">
+              {regionDrag.points ? (
+                <polygon
+                  points={(() => {
+                    const pts = regionDrag.points;
+                    const out = [];
+                    for (let i = 0; i + 1 < pts.length; i += 2) {
+                      out.push(
+                        `${view.x + pts[i] * view.zoom},${view.y + pts[i + 1] * view.zoom}`,
+                      );
+                    }
+                    return out.join(" ");
+                  })()}
+                />
+              ) : SELECT_TOOLS.includes(tool as never) && tool === "Select ellipse" ? (
+                <ellipse
+                  cx={view.x + (regionDrag.x + regionDrag.w / 2) * view.zoom}
+                  cy={view.y + (regionDrag.y + regionDrag.h / 2) * view.zoom}
+                  rx={(regionDrag.w / 2) * view.zoom}
+                  ry={(regionDrag.h / 2) * view.zoom}
+                />
+              ) : (
+                <rect
+                  x={view.x + regionDrag.x * view.zoom}
+                  y={view.y + regionDrag.y * view.zoom}
+                  width={regionDrag.w * view.zoom}
+                  height={regionDrag.h * view.zoom}
+                />
+              )}
+            </svg>
+          )}
+          {selQuad && (
+            <>
+              <svg className="sel-outline" aria-hidden="true">
+                <polygon points={selQuad.map((p) => p.join(",")).join(" ")} />
+              </svg>
+              {/* The knob sits off the top edge along the box's own normal,
+                  so it stays above the layer however the layer is turned.
+                  A locked layer has none: nothing about it turns, and
+                  neither does a box round several — it would turn the one
+                  the panel is showing and leave the rest where they
+                  were. */}
+              {grabbable && !manyBox &&
+                (() => {
+                  const [tl, tr, , bl] = selQuad;
+                  const mid = [(tl[0] + tr[0]) / 2, (tl[1] + tr[1]) / 2];
+                  const down = [bl[0] - tl[0], bl[1] - tl[1]];
+                  const len = Math.hypot(down[0], down[1]) || 1;
+                  const knob = [
+                    mid[0] - (down[0] / len) * 26,
+                    mid[1] - (down[1] / len) * 26,
+                  ];
+                  return (
+                    <>
+                      <svg className="sel-outline" aria-hidden="true">
+                        <line
+                          x1={mid[0]}
+                          y1={mid[1]}
+                          x2={knob[0]}
+                          y2={knob[1]}
+                        />
+                      </svg>
+                      <div
+                        className="rot-handle"
+                        data-handle="rotate"
+                        title="Rotate (hold Shift to snap)"
+                        aria-label="Rotate layer"
+                        style={{ left: knob[0], top: knob[1] }}
+                        onPointerDown={onRotatePointerDown}
+                        onPointerMove={onRotatePointerMove}
+                        onPointerUp={onRotatePointerUp}
+                      />
+                    </>
+                  );
+                })()}
+              {/* Gradient geometry, dragged where it is seen rather than
+                  through sliders in the panel. */}
+              {(() => {
+                const kind = selectedKind;
+                if (!selToScreen || !selLocal || kind === null) return null;
+                if (typeof kind !== "object" || !("Vector" in kind))
+                  return null;
+                const g = kind.Vector.gradient;
+                if (!g) return null;
+                const [x0, y0, x1, y1] = selLocal;
+                const at = (u: number, v: number) =>
+                  selToScreen!(x0 + u * (x1 - x0), y0 + v * (y1 - y0));
+                const knob = (
+                  key: string,
+                  p: [number, number],
+                  part: "from" | "to" | "centre" | "focus" | "radius" | "angle" | number,
+                  cls: string,
+                ) => (
+                  <div
+                    key={key}
+                    className={cls}
+                    data-grad={key}
+                    style={{ left: p[0], top: p[1] }}
+                    onPointerDown={(e) => onGradHandleDown(e, part)}
+                    onPointerMove={onGradHandleMove}
+                    onPointerUp={onGradHandleUp}
+                  />
+                );
+                if ("Linear" in g) {
+                  const { from, stops } = g.Linear;
+                  // The end is shown square to the bands on the page,
+                  // which is where the ramp runs (`rampSeen`).
+                  const [d0, d1] = rampSeen(boxAxes(at), [g.Linear.to[0] - from[0], g.Linear.to[1] - from[1]]);
+                  const to: [number, number] = [from[0] + d0, from[1] + d1];
+                  const [a, b] = [at(from[0], from[1]), at(to[0], to[1])];
+                  return (
+                    <>
+                      <svg className="sel-outline" aria-hidden="true">
+                        <line
+                          className="grad-line"
+                          x1={a[0]}
+                          y1={a[1]}
+                          x2={b[0]}
+                          y2={b[1]}
+                        />
+                      </svg>
+                      {knob("from", a, "from", "grad-handle")}
+                      {knob("to", b, "to", "grad-handle")}
+                      {stops
+                        .slice(1, -1)
+                        .map((st, i) =>
+                          knob(
+                            `stop${i + 1}`,
+                            at(
+                              from[0] + (to[0] - from[0]) * st.offset,
+                              from[1] + (to[1] - from[1]) * st.offset,
+                            ),
+                            i + 1,
+                            "grad-stop",
+                          ),
+                        )}
+                    </>
+                  );
+                }
+                if ("Conic" in g) {
+                  // The centre, and a knob out along where the ramp
+                  // starts: drag it round to turn the seam.
+                  const { center, angle } = g.Conic;
+                  const r = (angle * Math.PI) / 180;
+                  const c = at(center[0], center[1]);
+                  const start = at(center[0] + 0.3 * Math.cos(r), center[1] + 0.3 * Math.sin(r));
+                  return (
+                    <>
+                      <svg className="sel-outline" aria-hidden="true">
+                        <line className="grad-line" x1={c[0]} y1={c[1]} x2={start[0]} y2={start[1]} />
+                      </svg>
+                      {knob("centre", c, "centre", "grad-handle")}
+                      {knob("angle", start, "angle", "grad-handle")}
+                    </>
+                  );
+                }
+                const { center, radius, focus, axes } = g.Radial;
+                const c = at(center[0], center[1]);
+                // Where the rings reach the radius: through the axes, the
+                // box's point that measures (radius, 0).
+                const det = axes ? axes[0] * axes[3] - axes[1] * axes[2] : 1;
+                const [ru, rv] =
+                  axes && Math.abs(det) > 1e-9 ? [(axes[3] * radius) / det, (-axes[2] * radius) / det] : [radius, 0];
+                const rim = at(center[0] + ru, center[1] + rv);
+                // A focus being dragged keeps its knob even while it sits
+                // on the centre: taken away under the pointer, it would take
+                // the drag's capture with it and the gesture would never end.
+                const f = focus
+                  ? at(focus[0], focus[1])
+                  : gradDragRef.current?.part === "focus"
+                    ? c
+                    : null;
+                return (
+                  <>
+                    <svg className="sel-outline" aria-hidden="true">
+                      <line
+                        className="grad-line"
+                        x1={c[0]}
+                        y1={c[1]}
+                        x2={rim[0]}
+                        y2={rim[1]}
+                      />
+                    </svg>
+                    {f && knob("focus", f, "focus", "grad-handle grad-focus")}
+                    {knob("centre", c, "centre", "grad-handle")}
+                    {knob("radius", rim, "radius", "grad-handle")}
+                  </>
+                );
+              })()}
+              {grabbable &&
+                HANDLES.map((c, i) => (
+                  <div
+                    key={c}
+                    className={`handle ${c}`}
+                    data-handle={c}
+                    style={{
+                      left: selQuad![HANDLE_CORNER[i]][0],
+                      top: selQuad![HANDLE_CORNER[i]][1],
+                    }}
+                    onPointerDown={(e) => onHandlePointerDown(e, c)}
+                    onPointerMove={onHandlePointerMove}
+                    onPointerUp={onHandlePointerUp}
+                  />
+                ))}
+              {/* A picture whose corners have moved: the quad it lies
+                  on, and a pin on each corner to move it by. */}
+              {grabbable &&
+                !manyBox &&
+                selCorners?.moved &&
+                selToScreen &&
+                (() => {
+                  const at = selCorners.quad.map(([x, y]) => selToScreen!(x, y));
+                  return (
+                    <>
+                      <svg className="sel-outline warp-outline" aria-hidden="true">
+                        <polygon points={at.map((p) => p.join(",")).join(" ")} />
+                      </svg>
+                      {at.map(([x, y], i) => (
+                        <div
+                          key={`pin${i}`}
+                          className="warp-pin"
+                          data-handle={`pin-${i}`}
+                          aria-label={`Picture corner ${i + 1}`}
+                          title="Move this corner of the picture"
+                          style={{ left: x, top: y }}
+                          onPointerDown={(e) => startWarp(e, i)}
+                          onPointerMove={onWarpMove}
+                          onPointerUp={onWarpUp}
+                        />
+                      ))}
+                    </>
+                  );
+                })()}
+              {/* The sides' middles: one axis at a time, or with Ctrl a
+                  skew. Left off a box too small to hold them apart from
+                  its corners, where they would only be in the way. */}
+              {grabbable &&
+                SIDES.map((side, i) => {
+                  const [p, q] = SIDE_CORNERS[i].map((k) => selQuad![k]);
+                  if (Math.hypot(q[0] - p[0], q[1] - p[1]) < 36) return null;
+                  return (
+                    <div
+                      key={side}
+                      className={`handle side ${side}`}
+                      data-handle={side}
+                      title="Stretch (hold Ctrl to skew)"
+                      style={{ left: (p[0] + q[0]) / 2, top: (p[1] + q[1]) / 2 }}
+                      onPointerDown={(e) => onHandlePointerDown(e, side)}
+                      onPointerMove={onHandlePointerMove}
+                      onPointerUp={onHandlePointerUp}
+                    />
+                  );
+                })}
+            </>
+          )}
+          {/* The mask, drawn and edited where it applies. Dashed and
+              in its own colour, because it is not the layer's outline
+              and confusing the two makes both useless. */}
+          {(() => {
+            const held = maskBox(selectedMask);
+            if (!held || !maskParent) return null;
+            // The mask's own space all the way to the page.
+            const p = composeT(maskParent, held.transform);
+            const at = (x: number, y: number): [number, number] => [
+              view.x + (p.a * x + p.c * y + p.e) * view.zoom,
+              view.y + (p.b * x + p.d * y + p.f) * view.zoom,
+            ];
+            const [x0, y0, x1, y1] = held.box;
+            const quad: [number, number][] = [
+              at(x0, y0),
+              at(x1, y0),
+              at(x1, y1),
+              at(x0, y1),
+            ];
+            const centre = at((x0 + x1) / 2, (y0 + y1) / 2);
+            const knob = (
+              key: string,
+              pt: [number, number],
+              corner: Handle | "move",
+            ) => (
+              <div
+                key={key}
+                className={corner === "move" ? "mask-move" : "mask-handle"}
+                data-mask={key}
+                style={{ left: pt[0], top: pt[1] }}
+                onPointerDown={(e) => onMaskHandleDown(e, corner)}
+                onPointerMove={onMaskHandleMove}
+                onPointerUp={onMaskHandleUp}
+              />
+            );
+            return (
+              <>
+                <svg className="sel-outline" aria-hidden="true">
+                  {/* Drawn in the mask's own space and carried onto the
+                      screen whole: worked out from the corners as an
+                      upright ellipse, one in a turned group came out a
+                      sliver. */}
+                  <ellipse
+                    className="mask-outline"
+                    vectorEffect="non-scaling-stroke"
+                    transform={`matrix(${p.a * view.zoom} ${p.b * view.zoom} ${p.c * view.zoom} ${p.d * view.zoom} ${view.x + p.e * view.zoom} ${view.y + p.f * view.zoom})`}
+                    cx={(x0 + x1) / 2}
+                    cy={(y0 + y1) / 2}
+                    rx={Math.abs(x1 - x0) / 2}
+                    ry={Math.abs(y1 - y0) / 2}
+                  />
+                </svg>
+                {knob("move", centre, "move")}
+                {HANDLES.map((c, i) => knob(c, quad[HANDLE_CORNER[i]], c))}
+              </>
+            );
+          })()}
+          {/* A gradient mask, drawn where it fades: the line from where
+              it is whole to where it is gone (two marks across it, as
+              Lightroom draws a graduated filter), or the ellipse of a
+              radial one; each end a knob, the line itself moves both. */}
+          {(() => {
+            if (!selectedMask || !("Gradient" in selectedMask.kind) || !maskParent) return null;
+            const g = selectedMask.kind.Gradient;
+            const p = maskParent;
+            const at = (q: [number, number]): [number, number] => [
+              view.x + (p.a * q[0] + p.c * q[1] + p.e) * view.zoom,
+              view.y + (p.b * q[0] + p.d * q[1] + p.f) * view.zoom,
+            ];
+            const [a, b] = [at(g.from), at(g.to)];
+            const knob = (key: "from" | "to", pt: [number, number]) => (
+              <div
+                key={key}
+                className="grad-handle"
+                data-mask-end={key}
+                aria-label={key === "from" ? "Where the mask is whole" : "Where the mask has faded"}
+                style={{ left: pt[0], top: pt[1] }}
+                onPointerDown={(e) => onGradMaskDown(e, key)}
+                onPointerMove={onGradMaskMove}
+                onPointerUp={onGradMaskUp}
+              />
+            );
+            // Marks across the line at each end, as long as the
+            // layer is wide, so where it fades reads at a glance.
+            const [dx, dy] = [b[0] - a[0], b[1] - a[1]];
+            const len = Math.hypot(dx, dy) || 1;
+            const [nx, ny] = [(-dy / len) * 160, (dx / len) * 160];
+            const across = (q: [number, number], k: string) => (
+              <line key={k} className="mask-outline" x1={q[0] - nx} y1={q[1] - ny} x2={q[0] + nx} y2={q[1] + ny} />
+            );
+            return (
+              <>
+                <svg className="sel-outline" aria-hidden="true">
+                  {g.radial ? (
+                    // In the mask's own space, carried onto the screen
+                    // whole: from the ends' screen places, one in a
+                    // turned group came out a sliver, or a line.
+                    <ellipse
+                      className="mask-outline"
+                      vectorEffect="non-scaling-stroke"
+                      transform={`matrix(${p.a * view.zoom} ${p.b * view.zoom} ${p.c * view.zoom} ${p.d * view.zoom} ${view.x + p.e * view.zoom} ${view.y + p.f * view.zoom})`}
+                      cx={g.from[0]}
+                      cy={g.from[1]}
+                      rx={Math.abs(g.to[0] - g.from[0])}
+                      ry={Math.abs(g.to[1] - g.from[1])}
+                    />
+                  ) : (
+                    <>
+                      {across(a, "a")}
+                      {across(b, "b")}
+                    </>
+                  )}
+                  <line className="mask-outline" x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />
+                </svg>
+                {/* The line between, which carries both ends. */}
+                <svg className="sel-outline grad-mask-line" aria-hidden="true">
+                  <line
+                    className="grad-mask-hit"
+                    aria-label="Move the mask"
+                    x1={a[0]}
+                    y1={a[1]}
+                    x2={b[0]}
+                    y2={b[1]}
+                    onPointerDown={(e) => onGradMaskDown(e, "both")}
+                    onPointerMove={onGradMaskMove}
+                    onPointerUp={onGradMaskUp}
+                  />
+                </svg>
+                {knob("from", a)}
+                {knob("to", b)}
+              </>
+            );
+          })()}
+          {coarse && <HeldKeys held={held} setHeld={setHeld} />}
+        </main>
+        <aside
+          className={narrow ? `panel overlay${sheetTall ? " tall" : ""}` : "panel"}
+          aria-label="Layers"
+          hidden={narrow && !panelOpen}
+          style={{
+            // Drawn at the interface's size, so a larger interface does
+            // not squeeze the same text into the same pixels.
+            // Never more than two fifths of the window: kept wide at a
+            // large interface size, a narrow window was left a canvas
+            // a hundred and fifty pixels across.
+            width: Math.round(Math.min(panelWidth * prefs.uiScale, Math.max(200, window.innerWidth * 0.4))),
+            // Only ever down: a sheet pulled up past its edge would come
+            // away from the bottom of the screen.
+            transform: sheetPull !== null && sheetPull > 0 ? `translateY(${sheetPull}px)` : undefined,
+          }}
+        >
+          {narrow && (
+            // Shown only where the panel is a sheet (a phone held
+            // upright); beside the canvas it has an edge instead.
+            <div
+              className="sheet-grip"
+              role="button"
+              aria-label={sheetTall ? "Lower the layers" : "Raise the layers"}
+              // A button that can be pressed as one: by the keyboard, and
+              // by a screen reader's activation (a click), not only by a
+              // finger's drag.
+              tabIndex={0}
+              onClick={(e) => {
+                if (e.detail === 0) setSheetTall((t) => !t);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setSheetTall((t) => !t);
+                }
+              }}
+              onPointerDown={onSheetGrip}
+              onPointerMove={onSheetGripMove}
+              onPointerUp={onSheetGripUp}
+              onPointerCancel={() => setSheetPull(null)}
+            />
+          )}
+          {/* The panel's own edge, dragged to give it more or less room.
+              Its width is remembered, since how much of the screen the
+              layers deserve is a matter of what is being made. */}
+          <div
+            className="panel-edge"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Panel width"
+            aria-valuemin={180}
+            aria-valuemax={Math.round(panelMost())}
+            aria-valuenow={panelHeld(panelWidth)}
+            tabIndex={0}
+            onPointerDown={onPanelEdge}
+            onKeyDown={(e) => {
+              // The arrows say which way the edge goes: left widens.
+              const by = e.shiftKey ? 40 : 10;
+              const now = Math.min(panelWidth, panelMost());
+              const to =
+                e.key === "ArrowLeft" ? now + by
+                : e.key === "ArrowRight" ? now - by
+                : e.key === "Home" ? 180
+                : e.key === "End" ? panelMost()
+                : null;
+              if (to === null) return;
+              e.preventDefault();
+              e.stopPropagation();
+              setPanelWidth(panelHeld(to));
+            }}
+          />
+          <div className="panel-head">
+            <h2>Layers</h2>
+            <ActionSelect
+              className="add-adjustment"
+              onPick={addAdjustment}
+              title="Add adjustment layer"
+              aria-label="Add adjustment layer"
+            >
+              <option value="" disabled>
+                + Adjust
+              </option>
+              <optgroup label="Over everything below">
+                {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
+                  <option key={key} value={key}>
+                    {p.name}
+                  </option>
+                ))}
+                <option value="lookup">Colour lookup…</option>
+                <option value="dodge">Dodge (paint to lighten)</option>
+                <option value="burn">Burn (paint to darken)</option>
+              </optgroup>
+              {selectedLayer &&
+                selectedLayer.kind !== "adjustment" &&
+                selectedLayer.kind !== "filter" && (
+                  <optgroup label={`Only on ${clipName(selectedLayer.name)}`}>
+                    {Object.entries(ADJUSTMENT_PRESETS).map(([key, p]) => (
+                      <option key={`only:${key}`} value={`only:${key}`}>
+                        {p.name}
+                      </option>
+                    ))}
+                    <option value="only:lookup">Colour lookup…</option>
+                  </optgroup>
+                )}
+            </ActionSelect>
+            <div className="panel-head-actions">
+              <button
+                onClick={() => reorderSelected(1)}
+                // Enabled when something picked would actually move —
+                // asked of the same working-out that does the moving, so
+                // the button cannot say yes and then do nothing.
+                disabled={reorderCommands(1).length === 0}
+                title="Raise layer"
+                aria-label="Raise layer"
+              >
+                <Icon name="raise" size={16} />
+              </button>
+              <button
+                onClick={() => reorderSelected(-1)}
+                disabled={reorderCommands(-1).length === 0}
+                title="Lower layer"
+                aria-label="Lower layer"
+              >
+                <Icon name="lower" size={16} />
+              </button>
+              <button
+                onClick={groupSelection}
+                disabled={selectionSet.length === 0 || !groupable}
+                title={
+                  groupable
+                    ? "Group selected layers (ctrl-click to select several)"
+                    : "Layers in different groups cannot be grouped together"
+                }
+                aria-label="Group selected layers (ctrl-click to select several)"
+              >
+                <Icon name="group" size={16} />
+              </button>
+              <button
+                onClick={ungroupSelection}
+                disabled={selectedLayer?.kind !== "group"}
+                title="Ungroup selected group"
+                aria-label="Ungroup selected group"
+              >
+                <Icon name="ungroup" size={16} />
+              </button>
+              <button
+                onClick={clipSelection}
+                disabled={!clippable}
+                aria-pressed={selectedLayer?.clipped ?? false}
+                title={tip("Clip to layer below", "clip")}
+                aria-label="Clip to layer below"
+              >
+                <Icon name="clip" size={16} />
+              </button>
+              <button
+                onClick={instanceSelected}
+                disabled={selected === null}
+                title="Duplicate linked: a copy that follows this layer"
+                aria-label="Duplicate linked"
+              >
+                <Icon name="instance" size={16} />
+              </button>
+              <button
+                onClick={duplicateSelected}
+                disabled={selected === null}
+                title={tip("Duplicate layer", "duplicate")}
+                aria-label="Duplicate layer"
+              >
+                <Icon name="duplicate" size={16} />
+              </button>
+              <button
+                onClick={() => deleteSelected()}
+                disabled={selected === null}
+                title="Delete selected layer (Del)"
+                aria-label="Delete selected layer"
+              >
+                <Icon name="trash" size={16} />
+              </button>
+            </div>
+          </div>
+          {/* Layer comps: states of the page kept by name. The one the
+              page is showing now is marked; a press shows another. */}
+          <div className="palette comps" role="group" aria-label="Layer comps">
+            <span className="palette-label">Comps</span>
+            {comps.map((c) => (
+              <button
+                key={c.name}
+                className={`comp-chip${c.showing ? " active" : ""}`}
+                aria-pressed={c.showing}
+                aria-label={`Comp ${c.name}`}
+                title={`${c.name} — shift-click keeps the page as it is now under this name, double-click (or F2) renames, ctrl-click (or Delete) forgets`}
+                onKeyDown={chipKeys(
+                  () => {
+                    if (!session) return;
+                    session.forget_comp(c.name);
+                    refresh(session);
+                  },
+                  () => renameComp(c.name),
+                )}
+                onClick={(e) => onComp(c.name, e)}
+                onDoubleClick={() => {
+                  // The double-click's first press showed the comp; a
+                  // rename is not a wish to see it, so that is taken back.
+                  const shown = compShownBy.current;
+                  if (session && shown && shown.name === c.name && Date.now() - shown.at < 800) {
+                    session.take_back();
+                    refresh(session);
+                  }
+                  compShownBy.current = null;
+                  renameComp(c.name);
+                }}
+              >
+                {c.name}
+              </button>
+            ))}
+            <button
+              className="swatch add"
+              onClick={keepComp}
+              title="Keep the page as it is now: which layers show, where, and how strongly"
+              aria-label="Keep a layer comp"
+            >
+              +
+            </button>
+          </div>
+          {/* Finding a layer by name or by kind. */}
+          <div className="layer-search" role="search">
+            <input
+              type="search"
+              placeholder="Find layers"
+              value={layerQuery}
+              onChange={(e) => setLayerQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
+                if (e.key === "Escape") {
+                  setLayerQuery("");
+                  setLayerKind("");
+                  e.currentTarget.blur();
+                }
+              }}
+              aria-label="Find layers"
+              // What is typed here is not a step: its own undo takes it back.
+              data-own-undo=""
+            />
+            <select
+              value={layerKind}
+              onChange={(e) => setLayerKind(e.target.value)}
+              aria-label="Layer kind"
+              title="Show only layers of one kind"
+            >
+              <option value="">All kinds</option>
+              <option value="shapes">Shapes</option>
+              <option value="pictures">Pictures</option>
+              <option value="text">Text</option>
+              <option value="adjustments">Adjustments</option>
+              <option value="groups">Groups and frames</option>
+            </select>
+          </div>
+          {searching && found.size === 0 && (
+            <p className="layer-search-none">No layer matches.</p>
+          )}
+          <ul ref={layerListRef} className="layer-list">
+            {panelRows.map((l) => (
+              <li
+                key={l.id}
+                data-id={l.id}
+                data-kind={l.kind}
+                className={[
+                  l.id === selected
+                    ? "selected"
+                    : multiSel.includes(l.id)
+                      ? "multi"
+                      : "",
+                  searching && !found.has(l.id as number) ? "context" : "",
+                  layerDrag?.over === l.id && layerDrag.id !== l.id
+                    ? `drop-${layerDrag.where}`
+                    : "",
+                  layerDrag?.id === l.id ? "dragging" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+                // Indented by depth, and less deep past the sixth: at 14
+                // a level a layer eight deep had no room left for its name
+                // in the panel, and a picked one was a blank bar.
+                style={{
+                  paddingLeft: `${Math.min(l.depth * 14, 84 + Math.max(0, l.depth - 6) * 3, 110) + 2}px`,
+                }}
+                title={l.depth > 6 ? `${l.name} (${l.depth} deep)` : undefined}
+                tabIndex={0}
+                // A row with no role has no "selected" to say, so a
+                // picked row is said to be the current one.
+                aria-current={l.id === selected || multiSel.includes(l.id) ? "true" : undefined}
+                // Tab reaches a row; Enter picks it (with Ctrl or Shift,
+                // adds it) and F2 renames it. Not Space nor the arrows: a
+                // row keeps the caret after a click, and Space held pans
+                // the view and the arrows nudge the picked layer.
+                onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                      if (l.id !== selected) {
+                        setMultiSel((prev) =>
+                          prev.includes(l.id) ? prev.filter((id) => id !== l.id) : [...prev, l.id],
+                        );
+                      }
+                    } else {
+                      setSelected(l.id);
+                      setMultiSel([]);
+                    }
+                  } else if (e.key === "F2") {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setRenaming({ id: l.id, value: l.name });
+                  }
+                }}
+                onPointerDown={(e) => onRowPointerDown(e, l.id)}
+                // A right-click on a row is the same question as one on the
+                // layer on the canvas — what can be done with this — and
+                // gets the same menu: picking the row first when it is
+                // not already among the picked, as the canvas does.
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (!selectionSet.includes(l.id)) {
+                    setSelected(l.id);
+                    setMultiSel([]);
+                  }
+                  setContextAt([e.clientX, e.clientY]);
+                }}
+                onClick={(e) => {
+                  if (Date.now() - layerDragDone.current < 300) return;
+                  if (e.ctrlKey || e.metaKey || e.shiftKey) {
+                    // Toggle in the multi-selection. Shift does it too,
+                    // since that is what it does on the canvas and a
+                    // modifier should not change its mind between one
+                    // half of the window and the other — the primary
+                    // too: let go of, the next picked becomes primary.
+                    if (l.id === selected) {
+                      if (multiSel.length === 0) return;
+                      setSelected(multiSel[0]);
+                      setMultiSel(multiSel.slice(1));
+                      return;
+                    }
+                    setMultiSel((prev) =>
+                      prev.includes(l.id)
+                        ? prev.filter((id) => id !== l.id)
+                        : [...prev, l.id],
+                    );
+                  } else {
+                    setSelected(l.id);
+                    setMultiSel([]);
+                  }
+                }}
+              >
+                {/* A group or a frame folds shut, so a document of
+                    several artboards is a list of artboards rather than
+                    of everything in them. */}
+                {hasChildren.has(l.id) ? (
+                  <button
+                    className="fold"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCollapsed((prev) =>
+                        prev.includes(l.id)
+                          ? prev.filter((id) => id !== l.id)
+                          : [...prev, l.id],
+                      );
+                    }}
+                    aria-expanded={!collapsed.includes(l.id)}
+                    aria-label={
+                      collapsed.includes(l.id)
+                        ? `Open ${l.name}`
+                        : `Fold ${l.name}`
+                    }
+                  >
+                    <Icon
+                      name={collapsed.includes(l.id) ? "foldClosed" : "foldOpen"}
+                      size={13}
+                    />
+                  </button>
+                ) : (
+                  <span className="fold" />
+                )}
+                <button
+                  className={`visibility${solo === l.id ? " active" : ""}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Alt on the eye asks the other question the eye is
+                    // about: not "is this one shown" but "what does this
+                    // one look like by itself". Alt again puts the page
+                    // back, and so does alt on any other row.
+                    if (e.altKey) {
+                      if (!session) return;
+                      const want = solo === l.id ? null : l.id;
+                      session.set_solo(want === null ? -1 : want);
+                      setSolo(want);
+                      refresh(session);
+                      return;
+                    }
+                    run({ SetVisible: { id: l.id, visible: !l.visible } });
+                  }}
+                  // Named for what it is and pressed for whether it is
+                  // on, so the name and the state never disagree: it was
+                  // "Hide layer", pressed, while the layer was shown.
+                  // And which layer: every row's read "Show layer".
+                  aria-label={`Show layer ${l.name}`}
+                  aria-pressed={l.visible}
+                  title={
+                    solo === l.id
+                      ? "Shown on its own — alt-click to show the page again"
+                      : `${l.visible ? "Hide" : "Show"} layer (alt-click to see it on its own)`
+                  }
+                >
+                  <Icon name={l.visible ? "eye" : "eyeOff"} size={15} />
+                </button>
+                <button
+                  className="lock-toggle"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    run({ SetLocked: { id: l.id, locked: !l.locked } });
+                  }}
+                  aria-pressed={l.locked}
+                  title={l.locked ? "Unlock layer" : "Lock layer"}
+                  aria-label={`Lock layer ${l.name}`}
+                >
+                  <Icon name={l.locked ? "lock" : "unlock"} size={14} />
+                </button>
+                {/* A layer confined to the one below it says so with a
+                    hook pointing down at it, the way the panel of every
+                    editor that has clipping does. */}
+                {l.clipped && (
+                  <span
+                    className="clip-mark"
+                    title="Clipped to the layer below"
+                    aria-label="Clipped to the layer below"
+                  >
+                    <Icon name="clip" size={12} />
+                  </span>
+                )}
+                {/* What the layer holds, when it holds anything: a
+                    small picture of it on its own. An adjustment or a
+                    filter is a change to what is under it and has none,
+                    so those keep the glyph that says which they are. */}
+                <span className="layer-kind-icon" title={l.kind}>
+                  {thumbs[l.id] ? (
+                    <img className="layer-thumb" src={thumbs[l.id]} alt="" draggable={false} />
+                  ) : (
+                    <Icon name={KIND_ICONS[l.kind] ?? "rect"} size={15} />
+                  )}
+                </span>
+                {renaming?.id === l.id ? (
+                  <input
+                    className="rename"
+                    value={renaming.value}
+                    autoFocus
+                    // The name ready to be typed over, as everywhere
+                    // else: typing "Box" after F2 gave "Rect 1Box".
+                    onFocus={(e) => e.currentTarget.select()}
+                    onChange={(e) =>
+                      setRenaming({ id: l.id, value: e.target.value })
+                    }
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      if (!passesChord(e)) e.stopPropagation();
+                      if (e.key !== "Enter" && e.key !== "Escape") return;
+                      if (e.key === "Enter") commitRename();
+                      else setRenaming(null);
+                      // Back on the row the name was typed for, rather
+                      // than on the page's body.
+                      requestAnimationFrame(() =>
+                        document
+                          .querySelector<HTMLElement>(`.layer-list li[data-id="${l.id}"]`)
+                          ?.focus({ preventScroll: true }),
+                      );
+                    }}
+                    aria-label="Layer name"
+                  />
+                ) : (
+                  <span
+                    className={l.visible ? "layer-name" : "layer-name muted"}
+                    // A name in Hebrew or Arabic is laid out (and cut) from
+                    // its own start, and a cut one is shown whole on hover.
+                    dir="auto"
+                    title={l.name}
+                    onDoubleClick={() =>
+                      setRenaming({ id: l.id, value: l.name })
+                    }
+                  >
+                    {l.name}
+                  </span>
+                )}
+                {l.has_mask && (
+                  <span
+                    className="kind"
+                    title="What this layer's mask lets through"
+                  >
+                    {maskThumbs[l.id] ? (
+                      <img
+                        className="layer-thumb mask-thumb"
+                        draggable={false}
+                        src={maskThumbs[l.id]}
+                        alt=""
+                      />
+                    ) : (
+                      <Icon name="mask" size={14} />
+                    )}
+                  </span>
+                )}
+                {l.has_effects && (
+                  <span className="kind" title="This layer has effects">
+                    <Icon name="shadow" size={14} />
+                  </span>
+                )}
+              </li>
+            ))}
+            {layers.length === 0 && (
+              <li className="muted empty">
+                {/* The three ways in, for a first look at an empty page:
+                    it said only the first. */}
+                <span>
+                  No layers yet. Pick a shape on the rail and drag on the
+                  page, type with the text tool, or drop a picture onto it.
+                </span>
+              </li>
+            )}
+          </ul>
+          {/* Nothing to line up when every layer picked works on the
+              whole page wherever it is put. */}
+          {selectionSet.length >= 1 &&
+            selectionSet.some((id) => {
+              const k = layers.find((l) => l.id === id)?.kind;
+              return k !== "adjustment" && k !== "filter";
+            }) && (
+            <div className="align-bar" role="group" aria-label="Align layers">
+              {ALIGN_BUTTONS.map(([mode, icon, label]) => {
+                // With one layer picked the buttons say what it will be
+                // lined up with, since there is no other layer on screen
+                // to make that obvious.
+                const spread = mode.startsWith("distribute");
+                const alone = selectionSet.length < 2;
+                const title = spread
+                  ? prefs.alignTo === "page" && !alone
+                    ? `${label}, the outermost to the ${alignGround()}'s edges`
+                    : label
+                  : alone || prefs.alignTo === "page"
+                    ? `${label} to the ${alignGround()}`
+                    : prefs.alignTo === "key"
+                      ? `${label} to the layer with the handles`
+                      : label;
+                return (
+                  <button
+                    key={mode}
+                    onClick={() => alignSelection(mode)}
+                    disabled={spread && alone}
+                    title={title}
+                    aria-label={label}
+                  >
+                    <Icon name={icon} size={16} />
+                  </button>
+                );
+              })}
+              {/* What they line up with. One layer alone always goes to
+                  what it sits in, so the choice waits for two. */}
+              {selectionSet.length >= 2 && (
+                <select
+                  className="align-to"
+                  aria-label="Align to"
+                  title="What the buttons line layers up with"
+                  value={prefs.alignTo}
+                  onChange={(e) => setPrefs({ alignTo: e.target.value as AlignTo })}
+                >
+                  <option value="selection">To each other</option>
+                  <option value="key">To the key layer</option>
+                  <option value="page">To the {alignGround()}</option>
+                </select>
+              )}
+            </div>
+          )}
+          {selectionSet.length >= 2 && (
+            <div
+              className="align-bar combine-bar"
+              role="group"
+              aria-label="Combine shapes"
+            >
+              {BOOLEAN_BUTTONS.map(([op, icon, label]) => (
+                <button
+                  key={op}
+                  onClick={() => combineSelection(op)}
+                  title={label}
+                  aria-label={label}
+                >
+                  <Icon name={icon} size={16} />
+                </button>
+              ))}
+            </div>
+          )}
+          {selectedLayer && (
+            <div className="layer-props">
+              {/* A layer following a kept style says which, and can be
+                  let go of it: kept again, the style's look comes here
+                  too, which is the point of following one and the
+                  surprise if it was forgotten. */}
+              {selectedLayer.style && (
+                <div className="row copy-of">
+                  <span>Follows the style {selectedLayer.style}</span>
+                  <button
+                    type="button"
+                    onClick={() => run({ SetStyleLink: { id: selectedLayer.id, style: null } })}
+                    aria-label="Detach from the style"
+                    title="Keep this look, but stop following the style"
+                  >
+                    Detach
+                  </button>
+                </div>
+              )}
+              {/* A live copy says what it follows, and takes you there:
+                  what the copy draws is not in the copy, so the panel has
+                  to point at where it is. */}
+              {selectedLayer.copies !== 0 && (
+                <div className="row copy-of">
+                  <span>
+                    Follows{" "}
+                    {layers.find((l) => l.id === selectedLayer.copies)?.name ??
+                      "a layer that is gone"}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={
+                      !layers.some((l) => l.id === selectedLayer.copies)
+                    }
+                    onClick={() => {
+                      setSelected(selectedLayer.copies);
+                      setMultiSel([]);
+                    }}
+                    aria-label="Go to the original"
+                  >
+                    Go to it
+                  </button>
+                </div>
+              )}
+              {/* What a copy can differ in: the original's layers, each
+                  with a way to give this copy one of its own instead. */}
+              {selectedLayer.copies !== 0 && overridable.length > 0 && (
+                <div className="overrides" aria-label="Follows the original in">
+                  {overridable.map((row, i) => (
+                    <label key={i} className="row">
+                      <span>{row.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!session || selected === null) return;
+                          try {
+                            if (row.own) session.clear_override(selected, i);
+                            else session.override_child(selected, i);
+                            refresh(session);
+                          } catch (err) {
+                            alert(`Copy: ${said(err)}`);
+                          }
+                        }}
+                        aria-label={
+                          row.own
+                            ? `Follow the original's ${row.name} again`
+                            : `Give this copy its own ${row.name}`
+                        }
+                      >
+                        {row.own ? "Follow again" : "Make it its own"}
+                      </button>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {/* Inside a frame, what the layer does when that frame is
+                  given a new size — the reason a frame can be resized at
+                  all rather than only ever drawn at the size it was made
+                  with. */}
+              {inFrame && (
+                <div className="pinning" aria-label="Pinned to">
+                  {(
+                    [
+                      ["x", "Across"],
+                      ["y", "Down"],
+                    ] as const
+                  ).map(([axis, label]) => (
+                    <label key={axis}>
+                      {label}
+                      <select
+                        value={selectedLayer.pinned[axis]}
+                        onChange={(e) =>
+                          run({
+                            SetPinning: {
+                              id: selectedLayer.id,
+                              pinned: {
+                                ...selectedLayer.pinned,
+                                [axis]: e.target.value as Pin,
+                              },
+                            },
+                          })
+                        }
+                        aria-label={`Pinned ${label.toLowerCase()}`}
+                      >
+                        {PINS[axis].map(([value, name]) => (
+                          <option key={value} value={value}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {/* An adjustment or a filter acts on everything under it
+                  wherever it is put, so its box is the page's and the
+                  fields would only ever say 0, 0 and the page's size. */}
+              {selBox && !wholePageLayer && <h3 className="props-head">Position and size</h3>}
+              {/* With several picked, these fields and the effects below
+                  are the first-picked layer's; opacity and blend are
+                  every picked layer's. Said, where it was not: W typed
+                  with two picked scaled one, under the box round both. */}
+              {selBox && !wholePageLayer && selectionSet.length > 1 && (
+                <p className="props-note" role="note">
+                  For {clipName(selectedLayer.name)}, the layer picked first. Opacity and blend go to all{" "}
+                  {selectionSet.length} picked.
+                </p>
+              )}
+              {selBox && !wholePageLayer && (
+                <div className="geometry" aria-label="Position and size">
+                  {(
+                    [
+                      ["x", "X", selBox[0]],
+                      ["y", "Y", selBox[1]],
+                      ["w", "W", frameOwn?.[0] ?? selBox[2]],
+                      ["h", "H", frameOwn?.[1] ?? selBox[3]],
+                    ] as const
+                  ).map(([field, label, value]) => (
+                    <label key={field} className={`geo-${field}`}>
+                      {label}
+                      <input
+                        type="number"
+                        step={units === "px" ? "1" : "0.01"}
+                        // Keyed by the value so a committed edit re-reads
+                        // from the document rather than keeping a stale
+                        // draft: the box moves for reasons other than this
+                        // field (a drag, an undo, an align). Shown and
+                        // read in the chosen units.
+                        key={`${field}${units}${Math.round(value * 100)}`}
+                        defaultValue={inUnits(value, units, docDpi)}
+                        onKeyDown={fieldKeys}
+                        onBlur={(e) => {
+                          if (asGiven(e.currentTarget)) return;
+                          // An emptied box is not nought: it was read as
+                          // one, and moved the layer to the page's edge.
+                          const el = e.currentTarget;
+                          const text = el.value;
+                          const v = Number(text);
+                          // Nor is a number past any page a place or a
+                          // size: past what the engine holds it became
+                          // infinity, and a file saved after it would not
+                          // open again.
+                          const px = v / perPixel(units, docDpi);
+                          if (text.trim() !== "" && Number.isFinite(px) && Math.abs(px) <= 1e7)
+                            setGeometry(field, px);
+                          // A number the layer would not take (nought, less,
+                          // or what it already is) leaves the field: it
+                          // stays the same element, so it is put back to
+                          // what the layer says. One that was taken is a
+                          // new field by then.
+                          requestAnimationFrame(() => {
+                            if (el.isConnected) el.value = el.defaultValue;
+                          });
+                        }}
+                        aria-label={
+                          field === "w" || field === "h"
+                            ? `${label} size`
+                            : `${label} position`
+                        }
+                      />
+                    </label>
+                  ))}
+                  {/* The two sides tied together, or not: typing a
+                      width with them tied takes the height with it, the
+                      way a dragged corner does. */}
+                  <button
+                    className={keepRatio ? "ratio-lock on" : "ratio-lock"}
+                    onClick={() => setKeepRatio((on) => !on)}
+                    aria-pressed={keepRatio}
+                    aria-label="Keep the proportions"
+                    title={
+                      keepRatio
+                        ? "The sides are tied: typing one changes the other"
+                        : "The sides are free: typing one leaves the other"
+                    }
+                  >
+                    {keepRatio ? "⛓" : "⛓̸"}
+                  </button>
+                  {/* The angle the knob above the selection drags, said
+                      as a number: some things have to be at forty-five
+                      degrees exactly, and a knob cannot promise that. */}
+                  <label key="angle" className="geo-r">
+                    R
+                    <input
+                      type="number"
+                      step="0.1"
+                      key={`r${Math.round(selAngle() * 10)}`}
+                      defaultValue={Math.round(selAngle() * 10) / 10}
+                      onKeyDown={fieldKeys}
+                      onBlur={(e) => {
+                        if (asGiven(e.currentTarget)) return;
+                        const el = e.currentTarget;
+                        const text = el.value;
+                        const v = Number(text);
+                        if (text.trim() !== "" && Number.isFinite(v)) setAngle(v);
+                        // Held to what it can be, or refused: the field
+                        // says what the layer now is.
+                        requestAnimationFrame(() => {
+                          if (el.isConnected) el.value = el.defaultValue;
+                        });
+                      }}
+                      aria-label="Angle"
+                      title="Degrees clockwise"
+                    />
+                  </label>
+                  {/* The lean, said as a number: how far the layer's
+                      sides lean off its own upright, which a side held
+                      with Ctrl drags by eye. */}
+                  <label key="skew" className="geo-sk">
+                    Sk
+                    <input
+                      type="number"
+                      step="0.1"
+                      key={`k${Math.round(selSkew() * 10)}`}
+                      defaultValue={Math.round(selSkew() * 10) / 10}
+                      onKeyDown={fieldKeys}
+                      onBlur={(e) => {
+                        if (asGiven(e.currentTarget)) return;
+                        const el = e.currentTarget;
+                        const text = el.value;
+                        const v = Number(text);
+                        if (text.trim() !== "" && Number.isFinite(v)) setSkew(v);
+                        // Held to what it can be, or refused: the field
+                        // says what the layer now is.
+                        requestAnimationFrame(() => {
+                          if (el.isConnected) el.value = el.defaultValue;
+                        });
+                      }}
+                      aria-label="Skew"
+                      title="Degrees the sides lean, from -85 to 85"
+                    />
+                  </label>
+                </div>
+              )}
+              {selectedLayer.developed && (
+                <>
+                  <h3 className="props-head">Camera raw</h3>
+                  <button
+                    type="button"
+                    className="mask-button develop-again"
+                    onClick={developAgain}
+                    title="Develop the raw file this picture came from again, with other settings"
+                  >
+                    Develop again…
+                  </button>
+                  {developedOthers.length > 0 && (
+                    <button
+                      type="button"
+                      className="mask-button develop-others"
+                      onClick={developOthersLikeThis}
+                      title="Give the other picked raw photographs this one's develop settings, in one step"
+                    >
+                      Develop the other {developedOthers.length} like this
+                    </button>
+                  )}
+                </>
+              )}
+              <h3 className="props-head">Appearance</h3>
+              <label>
+                <SliderHead
+                  label="Opacity"
+                  value={Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}
+                  unit="%"
+                />
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={opacityDraft ?? selectedLayer.opacity}
+                  onChange={(e) => {
+                    // Shown as it moves, on every picked layer, and kept
+                    // as one step when it is let go of (`commitOpacity`).
+                    const v = Number(e.target.value);
+                    setOpacityDraft(v);
+                    if (!session || selectionSet.length === 0) return;
+                    try {
+                      session.preview(
+                        JSON.stringify({ Batch: selectionSet.map((id) => ({ SetOpacity: { id, opacity: v } })) }),
+                      );
+                      refresh(session);
+                    } catch (err) {
+                      console.warn("opacity preview:", err);
+                    }
+                  }}
+                  onPointerUp={commitOpacity}
+                  // A touch the system takes back is no change: the
+                  // preview goes and nothing is left pending, where the
+                  // value stayed and a later Tab past the slider set it.
+                  onPointerCancel={dropOpacity}
+                  onKeyUp={commitOpacity}
+                  onBlur={commitOpacity}
+                  aria-label="Layer opacity"
+                  aria-valuetext={`${Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%`}
+                />
+              </label>
+              <label>
+                Blend
+                <select
+                  // Layers picked together that blend differently say so:
+                  // shown as the first one's mode, choosing that mode
+                  // changed nothing, and the others kept theirs.
+                  value={
+                    new Set(selectionSet.filter(blends).map((id) => layers.find((l) => l.id === id)?.blend)).size > 1
+                      ? ""
+                      : selectedLayer.blend
+                  }
+                  onChange={(e) => {
+                    if (e.target.value) setBlendOfSelection(e.target.value as BlendMode);
+                  }}
+                  // An adjustment or a filter rewrites what is under it
+                  // and has nothing of its own left to blend: a mode
+                  // chosen for one was kept and did nothing.
+                  disabled={!selectionSet.some(blends)}
+                  title={
+                    !selectionSet.some(blends)
+                      ? "An adjustment or a filter changes what is under it, and has nothing of its own to blend"
+                      : undefined
+                  }
+                  aria-label="Blend mode"
+                >
+                  <option value="" disabled hidden>
+                    Mixed
+                  </option>
+                  {BLEND_GROUPS.map(([label, modes]) =>
+                    label === "" ? (
+                      modes.map((m) => (
+                        <option key={m} value={m}>
+                          {BLEND_NAMES[m] ?? m}
+                        </option>
+                      ))
+                    ) : (
+                      <optgroup key={label} label={label}>
+                        {modes.map((m) => (
+                          <option key={m} value={m}>
+                            {BLEND_NAMES[m] ?? m}
+                          </option>
+                        ))}
+                      </optgroup>
+                    ),
+                  )}
+                </select>
+              </label>
+              {kindHead(selectedKind) && (
+                <h3 className="props-head">{kindHead(selectedKind)}</h3>
+              )}
+              {selectedKind && (
+                <KindProps
+                  kind={selectedKind}
+                  boxAxesSeen={
+                    selLocal && selToScreen
+                      ? boxAxes((a, b) =>
+                          selToScreen!(selLocal![0] + a * (selLocal![2] - selLocal![0]), selLocal![1] + b * (selLocal![3] - selLocal![1])),
+                        )
+                      : null
+                  }
+                  bins={histogram}
+                  dpi={docDpi}
+                  onFrameSize={(w, h) =>
+                    selected !== null && resizeFrame(selected, w, h, 0, 0, false)
+                  }
+                  onEdit={setKind}
+                  onGestureEnd={endGesture}
+                  onAutoLevels={autoLevels}
+                  onPickNeutral={() => setPickingNeutral((on) => !on)}
+                  pickingNeutral={pickingNeutral}
+                  onAutoColour={autoColour}
+                  onRoundCorners={roundCorners}
+                  onLoadLookup={() => {
+                    lookupFor.current = "replace";
+                    lookupInputRef.current?.click();
+                  }}
+                  cmyk={cmyk}
+                  ink={inkOf}
+                  fonts={fontNames}
+                  shapes={layers
+                    .filter(
+                      (l) => l.kind === "vector" && l.id !== selectedLayer.id,
+                    )
+                    .map((l) => ({ id: l.id, name: l.name }))}
+                  onAlong={(shape) => {
+                    if (!session || !selectedLayer) return;
+                    if (shape === null) {
+                      if (
+                        selectedKind &&
+                        typeof selectedKind === "object" &&
+                        "Text" in selectedKind
+                      ) {
+                        setKind(
+                          { Text: { ...selectedKind.Text, along: null } },
+                          false,
+                        );
+                      }
+                      return;
+                    }
+                    try {
+                      session.text_along(selectedLayer.id, shape);
+                      refresh(session);
+                    } catch (err) {
+                      alert(`Text on path: ${said(err)}`);
+                    }
+                  }}
+                />
+              )}
+              <h3 className="props-head">Effects</h3>
+              <div className="effects">
+                {selectedEffects.map((effect, at) => {
+                  const kind = effectKind(effect);
+                  const body = effectBody(effect) as Record<string, number>;
+                  return (
+                    <div className="effect" key={`${kind}${at}`}>
+                      <div className="row effect-head">
+                        <span>{effectTitle(effect)}</span>
+                        {EFFECT_COLORS[kind].map(([field, called]) => (
+                          <input
+                            key={field}
+                            type="color"
+                            value={colorToHex(
+                              (effect as never)[kind][field] as AuthoredColor,
+                            )}
+                            // One step for a gesture in the well, as the
+                            // fill's and the stroke's: each tick was a
+                            // step of its own.
+                            onChange={(e) =>
+                              tuneEffect(
+                                at,
+                                {
+                                  [field]: inkOf(e.target.value),
+                                },
+                                true,
+                              )
+                            }
+                            // Its own gesture only: the next control's first
+                            // move comes before this blur, and ended here, the
+                            // slider's drag was cut in two.
+                            onBlur={() => {
+                              if (effectGesture.current === `${at}:${field}`) endGesture();
+                            }}
+                            title={`${EFFECT_LABELS[kind]} ${called}`}
+                            aria-label={`${EFFECT_LABELS[kind]} ${called}`}
+                          />
+                        ))}
+                        {/* Order matters: an outline under a drop shadow
+                            is not the same picture as one over it. */}
+                        <button
+                          className="mask-button"
+                          disabled={at === 0}
+                          aria-label={`Move ${EFFECT_LABELS[kind]} down`}
+                          onClick={() => {
+                            setEffects(swapEffects(at, at - 1));
+                            keepEffectFocus(at - 1, `Move ${EFFECT_LABELS[kind]} down`);
+                          }}
+                        >
+                          <Icon name="lower" size={14} />
+                        </button>
+                        <button
+                          className="mask-button"
+                          disabled={at === selectedEffects.length - 1}
+                          aria-label={`Move ${EFFECT_LABELS[kind]} up`}
+                          onClick={() => {
+                            setEffects(swapEffects(at, at + 1));
+                            keepEffectFocus(at + 1, `Move ${EFFECT_LABELS[kind]} up`);
+                          }}
+                        >
+                          <Icon name="raise" size={14} />
+                        </button>
+                        <button
+                          className="mask-button"
+                          aria-label={`Remove ${EFFECT_LABELS[kind]}`}
+                          onClick={() =>
+                            setEffects(
+                              selectedEffects.filter((_, i) => i !== at),
+                            )
+                          }
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      {EFFECT_FIELDS[kind].map(
+                        ([field, label, min, max, step]) => {
+                          const derived = EFFECT_DERIVED[kind]?.[field];
+                          const shown = derived ? derived.read(body) : (body[field] ?? 0);
+                          return (
+                          <label key={field}>
+                            <SliderHead label={label} value={shown} />
+                            <StretchRange
+                              min={min}
+                              max={max}
+                              step={step}
+                              value={shown}
+                              onValue={(v) =>
+                                tuneEffect(at, derived ? derived.write(v) : { [field]: v }, true)
+                              }
+                              onPointerUp={endGesture}
+                              onKeyUp={endGesture}
+                              onBlur={endGesture}
+                              aria-label={`${EFFECT_LABELS[kind]} ${label.toLowerCase()}`}
+                            />
+                          </label>
+                          );
+                        },
+                      )}
+                    </div>
+                  );
+                })}
+                <label className="row">
+                  Add effect
+                  <ActionSelect
+                    onPick={(value) => {
+                      const kind = value as EffectKind;
+                      if (!kind) return;
+                      const ink = (hex: string) =>
+                        inkOf(hex);
+                      setEffects([
+                        ...selectedEffects,
+                        newEffect(kind, ink("#000000"), ink("#ffe08a"), ink("#ffffff")),
+                      ]);
+                    }}
+                    // An adjustment or a filter has nothing of its own to
+                    // cast a shadow or wear an outline: one given it was a
+                    // history step that changed nothing, as Blend was.
+                    disabled={!!selectedLayer && !blends(selectedLayer.id) && selectedEffects.length === 0}
+                    title={
+                      !!selectedLayer && !blends(selectedLayer.id)
+                        ? "An adjustment or a filter changes what is under it, and has nothing of its own to wear an effect"
+                        : undefined
+                    }
+                    aria-label="Add effect"
+                  >
+                    <option value="">Choose…</option>
+                    {(Object.keys(EFFECT_LABELS) as EffectKind[]).map((k) => (
+                      <option key={k} value={k}>
+                        {EFFECT_LABELS[k]}
+                      </option>
+                    ))}
+                    {Object.entries(EFFECT_PRESETS).map(([k, name]) => (
+                      <option key={k} value={k}>
+                        {name}
+                      </option>
+                    ))}
+                  </ActionSelect>
+                </label>
+              </div>
+              <h3 className="props-head">Mask</h3>
+              {selectedMask === null ? (
+                <div className="row mask-row">
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("ellipse")}
+                  >
+                    Ellipse mask
+                  </button>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("rect")}
+                  >
+                    Rect mask
+                  </button>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("linear")}
+                    title="Fades from all at one end to none at the other — a graduated filter, as for a sky"
+                  >
+                    Graduated
+                  </button>
+                  <button
+                    className="mask-button"
+                    onClick={() => addMask("radial")}
+                    title="Fades from all in the middle to none at its rim — a radial filter, as for a face"
+                  >
+                    Radial
+                  </button>
+                  {selectedKind &&
+                    typeof selectedKind === "object" &&
+                    "Vector" in selectedKind && (
+                      <button
+                        className="mask-button"
+                        onClick={maskWithSelectedShape}
+                      >
+                        Mask below
+                      </button>
+                    )}
+                </div>
+              ) : (
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={selectedMask.invert}
+                    onChange={(e) =>
+                      run({
+                        SetMask: {
+                          id: selectedLayer.id,
+                          mask: { ...selectedMask!, invert: e.target.checked },
+                        },
+                      })
+                    }
+                    aria-label="Invert mask"
+                  />
+                  Invert mask
+                  <button
+                    className="mask-button"
+                    onClick={() =>
+                      run({ SetMask: { id: selectedLayer.id, mask: null } })
+                    }
+                  >
+                    Remove
+                  </button>
+                </label>
+              )}
+              {/* How far the mask's edge is softened over. A region
+                  picked out of a photograph almost never wants the edge
+                  the marquee drew, and a layer masked into another wants
+                  to be let into it rather than stamped on it. Dragged,
+                  so it previews as one history entry like every other
+                  slider here. */}
+              {selectedMask !== null && (
+                <label className="row">
+                  Feather
+                  <StretchRange
+                    min={0}
+                    max={40}
+                    step={0.5}
+                    value={selectedMask.feather ?? 0}
+                    aria-label="Mask feather"
+                    onValue={(v) =>
+                      preview({
+                        SetMask: {
+                          id: selectedLayer.id,
+                          mask: {
+                            ...selectedMask!,
+                            feather: v,
+                          },
+                        },
+                      })
+                    }
+                    onPointerUp={() => {
+                      if (session?.commit_preview()) refresh(session);
+                    }}
+                    onBlur={() => {
+                      if (session?.commit_preview()) refresh(session);
+                    }}
+                  />
+                  <span className="num">
+                    {Math.round(selectedMask.feather ?? 0)}
+                  </span>
+                </label>
+              )}
+            </div>
+          )}
+          {(history.past.length > 0 || history.future.length > 0) && (
+            <div className="history" aria-label="History">
+              <h2>History</h2>
+              <ol
+                ref={historyListRef}
+                onClick={(e) => {
+                  const row = (e.target as Element).closest?.("button[data-step]");
+                  if (!row) return;
+                  jumpHistory(Number(row.getAttribute("data-step")) + 1 - historyNow.current.past.length);
+                }}
+              >
+                {/* Where the document began, as the first row: every
+                    step back at once, in one press, which otherwise took
+                    as many presses as there were steps. */}
+                <li className="history-start">
+                  <button
+                    className={history.past.length === 0 ? "current" : undefined}
+                    aria-current={history.past.length === 0 ? "step" : undefined}
+                    data-step={-1}
+                    // Said rather than switched off, so the focus can
+                    // stay on it: switched off, it dropped to the page.
+                    aria-disabled={history.past.length === 0}
+                  >
+                    As it began
+                  </button>
+                </li>
+                {/* One list, keyed by step, past or future, so a step
+                    undone or redone is the same row — and the same
+                    button, which keeps the focus: drawn as two lists,
+                    Ctrl+Z on a row put the focus on the page. */}
+                {[...history.past, ...history.future].map((label, step) => {
+                  const done = step < history.past.length;
+                  const current = step === history.past.length - 1;
+                  return (
+                    <li key={`s${step}`} className={done ? undefined : "future"}>
+                      <button
+                        className={current ? "current" : undefined}
+                        aria-current={current ? "step" : undefined}
+                        data-step={step}
+                        aria-label={done ? undefined : `${label} (undone)`}
+                      >
+                        {label}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            </div>
+          )}
+        </aside>
+      </div>
+    </div>
+  );
+}
+
+function topLevelCount(layers: LayerInfo[]): number {
+  return layers.filter((l) => l.depth === 0).length;
+}
+
+/** What this editor answers to, in the order someone would meet it.
+ * Gestures sit beside keys because most of these are gestures. */
+/** The sheet of keys. The tool rows are written from the keys as they
+ * stand rather than as they were shipped, so a rebound tool is listed
+ * under the key it now answers to; a tool with no key left says so. */
+const keyHelp = (
+  hint: Record<Tool, string>,
+  /** A command's chord as it stands, rebindings and all. */
+  chordOf: Record<CommandId, string>,
+  /** The menu rows a person gave chords of their own: label and chord. */
+  own: [string, string][] = [],
+  /** How far the arrow keys nudge, and with shift (Preferences). */
+  nudge: [number, number] = [1, 10],
+): [string, [string, string][]][] => {
+  const k = (t: Tool) => hint[t] || "(no key)";
+  // A command's chord as it reads, or "(no key)" for one given none;
+  // "?" is written as itself, not as the shift it takes on one keyboard.
+  const c = (id: CommandId) => {
+    const chord = chordOf[id];
+    if (!chord) return "(no key)";
+    return chord === "shift+/" ? "?" : chordLabel(chord);
+  };
+  const cs = (...ids: CommandId[]) => ids.map(c).join(", ");
+  const shifted = (t: Tool) => (hint[t] ? `Shift+${hint[t]}` : "(no key)");
+  return [
+    [
+      "Tools",
+      [
+        [k("Move"), "Move"],
+        [k("Select"), "Select a region; with shift, the region tools in turn"],
+        [k("Frame"), "Frame (an artboard: a page within the page)"],
+        [`${k("Rect")}, ${k("Ellipse")}`, "Rectangle, ellipse"],
+        [`${k("Line")}, ${k("Polygon")}, ${k("Star")}`, "Line, polygon, star"],
+        [k("Shape"), "Shape — one of the library's: a triangle, an arrow, a callout, a heart"],
+        [`${k("Pen")}, ${k("Brush")}`, "Pen, brush"],
+        [k("Node"), "Node — press a shape to take hold of its anchors, its outline to add one, alt-press an anchor to take it off, alt-press the outline to cut it there"],
+        [shifted("Node"), "Knife — drag a line across shapes to cut them in two; only the picked ones when any are; shift holds the angle"],
+        [k("Paint"), "Paint (a brush that lays pixels)"],
+        [shifted("Paint"), "Eraser — on a paint layer, rubs out its paint; on any other, takes a piece out of it (and the brush puts it back)"],
+        [k("Clone"), "Clone (paint with what is already there, as it is)"],
+        [shifted("Clone"), "Heal — the same, laid down in the colour of the place it lands"],
+        ["Alt-click (clone, heal)", "Set the place to clone from"],
+        ["[  ]", "Thinner, thicker brush"],
+        ["Alt-click (brush)", "Take the colour under the brush"],
+        ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
+        [k("Text"), "Text"],
+        [k("Crop"), "Crop — drag a frame, adjust it, Enter or double-click to take it"],
+        [k("Eyedropper"), "Eyedropper — take the colour under the cursor"],
+        [k("Gradient"), "Gradient — drag across a shape; alt for a radial one, shift holds the angle"],
+        [shifted("Gradient"), "Fill — give the layer under a press the ink in hand; alt for its stroke; a press on nothing fills what is picked out"],
+        [k("Hand"), "Hand — drag the view about"],
+        [k("Zoom"), "Zoom — click to look nearer, drag a box to fill the window with it, alt-click to step back"],
+      ],
+    ],
+  [
+    "Picking",
+    [
+      ["Drag on bare canvas", "A band picks everything it touches"],
+      ["Shift-drag a band", "Adds to what is picked"],
+      ["Shift-click a layer", "Adds it to the selection, or takes it out"],
+      ["Ctrl-click a row", "The same, in the layer panel"],
+      ["Double-click text", "Type into it on the canvas"],
+      ["Right-click", "What can be done with what is under the pointer"],
+      ["Escape", "Let go of the selection"],
+    ],
+  ],
+  [
+    "Moving",
+    [
+      ["Drag", "Move; the edges snap to the page and to other layers"],
+      ["Drag a corner", "Resize, keeping the shape's proportions"],
+      ["Shift-drag a corner", "Resize free of them"],
+      ["Shift while drawing", "A square, a circle, a square page"],
+      ["Alt while drawing", "Out from the middle rather than a corner"],
+      ["Alt-drag a corner", "Resize about the middle, not the far corner"],
+      ["Shift-click with the pen", "Hold the segment to 45°"],
+      ["Ctrl while dragging", "Ignore the snapping"],
+      ["Alt-drag", "Leave the original and carry a copy"],
+      [
+        "Arrow keys",
+        nudge[0] === 1 && nudge[1] === 10
+          ? "Nudge a pixel; shift for ten"
+          : `Nudge ${nudge[0]} px; shift for ${nudge[1]}`,
+      ],
+      ["Drag a layer row", "Reorder, or drop into a group"],
+    ],
+  ],
+  [
+    "The view",
+    [
+      ["Wheel", "Zoom about the cursor"],
+      ["Space-drag, middle-drag", "Pan"],
+      ["Drag out of a ruler", "Place a guide; with the Move tool, drag it again or back to remove it"],
+      [cs("zoom-in", "zoom-out"), "Zoom in, out"],
+      [cs("zoom-fit", "zoom-actual"), "Fit the page to the window, actual size"],
+      [
+        "Alt-click a layer's eye",
+        "Show that layer on its own; again for the page back. Looking, not an edit: nothing is remembered by the file",
+      ],
+    ],
+  ],
+  [
+    "The document",
+    [
+      [cs("undo", "redo"), "Undo, redo"],
+      [cs("copy", "cut", "paste"), "Copy, cut, paste"],
+      [c("duplicate"), "Duplicate"],
+      [cs("group", "ungroup"), "Group, ungroup"],
+      [c("save"), "Save"],
+      [c("export"), "Export a PNG"],
+      [c("export-window"), "Export window — any format, any size"],
+      [c("preferences"), "Preferences"],
+      [cs("copy-style", "paste-style"), "Copy, paste a layer's look"],
+      [c("clip"), "Clip to layer below"],
+      [cs("to-front", "to-back"), "Bring to the front, send to the back"],
+      ["Double-click a path", "Put an anchor on its outline"],
+      ["Alt-click an anchor", "Take it off"],
+      [c("select-all"), "Select all — the page with a marquee in hand, else every layer"],
+      // The Select tool's key as it is bound, not as it shipped.
+      hint.Select
+        ? [hint.Select.toUpperCase(), `Pick a region out of the page (shift+${hint.Select.toUpperCase()} for the ellipse, the lasso and the wand)`]
+        : ["(no key)", "Pick a region out of the page (the Select tool)"],
+      ["Shift-drag", "Add to what is picked out; alt-drag takes from it"],
+      [c("deselect"), "Deselect — the selection first, then the layers"],
+      [c("pick-inverse"), "Inverse — select everything the selection leaves out"],
+      [
+        "Click a kept region",
+        "Pick it out again; shift adds it, alt takes it away, both keep the overlap, ctrl-click forgets it",
+      ],
+      [
+        "Click a swatch",
+        "Draw in that colour, and give it to the picked layer by name",
+      ],
+      [
+        "Shift-click a swatch",
+        "Say what that entry now means — everything that reached for it follows",
+      ],
+      ["Alt-click a swatch", "Take that colour out of the palette"],
+      ["Delete on a chip", "Forget it — a colour, style, comp, brush, region or setup (F2 renames a comp)"],
+      ["Delete", "Delete the picked layers"],
+      // The ways in for a person with no mouse.
+      ["F10", "The menu bar; the arrows walk it, Enter chooses, Escape leaves"],
+      ["Shift+F10 or the menu key", "The menu for what is picked, or for the focused row"],
+      ["Ctrl+Enter in text", "Finish typing, keeping what is typed"],
+      // Named only where they arrive: a browser keeps these two and
+      // never passes them on, so in a tab this sheet would be promising
+      // something that does not happen.
+      ...(isTauri()
+        ? ([[cs("new", "open"), "New document, open one"]] as [string, string][])
+        : ([
+            ...(browserKeeps(chordOf.new) ? [] : [[c("new"), "New document"]]),
+            ...(browserKeeps(chordOf.open) ? [] : [[c("open"), "Open a file"]]),
+          ] as [string, string][])),
+      [c("find-replace"), "Find and replace across the text layers"],
+      [c("keys-sheet"), "This sheet"],
+    ],
+  ],
+  ...(own.length > 0 ? ([["Your keys", own]] as [string, [string, string][]][]) : []),
+  ];
+};
+
+/** The sheet of keys and gestures. */
+/** What this is and which one: the app's version and the engine's, which
+ * are one number when the bundle is whole and two when it is not. */
+function AboutDialog({ onClose }: { onClose: () => void }) {
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeRef.current();
+      }
+    };
+    // Before the editor's own handler, which would take Escape for the
+    // selection.
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, []);
+  let engine = "";
+  try {
+    engine = engine_version();
+  } catch {
+    engine = "not loaded";
+  }
+  return (
+    <div className="modal-scrim" onPointerDown={onClose}>
+      <div
+        className="modal about"
+        role="dialog"
+        aria-label="About Chitrakar"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Chitrakar</h2>
+        <p className="modal-aside">
+          A non-destructive photo and vector editor. Every edit is a live
+          layer or a command that can be undone; the picture underneath is
+          never touched.
+        </p>
+        <dl className="about-facts">
+          <div>
+            <dt>Version</dt>
+            <dd>{__APP_VERSION__}</dd>
+          </div>
+          <div>
+            <dt>Engine</dt>
+            <dd>{engine}</dd>
+          </div>
+          <div>
+            <dt>Source</dt>
+            <dd>
+              <a href="https://github.com/SandeepSubba/Chitrakar" target="_blank" rel="noreferrer">
+                github.com/SandeepSubba/Chitrakar
+              </a>
+            </dd>
+          </div>
+        </dl>
+        <div className="modal-actions">
+          <button className="mask-button primary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KeysDialog({
+  hint,
+  chordOf,
+  own,
+  nudge,
+  onClose,
+}: {
+  hint: Record<Tool, string>;
+  chordOf: Record<CommandId, string>;
+  own: [string, string][];
+  nudge: [number, number];
+  onClose: () => void;
+}) {
+  const KEY_HELP = keyHelp(hint, chordOf, own, nudge);
+  // The key that opened the sheet puts it away again. The editor's own
+  // handler stands down while a window is up, so it only ever opened it.
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      // Whatever key it is given, as the editor reads it to open it.
+      const own = chordOf["keys-sheet"];
+      const pressed = chordFromEvent(e);
+      if (pressed === own || (own === "shift+/" && e.key === "?" && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onClose, chordOf]);
+  return (
+    <div className="modal-scrim" onPointerDown={onClose}>
+      <div
+        className="modal keys"
+        role="dialog"
+        aria-label="Keys and gestures"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Keys and gestures</h2>
+        <div className="keys-columns">
+          {KEY_HELP.map(([group, rows]) => (
+            <section key={group}>
+              <h3>{group}</h3>
+              <dl>
+                {rows.map(([key, what]) => (
+                  <div key={key}>
+                    <dt>{key}</dt>
+                    <dd>{what}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="mask-button primary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The largest page there can be — the engine's own (`canvas_fits`):
+ * 30,000 pixels a side and a hundred megapixels. A new document was
+ * held to 8192 square while Canvas size made pages of 30,000 × 3,000,
+ * so the one limit said two things. */
+const MAX_SIDE = 30000;
+const MAX_PIXELS = 100_000_000;
+
+/** New-document dialog: presets for the sizes people actually start from,
+ * and the two fields underneath for everything else. Colour mode is chosen
+ * here because it decides how every fill in the document is authored, and
+ * changing it afterwards would mean reinterpreting them all. */
+function NewDocDialog({
+  startW,
+  startH,
+  startDpi,
+  onCreate,
+  onCancel,
+}: {
+  /** What the fields open on, from Preferences. */
+  startW: number;
+  startH: number;
+  startDpi: number;
+  onCreate: (w: number, h: number, cmyk: boolean, dpi: number) => void;
+  onCancel: () => void;
+}) {
+  const [w, setW] = useState(startW);
+  const [h, setH] = useState(startH);
+  const [dpi, setDpi] = useState(startDpi);
+  const [mode, setMode] = useState("rgb");
+
+  // What will actually be made. A side larger than the ceiling used to
+  // be clamped inside the field as you typed, so asking for 30000 got
+  // you 8192 with nothing said and no way to type past the limit at
+  // all. Now the field keeps what was asked for and the dialog says
+  // what it is going to do about it.
+  const sideW = Math.min(w, MAX_SIDE);
+  const sideH = Math.min(h, MAX_SIDE);
+  // Past the pixels a page may have, both sides come down together.
+  const down = Math.min(1, Math.sqrt(MAX_PIXELS / Math.max(1, sideW * sideH)));
+  const madeW = Math.max(1, Math.floor(sideW * down));
+  const madeH = Math.max(1, Math.floor(sideH * down));
+  const clamped = madeW !== w || madeH !== h;
+  const create = useCallback(
+    () => onCreate(madeW, madeH, mode === "cmyk", dpi),
+    [madeW, madeH, mode, dpi, onCreate],
+  );
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (enterMeansGo(e)) create();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [create, onCancel]);
+
+  const size = (label: string, value: number, set: (v: number) => void) => (
+    <label className="row">
+      {label}
+      <NumberField min={1} max={30000} integer value={value} onValue={set} aria-label={label} />
+      <span className="hint unit">px</span>
+    </label>
+  );
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="New document"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>New document</h2>
+        <div className="preset-list">
+          {DOC_PRESETS.map(([name, pw, ph, pdpi]) => (
+            <button
+              key={name}
+              className={
+                w === pw && h === ph && dpi === pdpi
+                  ? "preset active"
+                  : "preset"
+              }
+              aria-pressed={w === pw && h === ph && dpi === pdpi}
+              onClick={() => {
+                setW(pw);
+                setH(ph);
+                setDpi(pdpi);
+              }}
+            >
+              {name}
+            </button>
+          ))}
+        </div>
+        {size("Width", w, setW)}
+        {size("Height", h, setH)}
+        {clamped && (
+          <p className="modal-note" role="status">
+            A page can be up to {MAX_SIDE.toLocaleString("en")} pixels a side and{" "}
+            {MAX_PIXELS / 1_000_000} megapixels — this one will be made {madeW} × {madeH}.
+          </p>
+        )}
+        <label className="row">
+          Resolution
+          <NumberField min={1} max={2400} integer value={dpi} onValue={setDpi} aria-label="Resolution" />
+          <span className="hint unit">dpi</span>
+        </label>
+        {/* What the resolution means on paper, on a line of its own: beside
+            the field it ran past the dialog's edge and lost its "mm". */}
+        <p className="modal-aside print-size" role="status">
+          Prints at {inUnits(madeW, "mm", dpi)} × {inUnits(madeH, "mm", dpi)} mm
+        </p>
+        <label className="row">
+          Colour
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value)}
+            aria-label="Colour mode"
+          >
+            <option value="rgb">RGB</option>
+            <option value="cmyk">CMYK</option>
+          </select>
+          <span className="hint unit" />
+        </label>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="mask-button primary" onClick={create}>
+            Create
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Canvas-size dialog: the page's own size, and which of its nine points
+ * stays where it is while the rest of it grows or shrinks around that.
+ *
+ * This is the other half of cropping. Cropping takes the page in to a
+ * rectangle drawn on it, which can only ever make it smaller; this gives
+ * the page room — the two centimetres of white around a photograph that
+ * every print asks for — without a single layer having to be moved by
+ * hand. Both are one command: a new size, and the shift that decides
+ * where the old page sits inside it. */
+/** One step of a repeat, as the window asks for it: how many copies,
+ * and how each is moved, turned and scaled from the one before. */
+type RepeatStep = {
+  copies: number;
+  dx: number;
+  dy: number;
+  degrees: number;
+  /** Per cent of the one before. */
+  scale: number;
+  /** Where the turn is about, from the middle of what is picked. */
+  px: number;
+  py: number;
+};
+
+/** Step and repeat: the copies a row, a ring or a spiral makes, said as
+ * one step — the move, the turn and the scale from each copy to the
+ * next. A ring is a turn about a point away from the middle: twelve
+ * copies at thirty degrees about a point below a mark is a clock face. */
+/** How a line along the edge of what is picked is drawn: its width and
+ * which side of the edge it lies on. Photoshop asks the same two. */
+/** Edit › Find and replace: words looked for across every text layer
+ * and put right in all of them at once, as one step of history. Says
+ * how many it found, and in how many layers, as the words are typed. */
+function FindReplaceDialog({
+  count,
+  onReplace,
+  onCancel,
+}: {
+  count: (find: string, opts: FindOptions) => { matches: number; layers: number };
+  onReplace: (find: string, replace: string, opts: FindOptions) => void;
+  onCancel: () => void;
+}) {
+  const [find, setFind] = useState("");
+  const [replace, setReplace] = useState("");
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const opts = { matchCase, wholeWord };
+  const found = count(find, opts);
+  const go = () => {
+    if (found.matches > 0) onReplace(find, replace, opts);
+  };
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  const field = (label: string, value: string, set: (v: string) => void, focus: boolean) => (
+    <label className="row">
+      {label}
+      <input
+        type="text"
+        value={value}
+        autoFocus={focus}
+        onChange={(e) => set(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            // Kept from what the focus goes back to as the window closes,
+            // which the key would otherwise press: the Edit menu's Undo,
+            // or a Delete button last pressed.
+            e.preventDefault();
+            go();
+          }
+          if (e.key === "Escape") onCancel();
+        }}
+        aria-label={label}
+      />
+    </label>
+  );
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Find and replace"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Find and replace</h2>
+        {field("Find", find, setFind, true)}
+        {field("Replace with", replace, setReplace, false)}
+        <label className="row check">
+          <input type="checkbox" checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
+          Match case
+        </label>
+        <label className="row check">
+          <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
+          Whole words
+        </label>
+        <p className="found" aria-live="polite" aria-label="Found">
+          {find.length === 0
+            ? "Every text layer is searched."
+            : found.matches === 0
+              ? "Not found in any text layer."
+              : `${found.matches} found in ${found.layers} ${found.layers === 1 ? "layer" : "layers"}.`}
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>Cancel</button>
+          <button className="mask-button primary" disabled={found.matches === 0} onClick={go}>
+            Replace all
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** How a camera's raw file is developed: what can only be done before
+ * it is pixels — the light's colour, the exposure, how the highlights
+ * roll off — with the photograph beside the settings, developed again
+ * as each one moves (a smaller copy, the same arithmetic). Opened when
+ * a raw file is placed or opened, and again from Layer › Develop again…
+ * on a layer that came from one: the file is kept in the document, so
+ * this is never a choice made once.
+ *
+ * Over the settings is the preview's histogram, with a corner each for
+ * what is clipped — pressed, the clipped pixels are painted over the
+ * photograph, red for highlights and blue for shadows — and Before, held
+ * (or the backslash key held), shows the plain development to compare. */
+/** A colour wheel for grading: the hue round the circle, how much of it
+ * by how far from the middle — a press or a drag puts the point there,
+ * a double-click takes it back to the middle. Red is to the right and
+ * the hues go round the other way from a clock, as on Lightroom's. */
+function GradeWheel({
+  label,
+  hue,
+  saturation,
+  onChange,
+}: {
+  label: string;
+  hue: number;
+  saturation: number;
+  onChange: (hue: number, saturation: number) => void;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const at = (e: React.PointerEvent) => {
+    const r = box.current!.getBoundingClientRect();
+    const [dx, dy] = [e.clientX - (r.left + r.width / 2), -(e.clientY - (r.top + r.height / 2))];
+    const reach = Math.min(1, Math.hypot(dx, dy) / (r.width / 2));
+    const h = ((Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+    onChange(Math.round(h), Math.round(reach * 100));
+  };
+  const angle = (hue * Math.PI) / 180;
+  const [px, py] = [50 + Math.cos(angle) * (saturation / 2), 50 - Math.sin(angle) * (saturation / 2)];
+  return (
+    <div className="grade-wheel-row">
+      <div
+        ref={box}
+        className="grade-wheel"
+        role="slider"
+        aria-label={label}
+        aria-valuetext={`hue ${hue}°, saturation ${saturation}`}
+        aria-valuenow={saturation}
+        tabIndex={0}
+        onPointerDown={(e) => {
+          e.currentTarget.setPointerCapture(e.pointerId);
+          at(e);
+        }}
+        onPointerMove={(e) => {
+          if (e.buttons) at(e);
+        }}
+        onDoubleClick={() => onChange(hue, 0)}
+        onKeyDown={(e) => {
+          // Left and right turn the hue, up and down are how much; Shift
+          // moves ten at a time.
+          const by = e.shiftKey ? 10 : 1;
+          const move: Record<string, [number, number]> = {
+            ArrowLeft: [-by, 0],
+            ArrowRight: [by, 0],
+            ArrowUp: [0, by],
+            ArrowDown: [0, -by],
+          };
+          const m = move[e.key];
+          if (!m) return;
+          e.preventDefault();
+          onChange((hue + m[0] + 360) % 360, Math.min(100, Math.max(0, saturation + m[1])));
+        }}
+        title="Drag the point: round for the hue, out for how much (or the arrow keys). Double-click to take it back"
+      >
+        <span className="grade-dot" style={{ left: `${px}%`, top: `${py}%` }} />
+      </div>
+      <span className="grade-numbers">
+        <span>Hue {hue}°</span>
+        <span>Saturation {saturation}</span>
+      </span>
+    </div>
+  );
+}
+
+function RawDevelopDialog({
+  session,
+  name,
+  info,
+  initial,
+  action,
+  historyKey,
+  count,
+  presets,
+  onPresets,
+  folded,
+  onFolded,
+  onCancel,
+  onDone,
+}: {
+  session: WasmSession;
+  name: string;
+  info: RawInfo;
+  initial: RawSettings;
+  action: string;
+  /** Which of undo and redo a key press is, by the person's own chords. */
+  historyKey: (e: KeyboardEvent) => "undo" | "redo" | undefined;
+  /** Which of how many raw files waiting this is, when more than one. */
+  count?: [number, number];
+  /** Settings kept by name, and keeping or forgetting one. */
+  presets: DevelopPreset[];
+  onPresets: (p: DevelopPreset[]) => void;
+  /** The sections folded away, by name, and folding or opening one. */
+  folded: string[];
+  onFolded: (f: string[]) => void;
+  onCancel: () => void;
+  onDone: (s: RawSettings, all?: boolean) => void;
+}) {
+  const [s, setS] = useState<RawSettings>(initial);
+  /** The window's own history, as Lightroom's: every change of the
+   * settings a step, those less than a breath apart one step (so a
+   * slider's whole drag is undone at once), a hundred kept. The
+   * document's own history is not touched until the development is
+   * placed, which is one step there. */
+  const past = useRef<RawSettings[]>([]);
+  const future = useRef<RawSettings[]>([]);
+  const recorded = useRef<RawSettings>(initial);
+  const lastChange = useRef(0);
+  const stepping = useRef(false);
+  const [, setSteps] = useState(0);
+  useEffect(() => {
+    if (s === recorded.current) return;
+    if (stepping.current) {
+      stepping.current = false;
+    } else {
+      const now = performance.now();
+      if (now - lastChange.current > 400) {
+        past.current.push(recorded.current);
+        if (past.current.length > 100) past.current.shift();
+      }
+      future.current = [];
+      lastChange.current = now;
+    }
+    recorded.current = s;
+    setSteps((n) => n + 1);
+  }, [s]);
+  const step = (from: React.MutableRefObject<RawSettings[]>, to: React.MutableRefObject<RawSettings[]>) => {
+    const back = from.current.pop();
+    if (!back) return;
+    to.current.push(recorded.current);
+    stepping.current = true;
+    lastChange.current = 0;
+    setS(back);
+  };
+  const undoRef = useRef(() => step(past, future));
+  undoRef.current = () => step(past, future);
+  const redoRef = useRef(() => step(future, past));
+  redoRef.current = () => step(future, past);
+  const historyKeyRef = useRef(historyKey);
+  historyKeyRef.current = historyKey;
+  useEffect(() => {
+    // Before the editor's own handler, which would otherwise undo the
+    // document behind the window.
+    const key = (e: KeyboardEvent) => {
+      const which = historyKeyRef.current(e);
+      if (!which) return;
+      e.stopImmediatePropagation();
+      // A name being typed keeps its own undo.
+      if (e.target instanceof HTMLInputElement && e.target.type === "text") return;
+      e.preventDefault();
+      if (which === "undo") undoRef.current();
+      else redoRef.current();
+    };
+    window.addEventListener("keydown", key, true);
+    return () => window.removeEventListener("keydown", key, true);
+  }, []);
+  /** A section of the settings, folded away by its heading as
+   * Lightroom's panels are, and kept folded from one photograph to the
+   * next. Hidden rather than taken out, so what draws inside it (the
+   * square at its own size) is there when it is opened again. */
+  const fold = (title: string, body: React.ReactNode, extra?: React.ReactNode) => {
+    const shut = folded.includes(title);
+    return (
+      <section className={shut ? "develop-section folded" : "develop-section"} aria-label={title}>
+        <div className="develop-head-row">
+          <button
+            type="button"
+            className="props-head fold-head"
+            aria-expanded={!shut}
+            title={shut ? `Show ${title.toLowerCase()}` : `Fold ${title.toLowerCase()} away`}
+            onClick={() => onFolded(shut ? folded.filter((f) => f !== title) : [...folded, title])}
+          >
+            {title}
+          </button>
+          {!shut && extra}
+        </div>
+        <div hidden={shut}>{body}</div>
+      </section>
+    );
+  };
+  const [picking, setPicking] = useState(false);
+  const [before, setBefore] = useState(false);
+  const [showClip, setShowClip] = useState<{ high: boolean; low: boolean }>({ high: false, low: false });
+  const [clipped, setClipped] = useState<{ high: number; low: number }>({ high: 0, low: 0 });
+  /** The developed preview's tones, for the tone curve to be drawn over,
+   * as four runs of 256 (red, green, blue, and a run left empty). */
+  const [bins, setBins] = useState<Uint32Array | null>(null);
+  /** The window filling the screen, or the size it was given. */
+  const [big, setBig] = useState(false);
+  /** Which of the colour mixer's three the sliders are showing. */
+  const [mixing, setMixing] = useState<0 | 1 | 2>(0);
+  /** Which of colour grading's zones the wheel is showing. */
+  const [zone, setZone] = useState<GradeZone>("shadows");
+  /** The picture's box, so a window made bigger develops a bigger
+   * preview and puts the spot's mark back where it belongs. */
+  const [boxSize, setBoxSize] = useState<[number, number]>([0, 0]);
+  const canvas = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const c = canvas.current;
+    if (!c || typeof ResizeObserver === "undefined") return;
+    const watch = new ResizeObserver(() => setBoxSize([c.clientWidth, c.clientHeight]));
+    watch.observe(c);
+    return () => watch.disconnect();
+  }, []);
+  const graph = useRef<HTMLCanvasElement>(null);
+  const loupe = useRef<HTMLCanvasElement>(null);
+  /** Where the square at its own size is taken, as fractions of the
+   * picture: the middle until the photograph is clicked. */
+  const [spot, setSpot] = useState<[number, number]>([0.5, 0.5]);
+  /** How the preview sits in its box, for the spot's mark. */
+  const [fit, setFit] = useState<{ ox: number; oy: number; w: number; h: number } | null>(null);
+  const LOUPE = 160;
+  /** The square's side in the photograph's own pixels: no bigger than
+   * the photograph. */
+  const square = Math.min(Math.round(LOUPE * devicePixelRatio), info.width, info.height);
+  const white = s.white ?? info.asShot;
+  /** The light Auto found for this photograph, once asked for: worked
+   * out from the picture's greys (`auto_white`), so it is this
+   * photograph's own and not a preset's. Null where none could be read. */
+  const [autoWhite, setAutoWhite] = useState<[number, number] | null | undefined>(undefined);
+  /** The light last chosen by name: Daylight and Flash are the same
+   * light, so the settings alone cannot say which was chosen. */
+  const [lightNamed, setLightNamed] = useState<string | null>(null);
+  const named = LIGHTS.find(([n]) => n === lightNamed)?.[1];
+  /** The camera's own light, as the photograph was shot. */
+  const asShot = () => {
+    setLightNamed(null);
+    setS((o) => ({ ...o, white: undefined }));
+  };
+  const light =
+    autoWhite && s.white && s.white[0] === autoWhite[0] && s.white[1] === autoWhite[1]
+      ? "Auto"
+      : named && s.white && s.white[0] === named[0] && s.white[1] === named[1]
+        ? lightNamed!
+        : lightOf(s);
+  /** Whether anything has been changed since the window opened: a click
+   * beside the window then is not taken as leaving it. */
+  const changed = JSON.stringify(s) !== JSON.stringify(initial);
+  const pickingRef = useRef(false);
+  pickingRef.current = picking;
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // Escape while picking a grey ends the picking, not the window.
+        if (pickingRef.current) setPicking(false);
+        else onCancel();
+      }
+      if (e.key === "\\" && !isTextEntry(e.target)) setBefore(true);
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key === "\\") setBefore(false);
+    };
+    document.addEventListener("keydown", down);
+    document.addEventListener("keyup", up);
+    return () => {
+      document.removeEventListener("keydown", down);
+      document.removeEventListener("keyup", up);
+    };
+  }, [onCancel]);
+  // Developed again on every change, at most once a frame; the histogram
+  // read off what was developed, before any clipping is painted on it.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const c = canvas.current;
+      if (!c) return;
+      const longest = Math.min(1600, Math.round(Math.max(c.clientWidth, c.clientHeight) * devicePixelRatio) || 1000);
+      let out: Uint8Array;
+      try {
+        out = session.raw_preview(JSON.stringify(before ? RAW_DEFAULTS : s), longest);
+      } catch {
+        return;
+      }
+      const view = new DataView(out.buffer, out.byteOffset, 8);
+      const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+      const pixels = new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4);
+      const hist = histogram(pixels);
+      setClipped({ high: hist.high, low: hist.low });
+      const runs = new Uint32Array(1024);
+      runs.set(hist.r, 0);
+      runs.set(hist.g, 256);
+      runs.set(hist.b, 512);
+      setBins(runs);
+      const g = graph.current;
+      const gx = g?.getContext("2d");
+      if (g && gx) drawHistogram(gx, hist, g.width, g.height);
+      if (showClip.high || showClip.low) markClipping(pixels, showClip.high, showClip.low);
+      c.width = w;
+      c.height = h;
+      c.getContext("2d")?.putImageData(new ImageData(pixels, w, h), 0, 0);
+      const k = Math.min(c.clientWidth / w, c.clientHeight / h);
+      setFit({ ox: (c.clientWidth - w * k) / 2, oy: (c.clientHeight - h * k) / 2, w: w * k, h: h * k });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [s, session, before, showClip, boxSize]);
+  // The square at its own size: Detail is judged here, since a preview
+  // made smaller shows neither sharpening nor noise.
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      const c = loupe.current;
+      if (!c) return;
+      const size = Math.round(LOUPE * devicePixelRatio);
+      let out: Uint8Array;
+      try {
+        out = session.raw_square(JSON.stringify(before ? RAW_DEFAULTS : s), spot[0], spot[1], size);
+      } catch {
+        return;
+      }
+      const view = new DataView(out.buffer, out.byteOffset, 8);
+      const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+      c.width = w;
+      c.height = h;
+      c.getContext("2d")?.putImageData(new ImageData(new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4), w, h), 0, 0);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [s, session, before, spot]);
+  const set = (k: keyof RawSettings, v: number) => setS((o) => ({ ...o, [k]: v }));
+  /** A change to colour grading, kept only while it asks for something. */
+  const grade = (change: (g: NonNullable<RawSettings["grading"]>) => void) =>
+    setS((o) => {
+      const g = structuredClone(o.grading ?? NO_GRADING);
+      change(g);
+      return { ...o, grading: cleanGrading(g) };
+    });
+  const grading = s.grading ?? NO_GRADING;
+  /** A slider with its number beside it, for any value of the settings. */
+  const slider = (label: string, value: number, put: (v: number) => void, min: number, max: number, step: number, unit = "") => (
+    <label key={label} onDoubleClick={() => put(0)} title="Double-click to put it back">
+      {/* The value can be typed as well as dragged: a slider a few
+          hundred pixels long for ten stops is a twentieth of a stop a
+          pixel, and a hand wants an exact number sometimes. */}
+      <span className="slider-head">
+        <span>{label}</span>
+        <span className="slider-value">
+          <NumberField
+            className="develop-number"
+            min={min}
+            max={max}
+            step={step}
+            value={Math.round(value * 100) / 100}
+            onValue={put}
+            onDoubleClick={(e) => e.stopPropagation()}
+            aria-label={`${label} value`}
+          />
+          {unit}
+        </span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => put(Number(e.target.value))}
+        aria-label={label}
+      />
+    </label>
+  );
+  const row = (label: string, k: Exclude<keyof RawSettings, "white" | "uncorrected" | "lens_profile" | "fringe" | "defringe" | "color_noise" | "curve" | "mixer" | "grading" | CurveKey>, min: number, max: number, step: number, unit = "") =>
+    slider(label, s[k], (v) => set(k, v), min, max, step, unit);
+  /** Defringe's purple (0) or green (1), kept only while it asks for something. */
+  const fringeRow = (label: string, i: 0 | 1) =>
+    slider(
+      label,
+      s.defringe?.[i] ?? 0,
+      (v) =>
+        setS((o) => {
+          const d: [number, number] = [...(o.defringe ?? [0, 0])] as [number, number];
+          d[i] = v;
+          const { defringe: _, ...rest } = o;
+          return d[0] === 0 && d[1] === 0 ? rest : { ...rest, defringe: d };
+        }),
+      0,
+      100,
+      1,
+    );
+  const pick = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const c = e.currentTarget;
+    const r = c.getBoundingClientRect();
+    // The picture is fitted inside the canvas box, its proportions kept.
+    const k = Math.min(r.width / c.width, r.height / c.height);
+    const [ox, oy] = [(r.width - c.width * k) / 2, (r.height - c.height * k) / 2];
+    const [x, y] = [Math.floor((e.clientX - r.left - ox) / k), Math.floor((e.clientY - r.top - oy) / k)];
+    if (!picking) {
+      // A click elsewhere is where to look at its own size.
+      if (x >= 0 && y >= 0 && x < c.width && y < c.height) setSpot([(x + 0.5) / c.width, (y + 0.5) / c.height]);
+      return;
+    }
+    setPicking(false);
+    const got = session.raw_white_at(x, y);
+    if (got) setS((o) => ({ ...o, white: JSON.parse(got) as [number, number] }));
+  };
+  const auto = () => {
+    try {
+      setS({ ...RAW_DEFAULTS, ...(JSON.parse(session.raw_auto(JSON.stringify(s))) as Partial<RawSettings>) });
+    } catch (err) {
+      alert(`${said(err)}`);
+    }
+  };
+  const percent = (f: number) => (f >= 0.001 ? `${(f * 100).toFixed(f < 0.1 ? 1 : 0)}%` : f > 0 ? "<0.1%" : "none");
+  return (
+    <div
+      className="modal-scrim"
+      // A stray click beside the window closes it only while nothing
+      // would be lost; once something is changed, Cancel or Escape it is.
+      onPointerDown={() => {
+        if (!changed) onCancel();
+      }}
+    >
+      <div
+        className={big ? "modal develop big" : "modal develop"}
+        role="dialog"
+        aria-label="Develop"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2 className="develop-title">
+          <span>
+            Develop {name}
+            {count && <span className="develop-count"> — {count[0]} of {count[1]}</span>}
+          </span>
+          {/* The window is resized by its corner; this fills the screen
+              with it, and puts it back. */}
+          <button
+            type="button"
+            className="develop-size"
+            aria-pressed={big}
+            aria-label={big ? "Restore the window" : "Fill the screen"}
+            title={big ? "Restore the window" : "Fill the screen (the corner resizes it)"}
+            onClick={() => setBig((b) => !b)}
+          >
+            {big ? "Restore" : "Fill screen"}
+          </button>
+        </h2>
+        <div className="develop-body">
+          <div className="develop-picture">
+            <div className="develop-frame">
+              <canvas
+                ref={canvas}
+                className={picking ? "picking" : undefined}
+                onPointerDown={pick}
+                aria-label="Developed picture"
+                data-before={before ? "" : undefined}
+              />
+              {fit && (
+                <span
+                  className="develop-spot"
+                  aria-hidden
+                  style={{
+                    left: fit.ox + spot[0] * fit.w,
+                    top: fit.oy + spot[1] * fit.h,
+                    width: Math.max(6, (square * fit.w) / info.width),
+                    height: Math.max(6, (square * fit.w) / info.width),
+                  }}
+                />
+              )}
+            </div>
+            <p className="modal-aside">
+              {info.width} × {info.height} px
+              {before ? " — before" : picking ? " — click something that should be grey" : ""}
+            </p>
+          </div>
+          <div className="develop-settings">
+            {/* Settings kept by name: a press gives them all, alt
+                forgets one, + keeps what the window says now. */}
+            <div className="develop-presets" role="group" aria-label="Presets">
+              {presets.map((p) => {
+                const inHand = samePreset(p, s);
+                return (
+                  <button
+                    key={p.name}
+                    type="button"
+                    className={inHand ? "preset setup active" : "preset setup"}
+                    aria-pressed={inHand}
+                    aria-label={`Preset ${p.name}`}
+                    title={`${p.name} — alt-click or Delete to forget it`}
+                    onKeyDown={chipKeys(() => onPresets(presets.filter((o) => o.name !== p.name)))}
+                    onClick={(e) => {
+                      if (e.altKey) onPresets(presets.filter((o) => o.name !== p.name));
+                      else setS(withDefaults(p.settings));
+                    }}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                className="preset setup add"
+                aria-label="Keep these settings"
+                title="Keep these settings by name, to give another photograph in one press"
+                onClick={() => {
+                  const taken = new Set(presets.map((p) => p.name));
+                  let suggestion = "Preset 1";
+                  for (let n = 2; taken.has(suggestion); n++) suggestion = `Preset ${n}`;
+                  const name = window.prompt("Keep these settings as:", suggestion)?.trim();
+                  if (!name) return;
+                  // A name kept again is the new settings under it, once
+                  // asked: the comps and regions ask the same.
+                  if (taken.has(name) && !window.confirm(`Settings called “${name}” are kept already. Keep these in their place?`)) return;
+                  onPresets([...presets.filter((p) => p.name !== name), { name, settings: { ...s } }]);
+                }}
+              >
+                {presets.length === 0 ? "+ Keep these settings" : "+"}
+              </button>
+            </div>
+            <div className="develop-histogram">
+              <canvas ref={graph} width={240} height={64} aria-label="Histogram" />
+              <button
+                type="button"
+                className={`clip clip-low${clipped.low > 0 ? " hit" : ""}${showClip.low ? " on" : ""}`}
+                aria-pressed={showClip.low}
+                aria-label="Show clipped shadows"
+                title={`Shadows with nothing left in them: ${percent(clipped.low)}. Press to show them in blue.`}
+                onClick={() => setShowClip((o) => ({ ...o, low: !o.low }))}
+              />
+              <button
+                type="button"
+                className={`clip clip-high${clipped.high > 0 ? " hit" : ""}${showClip.high ? " on" : ""}`}
+                aria-pressed={showClip.high}
+                aria-label="Show clipped highlights"
+                title={`Highlights with nothing left in them: ${percent(clipped.high)}. Press to show them in red.`}
+                onClick={() => setShowClip((o) => ({ ...o, high: !o.high }))}
+              />
+            </div>
+            {fold(
+              "White balance",
+              <>
+            <div className="develop-light">
+              <select
+                value={light}
+                onChange={(e) => {
+                  if (e.target.value === "Auto") {
+                    let found = autoWhite;
+                    if (found === undefined) {
+                      const json = session.raw_auto_white();
+                      found = json ? (JSON.parse(json) as [number, number]) : null;
+                      setAutoWhite(found);
+                    }
+                    if (found) setS((o) => ({ ...o, white: found }));
+                    return;
+                  }
+                  const w = LIGHTS.find(([n]) => n === e.target.value)?.[1];
+                  setLightNamed(e.target.value);
+                  setS((o) => ({ ...o, white: w ?? (e.target.value === "Custom" ? white : undefined) }));
+                }}
+                aria-label="Light"
+                title={autoWhite === null ? "Auto found too little in this photograph to go by" : undefined}
+              >
+                {LIGHTS.slice(0, 1).map(([n]) => (
+                  <option key={n}>{n}</option>
+                ))}
+                <option disabled={autoWhite === null}>Auto</option>
+                {LIGHTS.slice(1).map(([n]) => (
+                  <option key={n}>{n}</option>
+                ))}
+                {light === "Custom" && <option>Custom</option>}
+              </select>
+              <button
+                type="button"
+                className={picking ? "on" : undefined}
+                aria-pressed={picking}
+                onClick={() => setPicking((p) => !p)}
+                title="Click something in the picture that should be grey"
+              >
+                Pick grey
+              </button>
+            </div>
+            {/* Double-clicked, the light goes back to the camera's own, as
+                every other slider here goes back to where it began. */}
+            <label onDoubleClick={asShot} title="Double-click to put it back as shot">
+              <SliderHead label="Temperature" value={white[0]} unit=" K" />
+              <input
+                type="range"
+                min={0}
+                max={1000}
+                step={1}
+                value={kelvinToSlider(white[0])}
+                onChange={(e) => setS((o) => ({ ...o, white: [sliderToKelvin(Number(e.target.value)), white[1]] }))}
+                onKeyDown={(e) => {
+                  // A step of the slider is a few kelvin where it is warm,
+                  // less than the 50 K a temperature is kept to, so the
+                  // keys step by kelvin themselves: 50, or 500 with Shift.
+                  const by = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1, PageUp: 10, PageDown: -10 }[e.key];
+                  if (by === undefined) return;
+                  e.preventDefault();
+                  const k = stepKelvin(white[0], by * (e.shiftKey ? 10 : 1));
+                  setS((o) => ({ ...o, white: [k, white[1]] }));
+                }}
+                aria-label="Temperature"
+                aria-valuetext={`${Math.round(white[0])} K`}
+              />
+            </label>
+            <label onDoubleClick={asShot} title="Double-click to put it back as shot">
+              <SliderHead label="Tint" value={Math.round(white[1])} />
+              <input
+                type="range"
+                min={-150}
+                max={150}
+                step={1}
+                value={white[1]}
+                onChange={(e) => setS((o) => ({ ...o, white: [white[0], Number(e.target.value)] }))}
+                aria-label="Tint"
+              />
+            </label>
+              </>,
+            )}
+            {fold(
+              "Tone",
+              <>
+            {row("Exposure", "exposure", -5, 5, 0.05, " EV")}
+            {row("Contrast", "contrast", -100, 100, 1)}
+            {row("Highlights", "highlights", -100, 100, 1)}
+            {row("Shadows", "shadows", -100, 100, 1)}
+            {row("Whites", "whites", -100, 100, 1)}
+            {row("Blacks", "blacks", -100, 100, 1)}
+            <label
+              className="row check"
+              title="The tones the camera's own pictures have: deeper shadows and a soft roll into white, about the photograph's own middle. Off is the plain development"
+            >
+              <input
+                type="checkbox"
+                aria-label="Camera tone curve"
+                checked={!!s.curve}
+                onChange={(e) => setS((o) => ({ ...o, curve: e.target.checked }))}
+              />
+              Tone curve like the camera's
+            </label>
+              </>,
+              <button type="button" onClick={auto} title="Exposure, highlights and shadows worked out from the picture">
+                Auto
+              </button>,
+            )}
+            {fold(
+              "Presence",
+              <>
+            {row("Clarity", "clarity", -100, 100, 1)}
+            {row("Dehaze", "dehaze", -100, 100, 1)}
+            {row("Vibrance", "vibrance", -100, 100, 1)}
+            {row("Saturation", "saturation", -100, 100, 1)}
+              </>,
+            )}
+            {fold(
+              "Colour mixer",
+              <>
+            {/* Lightroom's HSL: a band of colour at a time — a sky deepened
+                without the grass, a face warmed without the wall. Hue,
+                saturation or luminance, one at a time across all eight. */}
+            <div className="develop-mixing" role="group" aria-label="Colour mixer shows">
+              {(["Hue", "Saturation", "Luminance"] as const).map((name, i) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={mixing === i ? "active" : undefined}
+                  aria-pressed={mixing === i}
+                  onClick={() => setMixing(i as 0 | 1 | 2)}
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+            {MIXER_BANDS.map(([band, colour], i) => {
+              const value = s.mixer?.[i]?.[mixing] ?? 0;
+              const give = (v: number) =>
+                setS((o) => {
+                  const m = (o.mixer ?? MIXER_BANDS.map(() => [0, 0, 0] as [number, number, number])).map(
+                    (b) => [...b] as [number, number, number],
+                  );
+                  m[i][mixing] = v;
+                  return { ...o, mixer: cleanMixer(m) };
+                });
+              const label = `${band} ${["hue", "saturation", "luminance"][mixing]}`;
+              return (
+                <label key={band} className="develop-band" onDoubleClick={() => give(0)} title="Double-click to put it back">
+                  <span className="slider-head">
+                    <span>{band}</span>
+                    <span className="slider-value">{value}</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={-100}
+                    max={100}
+                    step={1}
+                    value={value}
+                    style={{ accentColor: colour }}
+                    onChange={(e) => give(Number(e.target.value))}
+                    aria-label={label}
+                  />
+                </label>
+              );
+            })}
+              </>,
+            )}
+            {fold(
+              "Colour grading",
+              <>
+            {/* Lightroom's colour grading: a tint for the shadows, the
+                midtones and the highlights, and one for everything. One
+                wheel at a time, the zone chosen above it. */}
+            <div className="develop-mixing" role="group" aria-label="Colour grading zone">
+              {GRADE_ZONES.map((z) => (
+                <button
+                  key={z}
+                  type="button"
+                  className={zone === z ? "active" : undefined}
+                  aria-pressed={zone === z}
+                  onClick={() => setZone(z)}
+                >
+                  {z[0].toUpperCase() + z.slice(1)}
+                  {grading[z][1] !== 0 || grading[z][2] !== 0 ? "•" : ""}
+                </button>
+              ))}
+            </div>
+            <GradeWheel
+              label={`${zone[0].toUpperCase() + zone.slice(1)} colour`}
+              hue={grading[zone][0]}
+              saturation={grading[zone][1]}
+              onChange={(h, sat) =>
+                grade((g) => {
+                  g[zone] = [h, sat, g[zone][2]];
+                })
+              }
+            />
+            <label onDoubleClick={() => grade((g) => (g[zone] = [g[zone][0], g[zone][1], 0]))} title="Double-click to put it back">
+              <SliderHead label="Luminance" value={grading[zone][2]} />
+              <input
+                type="range"
+                min={-100}
+                max={100}
+                step={1}
+                value={grading[zone][2]}
+                onChange={(e) => grade((g) => (g[zone] = [g[zone][0], g[zone][1], Number(e.target.value)]))}
+                aria-label={`${zone} luminance`}
+              />
+            </label>
+            <label onDoubleClick={() => grade((g) => (g.blending = 50))} title="How far the zones run into each other. Double-click to put it back">
+              <SliderHead label="Blending" value={grading.blending} />
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={grading.blending}
+                onChange={(e) => grade((g) => (g.blending = Number(e.target.value)))}
+                aria-label="Grading blending"
+              />
+            </label>
+            <label onDoubleClick={() => grade((g) => (g.balance = 0))} title="Where the shadows end and the highlights begin. Double-click to put it back">
+              <SliderHead label="Balance" value={grading.balance} />
+              <input
+                type="range"
+                min={-100}
+                max={100}
+                step={1}
+                value={grading.balance}
+                onChange={(e) => grade((g) => (g.balance = Number(e.target.value)))}
+                aria-label="Grading balance"
+              />
+            </label>
+              </>,
+            )}
+            {fold(
+              "Tone curve",
+              <>
+            {/* The same curves as a Curves layer, drawn over the developed
+                preview's tones: the tones as they will be seen, after
+                everything above. */}
+            <CurvesPanel
+              curves={{
+                points: s.tone_curve ?? [
+                  [0, 0],
+                  [1, 1],
+                ],
+                red: s.red_curve ?? [],
+                green: s.green_curve ?? [],
+                blue: s.blue_curve ?? [],
+              }}
+              bins={bins}
+              onEdit={(c) =>
+                setS((o) => ({
+                  ...o,
+                  tone_curve: cleanCurve(c.points),
+                  red_curve: cleanCurve(c.red),
+                  green_curve: cleanCurve(c.green),
+                  blue_curve: cleanCurve(c.blue),
+                }))
+              }
+              onGestureEnd={() => {}}
+              onAutoColour={() => {
+                // Measured on the picture without the channel curves it
+                // has now, which are what this replaces.
+                const bare = { ...s, red_curve: undefined, green_curve: undefined, blue_curve: undefined };
+                try {
+                  const out = session.raw_preview(JSON.stringify(bare), 480);
+                  const view = new DataView(out.buffer, out.byteOffset, 8);
+                  const [w, h] = [view.getUint32(0, true), view.getUint32(4, true)];
+                  const hist = histogram(new Uint8ClampedArray(out.buffer, out.byteOffset + 8, w * h * 4));
+                  setS({ ...bare, ...autoChannels(hist) });
+                } catch {
+                  // No preview to measure: nothing changes.
+                }
+              }}
+            />
+              </>,
+            )}
+            {fold(
+              "Detail",
+              <>
+            <canvas
+              ref={loupe}
+              className="develop-loupe"
+              style={{ width: LOUPE, height: LOUPE }}
+              aria-label="At its own size"
+              title="The photograph at its own size, where it was last clicked: sharpening and noise show here"
+            />
+            {row("Sharpening", "sharpen", 0, 150, 1)}
+            {row("Masking", "masking", 0, 100, 1)}
+            {/* Two, as Lightroom's Luminance and Color: brightness grain
+                and colour blotches want different amounts. Settings from
+                before there were two have one, which the colour follows
+                until either is moved. */}
+            {slider(
+              "Luminance noise",
+              s.noise,
+              (v) => setS((o) => ({ ...o, noise: v, color_noise: o.color_noise ?? o.noise })),
+              0,
+              100,
+              1,
+            )}
+            {slider("Colour noise", s.color_noise ?? s.noise, (v) => setS((o) => ({ ...o, color_noise: v })), 0, 100, 1)}
+              </>,
+            )}
+            {fold(
+                "Lens",
+                <>
+                {info.lens && (
+                <label
+                  className="row check"
+                  title={
+                    info.lensProfile
+                      ? "The distortion, colour fringes and dark corners lensfun measured for this lens are put right, at the focal length and aperture the photograph was taken at"
+                      : "The distortion, colour fringes and dark corners the camera wrote into the file are put right, as the camera's own pictures are"
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    aria-label="Lens corrections"
+                    checked={!s.uncorrected}
+                    onChange={(e) => {
+                      const { uncorrected: _, ...rest } = s;
+                      setS(e.target.checked ? rest : { ...rest, uncorrected: true });
+                    }}
+                  />
+                  {info.lensProfile ? "Corrections from lensfun" : "Corrections from the camera"}
+                </label>
+                )}
+                <label
+                  className="row check"
+                  title="The red and blue edges a lens leaves towards the corners, measured from this photograph and taken out (in place of any the corrections above give)"
+                >
+                  <input
+                    type="checkbox"
+                    aria-label="Remove chromatic aberration"
+                    checked={!!s.fringe}
+                    onChange={(e) => {
+                      const { fringe: _, ...rest } = s;
+                      setS(e.target.checked ? { ...rest, fringe: true } : rest);
+                    }}
+                  />
+                  Remove chromatic aberration
+                </label>
+                {fringeRow("Purple fringe", 0)}
+                {fringeRow("Green fringe", 1)}
+                {info.lensProfile && (
+                  <p className="modal-aside" aria-label="Lens profile">
+                    {info.lensProfile}
+                  </p>
+                )}
+                </>,
+              )}
+          </div>
+        </div>
+        {initial.lens_profile && !info.lensProfile && (
+          // Developed elsewhere with a profile this device has not been
+          // given: developed again here it loses those corrections, which
+          // happened without a word.
+          <p className="modal-note" role="note" aria-label="Lens profile missing">
+            Developed with lensfun's profile for {initial.lens_profile}, which is not on this device: without it the
+            lens is not corrected. Add it in Preferences › Camera raw to keep the corrections.
+          </p>
+        )}
+        <div className="modal-actions">
+          <button onClick={() => setS(RAW_DEFAULTS)}>Reset</button>
+          <button type="button" disabled={past.current.length === 0} onClick={() => undoRef.current()} title="Undo the last change here">
+            Undo
+          </button>
+          <button type="button" disabled={future.current.length === 0} onClick={() => redoRef.current()} title="Redo">
+            Redo
+          </button>
+          <button
+            type="button"
+            className={before ? "on" : undefined}
+            onPointerDown={() => setBefore(true)}
+            onPointerUp={() => setBefore(false)}
+            onPointerLeave={() => setBefore(false)}
+            title="Hold to see the plain development (or hold \)"
+          >
+            Before
+          </button>
+          <span className="spacer" />
+          <button onClick={onCancel} title={count ? "Leave this one out and go on to the next" : undefined}>
+            {count && count[0] < count[1] ? "Skip" : "Cancel"}
+          </button>
+          {count && count[0] < count[1] && (
+            <button
+              onClick={() => onDone(s, true)}
+              title="Place this and every raw file still waiting with these settings"
+            >
+              Place all {count[1] - count[0] + 1}
+            </button>
+          )}
+          <button className="primary" onClick={() => onDone(s)}>
+            {action}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Which page of a PDF (or an Illustrator file) comes in, and at what
+ * resolution: a page is drawn, not unpicked into shapes, so what it is
+ * drawn at is the most detail it will ever have. The size it comes to
+ * is shown as the numbers are changed. */
+function PdfDialog({
+  name,
+  sizes,
+  onCancel,
+  onPlace,
+}: {
+  name: string;
+  sizes: [number, number][];
+  onCancel: () => void;
+  onPlace: (page: number, dpi: number) => void;
+}) {
+  const [page, setPage] = useState(1);
+  const [dpi, setDpi] = useState(150);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  const [w, h] = sizes[Math.min(sizes.length, Math.max(1, page)) - 1] ?? [0, 0];
+  // The renderer goes no further than 16384 pixels on a side.
+  const k = Math.min(dpi / 72, 16384 / Math.max(w, h, 1));
+  // Whole pixels as the reader makes them, which drops the part of a
+  // pixel left over: rounded, it said 417 and gave 416.
+  const [pw, ph] = [Math.max(1, Math.floor(w * k)), Math.max(1, Math.floor(h * k))];
+  // And a picture past a hundred megapixels is taken down to it when it
+  // lands, as any is: said here, where the size was promised.
+  const down = Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph)));
+  const [lw, lh] = [Math.max(1, Math.floor(pw * down)), Math.max(1, Math.floor(ph * down))];
+  const ok = page >= 1 && page <= sizes.length && dpi > 0;
+  const go = () => ok && onPlace(page - 1, dpi);
+  const enter = (e: React.KeyboardEvent) => {
+    // The field's keys are its own, but Escape puts the window away from
+    // it too: kept to the field, it did nothing at all.
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      onCancel();
+      return;
+    }
+    if (e.key === "Enter") {
+      // Kept from the menu row the focus goes back to as the
+      // window closes, which the key would otherwise press.
+      e.preventDefault();
+      go();
+    }
+  };
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Place PDF"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Place {name}</h2>
+        {sizes.length > 1 && (
+          <label className="row">
+            Page
+            <NumberField
+              min={1}
+              max={sizes.length}
+              step={1}
+              integer
+              value={page}
+              onValue={setPage}
+              onKeyDown={enter}
+              aria-label="Page"
+            />
+            <span className="unit">of {sizes.length}</span>
+          </label>
+        )}
+        <label className="row">
+          Resolution
+          <NumberField
+            min={18}
+            max={1200}
+            step={1}
+            value={dpi}
+            onValue={setDpi}
+            onKeyDown={enter}
+            aria-label="Resolution"
+          />
+          <span className="unit">dpi</span>
+        </label>
+        <p className="modal-aside" role="status" aria-label="Page size">
+          {ok
+            ? down < 1
+              ? `${(w / 72).toFixed(2)} × ${(h / 72).toFixed(2)} in, drawn at ${pw} × ${ph} px and taken down to about ${lw} × ${lh}, a hundred megapixels`
+              : `${(w / 72).toFixed(2)} × ${(h / 72).toFixed(2)} in, comes in at ${pw} × ${ph} px` +
+                (k < dpi / 72 ? " — as large as a page is drawn" : "")
+            : `A page from 1 to ${sizes.length}.`}
+        </p>
+        <p className="modal-aside">
+          The page comes in as a picture: its text and shapes are drawn, not kept as layers.
+        </p>
+        <div className="modal-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" disabled={!ok} onClick={go}>
+            Place
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StrokeDialog({
+  onCancel,
+  onStroke,
+}: {
+  onCancel: () => void;
+  onStroke: (width: number, side: string) => void;
+}) {
+  const [width, setWidth] = useState(4);
+  const [side, setSide] = useState("inside");
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Stroke"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Stroke what is picked</h2>
+        <label className="row">
+          Width
+          <NumberField
+            min={0.5}
+            step={0.5}
+            value={width}
+            onValue={setWidth}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && width > 0) {
+                // Kept from the menu row the focus goes back to as the
+                // window closes, which the key would otherwise press.
+                e.preventDefault();
+                onStroke(width, side);
+              }
+            }}
+            aria-label="Stroke width"
+          />
+          <span className="unit">px</span>
+        </label>
+        <label className="row">
+          Where
+          <select value={side} onChange={(e) => setSide(e.target.value)} aria-label="Stroke side">
+            <option value="inside">Inside the edge</option>
+            <option value="centre">Across the edge</option>
+            <option value="outside">Outside the edge</option>
+          </select>
+        </label>
+        <div className="modal-actions">
+          <button onClick={onCancel}>Cancel</button>
+          <button className="primary" disabled={!(width > 0)} onClick={() => onStroke(width, side)}>
+            Stroke
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RepeatDialog({
+  count,
+  onCancel,
+  onRepeat,
+}: {
+  count: number;
+  onCancel: () => void;
+  onRepeat: (step: RepeatStep) => void;
+}) {
+  const [step, setStep] = useState<RepeatStep>({
+    copies: 3,
+    dx: 40,
+    dy: 0,
+    degrees: 0,
+    scale: 100,
+    px: 0,
+    py: 0,
+  });
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+  const field = (key: keyof RepeatStep, label: string, unit: string, min?: number, max?: number) => (
+    <label className="row">
+      {label}
+      <NumberField
+        value={step[key]}
+        min={min}
+        max={max}
+        integer={key === "copies"}
+        onValue={(v) => setStep({ ...step, [key]: v })}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          // Kept from the menu row the focus goes back to as the window
+          // closes, which the key would otherwise press.
+          e.preventDefault();
+          // What is typed, settled as the box will settle it — held to
+          // its range — rather than the last value it handed on: 600
+          // typed and Enter repeated the old count, not 500.
+          const typed = Number(e.currentTarget.value);
+          const v = Number.isFinite(typed) && e.currentTarget.value.trim() !== ""
+            ? Math.min(max ?? Infinity, Math.max(min ?? -Infinity, key === "copies" ? Math.round(typed) : typed))
+            : step[key];
+          onRepeat({ ...step, [key]: v });
+        }}
+        aria-label={`Repeat ${label.toLowerCase()}`}
+      />
+      <span className="unit">{unit}</span>
+    </label>
+  );
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Repeat"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Repeat {count === 1 ? "the layer" : `${count} layers`}</h2>
+        {field("copies", "Copies", "", 1, 500)}
+        {field("dx", "Move across", "px")}
+        {field("dy", "Move down", "px")}
+        {field("degrees", "Turn", "°")}
+        {field("scale", "Scale", "%", 1, 10000)}
+        {field("px", "Turn about across", "px")}
+        {field("py", "Turn about down", "px")}
+        <p className="modal-aside">
+          Each copy is one step on from the one before: moved, turned about
+          the point that far from the middle of what is picked, and scaled
+          about that middle. A row is a move; a ring is a turn about a
+          point away from the middle — eleven copies at 30° about a point
+          below, with the layer itself, are a clock face's twelve. One step
+          to undo.
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="mask-button primary" onClick={() => onRepeat(step)}>
+            Repeat
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Trace into shapes: how many colours the picture is said in and how
+ * closely each outline follows its pixels, with the answer drawn as it is
+ * asked — the trace on its own, made by the engine on a page of its own,
+ * so nothing is laid until it is wanted. */
+function TraceDialog({
+  session,
+  id,
+  name,
+  onCancel,
+  onTrace,
+}: {
+  session: WasmSession;
+  id: number;
+  name: string;
+  onCancel: () => void;
+  onTrace: (colours: number, smoothing: number) => void;
+}) {
+  const [colours, setColours] = useState(6);
+  const [smoothing, setSmoothing] = useState(1);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  // A moment after the last change, so a slider being dragged is not a
+  // trace a pixel; the picture it replaces is let go of.
+  useEffect(() => {
+    let url: string | null = null;
+    const timer = window.setTimeout(() => {
+      try {
+        const png = session.trace_preview(id, colours, smoothing, 360);
+        url = URL.createObjectURL(new Blob([png as BlobPart], { type: "image/png" }));
+        setPreview(url);
+        setFailed(null);
+      } catch (err) {
+        setPreview(null);
+        setFailed(String(err));
+      }
+    }, 120);
+    return () => {
+      window.clearTimeout(timer);
+      if (url) URL.revokeObjectURL(url);
+    };
+  }, [session, id, colours, smoothing]);
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal trace"
+        role="dialog"
+        aria-label="Picture to shapes"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Trace {name} into shapes</h2>
+        <figure className="trace-preview">
+          {preview ? (
+            <img src={preview} alt="Trace preview" />
+          ) : (
+            <span className="modal-note">{failed ?? "Tracing…"}</span>
+          )}
+        </figure>
+        <label className="row">
+          Colours {colours}
+          <input
+            type="range"
+            min={2}
+            max={16}
+            step={1}
+            value={colours}
+            onChange={(e) => setColours(Number(e.target.value))}
+            aria-label="Trace colours"
+          />
+        </label>
+        <label className="row">
+          Smoothing {smoothing.toFixed(2)}
+          <input
+            type="range"
+            min={0.5}
+            max={4}
+            step={0.25}
+            value={smoothing}
+            onChange={(e) => setSmoothing(Number(e.target.value))}
+            aria-label="Trace smoothing"
+          />
+        </label>
+        <p className="modal-aside">
+          The picture is said in this many flat colours, the commonest laid
+          at the bottom and each one under everything above it, so no seam
+          shows between them. Smoothing is how far, in the picture's
+          pixels, an outline may stray from the pixels it follows: more is
+          fewer, rounder curves. The picture stays under the shapes.
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            disabled={failed !== null}
+            onClick={() => onTrace(colours, smoothing)}
+          >
+            Trace
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Straighten: an angle to turn the page by, shown as it is dragged so a
+ * crooked horizon can be laid level against the edge of the page rather
+ * than guessed at, and cropped back to the page's own proportions when it
+ * is taken. */
+/** How far the edge of what is picked is softened over.
+ *
+ * A window rather than only the rail's number, because a region picked
+ * out of a photograph almost never wants the edge the marquee drew, and
+ * that is not a thing anybody finds by hunting for an unlabelled box.
+ * It previews while the slider moves and lands as one entry in the
+ * history: softness is judged by looking at it, so it has to be visible
+ * before it is committed to. */
+function FeatherDialog({
+  radius,
+  onRadius,
+  onCancel,
+  onApply,
+}: {
+  radius: number;
+  onRadius: (radius: number) => void;
+  onCancel: () => void;
+  onApply: () => void;
+}) {
+  const set = (v: number) =>
+    onRadius(Math.max(0, Math.min(200, Number.isFinite(v) ? v : 0)));
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+      if (enterMeansGo(e)) onApply();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel, onApply]);
+
+  return (
+    // Over the canvas rather than in front of it, like straightening:
+    // the thing being judged is on the page, so the page has to stay
+    // visible while the number is chosen.
+    <div className="straighten-panel" role="dialog" aria-label="Feather">
+      <div>
+        <h2>Feather</h2>
+        <label className="row">
+          Softness
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={Math.min(100, radius)}
+            onChange={(e) => set(Number(e.target.value))}
+            aria-label="Feather slider"
+          />
+        </label>
+        <label className="row">
+          Radius
+          <NumberField
+            min={0}
+            max={200}
+            step={1}
+            value={Math.round(radius)}
+            onValue={set}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                // Kept from the menu row the focus goes back to as the
+                // window closes, which the key would otherwise press.
+                e.preventDefault();
+                onApply();
+              }
+            }}
+            aria-label="Feather radius"
+          />
+          <span className="unit">px</span>
+        </label>
+        <p className="modal-aside">
+          Zero is the hard edge the marquee drew. Anything else softens
+          the coverage over that many page pixels, so the region is
+          neither wholly in nor wholly out across the band — which is
+          what an edge in a photograph actually looks like. The softness
+          travels with the region: hand it to a layer as a mask and the
+          layer is let into the page rather than stamped onto it.
+        </p>
+        <div className="modal-actions">
+          <button
+            className="mask-button"
+            onClick={onCancel}
+            aria-label="Leave the edge as it was"
+          >
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            onClick={onApply}
+            aria-label="Soften the edge"
+          >
+            Feather
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StraightenDialog({
+  degrees,
+  onAngle,
+  onLevel,
+  levelling,
+  onCancel,
+  onApply,
+}: {
+  degrees: number;
+  onAngle: (degrees: number) => void;
+  onLevel: () => void;
+  levelling: boolean;
+  onCancel: () => void;
+  onApply: () => void;
+}) {
+  const set = (v: number) =>
+    onAngle(Math.max(-45, Math.min(45, Number.isFinite(v) ? v : 0)));
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  return (
+    // Over the canvas rather than in front of it: a horizon is laid
+    // level against the page itself, so the page has to stay reachable
+    // while the angle is chosen.
+    <div className="straighten-panel" role="dialog" aria-label="Straighten">
+      <div>
+        <h2>Straighten</h2>
+        <label className="row">
+          Angle
+          <input
+            type="range"
+            min={-45}
+            max={45}
+            step={0.1}
+            value={degrees}
+            onChange={(e) => set(Number(e.target.value))}
+            aria-label="Straighten angle"
+          />
+        </label>
+        <label className="row">
+          Degrees
+          <NumberField
+            min={-45}
+            max={45}
+            step={0.1}
+            value={degrees}
+            onValue={set}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                // Kept from the menu row the focus goes back to as the
+                // window closes, which the key would otherwise press.
+                e.preventDefault();
+                onApply();
+              }
+            }}
+            aria-label="Straighten degrees"
+          />
+          <span className="unit">°</span>
+        </label>
+        <button
+          className={levelling ? "mask-button on" : "mask-button"}
+          onClick={onLevel}
+          aria-label="Draw a level line"
+        >
+          {levelling ? "Draw along it…" : "Draw a level line"}
+        </button>
+        <p className="modal-aside">
+          Drag along something that ought to be level — a horizon, a
+          window, the edge of a table — and the angle follows from it.
+          The page turns about its own middle and is cropped back to the
+          shape it was, which takes away the wedges of nothing the turn
+          brings in at the corners. Nothing is resampled: what is on the
+          page is turned, not redrawn.
+        </p>
+        <div className="modal-actions">
+          <button
+            className="mask-button"
+            onClick={onCancel}
+            aria-label="Leave the page as it is"
+          >
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            onClick={onApply}
+            aria-label="Straighten the page"
+          >
+            Straighten
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The same design at another size. One factor, the same both ways,
+ * asked for as a width, a height or a percentage — whichever is typed,
+ * the others follow, since a design stretched one way is not the same
+ * design and a length carried through the scale can only be undone when
+ * the scale is the same both ways. What a layer holds in its own units
+ * — a blur's radius, a stroke's width — does not scale, and the window
+ * says so. */
+function ScalePageDialog({
+  width,
+  height,
+  units,
+  dpi,
+  onScale,
+  onCancel,
+}: {
+  width: number;
+  height: number;
+  units: Units;
+  dpi: number;
+  onScale: (factor: number) => void;
+  onCancel: () => void;
+}) {
+  const [factor, setFactor] = useState(1);
+  const per = perPixel(units, dpi);
+  const shown = (px: number) => inUnits(px, units, dpi);
+  const fromWidth = (w: number) => setFactor(w / per / width);
+  const fromHeight = (h: number) => setFactor(h / per / height);
+  const [nw, nh] = [Math.max(1, Math.round(width * factor)), Math.max(1, Math.round(height * factor))];
+  // Nor past what a page can be, said here with the button put out as
+  // Canvas size says it: the window closed and said no after, with
+  // what was typed gone.
+  const fits = nw <= MAX_SIDE && nh <= MAX_SIDE && nw * nh <= 100e6;
+  const ok = Number.isFinite(factor) && factor > 0 && Math.abs(factor - 1) > 1e-6 && fits;
+  const apply = () => {
+    if (ok) onScale(factor);
+  };
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  const field = (
+    label: string,
+    value: number,
+    set: (v: number) => void,
+    unit: string,
+    step: number,
+    least = step,
+  ) => (
+    <label className="row">
+      {label}
+      <NumberField
+        min={least}
+        step={step}
+        value={value}
+        onValue={set}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            // Kept from the menu row the focus goes back to as the
+            // window closes, which the key would otherwise press.
+            e.preventDefault();
+            apply();
+          }
+        }}
+        aria-label={label}
+      />
+      <span className="unit">{unit}</span>
+    </label>
+  );
+
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Resize page"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Resize page</h2>
+        <p className="modal-aside">
+          {shown(width)} × {shown(height)} {units} now. Everything on the
+          page scales with it.
+        </p>
+        {field("Scale to width", shown(nw), fromWidth, units, units === "px" ? 1 : 0.01)}
+        {field("Scale to height", shown(nh), fromHeight, units, units === "px" ? 1 : 0.01)}
+        {/* As small a share as a person types: held to a step of one
+            percent, 0.01 typed became 1 on Enter and the page went to
+            8 by 6, which neither box had said. */}
+        {field(
+          "Scale by",
+          Math.round(factor * 100000) / 1000,
+          (pct) => setFactor(pct / 100),
+          "%",
+          1,
+          0.001,
+        )}
+        {Number.isFinite(factor) && !fits && (
+          <p className="modal-aside" role="alert">
+            A page can be up to {MAX_SIDE.toLocaleString("en")} pixels a side and 100 megapixels;{" "}
+            {nw.toLocaleString("en")} × {nh.toLocaleString("en")} is past that.
+          </p>
+        )}
+        <p className="modal-aside">
+          Proportions are kept: a design stretched one way is not the
+          same design. A blur's radius and a stroke's width are the
+          layer's own and stay as they are.
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="mask-button primary" onClick={apply} disabled={!ok}>
+            Scale
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CanvasSizeDialog({
+  width,
+  height,
+  units,
+  dpi,
+  onResize,
+  onCancel,
+}: {
+  width: number;
+  height: number;
+  units: Units;
+  dpi: number;
+  onResize: (width: number, height: number, dx: number, dy: number) => void;
+  onCancel: () => void;
+}) {
+  const per = perPixel(units, dpi);
+  const [w, setW] = useState(inUnits(width, units, dpi));
+  const [h, setH] = useState(inUnits(height, units, dpi));
+  // Which point of the old page stays put, as a fraction along each side.
+  const [anchor, setAnchor] = useState<[number, number]>([0.5, 0.5]);
+  const px = (v: number) => Math.max(1, Math.round(v / per));
+  // A page is at least a pixel each way: nought or less, typed and sent
+  // with Enter before the field could hold it to that, made a one-pixel
+  // page in one step.
+  // Nor past what a page can be (30,000 a side, a hundred megapixels),
+  // which closed the window and said no after, with what was typed gone.
+  const fits =
+    Number.isFinite(w) &&
+    Number.isFinite(h) &&
+    w / per >= 0.5 &&
+    h / per >= 0.5 &&
+    px(w) <= MAX_SIDE &&
+    px(h) <= MAX_SIDE &&
+    px(w) * px(h) <= 100e6;
+  const apply = () => {
+    if (!fits) return;
+    const [nw, nh] = [px(w), px(h)];
+    // The anchor point of the old page has to land on the same point of
+    // the new one, and every top-level layer carries that shift.
+    // On whole pixels, as every editor puts it: a page grown by one
+    // about its middle moved everything half a pixel, and a photograph
+    // came out resampled soft with its edges half there.
+    onResize(
+      nw,
+      nh,
+      Math.round(anchor[0] * (nw - width)),
+      Math.round(anchor[1] * (nh - height)),
+    );
+  };
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onCancel]);
+
+  const field = (
+    label: string,
+    value: number,
+    set: (v: number) => void,
+  ) => (
+    <label className="row">
+      {label}
+      <NumberField
+        // No floor of its own: held to one, nought typed became a
+        // one-pixel page the moment Resize was pressed. The window says
+        // no instead (`fits`), with the button put out — and an emptied
+        // box is no number at all, not the last one it held on the way.
+        step={units === "px" ? 1 : 0.01}
+        blankAs={NaN}
+        value={value}
+        onValue={set}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            // Kept from the menu row the focus goes back to as the
+            // window closes, which the key would otherwise press.
+            e.preventDefault();
+            apply();
+          }
+        }}
+        aria-label={label}
+      />
+      <span className="unit">{units}</span>
+    </label>
+  );
+
+  const [nw, nh] = [px(w), px(h)];
+  const bigger = nw >= width && nh >= height;
+  return (
+    <div className="modal-scrim" onPointerDown={onCancel}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-label="Canvas size"
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        <h2>Canvas size</h2>
+        <p className="modal-aside">
+          {inUnits(width, units, dpi)} × {inUnits(height, units, dpi)} {units}{" "}
+          now
+        </p>
+        {field("Canvas width", w, setW)}
+        {field("Canvas height", h, setH)}
+        <div className="anchor-grid" aria-label="Anchor">
+          {[0, 0.5, 1].map((ay) =>
+            [0, 0.5, 1].map((ax) => (
+              <button
+                key={`${ax},${ay}`}
+                className={
+                  anchor[0] === ax && anchor[1] === ay
+                    ? "anchor-cell active"
+                    : "anchor-cell"
+                }
+                onClick={() => setAnchor([ax, ay])}
+                aria-label={`Anchor ${["left", "centre", "right"][ax * 2]} ${
+                  ["top", "middle", "bottom"][ay * 2]
+                }`}
+                aria-pressed={anchor[0] === ax && anchor[1] === ay}
+              />
+            )),
+          )}
+        </div>
+        <p className="modal-aside">
+          {bigger
+            ? "The page grows around the point you pick."
+            : "What falls outside the new page is still there — it is off the page, not gone."}
+        </p>
+        <div className="modal-actions">
+          <button className="mask-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="mask-button primary"
+            disabled={!fits}
+            onClick={apply}
+            aria-label="Resize the page"
+          >
+            Resize
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** One top-level menu: a label in the bar and the popup it owns.
+ *
+ * Menu bars have a convention worth honouring — once one menu is open,
+ * moving across the bar switches to its neighbour without another click —
+ * so opening is a click but switching is a hover, which is what `onHover`
+ * is for. Escape and any click outside close it. */
+/** What had the focus before the keyboard came to the menu bar: where
+ * a row chosen gives it back (`MenuButton`). `null` for the page itself. */
+let menusEnteredFrom: HTMLElement | null = null;
+/** Whether that was a layer's row — asked when it is recorded, since a
+ * row deleted by what was chosen is no longer in the panel to ask. */
+let menusEnteredFromRow = false;
+
+function MenuButton({
+  label,
+  open,
+  onOpen,
+  onHover,
+  onClose,
+  children,
+}: {
+  label: string;
+  open: boolean;
+  onOpen: () => void;
+  onHover: () => void;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const labelRef = useRef<HTMLButtonElement>(null);
+  const pop = () => ref.current?.querySelector(":scope > [role=menu]");
+  /** Whether the open menu has been walked with the keys. */
+  const keyed = useRef(false);
+  /** Whether it was closed by Escape rather than by a row chosen. */
+  const escaped = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    // Opened from the keyboard, the menu takes the focus on its first
+    // row, so the arrows walk it rather than nudging the layer behind.
+    if (labelRef.current?.matches(":focus-visible")) focusFirstRow(pop);
+    keyed.current = false;
+    escaped.current = false;
+    return () => {
+      // A row chosen from the keyboard gives the focus back to where the
+      // keyboard came to the menus from — the canvas, a row of the
+      // panel. Left on the menu's label, the arrows walked the bar
+      // rather than nudging the shape just made, Escape let go of it,
+      // and the way back was sixty Tabs round. Where the menus were
+      // come to from nothing in particular, the focus goes back to
+      // nothing in particular, which is where the editor's keys are.
+      const lost = document.activeElement === null || document.activeElement === document.body;
+      if (!(keyed.current && lost)) return;
+      // Closed with Escape, nothing was chosen: the label keeps the
+      // focus, where a second Escape or the arrows go on from.
+      if (escaped.current) {
+        labelRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      const back = menusEnteredFrom;
+      // Come from a layer's row, the keyboard goes back to the row of
+      // the layer picked now, once the row chosen has had its say: a
+      // copy made is picked, and a layer deleted has no row to go to.
+      if (back && menusEnteredFromRow) {
+        labelRef.current?.blur();
+        requestAnimationFrame(() => {
+          const lost = document.activeElement === null || document.activeElement === document.body;
+          if (!lost) return;
+          const picked = document.querySelector<HTMLElement>("aside.panel .layer-list li.selected");
+          const first = document.querySelector<HTMLElement>("aside.panel .layer-list li");
+          (picked ?? (back.isConnected ? back : first))?.focus({ preventScroll: true });
+        });
+        return;
+      }
+      if (back && back.isConnected && !(back as HTMLButtonElement).disabled) {
+        back.focus({ preventScroll: true });
+      } else if (back === null) {
+        // Already nothing in particular: stays so.
+      } else {
+        labelRef.current?.focus({ preventScroll: true });
+      }
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => {
+      if (ref.current?.contains(e.target as Node)) return;
+      onClose();
+      pressOnlyCloses(e);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      escaped.current = true;
+      onClose();
+    };
+    // On the way in, as the canvas's menu is: see there.
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", key);
+    };
+  }, [open, onClose]);
+
+  /** The neighbouring menu in the bar, round the ends: opened if this
+   * one is, its label focused either way. */
+  const across = (by: -1 | 1, opening: boolean) => {
+    const menus = [...(ref.current?.parentElement?.querySelectorAll<HTMLElement>(":scope > .menu") ?? [])];
+    const next = menus[(menus.indexOf(ref.current!) + by + menus.length) % menus.length];
+    const nextLabel = next?.querySelector<HTMLButtonElement>(".menu-label");
+    if (!next || !nextLabel) return;
+    nextLabel.focus({ preventScroll: true });
+    if (opening) {
+      nextLabel.click();
+      focusFirstRow(() => next.querySelector(":scope > [role=menu]"));
+    }
+  };
+
+  return (
+    <div className="menu" ref={ref}>
+      <button
+        ref={labelRef}
+        className={open ? "menu-label open" : "menu-label"}
+        onClick={onOpen}
+        onPointerEnter={(e) => {
+          // A menu opened by passing over its label takes the focus from
+          // the one it replaced, if the focus was there: left on File's
+          // label, the next ArrowDown opened File again over the Layer
+          // menu the pointer had opened.
+          const was = document.activeElement;
+          const wasMenus = was instanceof Element && !!was.closest(".menubar");
+          onHover();
+          if (wasMenus && document.querySelector(".menubar .menu-label.open") && was !== e.currentTarget) {
+            e.currentTarget.focus({ preventScroll: true });
+          }
+        }}
+        onFocus={(e) => {
+          // Where the keyboard came to the menus from (F10, Tab): a row
+          // chosen gives it back there.
+          const from = e.relatedTarget;
+          if (!(from instanceof Element && from.closest(".menubar, [role=menu]"))) {
+            menusEnteredFrom = from instanceof HTMLElement ? from : null;
+            menusEnteredFromRow = !!menusEnteredFrom?.closest("aside.panel .layer-list li");
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (!open) onOpen();
+            focusFirstRow(pop);
+          } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+            e.preventDefault();
+            e.stopPropagation();
+            across(e.key === "ArrowLeft" ? -1 : 1, open);
+          } else if (e.key === "Escape" && !open && !ref.current?.parentElement?.querySelector(".menu-label.open")) {
+            // (With a neighbour's menu open — the pointer crossed the
+            // bar — this Escape is that menu's to close.)
+            // Escape on the bar leaves it, for where the keyboard came
+            // from — and is no Escape of the editor's, which let go of
+            // the layer the menus were come to for.
+            e.preventDefault();
+            e.stopPropagation();
+            const back = menusEnteredFrom;
+            if (back && back.isConnected && !(back as HTMLButtonElement).disabled) {
+              back.focus({ preventScroll: true });
+            } else {
+              labelRef.current?.blur();
+            }
+          }
+        }}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {label}
+      </button>
+      {open && (
+        <div
+          className="menu-pop"
+          role="menu"
+          aria-label={label}
+          onClick={onClose}
+          onKeyDown={(e) => {
+            keyed.current = true;
+            menuKeyDown(
+              e.nativeEvent,
+              e.currentTarget,
+              () => {
+                onClose();
+                labelRef.current?.focus({ preventScroll: true });
+              },
+              (by) => across(by, true),
+            );
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The menus as a drawer, for a phone: every menu a section that opens
+ * in place, its rows full-width and finger-sized, and a menu inside a
+ * menu opened inline beneath its row rather than beside it — there is
+ * no beside on a phone, and nothing to hover with. A row pressed does
+ * its work and puts the drawer away; so does the scrim, and Escape. */
+/** Shift, alt and control on the screen, for a hand with no keyboard.
+ * Tapped, a key stays down until tapped again; held while the other
+ * hand draws, it lets go with the finger. Its own presses are kept from
+ * the canvas under it, which would otherwise count the finger on a key
+ * as one more on the page and begin a pinch. */
+function HeldKeys({ held, setHeld }: { held: Held; setHeld: (h: Held) => void }) {
+  const press = useRef<{ key: keyof Held; t: number; wasOn: boolean } | null>(null);
+  const mac = onAMac();
+  const keys: [keyof Held, string][] = [
+    ["shift", "Shift"],
+    ["alt", mac ? "Opt" : "Alt"],
+    ["mod", mac ? "Cmd" : "Ctrl"],
+  ];
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <div
+      className="held-keys"
+      role="group"
+      aria-label="Held keys"
+      onPointerDown={stop}
+      onPointerMove={stop}
+      onPointerUp={stop}
+      onPointerCancel={stop}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      {keys.map(([key, label]) => (
+        <button
+          key={key}
+          type="button"
+          className={held[key] ? "held-key on" : "held-key"}
+          aria-pressed={held[key]}
+          aria-label={`Hold ${label}`}
+          title={`Hold ${label}: tap to keep it down, or hold it while you work`}
+          onPointerDown={(e) => {
+            // Kept, so a finger sliding off the key still lets go of it.
+            try {
+              e.currentTarget.setPointerCapture(e.pointerId);
+            } catch {
+              // A pointer the browser no longer knows: nothing to keep.
+            }
+            press.current = { key, t: performance.now(), wasOn: held[key] };
+            setHeld({ ...held, [key]: true });
+          }}
+          onPointerUp={() => {
+            const p = press.current;
+            press.current = null;
+            if (!p) return;
+            setHeld({ ...held, [p.key]: afterPress(p.wasOn, performance.now() - p.t) });
+          }}
+          onPointerCancel={() => {
+            press.current = null;
+            setHeld({ ...held, [key]: false });
+          }}
+          // A keyboard's Enter or space presses it too, as a toggle.
+          onClick={(e) => e.detail === 0 && setHeld({ ...held, [key]: !held[key] })}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function MenuSheet({ menus, onClose }: { menus: MenuSpec[]; onClose: () => void }) {
+  const [open, setOpen] = useState<string | null>(null);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, [onClose]);
+  const rows = (entries: MenuEntry[], depth: number): React.ReactNode =>
+    entries.map((e, i) =>
+      e.kind === "sep" ? (
+        <hr key={`sep${depth}-${i}`} />
+      ) : e.kind === "sub" ? (
+        <details key={e.id} className="sheet-sub">
+          <summary className="menu-item">
+            <Icon name={e.icon as IconName} size={16} />
+            <span className="menu-item-label">{e.label}</span>
+          </summary>
+          <div className="sheet-rows">{rows(e.entries, depth + 1)}</div>
+        </details>
+      ) : (
+        <MenuItem
+          key={e.id}
+          icon={e.icon as IconName}
+          onClick={() => {
+            onClose();
+            e.run();
+          }}
+          hint={e.hint}
+          disabled={e.disabled}
+        >
+          {e.label}
+        </MenuItem>
+      ),
+    );
+  return (
+    <div className="sheet-scrim" onPointerDown={onClose}>
+      <nav
+        className="menu-sheet"
+        role="dialog"
+        aria-label="Menus"
+        onPointerDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // The arrows walk what shows — the menus' labels and the rows
+          // of the one open — as in the bar's menus; Tab was the only
+          // way down them.
+          const by =
+            e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : e.key === "Home" ? -Infinity : e.key === "End" ? Infinity : 0;
+          if (by === 0) return;
+          const stops = [
+            ...e.currentTarget.querySelectorAll<HTMLElement>(
+              ".sheet-menu-label, button.menu-item:not([disabled]), summary.menu-item",
+            ),
+          ].filter((r) => r.getClientRects().length > 0);
+          if (stops.length === 0) return;
+          e.preventDefault();
+          e.stopPropagation();
+          const at = stops.indexOf(document.activeElement as HTMLElement);
+          const to =
+            by === -Infinity ? 0
+            : by === Infinity ? stops.length - 1
+            : at < 0 ? (by > 0 ? 0 : stops.length - 1)
+            : (at + by + stops.length) % stops.length;
+          stops[to].focus({ preventScroll: false });
+        }}
+      >
+        {menus.map((m) => (
+          <section key={m.id} className={open === m.id ? "sheet-menu open" : "sheet-menu"}>
+            <button
+              className="sheet-menu-label"
+              aria-expanded={open === m.id}
+              onClick={() => setOpen(open === m.id ? null : m.id)}
+            >
+              {m.label}
+            </button>
+            {open === m.id && (
+              <div
+                className="sheet-rows"
+                role="menu"
+                aria-label={m.label}
+              >
+                {rows(m.entries, 0)}
+              </div>
+            )}
+          </section>
+        ))}
+      </nav>
+    </div>
+  );
+}
+
+/** The rows of a menu, from the description the native bar is built
+ * from too: a rule, a row, or a row that opens a menu of its own. */
+function MenuRows({ entries }: { entries: MenuEntry[] }) {
+  return (
+    <>
+      {entries.map((e, i) =>
+        e.kind === "sep" ? (
+          <hr key={`sep${i}`} />
+        ) : e.kind === "sub" ? (
+          <SubMenu key={e.id} entry={e} />
+        ) : (
+          <MenuItem key={e.id} icon={e.icon as IconName} onClick={e.run} hint={e.hint} disabled={e.disabled}>
+            {e.label}
+          </MenuItem>
+        ),
+      )}
+    </>
+  );
+}
+
+/** A row with a menu behind it. It opens beside the row on hover, the
+ * way every desktop menu does, and on a press as well, since a finger
+ * cannot hover. The popup is fixed to the window rather than to the
+ * row: the menu it sits in scrolls when it is taller than the window,
+ * and a popup placed inside a scrolling box is cut off at the box's
+ * edge. Placed to the right of the row where there is room and to the
+ * left where there is not, and never past the bottom of the window. */
+function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
+  /** Every row behind it greyed out: the row is greyed too, and opens
+   * nothing. Live, it opened a menu the keys could not get into, which
+   * stayed open beside the menu as they went on down it. */
+  const dead = subIsDead(entry);
+  const [open, setOpen] = useState(false);
+  const [at, setAt] = useState<[number, number]>([0, 0]);
+  const rowRef = useRef<HTMLButtonElement>(null);
+  /** The pointer on its way from the row to the popup crosses the rows
+   * under it, and a popup that closed the moment the pointer left its
+   * row would close before it could be reached. So it waits a beat,
+   * the way every desktop menu does. */
+  const closing = useRef<number | null>(null);
+  /** And it waits a shorter beat before opening, so a pointer passing
+   * over this row on its way to a popup already open beside the row
+   * above does not open a second one over it. A press does not wait. */
+  const opening = useRef<number | null>(null);
+  const clear = (timer: { current: number | null }) => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+    timer.current = null;
+  };
+  useEffect(
+    () => () => {
+      clear(closing);
+      clear(opening);
+    },
+    [],
+  );
+  const place = () => {
+    const row = rowRef.current?.getBoundingClientRect();
+    if (!row) return;
+    // In the root's own units: at a larger interface size the popup is
+    // wider than sixteen pixels a rem said, and ran off the window.
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const width = 15 * rem;
+    const height = Math.min(window.innerHeight - 16, 24 + (entry.entries.length * 30 * rem) / 16);
+    // Flush with the row's edge rather than beside it: a gap between
+    // the two is a strip of the menu's own padding, and a pointer
+    // crossing it has left the row and not yet reached the popup.
+    const left =
+      row.right + width + 8 <= window.innerWidth
+        ? row.right
+        : Math.max(8, row.left - width);
+    const top = Math.max(8, Math.min(row.top - 5, window.innerHeight - height - 8));
+    setAt([left, top]);
+  };
+  const show = () => {
+    clear(closing);
+    clear(opening);
+    place();
+    setOpen(true);
+  };
+  const hide = () => {
+    clear(opening);
+    clear(closing);
+    closing.current = window.setTimeout(() => {
+      closing.current = null;
+      setOpen(false);
+    }, 250);
+  };
+  return (
+    <div
+      className={open ? "menu-sub open" : "menu-sub"}
+      onPointerEnter={() => {
+        clear(closing);
+        if (open || dead) return;
+        clear(opening);
+        opening.current = window.setTimeout(show, 120);
+      }}
+      onPointerLeave={hide}
+    >
+      <button
+        ref={rowRef}
+        className="menu-item has-sub"
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={dead}
+        onClick={(e) => {
+          // A press on the row is for the row, not for the menu it is
+          // in: the menu closes on any click inside it, and this one
+          // has not chosen anything yet.
+          e.stopPropagation();
+          if (open) setOpen(false);
+          else show();
+        }}
+      >
+        <Icon name={entry.icon as IconName} size={16} />
+        <span className="menu-item-label">{entry.label}</span>
+        <span className="menu-item-hint menu-sub-mark" aria-hidden="true">
+          ▸
+        </span>
+      </button>
+      {open && !dead && (
+        <div
+          className="menu-pop sub"
+          role="menu"
+          aria-label={entry.label}
+          style={{ left: at[0], top: at[1] }}
+          onKeyDown={(e) => menuKeyDown(e.nativeEvent, e.currentTarget, () => setOpen(false))}
+        >
+          <MenuRows entries={entry.entries} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A row in a menu: glyph, label, and an optional hint on the right for a
+ * shortcut or the mode an action will use. */
+function MenuItem({
+  icon,
+  onClick,
+  hint,
+  disabled,
+  children,
+}: {
+  icon: IconName;
+  onClick: () => void;
+  hint?: string;
+  disabled?: boolean;
+  children: React.ReactNode;
+}) {
+  // A row ticked as the one chosen (a grid, a unit) says so to a screen
+  // reader as checked; the tick itself was read out as "check mark".
+  const ticked = hint === "✓" || !!hint?.startsWith("✓ ");
+  return (
+    <button
+      className="menu-item"
+      role={ticked ? "menuitemcheckbox" : "menuitem"}
+      aria-checked={ticked || undefined}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      <Icon name={icon} size={16} />
+      <span className="menu-item-label">{children}</span>
+      {hint && (
+        <span className="menu-item-hint" aria-hidden={ticked || undefined}>
+          {hint}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** The curve a set of points implies, sampled for drawing: the same
+ * monotone cubic the renderer tabulates (Fritsch–Carlson), sorted, flat
+ * past the outer points, identity for fewer than two. */
+function curveSamples(points: [number, number][], n = 64): [number, number][] {
+  const pts = [...points]
+    .map(
+      ([x, y]) =>
+        [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))] as [
+          number,
+          number,
+        ],
+    )
+    .sort((a, b) => a[0] - b[0])
+    .filter(
+      (p, i, all) =>
+        i === all.length - 1 || Math.abs(all[i + 1][0] - p[0]) >= 1e-6,
+    );
+  const k = pts.length;
+  const at = (x: number): number => {
+    if (k < 2) return x;
+    if (x <= pts[0][0]) return pts[0][1];
+    if (x >= pts[k - 1][0]) return pts[k - 1][1];
+    const h = pts.slice(0, -1).map((p, i) => pts[i + 1][0] - p[0]);
+    const d = pts.slice(0, -1).map((p, i) => (pts[i + 1][1] - p[1]) / h[i]);
+    const m = pts.map((_, i) =>
+      i === 0
+        ? d[0]
+        : i === k - 1
+          ? d[k - 2]
+          : d[i - 1] * d[i] > 0
+            ? (d[i - 1] + d[i]) / 2
+            : 0,
+    );
+    for (let i = 0; i < k - 1; i++) {
+      if (d[i] === 0) {
+        m[i] = m[i + 1] = 0;
+        continue;
+      }
+      const [a, b] = [m[i] / d[i], m[i + 1] / d[i]];
+      const r = a * a + b * b;
+      if (r > 9) {
+        const t = 3 / Math.sqrt(r);
+        m[i] = t * a * d[i];
+        m[i + 1] = t * b * d[i];
+      }
+    }
+    let s = 0;
+    while (pts[s + 1][0] < x) s++;
+    const t = (x - pts[s][0]) / h[s];
+    const [t2, t3] = [t * t, t * t * t];
+    const y =
+      (2 * t3 - 3 * t2 + 1) * pts[s][1] +
+      (t3 - 2 * t2 + t) * h[s] * m[s] +
+      (-2 * t3 + 3 * t2) * pts[s + 1][1] +
+      (t3 - t2) * h[s] * m[s + 1];
+    return Math.min(1, Math.max(0, y));
+  };
+  return Array.from({ length: n + 1 }, (_, i) => [i / n, at(i / n)]);
+}
+
+/** The spread of tones in the picture, as a filled shape per channel —
+ * what every graph that reads one is drawn over, so the eye can see
+ * where the tones actually are before deciding where to move them.
+ *
+ * Counts come from the engine as four runs of 256. The tallest bin sets
+ * the height, with the top and bottom bins left out of that reckoning:
+ * a picture on a bare page piles clipped tones at one end, and letting
+ * that spike set the scale flattens everything worth seeing.
+ */
+function Histogram({
+  bins,
+  channel = "rgb",
+  width,
+  height,
+}: {
+  bins: Uint32Array | null;
+  channel?: CurveChannel;
+  width: number;
+  height: number;
+}) {
+  if (!bins || bins.length < 1024) return null;
+  const runs: [string, number][] =
+    channel === "rgb"
+      ? [
+          ["#e5484d", 0],
+          ["#30a46c", 256],
+          ["#3e63dd", 512],
+        ]
+      : [
+          [
+            CURVE_CHANNELS.find(([k]) => k === channel)![2],
+            { red: 0, green: 256, blue: 512 }[channel],
+          ],
+        ];
+  let peak = 1;
+  for (const [, at] of runs) {
+    for (let i = 1; i < 255; i++) peak = Math.max(peak, bins[at + i]);
+  }
+  const path = (at: number) => {
+    const pts = Array.from({ length: 256 }, (_, i) => {
+      const x = (i / 255) * width;
+      const y = height - Math.min(1, bins[at + i] / peak) * height;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    return `M0,${height} L${pts.join(" L")} L${width},${height} Z`;
+  };
+  return (
+    <g className="histogram" aria-hidden="true">
+      {runs.map(([colour, at]) => (
+        <path key={at} d={path(at)} style={{ fill: colour }} />
+      ))}
+    </g>
+  );
+}
+
+/** A tone curve to draw on: press anywhere to add a point and drag it in
+ * the same gesture, drag a point to move it (it stays between its
+ * neighbours), double-click one to take it away. The document previews
+ * while the pointer is down and records one entry when it lifts. */
+function CurveEditor({
+  points,
+  onEdit,
+  onGestureEnd,
+  label = "Tone curve",
+  bins = null,
+  channel = "rgb",
+  colour,
+  ghosts = [],
+}: {
+  points: [number, number][];
+  onEdit: (points: [number, number][], gesture: boolean) => void;
+  onGestureEnd: () => void;
+  label?: string;
+  /** The tones in the picture the curve is about to move, drawn behind
+   * the graph. */
+  bins?: Uint32Array | null;
+  /** Which run of the histogram to draw, and what the curve being edited
+   * is drawn in; the panel's own ink when left out. */
+  channel?: CurveChannel;
+  colour?: string;
+  /** The other channels' curves, drawn faintly behind, so a grade can be
+   * read as a whole while one channel of it is worked on. */
+  ghosts?: { key: string; points: [number, number][]; colour: string }[];
+}) {
+  const SIZE = 160;
+  const svgRef = useRef<SVGSVGElement>(null);
+  /** The gesture's own copy of the points and which one it holds, so a
+   * move that lands before React has re-rendered the props still edits
+   * the right point. */
+  const dragging = useRef<{
+    index: number;
+    points: [number, number][];
+    previewing: boolean;
+  } | null>(null);
+  const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+  const local = (
+    e: React.PointerEvent | React.MouseEvent,
+  ): [number, number] => {
+    const r = svgRef.current!.getBoundingClientRect();
+    return [
+      clamp01((e.clientX - r.left) / r.width),
+      clamp01(1 - (e.clientY - r.top) / r.height),
+    ];
+  };
+  const nearest = (p: [number, number]) => {
+    let best = -1;
+    let dist = 0.06;
+    points.forEach(([x, y], i) => {
+      const d = Math.hypot(x - p[0], y - p[1]);
+      if (d < dist) {
+        best = i;
+        dist = d;
+      }
+    });
+    return best;
+  };
+  const sorted = (pts: [number, number][]) =>
+    [...pts].sort((a, b) => a[0] - b[0]);
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    const p = local(e);
+    let index = nearest(p);
+    let next = sorted(points);
+    if (index < 0) {
+      next = sorted([...next, p]);
+      index = next.findIndex((q) => q === p);
+    } else {
+      index = next.findIndex((q) => q === points[index]);
+    }
+    dragging.current = {
+      index,
+      points: next,
+      previewing: index < 0 || next.length > points.length,
+    };
+    svgRef.current!.setPointerCapture(e.pointerId);
+    // A new point is previewed at once; pressing an existing one previews
+    // nothing until it moves, so a click on a point is not an edit.
+    if (dragging.current.previewing) onEdit(next, true);
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    const drag = dragging.current;
+    if (!drag) return;
+    drag.previewing = true;
+    const p = local(e);
+    const { index: i } = drag;
+    const next = [...drag.points];
+    const lo = i > 0 ? next[i - 1][0] + 0.005 : 0;
+    const hi = i < next.length - 1 ? next[i + 1][0] - 0.005 : 1;
+    next[i] = [Math.min(hi, Math.max(lo, p[0])), p[1]];
+    drag.points = next;
+    onEdit(next, true);
+  };
+  const onPointerUp = () => {
+    const drag = dragging.current;
+    if (!drag) return;
+    dragging.current = null;
+    if (drag.previewing) onGestureEnd();
+  };
+  const onDoubleClick = (e: React.MouseEvent) => {
+    const i = nearest(local(e));
+    if (i < 0 || points.length <= 2) return;
+    onEdit(
+      points.filter((_, j) => j !== i),
+      false,
+    );
+  };
+  const px = (v: number) => v * SIZE;
+  const py = (v: number) => (1 - v) * SIZE;
+  const line = curveSamples(points)
+    .map(
+      ([x, y], i) =>
+        `${i === 0 ? "M" : "L"}${px(x).toFixed(1)},${py(y).toFixed(1)}`,
+    )
+    .join(" ");
+  return (
+    <div className="curve-row">
+      <svg
+        ref={svgRef}
+        className="curve-editor"
+        viewBox={`0 0 ${SIZE} ${SIZE}`}
+        role="img"
+        aria-label={label}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onDoubleClick={onDoubleClick}
+      >
+        <Histogram bins={bins} channel={channel} width={SIZE} height={SIZE} />
+        {[0.25, 0.5, 0.75].map((v) => (
+          <g key={v} className="grid">
+            <line x1={px(v)} y1={0} x2={px(v)} y2={SIZE} />
+            <line x1={0} y1={py(v)} x2={SIZE} y2={py(v)} />
+          </g>
+        ))}
+        <line className="grid" x1={0} y1={SIZE} x2={SIZE} y2={0} />
+        {ghosts.map((g) => (
+          <path
+            key={g.key}
+            className="line ghost"
+            // Inline, not an attribute: the stylesheet's own stroke would
+            // win over a presentation attribute.
+            style={{ stroke: g.colour }}
+            d={curveSamples(g.points)
+              .map(
+                ([x, y], i) =>
+                  `${i === 0 ? "M" : "L"}${px(x).toFixed(1)},${py(y).toFixed(1)}`,
+              )
+              .join(" ")}
+          />
+        ))}
+        <path className="line" style={{ stroke: colour }} d={line} />
+        {points.map(([x, y], i) => (
+          <circle
+            key={i}
+            className="pt"
+            style={{ fill: colour }}
+            cx={px(x)}
+            cy={py(y)}
+            r={4}
+          />
+        ))}
+      </svg>
+      <button
+        type="button"
+        className="mask-button curve-reset"
+        onClick={() =>
+          onEdit(
+            [
+              [0, 0],
+              [1, 1],
+            ],
+            false,
+          )
+        }
+        title="Back to the diagonal"
+      >
+        Reset curve
+      </button>
+    </div>
+  );
+}
+
+/** The channels a curves adjustment can be drawn on, and the ink each is
+ * drawn in — the master first, since that is the one most grades start
+ * from. */
+const CURVE_CHANNELS = [
+  ["rgb", "RGB", "var(--text)", "Tone curve", "RGB"],
+  ["red", "R", "#e5484d", "Red curve", "Red"],
+  ["green", "G", "#30a46c", "Green curve", "Green"],
+  ["blue", "B", "#3e63dd", "Blue curve", "Blue"],
+] as const;
+type CurveChannel = (typeof CURVE_CHANNELS)[number][0];
+
+/** The whole curves adjustment: a picker for which channel is being
+ * drawn on, and the graph for it. The master curve runs first and each
+ * channel's own after it, so the other channels are drawn faintly behind
+ * the one in hand and the grade reads as a whole. */
+/** The stops of a colour ramp: a strip of the ramp itself, so the list
+ * reads as a whole, and a row for each stop. Shared by a shape's
+ * gradient fill and by a gradient map, so a ramp is edited the same way
+ * wherever one turns up. */
+function StopList({
+  stops,
+  name,
+  authored,
+  onChange,
+  onGestureEnd,
+}: {
+  stops: GradientStop[];
+  /** What one row is called, in the labels a reader is read them by. */
+  name: string;
+  authored: (hex: string) => AuthoredColor;
+  onChange: (stops: GradientStop[], gesture: boolean) => void;
+  onGestureEnd: () => void;
+}) {
+  const set = (i: number, changes: Partial<GradientStop>) =>
+    onChange(
+      stops.map((s, j) => (j === i ? { ...s, ...changes } : s)),
+      true,
+    );
+  /** Insert a stop in the widest gap, coloured by what the ramp already
+   * shows there, so adding one changes nothing until it is moved. */
+  const add = () => {
+    // In the order the ramp has them: a stop dragged past another on the
+    // canvas leaves the list out of order, and the widest gap and the
+    // colour in it were read from the list as it stood.
+    const sorted = [...stops].sort((p, q) => p.offset - q.offset);
+    let at = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      if (
+        sorted[i].offset - sorted[i - 1].offset >
+        sorted[at + 1].offset - sorted[at].offset
+      )
+        at = i - 1;
+    }
+    const [a, b] = [sorted[at], sorted[at + 1]];
+    onChange(
+      [
+        ...sorted.slice(0, at + 1),
+        {
+          offset: (a.offset + b.offset) / 2,
+          color: mixAuthored(a.color, b.color, 0.5),
+        },
+        ...sorted.slice(at + 1),
+      ],
+      false,
+    );
+  };
+  // CSS mixes a gradient on the values a device shows, which is where
+  // the engine mixes one too, so the strip is the ramp — taken in order
+  // of where each stop sits, as the engine takes them: a stop dragged
+  // past another drew one gradient here and another on the canvas.
+  const rampCss = `linear-gradient(90deg, ${[...stops]
+    .sort((a, b) => a.offset - b.offset)
+    .map((s) => `${colorToHex(s.color)} ${Math.round(s.offset * 100)}%`)
+    .join(", ")})`;
+  return (
+    <>
+      <div
+        className="ramp-preview"
+        style={{ background: rampCss }}
+        aria-hidden="true"
+      />
+      {stops.map((stop, i) => (
+        <div className="stop-row" key={i}>
+          <input
+            type="color"
+            value={colorToHex(stop.color)}
+            onChange={(e) => set(i, { color: authored(e.target.value) })}
+            onBlur={onGestureEnd}
+            aria-label={`${name} ${i + 1}`}
+          />
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={stop.offset}
+            onChange={(e) => set(i, { offset: Number(e.target.value) })}
+            onPointerUp={onGestureEnd}
+            onKeyUp={onGestureEnd}
+            onBlur={onGestureEnd}
+            aria-label={`${name} ${i + 1} position`}
+          />
+          <button
+            className="stop-remove"
+            disabled={stops.length <= 2}
+            onClick={() =>
+              onChange(
+                stops.filter((_, j) => j !== i),
+                false,
+              )
+            }
+            title={
+              stops.length <= 2
+                ? "A ramp needs at least two stops"
+                : `Remove stop ${i + 1}`
+            }
+            aria-label={`Remove ${name.toLowerCase()} ${i + 1}`}
+          >
+            <Icon name="trash" size={14} />
+          </button>
+        </div>
+      ))}
+      <button className="mask-button" onClick={add}>
+        Add stop
+      </button>
+    </>
+  );
+}
+
+function CurvesPanel({
+  curves,
+  bins,
+  onEdit,
+  onGestureEnd,
+  onAutoColour,
+}: {
+  bins: Uint32Array | null;
+  curves: {
+    points: [number, number][];
+    red: [number, number][];
+    green: [number, number][];
+    blue: [number, number][];
+  };
+  onEdit: (curves: CurvesPanelProps["curves"], gesture: boolean) => void;
+  onGestureEnd: () => void;
+  onAutoColour: () => void;
+}) {
+  const [channel, setChannel] = useState<CurveChannel>("rgb");
+  const DIAGONAL: [number, number][] = [
+    [0, 0],
+    [1, 1],
+  ];
+  const of = (c: CurveChannel) =>
+    c === "rgb" ? curves.points : curves[c].length >= 2 ? curves[c] : DIAGONAL;
+  const touched = (c: CurveChannel) =>
+    c === "rgb"
+      ? curves.points.length > 2 ||
+        curves.points.some(([x, y]) => Math.abs(x - y) > 1e-6)
+      : curves[c].length >= 2;
+  const ink = (c: CurveChannel) =>
+    CURVE_CHANNELS.find(([k]) => k === c)![2];
+  return (
+    <>
+      <div
+        className="curve-channels"
+        role="group"
+        aria-label="Curve channel"
+      >
+        {CURVE_CHANNELS.map(([key, label, colour, , name]) => (
+          <button
+            key={key}
+            type="button"
+            className={key === channel ? "active" : ""}
+            style={{ color: colour }}
+            aria-pressed={key === channel}
+            aria-label={`${name} channel`}
+            onClick={() => setChannel(key)}
+          >
+            {label}
+            {touched(key) ? "•" : ""}
+          </button>
+        ))}
+      </div>
+      {/* Each channel taken to its own ends, which is what pulls a
+          colour cast out: a picture under a blue light has a blue
+          channel reaching further than its red. */}
+      <button className="auto-levels" onClick={onAutoColour} aria-label="Auto colour">
+        Auto colour
+      </button>
+      <CurveEditor
+        key={channel}
+        points={of(channel)}
+        bins={bins}
+        channel={channel}
+        colour={ink(channel)}
+        label={CURVE_CHANNELS.find(([k]) => k === channel)![3]}
+        ghosts={CURVE_CHANNELS.filter(([k]) => k !== channel && touched(k)).map(
+          ([k]) => ({ key: k, points: of(k), colour: ink(k) }),
+        )}
+        onEdit={(points, gesture) => {
+          // Back on the diagonal, a channel is written out as nothing at
+          // all — which is what the engine reads as the identity, and
+          // what keeps a file free of curves nobody drew.
+          const bare =
+            points.length === 2 &&
+            points.every(([x, y]) => Math.abs(x - y) < 1e-6);
+          onEdit(
+            channel === "rgb"
+              ? { ...curves, points }
+              : { ...curves, [channel]: bare ? [] : points },
+            gesture,
+          );
+        }}
+        onGestureEnd={onGestureEnd}
+      />
+    </>
+  );
+}
+
+interface CurvesPanelProps {
+  curves: {
+    points: [number, number][];
+    red: [number, number][];
+    green: [number, number][];
+    blue: [number, number][];
+  };
+}
+
+interface KindPropsProps {
+  kind: NodeKind;
+  /** How the picked shape's box lies on the screen (`boxAxes`): the
+   * gradient's angle is read and turned as it is seen there. */
+  boxAxesSeen?: [number, number, number, number] | null;
+  /** A colour from a well as the document holds it (through the press
+   * profile, where there is one). */
+  ink?: (hex: string) => AuthoredColor;
+  /** Ask for another `.cube` file for the picked colour lookup. */
+  onLoadLookup?: () => void;
+  /** The document's resolution, for the paper sizes a frame can be given
+   * — those are quoted on paper, not in pixels. */
+  dpi: number;
+  /** Give a frame a size, which is not a plain kind edit: what is inside
+   * it moves by how each layer is pinned. */
+  onFrameSize: (width: number, height: number) => void;
+  /** How the tones under this layer are spread, for the graphs that read
+   * one. Null until the document has settled long enough to count them. */
+  bins: Uint32Array | null;
+  /** gesture=true routes through preview (live, uncommitted). */
+  onEdit: (kind: NodeKind, gesture: boolean) => void;
+  onGestureEnd: () => void;
+  /** Document colour mode, so new colours are authored as ink in a CMYK
+   * document exactly like the shape tools do. */
+  cmyk: boolean;
+  /** Faces a text block may be set in, bundled one first. */
+  fonts: string[];
+  /** Shape layers a text block could be set along, and what to do when
+   * one is picked (null takes the text off its path). */
+  shapes: { id: number; name: string }[];
+  onAlong: (shape: number | null) => void;
+  /** Set a levels layer's input points from the picture it sees. It
+   * needs the engine's own reading of the histogram, which lives a
+   * level up. */
+  onAutoLevels: () => void;
+  /** Ask for the next click on the page to say which pixel is meant to
+   * be grey, and whether that ask is outstanding. */
+  onPickNeutral: () => void;
+  pickingNeutral: boolean;
+  /** Take each channel of a curves layer to its own ends, which is what
+   * pulls a colour cast out of a picture. */
+  onAutoColour: () => void;
+  /** Round the corners of a path by this radius (the rest of the shapes
+   * keep a live radius of their own, edited here as one). */
+  onRoundCorners: (radius: number) => void;
+}
+
+/** Parameter editors for the selected node's kind — the panel that makes
+ * every layer's settings revisitable (the non-destructive contract). */
+function KindProps({
+  kind,
+  bins,
+  dpi,
+  onFrameSize,
+  onEdit,
+  onGestureEnd,
+  cmyk,
+  fonts,
+  shapes,
+  onAlong,
+  onAutoLevels,
+  onPickNeutral,
+  pickingNeutral,
+  onAutoColour,
+  onLoadLookup,
+  onRoundCorners,
+  ink,
+  boxAxesSeen,
+}: KindPropsProps) {
+  // A colour picked here as the document holds one: through the press
+  // profile in a CMYK document that has one, as the bar's well goes.
+  const inkOf = (hex: string): AuthoredColor => (ink ? ink(hex) : cmyk ? hexToCmykColor(hex) : hexColor(hex));
+  // How far a path's corners are rounded when asked.
+  const [roundBy, setRoundBy] = useState(8);
+  // Which band of colour the panel is showing, when it is showing one.
+  const [band, setBand] = useState(0);
+  // And which range of tone, when the panel is showing one of those.
+  const [range, setRange] = useState(1);
+  // And which channel comes out, in a channel mixer.
+  const [output, setOutput] = useState(0);
+  if (typeof kind !== "object") return null;
+
+  const slider = (
+    label: string,
+    value: number,
+    min: number,
+    max: number,
+    step: number,
+    set: (v: number) => NodeKind,
+  ) => (
+    <label key={label}>
+      <SliderHead label={label} value={value} />
+      <StretchRange
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onValue={(v) => onEdit(set(v), true)}
+        onPointerUp={onGestureEnd}
+        onKeyUp={onGestureEnd}
+        onBlur={onGestureEnd}
+        aria-label={label}
+      />
+    </label>
+  );
+
+  if ("Adjustment" in kind) {
+    const adj = kind.Adjustment;
+    const wrap = (a: Adjustment): NodeKind => ({ Adjustment: a });
+    if ("Exposure" in adj) {
+      return slider("Stops", adj.Exposure.stops, -3, 3, 0.05, (v) =>
+        wrap({ Exposure: { stops: v } }),
+      );
+    }
+    if ("BrightnessContrast" in adj) {
+      const p = adj.BrightnessContrast;
+      return (
+        <>
+          {slider("Brightness", p.brightness, -1, 1, 0.01, (v) =>
+            wrap({ BrightnessContrast: { ...p, brightness: v } }),
+          )}
+          {slider("Contrast", p.contrast, -1, 1, 0.01, (v) =>
+            wrap({ BrightnessContrast: { ...p, contrast: v } }),
+          )}
+        </>
+      );
+    }
+    if ("HueSaturation" in adj) {
+      const p = adj.HueSaturation;
+      return (
+        <>
+          {slider("Hue", p.hue_degrees, -180, 180, 1, (v) =>
+            wrap({ HueSaturation: { ...p, hue_degrees: v } }),
+          )}
+          {slider("Saturation", p.saturation, -1, 1, 0.01, (v) =>
+            wrap({ HueSaturation: { ...p, saturation: v } }),
+          )}
+          {slider("Lightness", p.lightness, -1, 1, 0.01, (v) =>
+            wrap({ HueSaturation: { ...p, lightness: v } }),
+          )}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={!!p.colorize}
+              onChange={(e) =>
+                onEdit(
+                  wrap({
+                    HueSaturation: {
+                      ...p,
+                      colorize: e.target.checked,
+                      // Turned on from where it opens, the tint starts
+                      // at a quarter, where Photoshop's does: the slider
+                      // reads -1..1 as 0..1 of the tint.
+                      saturation:
+                        e.target.checked && p.saturation === 0 ? -0.5 : p.saturation,
+                    },
+                  }),
+                  false,
+                )
+              }
+              aria-label="Colorize"
+            />
+            Colorize
+          </label>
+        </>
+      );
+    }
+    if ("WhiteBalance" in adj) {
+      const p = adj.WhiteBalance;
+      return (
+        <>
+          {/* The way a photograph is actually balanced: point at
+              something that is meant to be grey and let the numbers
+              follow, rather than pushing two sliders about. */}
+          <button
+            className={pickingNeutral ? "auto-levels on" : "auto-levels"}
+            onClick={onPickNeutral}
+            title="Click something in the picture that is meant to be grey"
+            aria-label="Pick a grey"
+          >
+            {pickingNeutral ? "Click a grey…" : "Pick a grey"}
+          </button>
+          {slider("Temperature", p.temperature, -1, 1, 0.01, (v) =>
+            wrap({ WhiteBalance: { ...p, temperature: v } }),
+          )}
+          {slider("Tint", p.tint, -1, 1, 0.01, (v) =>
+            wrap({ WhiteBalance: { ...p, tint: v } }),
+          )}
+        </>
+      );
+    }
+    if ("SelectiveHsl" in adj) {
+      const p = adj.SelectiveHsl;
+      const bands: [number, number, number][] = Array.from(
+        { length: 6 },
+        (_, i) => p.bands[i] ?? [0, 0, 0],
+      );
+      const set = (i: number, k: number, v: number): NodeKind => {
+        const next = bands.map((t) => [...t] as [number, number, number]);
+        next[i][k] = v;
+        return wrap({ SelectiveHsl: { bands: next } });
+      };
+      const touched = (i: number) => bands[i].some((v) => Math.abs(v) > 1e-6);
+      return (
+        <>
+          {/* One band at a time, in the order a colour wheel is read.
+              The dot says which ones have been asked for something, so
+              nothing is hidden behind the picker. */}
+          <div className="curve-channels" role="group" aria-label="Colour band">
+            {COLOUR_BANDS.map(([name, colour], i) => (
+              <button
+                key={name}
+                type="button"
+                className={i === band ? "active" : ""}
+                style={{ color: colour }}
+                aria-pressed={i === band}
+                aria-label={`${name} band`}
+                onClick={() => setBand(i)}
+              >
+                {name.slice(0, 3)}
+                {touched(i) ? "•" : ""}
+              </button>
+            ))}
+          </div>
+          {slider("Band hue", bands[band][0], -1, 1, 0.01, (v) =>
+            set(band, 0, v),
+          )}
+          {slider("Band saturation", bands[band][1], -1, 1, 0.01, (v) =>
+            set(band, 1, v),
+          )}
+          {slider("Band lightness", bands[band][2], -1, 1, 0.01, (v) =>
+            set(band, 2, v),
+          )}
+        </>
+      );
+    }
+    if ("ColorBalance" in adj) {
+      const p = adj.ColorBalance;
+      const ranges: [string, [number, number, number]][] = [
+        ["Shadows", p.shadows],
+        ["Midtones", p.midtones],
+        ["Highlights", p.highlights],
+      ];
+      const keys = ["shadows", "midtones", "highlights"] as const;
+      const trio = ranges[range][1] ?? [0, 0, 0];
+      const set = (k: number, v: number): NodeKind => {
+        const next: [number, number, number] = [...trio];
+        next[k] = v;
+        return wrap({ ColorBalance: { ...p, [keys[range]]: next } });
+      };
+      const touched = (t: [number, number, number]) =>
+        t.some((v) => Math.abs(v) > 1e-6);
+      return (
+        <>
+          {/* One range of tone at a time, dark to light, with a dot on
+              the ones that have been asked for something so nothing is
+              hidden behind the picker. */}
+          <div className="curve-channels" role="group" aria-label="Tone range">
+            {ranges.map(([name, trio], i) => (
+              <button
+                key={name}
+                type="button"
+                className={i === range ? "active" : ""}
+                aria-pressed={i === range}
+                aria-label={`${name} range`}
+                onClick={() => setRange(i)}
+              >
+                {name.slice(0, 4)}
+                {touched(trio ?? [0, 0, 0]) ? "•" : ""}
+              </button>
+            ))}
+          </div>
+          {/* Named as both ends, which is how a correction is thought
+              of: a picture is too cyan and wants red, not "channel 0". */}
+          {slider("Cyan · Red", trio[0], -1, 1, 0.01, (v) => set(0, v))}
+          {slider("Magenta · Green", trio[1], -1, 1, 0.01, (v) => set(1, v))}
+          {slider("Yellow · Blue", trio[2], -1, 1, 0.01, (v) => set(2, v))}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.preserve_luminosity}
+              onChange={(e) =>
+                onEdit(
+                  wrap({
+                    ColorBalance: { ...p, preserve_luminosity: e.target.checked },
+                  }),
+                  false,
+                )
+              }
+              aria-label="Keep brightness"
+            />
+            Keep brightness
+          </label>
+        </>
+      );
+    }
+    if ("ColorLookup" in adj) {
+      const p = adj.ColorLookup;
+      return (
+        <>
+          <p className="muted" aria-label="Colour lookup table">
+            {p.name || "A table"} — a grid of {p.size} a side
+          </p>
+          <button type="button" className="mask-button" onClick={onLoadLookup} aria-label="Load another table">
+            Load another .cube…
+          </button>
+        </>
+      );
+    }
+    if ("PhotoFilter" in adj) {
+      const p = adj.PhotoFilter;
+      // The usual glasses, a press away; any other is the colour well's.
+      const glasses: [string, string][] = [
+        ["Warming", "#ec8a00"],
+        ["Cooling", "#006dff"],
+        ["Sepia", "#ac7a33"],
+        ["Green", "#19c919"],
+      ];
+      const authoredOf = (hex: string) => (inkOf(hex));
+      return (
+        <>
+          <label className="row">
+            Glass
+            <input
+              type="color"
+              value={colorToHex(p.color)}
+              onChange={(e) =>
+                onEdit(wrap({ PhotoFilter: { ...p, color: authoredOf(e.target.value) } }), true)
+              }
+              onBlur={onGestureEnd}
+              aria-label="Filter colour"
+            />
+          </label>
+          <div className="curve-channels" role="group" aria-label="Filters">
+            {glasses.map(([name, hex]) => (
+              <button
+                key={name}
+                type="button"
+                className={colorToHex(p.color) === hex ? "active" : ""}
+                onClick={() =>
+                  onEdit(wrap({ PhotoFilter: { ...p, color: authoredOf(hex) } }), false)
+                }
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {slider("Density", p.density, 0, 1, 0.01, (v) =>
+            wrap({ PhotoFilter: { ...p, density: v } }),
+          )}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.preserve_luminosity}
+              onChange={(e) =>
+                onEdit(
+                  wrap({ PhotoFilter: { ...p, preserve_luminosity: e.target.checked } }),
+                  false,
+                )
+              }
+              aria-label="Keep brightness"
+            />
+            Keep brightness
+          </label>
+        </>
+      );
+    }
+    if ("ChannelMixer" in adj) {
+      const p = adj.ChannelMixer;
+      // Monochrome is one grey channel, mixed by the red row, so there
+      // is nothing to pick between.
+      const out = p.monochrome ? 0 : output;
+      const keys = ["red", "green", "blue"] as const;
+      const row = p[keys[out]] ?? [0, 0, 0];
+      const constant = p.constant ?? [0, 0, 0];
+      const setRow = (k: number, v: number): NodeKind => {
+        const next: [number, number, number] = [...row];
+        next[k] = v;
+        return wrap({ ChannelMixer: { ...p, [keys[out]]: next } });
+      };
+      const setConstant = (v: number): NodeKind => {
+        const next: [number, number, number] = [...constant];
+        next[out] = v;
+        return wrap({ ChannelMixer: { ...p, constant: next } });
+      };
+      const own = (i: number) => {
+        const r = p[keys[i]] ?? [0, 0, 0];
+        return r.some((v, j) => Math.abs(v - (j === i ? 1 : 0)) > 1e-6) ||
+          Math.abs(constant[i] ?? 0) > 1e-6;
+      };
+      // Not normalized, so what a row adds to is what it does to the
+      // brightness of its channel: a hundred is the picture's own.
+      const total = Math.round((row[0] + row[1] + row[2]) * 100);
+      return (
+        <>
+          {!p.monochrome && (
+            <div className="curve-channels" role="group" aria-label="Output channel">
+              {(["Red", "Green", "Blue"] as const).map((name, i) => (
+                <button
+                  key={name}
+                  type="button"
+                  className={i === out ? "active" : ""}
+                  aria-pressed={i === out}
+                  aria-label={`${name} out`}
+                  onClick={() => setOutput(i)}
+                >
+                  {name}
+                  {own(i) ? "•" : ""}
+                </button>
+              ))}
+            </div>
+          )}
+          {slider("From red", row[0], -2, 2, 0.01, (v) => setRow(0, v))}
+          {slider("From green", row[1], -2, 2, 0.01, (v) => setRow(1, v))}
+          {slider("From blue", row[2], -2, 2, 0.01, (v) => setRow(2, v))}
+          {slider("Constant", constant[out] ?? 0, -1, 1, 0.01, (v) => setConstant(v))}
+          <p className={`mixer-total${total === 100 ? "" : " off"}`} aria-label="Row total">
+            Adds to {total}%
+          </p>
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.monochrome}
+              onChange={(e) =>
+                onEdit(wrap({ ChannelMixer: { ...p, monochrome: e.target.checked } }), false)
+              }
+              aria-label="Monochrome"
+            />
+            Monochrome
+          </label>
+        </>
+      );
+    }
+    if ("ShadowsHighlights" in adj) {
+      const p = adj.ShadowsHighlights;
+      // Both run the other way too, which is what deepens a shadow or
+      // brings a highlight up rather than fixing one.
+      return (
+        <>
+          {slider("Shadows", p.shadows, -1, 1, 0.01, (v) =>
+            wrap({ ShadowsHighlights: { ...p, shadows: v } }),
+          )}
+          {slider("Highlights", p.highlights, -1, 1, 0.01, (v) =>
+            wrap({ ShadowsHighlights: { ...p, highlights: v } }),
+          )}
+        </>
+      );
+    }
+    if ("Vibrance" in adj) {
+      return slider("Vibrance", adj.Vibrance.amount, -1, 1, 0.01, (v) =>
+        wrap({ Vibrance: { amount: v } }),
+      );
+    }
+    if ("BlackAndWhite" in adj) {
+      const p = adj.BlackAndWhite;
+      // The weights are normalized by the engine, so what these change
+      // is which colours come out light and which dark — not how bright
+      // the picture is. Negative is allowed: it is what darkens one
+      // colour to make another stand out.
+      return (
+        <>
+          {(["red", "green", "blue"] as const).map((k) =>
+            slider(
+              `${k[0].toUpperCase()}${k.slice(1)} weight`,
+              p[k],
+              -0.5,
+              2,
+              0.01,
+              (v) => wrap({ BlackAndWhite: { ...p, [k]: v } }),
+            ),
+          )}
+          <button
+            className="mask-button"
+            onClick={() =>
+              onEdit(
+                wrap({
+                  BlackAndWhite: {
+                    red: LUMA[0],
+                    green: LUMA[1],
+                    blue: LUMA[2],
+                  },
+                }),
+                false,
+              )
+            }
+          >
+            Plain luminance
+          </button>
+        </>
+      );
+    }
+    if ("GradientMap" in adj) {
+      const stops = adj.GradientMap.stops;
+      return (
+        <StopList
+          stops={stops}
+          name="Map stop"
+          authored={(hex) => (inkOf(hex))}
+          onChange={(next, gesture) =>
+            onEdit(wrap({ GradientMap: { stops: next } }), gesture)
+          }
+          onGestureEnd={onGestureEnd}
+        />
+      );
+    }
+    if ("Invert" in adj) {
+      return slider("Amount", adj.Invert.amount, 0, 1, 0.01, (v) =>
+        wrap({ Invert: { amount: v } }),
+      );
+    }
+    if ("Posterize" in adj) {
+      // Whole steps: the engine reads the number whole anyway, and a
+      // slider that moved in hundredths would sit still for ninety-nine
+      // of every hundred of them.
+      return slider("Levels", adj.Posterize.levels, 2, 32, 1, (v) =>
+        wrap({ Posterize: { levels: v } }),
+      );
+    }
+    if ("Threshold" in adj) {
+      return slider("Level", adj.Threshold.level, 0, 1, 0.01, (v) =>
+        wrap({ Threshold: { level: v } }),
+      );
+    }
+    if ("Curves" in adj) {
+      return (
+        <CurvesPanel
+          curves={adj.Curves}
+          bins={bins}
+          onEdit={(curves, gesture) => onEdit(wrap({ Curves: curves }), gesture)}
+          onGestureEnd={onGestureEnd}
+          onAutoColour={onAutoColour}
+        />
+      );
+    }
+    if ("Levels" in adj) {
+      const p = adj.Levels;
+      const set = (patch: Partial<typeof p>) =>
+        wrap({ Levels: { ...p, ...patch } });
+      // The four points are shown in the encoding the histogram above
+      // them is drawn in, and kept in the linear light the adjustment
+      // works in. A black point set to where the picture starts has to
+      // be read off the graph that says where that is, and linear light
+      // puts the middle of a picture at a fifth of the way along.
+      const at = (v: number) => Math.round(toShown(v) * 100) / 100;
+      return (
+        <>
+          {/* The tones the sliders are about to move, so the black and
+              white points can be set to where the picture actually
+              starts and stops rather than by eye. */}
+          <svg
+            className="levels-histogram"
+            viewBox="0 0 256 64"
+            preserveAspectRatio="none"
+            role="img"
+            aria-label="Tones in the picture"
+          >
+            <Histogram bins={bins} width={256} height={64} />
+          </svg>
+          <button
+            className="auto-levels"
+            onClick={onAutoLevels}
+            title="Set the input points to where the picture's own tones start and stop"
+            aria-label="Auto levels"
+          >
+            Auto
+          </button>
+          {slider("Input black", at(p.in_black), 0, 1, 0.01, (v) =>
+            set({ in_black: toLinear(v) }),
+          )}
+          {slider("Input white", at(p.in_white), 0, 1, 0.01, (v) =>
+            set({ in_white: toLinear(v) }),
+          )}
+          {slider("Gamma", p.gamma, 0.2, 3, 0.02, (v) => set({ gamma: v }))}
+          {slider("Output black", at(p.out_black), 0, 1, 0.01, (v) =>
+            set({ out_black: toLinear(v) }),
+          )}
+          {slider("Output white", at(p.out_white), 0, 1, 0.01, (v) =>
+            set({ out_white: toLinear(v) }),
+          )}
+        </>
+      );
+    }
+    return null;
+  }
+
+  if ("Filter" in kind) {
+    const filter = kind.Filter;
+    if ("GaussianBlur" in filter) {
+      return slider(
+        "Blur sigma",
+        filter.GaussianBlur.sigma,
+        0,
+        50,
+        0.5,
+        (v) => ({
+          Filter: { GaussianBlur: { sigma: v } },
+        }),
+      );
+    }
+    if ("RadialBlur" in filter) {
+      const p = filter.RadialBlur;
+      const wrapRadial = (next: typeof p) => ({ Filter: { RadialBlur: next } }) as NodeKind;
+      return (
+        <>
+          {/* Zoomed or spun. The amount means a share in the one and an
+              angle in the other, so changing kind starts it again at a
+              strength that reads as itself. */}
+          <div className="curve-channels" role="group" aria-label="Radial blur kind">
+            {(
+              [
+                ["Zoom", false],
+                ["Spin", true],
+              ] as const
+            ).map(([name, spin]) => (
+              <button
+                key={name}
+                type="button"
+                className={p.spin === spin ? "active" : ""}
+                aria-pressed={p.spin === spin}
+                onClick={() =>
+                  p.spin !== spin &&
+                  onEdit(wrapRadial({ ...p, spin, amount: spin ? 15 : 0.2 }), false)
+                }
+              >
+                {name}
+              </button>
+            ))}
+          </div>
+          {p.spin
+            ? slider("Angle", p.amount, 0, 180, 1, (v) => wrapRadial({ ...p, amount: v }))
+            : slider("Amount", p.amount, 0, 1, 0.01, (v) => wrapRadial({ ...p, amount: v }))}
+          {slider("Centre across", p.center[0], 0, 1, 0.01, (v) =>
+            wrapRadial({ ...p, center: [v, p.center[1]] }),
+          )}
+          {slider("Centre down", p.center[1], 0, 1, 0.01, (v) =>
+            wrapRadial({ ...p, center: [p.center[0], v] }),
+          )}
+        </>
+      );
+    }
+    if ("MotionBlur" in filter) {
+      return (
+        <>
+          {slider("Distance", filter.MotionBlur.distance, 0, 200, 1, (v) => ({
+            Filter: { MotionBlur: { ...filter.MotionBlur, distance: v } },
+          }))}
+          {/* A direction is a turn rather than a length, so it wraps: a
+              full circle round and it is where it began. */}
+          {slider("Direction", filter.MotionBlur.degrees, -180, 180, 1, (v) => ({
+            Filter: { MotionBlur: { ...filter.MotionBlur, degrees: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Pixelate" in filter) {
+      return slider("Block size", filter.Pixelate.size, 2, 100, 1, (v) => ({
+        Filter: { Pixelate: { size: v } },
+      }));
+    }
+    if ("Median" in filter) {
+      // Whole pixels each way: a window is so many pixels across.
+      return slider("Radius", filter.Median.radius, 1, 20, 1, (v) => ({
+        Filter: { Median: { radius: v } },
+      }));
+    }
+    if ("SurfaceBlur" in filter) {
+      const p = filter.SurfaceBlur;
+      // How far each pixel looks along its row and down its column, and
+      // how unlike a neighbour may look and still be averaged in.
+      return (
+        <>
+          {slider("Smoothing radius", p.radius, 1, 40, 1, (v) => ({
+            Filter: { SurfaceBlur: { ...p, radius: v } },
+          }))}
+          {slider("Edge threshold", p.threshold, 0.01, 0.6, 0.01, (v) => ({
+            Filter: { SurfaceBlur: { ...p, threshold: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Noise" in filter) {
+      const p = filter.Noise;
+      return (
+        <>
+          {slider("Noise amount", p.amount, 0, 1, 0.01, (v) => ({
+            Filter: { Noise: { ...p, amount: v } },
+          }))}
+          {slider("Grain size", p.grain, 0.5, 20, 0.5, (v) => ({
+            Filter: { Noise: { ...p, grain: v } },
+          }))}
+          <label className="row">
+            <input
+              type="checkbox"
+              checked={p.mono}
+              onChange={(e) =>
+                onEdit(
+                  { Filter: { Noise: { ...p, mono: e.target.checked } } },
+                  false,
+                )
+              }
+              aria-label="Grain in one colour"
+            />
+            One colour
+          </label>
+        </>
+      );
+    }
+    if ("Vignette" in filter) {
+      const p = filter.Vignette;
+      return (
+        <>
+          {/* Below zero it lifts the corners instead, which is what
+              takes a vignette a lens put there back out. */}
+          {slider("Vignette amount", p.amount, -1, 1, 0.01, (v) => ({
+            Filter: { Vignette: { ...p, amount: v } },
+          }))}
+          {slider("Vignette radius", p.radius, 0, 0.95, 0.01, (v) => ({
+            Filter: { Vignette: { ...p, radius: v } },
+          }))}
+          {slider("Vignette softness", p.softness, 0, 1, 0.01, (v) => ({
+            Filter: { Vignette: { ...p, softness: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Halftone" in filter) {
+      const p = filter.Halftone;
+      return (
+        <>
+          {slider("Dot size", p.size, 2, 60, 1, (v) => ({
+            Filter: { Halftone: { ...p, size: v } },
+          }))}
+          {slider("Screen angle", p.degrees, 0, 90, 1, (v) => ({
+            Filter: { Halftone: { ...p, degrees: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Twirl" in filter || "Pinch" in filter) {
+      // The two share a circle — where its middle is and how far out it
+      // reaches — and differ in what happens inside it.
+      const twirl = "Twirl" in filter;
+      const p = twirl ? filter.Twirl : filter.Pinch;
+      const wrap = (next: Partial<typeof p>) =>
+        (twirl
+          ? { Filter: { Twirl: { ...filter.Twirl, ...next } } }
+          : { Filter: { Pinch: { ...filter.Pinch, ...next } } }) as NodeKind;
+      return (
+        <>
+          {twirl
+            ? slider("Twirl angle", filter.Twirl.degrees, -720, 720, 1, (v) => wrap({ degrees: v }))
+            : slider("Pinch amount", filter.Pinch.amount, -1, 1, 0.01, (v) => wrap({ amount: v }))}
+          {slider("Circle size", p.radius, 0.05, 2, 0.01, (v) => wrap({ radius: v }))}
+          {slider("Centre across", p.center[0], 0, 1, 0.01, (v) => wrap({ center: [v, p.center[1]] }))}
+          {slider("Centre down", p.center[1], 0, 1, 0.01, (v) => wrap({ center: [p.center[0], v] }))}
+        </>
+      );
+    }
+    if ("LensCorrection" in filter) {
+      return slider("Distortion", filter.LensCorrection.amount, -1, 1, 0.01, (v) => ({
+        Filter: { LensCorrection: { amount: v } },
+      }));
+    }
+    if ("OilPaint" in filter) {
+      return slider("Brush size", filter.OilPaint.radius, 1, 20, 0.5, (v) => ({
+        Filter: { OilPaint: { radius: v } },
+      }));
+    }
+    if ("FindEdges" in filter) {
+      return slider("Edge strength", filter.FindEdges.amount, 0, 5, 0.05, (v) => ({
+        Filter: { FindEdges: { amount: v } },
+      }));
+    }
+    if ("Ripple" in filter) {
+      const p = filter.Ripple;
+      return (
+        <>
+          {slider("Ripple height", p.amplitude, 0, 50, 0.5, (v) => ({
+            Filter: { Ripple: { ...p, amplitude: v } },
+          }))}
+          {slider("Wavelength", p.wavelength, 2, 200, 1, (v) => ({
+            Filter: { Ripple: { ...p, wavelength: v } },
+          }))}
+        </>
+      );
+    }
+    if ("Emboss" in filter) {
+      const p = filter.Emboss;
+      return (
+        <>
+          {slider("Light angle", p.degrees, 0, 360, 1, (v) => ({
+            Filter: { Emboss: { ...p, degrees: v } },
+          }))}
+          {slider("Relief height", p.height, 0.5, 20, 0.5, (v) => ({
+            Filter: { Emboss: { ...p, height: v } },
+          }))}
+          {slider("Relief amount", p.amount, 0, 5, 0.1, (v) => ({
+            Filter: { Emboss: { ...p, amount: v } },
+          }))}
+        </>
+      );
+    }
+    if ("HighPass" in filter) {
+      const p = filter.HighPass;
+      return slider("High pass radius", p.sigma, 0.5, 40, 0.5, (v) => ({
+        Filter: { HighPass: { sigma: v } },
+      }));
+    }
+    if ("Sharpen" in filter) {
+      const p = filter.Sharpen;
+      return (
+        <>
+          {slider("Sharpen sigma", p.sigma, 0.5, 20, 0.5, (v) => ({
+            Filter: { Sharpen: { ...p, sigma: v } },
+          }))}
+          {slider("Amount", p.amount, 0, 3, 0.05, (v) => ({
+            Filter: { Sharpen: { ...p, amount: v } },
+          }))}
+        </>
+      );
+    }
+    return null;
+  }
+
+  if ("Text" in kind) {
+    const t = kind.Text;
+    // Where the caret is in whichever text box was last used. A style
+    // button applies to the selection when there is one and to the whole
+    // block when there is not, which is what every editor does — and the
+    // offsets survive the button taking focus away from the box.
+    const selection = () => textRange(t);
+    // Apply one styling choice: over the selection as a run, or over the
+    // block itself when nothing is selected.
+    const styled = (change: Styling): NodeKind => {
+      const range = selection();
+      if (!range) {
+        const block: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(change)) {
+          block[k] = v ?? (k === "font" ? "" : false);
+        }
+        return { Text: { ...t, ...block } } as NodeKind;
+      }
+      return {
+        Text: {
+          ...t,
+          runs: styleRange(t.text, t.runs ?? [], range[0], range[1], change, {
+            fill: t.fill,
+            bold: !!t.bold,
+            italic: !!t.italic,
+            underline: !!t.underline,
+            strike: !!t.strike,
+            font: t.font ?? "",
+            size: t.size,
+            baseline: 0,
+          }),
+        },
+      };
+    };
+    // Whether a toggle reads as on: what the selection says where there
+    // is one, and what the block says where there is not.
+    const isOn = (key: "bold" | "italic" | "underline" | "strike"): boolean => {
+      const range = selection();
+      const block = !!t[key];
+      if (!range) return block;
+      return !!rangeSays(t.text, t.runs ?? [], range[0], range[1], key, block);
+    };
+    return (
+      <>
+        <label>
+          Text
+          <textarea
+            value={t.text}
+            rows={2}
+            onChange={(e) => {
+              const el = e.target;
+              const was = textSelections.get(el);
+              textSelections.set(el, [el.selectionStart, el.selectionEnd]);
+              onEdit(
+                {
+                  Text: {
+                    ...t,
+                    text: el.value,
+                    runs: shiftRuns(
+                      t.text,
+                      el.value,
+                      t.runs ?? [],
+                      was ? editOf(t.text, el.value, was, el.selectionEnd) : undefined,
+                    ),
+                  },
+                },
+                true,
+              );
+            }}
+            onSelect={(e) => textSelections.set(e.currentTarget, [e.currentTarget.selectionStart, e.currentTarget.selectionEnd])}
+            onBlur={onGestureEnd}
+            aria-label="Text content"
+          />
+        </label>
+        {/* The block's size, or the selection's when part of the text is
+            picked out: a run of its own size, which makes the line it is
+            on as tall as it needs. A selection of mixed sizes shows the
+            block's until it is given one. */}
+        {(() => {
+          const range = selection();
+          const shown = range
+            ? (rangeSays(t.text, t.runs ?? [], range[0], range[1], "size", t.size) ?? t.size)
+            : t.size;
+          return slider("Size", shown, 8, 200, 1, (v) =>
+            selection() ? styled({ size: v }) : { Text: { ...t, size: v } },
+          );
+        })()}
+        <div className="align-bar" role="group" aria-label="Text alignment">
+          {(
+            [
+              ["Left", "alignLeft", "Align text left"],
+              ["Center", "alignCenterH", "Centre text"],
+              ["Right", "alignRight", "Align text right"],
+              ["Justify", "textJustify", "Justify text"],
+            ] as const
+          ).map(([mode, icon, title]) => (
+            <button
+              key={mode}
+              className={(t.align ?? "Left") === mode ? "active" : undefined}
+              title={title}
+              aria-label={title}
+              aria-pressed={(t.align ?? "Left") === mode}
+              // Already so, it is no step.
+              onClick={() => {
+                if ((t.align ?? "Left") !== mode) onEdit({ Text: { ...t, align: mode } }, false);
+              }}
+            >
+              <Icon name={icon} />
+            </button>
+          ))}
+        </div>
+        {slider("Line height", t.line_height ?? 1, 0.5, 3, 0.05, (v) => ({
+          Text: { ...t, line_height: v },
+        }))}
+        {slider(
+          "Letter spacing",
+          t.letter_spacing ?? 0,
+          -0.1,
+          0.5,
+          0.01,
+          (v) => ({
+            Text: { ...t, letter_spacing: v },
+          }),
+        )}
+        {slider(
+          "Paragraph spacing",
+          t.paragraph_spacing ?? 0,
+          0,
+          3,
+          0.05,
+          (v) => ({
+            Text: { ...t, paragraph_spacing: v },
+          }),
+        )}
+        {/* Each paragraph an item: its bullet or number in the margin,
+            its lines hanging beside it. */}
+        <label className="row">
+          List
+          <select
+            value={t.list ?? "None"}
+            onChange={(e) =>
+              onEdit({ Text: { ...t, list: e.target.value as TextList } }, false)
+            }
+            aria-label="List"
+          >
+            <option value="None">None</option>
+            <option value="Bullet">Bullets</option>
+            <option value="Numbered">Numbers</option>
+          </select>
+        </label>
+        {/* A row of its own rather than one label around both controls:
+            a label labels one control, and a toggle sharing it would be
+            what the label points at. */}
+        <div className="row font-row">
+          <label htmlFor="text-font">Font</label>
+          {(() => {
+            // Bold always works: the family's "… Bold" cut when one is
+            // registered, a thickening the rasterizer synthesizes when
+            // none is. A block set bold before the flag existed said so
+            // by naming the bold face, so that still reads as bold here
+            // and un-bolds back to the face it was a twin of.
+            const named = (t.font ?? "").endsWith(" Bold");
+            // Read afresh on the press rather than reusing what the last
+            // render worked out: a selection can move between the two,
+            // and then the answer is about the wrong stretch of text.
+            const bolded = () => isOn("bold") || named;
+            return (
+              <button
+                className={bolded() ? "active" : undefined}
+                title="Bold"
+                aria-label="Bold"
+                aria-pressed={bolded()}
+                onClick={() =>
+                  onEdit(
+                    bolded() && named
+                      ? {
+                          Text: {
+                            ...t,
+                            bold: false,
+                            font: t.font.slice(0, -" Bold".length),
+                          },
+                        }
+                      : styled({ bold: !bolded() }),
+                    false,
+                  )
+                }
+              >
+                <strong>B</strong>
+              </button>
+            );
+          })()}
+          {/* Italic always works: the face's oblique twin when there is
+              one, a lean the rasterizer synthesizes when there is not. */}
+          <button
+            className={isOn("italic") ? "active" : undefined}
+            title="Italic"
+            aria-label="Italic"
+            aria-pressed={isOn("italic")}
+            onClick={() => onEdit(styled({ italic: !isOn("italic") }), false)}
+          >
+            <em>I</em>
+          </button>
+          <button
+            className={isOn("underline") ? "active" : undefined}
+            title="Underline"
+            aria-label="Underline"
+            aria-pressed={isOn("underline")}
+            onClick={() => onEdit(styled({ underline: !isOn("underline") }), false)}
+          >
+            <u>U</u>
+          </button>
+          <button
+            className={isOn("strike") ? "active" : undefined}
+            title="Strike-through"
+            aria-label="Strike-through"
+            aria-pressed={isOn("strike")}
+            onClick={() => onEdit(styled({ strike: !isOn("strike") }), false)}
+          >
+            <s>S</s>
+          </button>
+          {/* Raised or lowered off the line, and smaller: what is picked
+              out of the text, and again to put it back. */}
+          {(
+            [
+              ["Superscript", 0.33, "x²"],
+              ["Subscript", -0.2, "x₂"],
+            ] as const
+          ).map(([name, rise, glyph]) => {
+            const range = selection();
+            const on =
+              !!range && rangeSays(t.text, t.runs ?? [], range[0], range[1], "baseline", 0) === rise;
+            return (
+              <button
+                key={name}
+                className={on ? "active" : undefined}
+                title={`${name} — pick out some of the text first`}
+                aria-label={name}
+                aria-pressed={on}
+                disabled={!range}
+                onClick={() => {
+                  // Each part of what is picked by its own size: 0.6 of the
+                  // block's took a run set at 60 down to 29, and back off
+                  // it lost the 60. Kept to a hundredth rather than a whole
+                  // pixel, so on and off again is where it began (24 came
+                  // back 23), and back at the block's size it follows the
+                  // block again. From the other script it only moves: a
+                  // superscript made a subscript shrank a second time.
+                  if (!range) return;
+                  const exact = (v: number) => Math.round(v * 100) / 100;
+                  let runs = t.runs ?? [];
+                  for (const piece of rangePieces(t.text, runs, range[0], range[1])) {
+                    const size = piece.run?.size ?? t.size;
+                    const raised = piece.run?.baseline ?? 0;
+                    // Coming off: a part with no size of its own is at the
+                    // block's already (its Size set back to it), and one
+                    // within a point of the block's — a superscript made
+                    // before sizes were kept to a hundredth, 24 stored as
+                    // 14 — goes back to following the block.
+                    const back = size / 0.6;
+                    const change: Styling = on
+                      ? {
+                          baseline: null,
+                          size: piece.run?.size == null || Math.abs(back - t.size) < 1 ? null : exact(back),
+                        }
+                      : raised !== 0
+                        ? { baseline: rise }
+                        : { baseline: rise, size: exact(size * 0.6) };
+                    runs = styleRange(t.text, runs, piece.start, piece.end, change, {
+                      fill: t.fill,
+                      bold: !!t.bold,
+                      italic: !!t.italic,
+                      underline: !!t.underline,
+                      strike: !!t.strike,
+                      font: t.font ?? "",
+                      size: t.size,
+                      baseline: 0,
+                    });
+                  }
+                  onEdit({ Text: { ...t, runs } }, false);
+                }}
+              >
+                {glyph}
+              </button>
+            );
+          })}
+          <select
+            id="text-font"
+            value={t.font || fonts[0]}
+            onChange={(e) => {
+              // The face it is shown in already (an unnamed block is in
+              // the first): naming it changes nothing to see.
+              if ((t.font || fonts[0]) === e.target.value) return;
+              onEdit({ Text: { ...t, font: e.target.value } }, false);
+            }}
+            aria-label="Font"
+          >
+            {fonts.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </div>
+        {/* A guide to run along: picking a shape copies its outline into
+            the block, so the block stands alone afterwards. */}
+        <div className="row along-row">
+          <label htmlFor="text-along">Along</label>
+          <select
+            id="text-along"
+            aria-label="Along"
+            value={t.along ? "on" : ""}
+            onChange={(e) =>
+              onAlong(e.target.value === "" ? null : Number(e.target.value))
+            }
+          >
+            <option value="">None</option>
+            {t.along && <option value="on">This path</option>}
+            {shapes.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        {t.along &&
+          slider("Path offset", t.along_offset, 0, 2000, 1, (v) => ({
+            Text: { ...t, along_offset: v },
+          }))}
+        {/* Zero is a block that fits its text; anything else wraps to it. */}
+        {slider("Wrap width", t.width ?? 0, 0, 2000, 10, (v) => ({
+          Text: { ...t, width: v },
+        }))}
+        <label className="row">
+          Colour
+          <input
+            type="color"
+            value={colorToHex(t.fill)}
+            onChange={(e) =>
+              onEdit(styled({ fill: inkOf(e.target.value) }), true)
+            }
+            onBlur={onGestureEnd}
+            aria-label="Text color"
+          />
+        </label>
+      </>
+    );
+  }
+
+  if ("Artboard" in kind) {
+    const f = kind.Artboard;
+    // Paper is quoted in millimetres and inches, so it becomes pixels
+    // through the document's own resolution rather than a fixed number.
+    const mm = (v: number) => Math.round((v / 25.4) * dpi);
+    const inch = (v: number) => Math.round(v * dpi);
+    const sizes: [string, number, number][] = [
+      ["Desktop 1920 × 1080", 1920, 1080],
+      ["Laptop 1440 × 900", 1440, 900],
+      ["Phone 390 × 844", 390, 844],
+      ["Tablet 834 × 1194", 834, 1194],
+      ["Square post 1080 × 1080", 1080, 1080],
+      ["Story 1080 × 1920", 1080, 1920],
+      ["A4", mm(210), mm(297)],
+      ["A5", mm(148), mm(210)],
+      ["Letter", inch(8.5), inch(11)],
+    ];
+    const ground = (background: AuthoredColor | null): NodeKind => ({
+      Artboard: { ...f, background },
+    });
+    return (
+      <>
+        <label className="row">
+          Size
+          <select
+            value=""
+            onChange={(e) => {
+              const at = Number(e.target.value);
+              if (Number.isFinite(at) && sizes[at]) {
+                onFrameSize(sizes[at][1], sizes[at][2]);
+              }
+            }}
+            aria-label="Frame size preset"
+          >
+            <option value="" disabled>
+              {Math.round(f.width)} × {Math.round(f.height)}
+            </option>
+            {sizes.map(([name, w, h], i) => (
+              <option key={name} value={i}>
+                {name.includes("×") ? name : `${name} (${w} × ${h})`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="row">
+          Export at
+          <select
+            value={String(f.export_scale > 0 ? f.export_scale : 1)}
+            onChange={(e) =>
+              onEdit(
+                { Artboard: { ...f, export_scale: Number(e.target.value) } },
+                false,
+              )
+            }
+            aria-label="Frame export scale"
+          >
+            {[1, 2, 3].map((n) => (
+              <option key={n} value={n}>{`${n}×`}</option>
+            ))}
+          </select>
+        </label>
+        <label className="row">
+          Ground
+          <input
+            type="color"
+            value={colorToHex(f.background ?? hexColor("#ffffff"))}
+            onChange={(e) =>
+              onEdit(
+                ground(inkOf(e.target.value)),
+                true,
+              )
+            }
+            onBlur={onGestureEnd}
+            aria-label="Frame ground"
+            disabled={f.background === null}
+          />
+        </label>
+        <label className="row">
+          {/* A frame with no ground is a window onto the page: what is
+              under it shows through, and a click passes through with it. */}
+          <input
+            type="checkbox"
+            checked={f.background !== null}
+            onChange={(e) =>
+              onEdit(
+                ground(
+                  e.target.checked
+                    ? inkOf("#ffffff")
+                    : null,
+                ),
+                false,
+              )
+            }
+            aria-label="Frame has a ground"
+          />
+          Paint a ground
+        </label>
+      </>
+    );
+  }
+
+  if ("Vector" in kind) {
+    const v = kind.Vector;
+    const patch = (changes: Partial<typeof v>): NodeKind => ({
+      Vector: { ...v, ...changes },
+    });
+
+    const authored = (hex: string) =>
+      inkOf(hex);
+    const grad = v.gradient;
+    const gradStops = grad ? gradientStops(grad) : [];
+    const fillKind = !grad
+      ? "solid"
+      : "Linear" in grad
+        ? "linear"
+        : "Conic" in grad
+          ? "conic"
+          : "radial";
+    // A gradient's ends are the shape's own fill and white, so switching
+    // fill type starts from what is already on screen.
+    const startingStops = (): GradientStop[] => [
+      { offset: 0, color: v.fill ?? authored("#6c8cff") },
+      { offset: 1, color: authored("#ffffff") },
+    ];
+    /** Endpoints of a linear ramp at `deg`, across the shape's box. */
+    const endpoints = (
+      deg: number,
+    ): { from: [number, number]; to: [number, number] } => {
+      const rad = (deg * Math.PI) / 180;
+      const [dx, dy] = [Math.cos(rad) / 2, Math.sin(rad) / 2];
+      return { from: [0.5 - dx, 0.5 - dy], to: [0.5 + dx, 0.5 + dy] };
+    };
+    /** Where a ramp's end is seen from its start, on the screen, square to
+     * its bands — the way the Gradient tool drew it — and the same in the
+     * box's own units. Without the box's axes, the box's units. */
+    const seenOf = (g: Extract<NonNullable<typeof grad>, { Linear: unknown }>) => {
+      const { from, to } = g.Linear;
+      const stored: [number, number] = [to[0] - from[0], to[1] - from[1]];
+      if (!boxAxesSeen) return { box: stored, screen: stored };
+      const box = rampSeen(boxAxesSeen, stored);
+      const [a, b, c, d] = boxAxesSeen;
+      return { box, screen: [a * box[0] + b * box[1], c * box[0] + d * box[1]] as [number, number] };
+    };
+    const angleOf = (g: typeof grad): number => {
+      if (!g || !("Linear" in g)) return 0;
+      // As it is seen on the page: read in the box's own units, a ramp
+      // the Gradient tool drew at 30° said 11 on a wide shape.
+      const [x, y] = seenOf(g).screen;
+      const deg = (Math.atan2(y, x) * 180) / Math.PI;
+      return Math.round(deg < 0 ? deg + 360 : deg);
+    };
+    /** The ramp turned to `deg` as seen, about its own middle and as long
+     * as it was: rebuilt across the whole box, a nudge of a degree moved
+     * its ends and changed its length as well as its angle. */
+    const turnedTo = (g: Extract<NonNullable<typeof grad>, { Linear: unknown }>, deg: number) => {
+      if (!boxAxesSeen) return endpoints(deg);
+      const { from } = g.Linear;
+      const { box, screen } = seenOf(g);
+      const len = Math.hypot(screen[0], screen[1]);
+      const rad = (deg * Math.PI) / 180;
+      const want = [Math.cos(rad) * len, Math.sin(rad) * len];
+      const [a, b, c, d] = boxAxesSeen;
+      const det = a * d - b * c;
+      if (!(Math.abs(det) > 1e-9) || !(len > 1e-9)) return endpoints(deg);
+      // How far across the box a ramp at an angle runs, edge to edge, as
+      // seen: the box's two sides laid along it.
+      const across = (r: number) => Math.abs(Math.cos(r) * a + Math.sin(r) * c) + Math.abs(Math.cos(r) * b + Math.sin(r) * d);
+      // A ramp that spans the box through its middle — what choosing a
+      // gradient gives — goes on spanning it at the new angle, as a CSS
+      // angle does; one drawn by the Gradient tool keeps its length.
+      const now = Math.atan2(screen[1], screen[0]);
+      const centred = Math.abs(from[0] + box[0] / 2 - 0.5) < 1e-3 && Math.abs(from[1] + box[1] / 2 - 0.5) < 1e-3;
+      const spans = centred && Math.abs(len - across(now)) <= 0.01 * len;
+      if (spans) {
+        const l = across(rad);
+        want[0] = Math.cos(rad) * l;
+        want[1] = Math.sin(rad) * l;
+      }
+      // Back into the box's units, and stored as the ramp keeps it.
+      const q: [number, number] = [(d * want[0] - b * want[1]) / det, (-c * want[0] + a * want[1]) / det];
+      const stored = rampStored(boxAxesSeen, q);
+      const mid = [from[0] + box[0] / 2, from[1] + box[1] / 2];
+      const start: [number, number] = [mid[0] - q[0] / 2, mid[1] - q[1] / 2];
+      return { from: start, to: [start[0] + stored[0], start[1] + stored[1]] as [number, number] };
+    };
+    const setFillKind = (next: string) => {
+      const stops = gradStops.length ? gradStops : startingStops();
+      if (next === "solid") return patch({ gradient: null });
+      if (next === "linear")
+        return patch({ gradient: { Linear: { ...endpoints(0), stops } } });
+      // From the top, as a colour wheel starts.
+      if (next === "conic")
+        return patch({ gradient: { Conic: { center: [0.5, 0.5], angle: 270, stops } } });
+      return patch({
+        gradient: { Radial: { center: [0.5, 0.5], radius: 0.5, stops } },
+      });
+    };
+    /** Put a new stop list back into whichever gradient kind is set. */
+    const withStops = (stops: GradientStop[]): NodeKind => {
+      if (grad && "Linear" in grad)
+        return patch({ gradient: { Linear: { ...grad.Linear, stops } } });
+      if (grad && "Radial" in grad)
+        return patch({ gradient: { Radial: { ...grad.Radial, stops } } });
+      if (grad && "Conic" in grad)
+        return patch({ gradient: { Conic: { ...grad.Conic, stops } } });
+      return patch({});
+    };
+
+    return (
+      <>
+        <label className="row">
+          Fill type
+          <select
+            value={fillKind}
+            onChange={(e) => onEdit(setFillKind(e.target.value), false)}
+            aria-label="Fill type"
+          >
+            <option value="solid">Solid</option>
+            <option value="linear">Linear gradient</option>
+            <option value="radial">Radial gradient</option>
+            <option value="conic">Angular gradient</option>
+          </select>
+        </label>
+        {grad && (
+          <>
+            <StopList
+              stops={gradStops}
+              name="Gradient stop"
+              authored={authored}
+              onChange={(next, gesture) => onEdit(withStops(next), gesture)}
+              onGestureEnd={onGestureEnd}
+            />
+            {"Conic" in grad
+              ? slider("Gradient start", grad.Conic.angle, 0, 359, 1, (deg) =>
+                  patch({ gradient: { Conic: { ...grad.Conic, angle: deg } } }),
+                )
+              : "Linear" in grad
+              ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
+                  patch({
+                    gradient: {
+                      Linear: { ...grad.Linear, ...turnedTo(grad, deg), stops: gradStops },
+                    },
+                  }),
+                )
+              : slider(
+                  "Gradient radius",
+                  grad.Radial.radius,
+                  0.05,
+                  1.5,
+                  0.05,
+                  (r) =>
+                    patch({
+                      gradient: { Radial: { ...grad.Radial, radius: r } },
+                    }),
+                )}
+            {/* What it does past the ends of its ramp — a file's
+                spreadMethod, and the stripes a reflect or a repeat makes.
+                A full turn has no ends to be past. */}
+            {!("Conic" in grad) && (
+            <label className="row">
+              Past the ends
+              <select
+                value={("Linear" in grad ? grad.Linear.spread : grad.Radial.spread) ?? "Pad"}
+                onChange={(e) => {
+                  const spread = e.target.value as GradientSpread;
+                  onEdit(
+                    "Linear" in grad
+                      ? patch({ gradient: { Linear: { ...grad.Linear, spread } } })
+                      : patch({ gradient: { Radial: { ...grad.Radial, spread } } }),
+                    false,
+                  );
+                }}
+                aria-label="Gradient spread"
+              >
+                <option value="Pad">Hold the ends</option>
+                <option value="Reflect">Reflect</option>
+                <option value="Repeat">Repeat</option>
+              </select>
+            </label>
+            )}
+          </>
+        )}
+        <label className="row">
+          <input
+            type="checkbox"
+            checked={v.fill !== null}
+            onChange={(e) =>
+              onEdit(
+                patch({ fill: e.target.checked ? authored("#6c8cff") : null }),
+                false,
+              )
+            }
+            aria-label="Fill enabled"
+          />
+          Fill
+          {!grad && v.fill && !("Cmyk" in v.fill) && (
+            <input
+              type="color"
+              value={colorToHex(v.fill)}
+              onChange={(e) =>
+                onEdit(patch({ fill: authored(e.target.value) }), true)
+              }
+              onBlur={onGestureEnd}
+              aria-label="Fill color"
+            />
+          )}
+        </label>
+        {!grad && v.fill && "Cmyk" in v.fill && (
+          <>
+            {(["c", "m", "y", "k"] as const).map((ch) => {
+              const ink = (v.fill as { Cmyk: Record<string, number> }).Cmyk;
+              return slider(
+                `${ch.toUpperCase()} ink`,
+                ink[ch],
+                0,
+                1,
+                0.01,
+                (val) =>
+                  patch({
+                    fill: { Cmyk: { ...ink, [ch]: val } } as typeof v.fill,
+                  }),
+              );
+            })}
+          </>
+        )}
+        <label className="row">
+          <input
+            type="checkbox"
+            checked={v.stroke !== null}
+            onChange={(e) =>
+              onEdit(
+                patch({
+                  stroke: e.target.checked
+                    ? {
+                        color: authored("#1a1a1e"),
+                        width: 4,
+                        widths: [],
+                        dash: [],
+                        cap: "Round",
+                        join: "Round",
+                        start_marker: "None",
+                        end_marker: "None",
+                        align: null,
+                      }
+                    : null,
+                }),
+                false,
+              )
+            }
+            aria-label="Stroke enabled"
+          />
+          Stroke
+          {v.stroke && (
+            <input
+              type="color"
+              value={colorToHex(v.stroke.color)}
+              onChange={(e) =>
+                onEdit(
+                  patch({
+                    stroke: { ...v.stroke!, color: authored(e.target.value) },
+                  }),
+                  true,
+                )
+              }
+              onBlur={onGestureEnd}
+              aria-label="Stroke color"
+            />
+          )}
+        </label>
+        {v.stroke &&
+          slider("Stroke width", v.stroke.width, 1, 50, 1, (w) =>
+            patch({ stroke: { ...v.stroke!, width: w } }),
+          )}
+        {v.stroke && (
+          <label className="row">
+            Line
+            <select
+              value={DASHES.findIndex(
+                ([, pattern]) => pattern.join() === (v.stroke!.dash ?? []).join(),
+              )}
+              onChange={(e) => {
+                const at = Number(e.target.value);
+                if (DASHES[at]) {
+                  onEdit(
+                    patch({ stroke: { ...v.stroke!, dash: DASHES[at][1] } }),
+                    false,
+                  );
+                }
+              }}
+              aria-label="Line pattern"
+            >
+              {DASHES.map(([name], i) => (
+                <option key={name} value={i}>
+                  {name}
+                </option>
+              ))}
+              {/* A pattern typed into a file that is none of these still
+                  shows as something rather than as the first one. */}
+              <option value={-1} disabled>
+                Custom
+              </option>
+            </select>
+          </label>
+        )}
+        {/* Where along its pattern a dashed line starts — what a file
+            calls `stroke-dashoffset`, and what lines dashes up with a
+            corner. One period round is where it began, so that is as
+            far as the slider goes. */}
+        {v.stroke &&
+          (v.stroke.dash ?? []).length > 0 &&
+          slider(
+            "Dash offset",
+            v.stroke.dash_offset ?? 0,
+            0,
+            dashPeriod(v.stroke.dash),
+            0.5,
+            (o) => patch({ stroke: { ...v.stroke!, dash_offset: o } }),
+          )}
+        {/* Which side of the edge the border lies on: any shape with an
+            inside — a rect, an ellipse, a polygon or a star, a closed
+            path. An open path is a line, stroked down its middle. A
+            rect's and an ellipse's border lies inside unless told; a
+            path's, which was a line before there was a choice, across. */}
+        {v.stroke &&
+          ("Rect" in v.shape || "Ellipse" in v.shape || "Polygon" in v.shape || ("Path" in v.shape && v.shape.Path.closed)) && (
+          <label className="row">
+            Border
+            <select
+              value={v.stroke.align ?? ("Rect" in v.shape || "Ellipse" in v.shape ? "Inside" : "Centre")}
+              onChange={(e) =>
+                onEdit(
+                  patch({
+                    stroke: { ...v.stroke!, align: e.target.value as never },
+                  }),
+                  false,
+                )
+              }
+              aria-label="Border side"
+            >
+              <option value="Inside">Inside the edge</option>
+              <option value="Centre">Across the edge</option>
+              <option value="Outside">Outside the edge</option>
+            </select>
+          </label>
+        )}
+        {/* What the line carries at its ends. An open path only: a ring,
+            a rect and an ellipse have no ends to put anything on. */}
+        {v.stroke &&
+          "Path" in v.shape &&
+          !v.shape.Path.closed &&
+          (
+            [
+              ["Start", "start_marker"],
+              ["End", "end_marker"],
+            ] as const
+          ).map(([label, key]) => (
+            <label className="row" key={key}>
+              {label}
+              <select
+                value={v.stroke![key] ?? "None"}
+                onChange={(e) =>
+                  onEdit(
+                    patch({ stroke: { ...v.stroke!, [key]: e.target.value } }),
+                    false,
+                  )
+                }
+                aria-label={`Line ${label.toLowerCase()}`}
+              >
+                {["None", "Arrow", "Bar", "Dot"].map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        {/* Where a line stops and how it turns a corner. A rect's and an
+            ellipse's stroke is a band lying inside a closed outline: it
+            never stops, and its corners are the shape's own — so neither
+            question arises and neither is asked. */}
+        {v.stroke &&
+          "Path" in v.shape &&
+          (
+            [
+              ["Ends", "cap", ["Butt", "Round", "Square"]],
+              ["Corners", "join", ["Miter", "Round", "Bevel"]],
+            ] as const
+          ).map(([label, key, choices]) => (
+            <label className="row" key={key}>
+              {label}
+              <select
+                value={v.stroke![key] ?? choices[1]}
+                onChange={(e) =>
+                  onEdit(
+                    patch({ stroke: { ...v.stroke!, [key]: e.target.value } }),
+                    false,
+                  )
+                }
+                aria-label={`Line ${label.toLowerCase()}`}
+              >
+                {choices.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        {"Rect" in v.shape &&
+          (() => {
+            const rect = v.shape.Rect;
+            // Half the shorter side is where the corners meet and the rect
+            // becomes a capsule; past that there is nothing left to round.
+            const most = Math.max(1, Math.min(rect.width, rect.height) / 2);
+            return slider(
+              "Corner radius",
+              rect.radius ?? 0,
+              0,
+              most,
+              0.5,
+              (r) => patch({ shape: { Rect: { ...rect, radius: r } } }),
+            );
+          })()}
+        {"Polygon" in v.shape &&
+          (() => {
+            const poly = v.shape.Polygon;
+            return (
+              <>
+                {slider("Point count", poly.points, 3, 24, 1, (n) =>
+                  patch({ shape: { Polygon: { ...poly, points: Math.round(n) } } }),
+                )}
+                {/* One is a polygon; under it, every other corner comes in
+                    towards the middle and it is a star. */}
+                {slider("Star depth", 1 - poly.inner, 0, 0.95, 0.01, (d) =>
+                  patch({ shape: { Polygon: { ...poly, inner: 1 - d } } }),
+                )}
+                {/* Live, as a rectangle's is: each corner an arc, as far
+                    as the sides either side let it go. */}
+                {slider(
+                  "Corner radius",
+                  poly.corner,
+                  0,
+                  Math.max(1, Math.min(poly.rx, poly.ry)),
+                  0.5,
+                  (r) => patch({ shape: { Polygon: { ...poly, corner: r } } }),
+                )}
+              </>
+            );
+          })()}
+        {"Path" in v.shape &&
+          (() => {
+            const path = ("Path" in v.shape && v.shape.Path) as Extract<
+              VectorShape,
+              { Path: unknown }
+            >["Path"];
+            const curved = path.handles.some((h) => h.some((v) => v !== 0));
+            return (
+              <>
+                {/* A path keeps no radius of its own: its sharp corners
+                    are rewritten as arcs — the anchor last pressed with
+                    the anchor tool, or all of them. */}
+                {!path.smooth && (path.subpaths ?? []).length === 0 && (
+                  <div className="row">
+                    <NumberField
+                      min={0}
+                      step={1}
+                      value={roundBy}
+                      onValue={setRoundBy}
+                      aria-label="Round by"
+                    />
+                    <button
+                      className="mask-button"
+                      onClick={() => onRoundCorners(roundBy)}
+                      title="Round the sharp corners off by this radius — only the anchor last pressed, if one was"
+                    >
+                      Round corners
+                    </button>
+                  </div>
+                )}
+                <label className="row">
+                  <input
+                    type="checkbox"
+                    checked={path.smooth}
+                    disabled={curved}
+                    onChange={(e) =>
+                      onEdit(
+                        patch({
+                          shape: {
+                            Path: {
+                              ...path,
+                              smooth: e.target.checked,
+                              handles: path.handles,
+                            },
+                          },
+                        }),
+                        false,
+                      )
+                    }
+                    aria-label="Smooth path"
+                  />
+                  Smooth
+                </label>
+                {curved ? (
+                  <>
+                    <p className="muted">
+                      Curve handles are set, so they define the shape. Drag them
+                      on the canvas; hold Alt to move one on its own.
+                    </p>
+                    <button
+                      className="mask-button"
+                      onClick={() =>
+                        onEdit(
+                          patch({ shape: { Path: { ...path, handles: [] } } }),
+                          false,
+                        )
+                      }
+                    >
+                      Straighten curves
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="mask-button"
+                    onClick={() =>
+                      onEdit(
+                        patch({
+                          shape: {
+                            Path: { ...path, handles: seedHandles(path) },
+                          },
+                        }),
+                        false,
+                      )
+                    }
+                  >
+                    Convert to curves
+                  </button>
+                )}
+              </>
+            );
+          })()}
+      </>
+    );
+  }
+
+  return null;
+}
+
