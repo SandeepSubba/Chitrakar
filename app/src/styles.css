@@ -1398,7 +1398,10 @@ body {
 }
 
 .ruler line {
-  stroke: rgb(255 255 255 / 0.35);
+  /* The ruler's own ink, faded: white at a third vanished on the light
+     theme's ruler (1.07:1). */
+  stroke: currentColor;
+  stroke-opacity: 0.55;
   stroke-width: 1;
   shape-rendering: crispEdges;
 }
@@ -2426,6 +2429,10 @@ body {
 }
 
 .canvas-host {
+  /* What is drawn over the picture — handles, outlines, guides — keeps
+     its own colours, as Appearance says: a person's white accent made
+     the handles vanish on a white page. */
+  --accent: #6c8cff;
   /* Fingers draw and pinch; the browser must not take them for a
      scroll or a page zoom first. */
   touch-action: none;
@@ -3015,13 +3022,15 @@ body {
   gap: 0.6rem;
   padding: 0.35rem 0.8rem;
   background: var(--accent);
-  color: #fff;
+  /* What reads on the accent, a person's own included: white on the
+     shipped blue was 3:1, and on a yellow nothing at all. */
+  color: var(--on-accent);
   font-size: 0.85rem;
 }
 .recover button {
-  background: rgba(255, 255, 255, 0.18);
+  background: transparent;
   color: inherit;
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  border: 1px solid currentColor;
   border-radius: 4px;
   padding: 0.1rem 0.6rem;
 }
@@ -4772,4 +4781,9 @@ button.fold:hover {
   #engine-canvas {
     forced-color-adjust: none;
   }
+}
+
+/* The light theme's own, over the picture as everywhere else. */
+:root[data-theme="light"] .canvas-host {
+  --accent: #3b5bdb;
 }

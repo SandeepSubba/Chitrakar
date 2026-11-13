@@ -21660,6 +21660,49 @@ assert(
   );
 }
 
+// 9dq. The thirty-eighth audit's interface pass. A press on the page
+// left an open menu open and painted under it; a menu switched to by
+// hovering left the focus on the first, so ArrowDown reopened that one;
+// Edit › Toolbar… put the focus on Preferences' first tab.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.click('.menu-label:text-is("Edit")');
+  await p.waitForSelector(".menu-pop");
+  await p.mouse.move(r.x + 40, r.y + 40);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 140, r.y + 120, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  assert((await p.locator(".menu-pop").count()) === 0, "a press on the page puts the open menu away");
+  assert(
+    (await p.locator("aside.panel .layer-list li[data-id]").count()) === 0,
+    "and draws nothing under it",
+  );
+  await p.click('.menu-label:text-is("File")');
+  await p.waitForSelector(".menu-pop");
+  await p.locator('.menu-label:text-is("Layer")').hover();
+  await p.waitForTimeout(200);
+  const focused = await p.evaluate(() => document.activeElement?.textContent ?? "");
+  assert(focused === "Layer", `hovered across, the focus goes with the open menu (${focused})`);
+  await p.keyboard.press("Escape");
+  await p.keyboard.press("Escape");
+  await p.click('.menu-label:text-is("Edit")');
+  await p.click('.menu-pop .menu-item:has-text("Toolbar…")');
+  await p.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await p.waitForTimeout(250);
+  const tab = await p.evaluate(() => document.activeElement?.getAttribute("aria-label") ?? "");
+  assert(tab === "Tools", `Edit › Toolbar… starts on the Tools tab (${tab})`);
+  await ctx.close();
+}
+
 // 9dp. The thirty-seventh audit's interface pass. Two layers picked
 // with different blends showed the first one's as if both had it;
 // Delete on a layer's row that the keyboard was on, but not picked,
@@ -21701,6 +21744,10 @@ assert(
   await p.waitForTimeout(300);
   assert((await rows.count()) === before - 1, "Delete on a row takes one layer");
   assert((await rows.nth(0).getAttribute("data-id")) === topId, "and it is the row's, not the picked one");
+  assert(
+    ((await rows.nth(0).getAttribute("class")) ?? "").includes("selected"),
+    "and the layer that was picked still is",
+  );
   const zoom = p.locator('input[aria-label="Zoom"]');
   await zoom.fill("37");
   await zoom.press("Enter");

@@ -380,12 +380,15 @@ struct Record {
     artboard: bool,
 }
 
-/// A vector mask: its subpaths, each a run of knots (the control point
-/// coming in, the anchor, the control point going out, as x and y in
-/// fractions of the page), and whether it is inverted.
+/// A vector mask: its subpaths, each with how it combines with those
+/// before it and a run of knots (the control point coming in, the
+/// anchor, the control point going out, as x and y in fractions of the
+/// page); whether it is inverted; its own Density and Feather.
 struct VectorMask {
-    paths: Vec<Vec<[f64; 6]>>,
+    paths: Vec<(i16, Vec<[f64; 6]>)>,
     invert: bool,
+    density: f32,
+    feather: f32,
 }
 
 impl VectorMask {
@@ -399,13 +402,15 @@ impl VectorMask {
         if flags & 4 != 0 {
             return None;
         }
-        let mut paths: Vec<Vec<[f64; 6]>> = Vec::new();
+        let mut paths: Vec<(i16, Vec<[f64; 6]>)> = Vec::new();
         let fixed =
             |b: &[u8]| i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as f64 / (1 << 24) as f64;
         while d.left() >= 26 {
             let rec = d.take(26).ok()?;
             match u16::from_be_bytes([rec[0], rec[1]]) {
-                0 | 3 => paths.push(Vec::new()),
+                // A subpath's length record carries, after its count, how
+                // it combines with those before it (CS6 on; -1 before).
+                0 | 3 => paths.push((i16::from_be_bytes([rec[4], rec[5]]), Vec::new())),
                 1 | 2 | 4 | 5 => {
                     let p = &rec[2..];
                     // Each point is y, then x.
@@ -417,92 +422,160 @@ impl VectorMask {
                         fixed(&p[20..24]),
                         fixed(&p[16..20]),
                     ];
-                    if let Some(path) = paths.last_mut() {
+                    if let Some((_, path)) = paths.last_mut() {
                         path.push(knot);
                     }
                 }
                 _ => {}
             }
         }
-        paths.retain(|p| p.len() >= 2);
+        paths.retain(|(_, p)| p.len() >= 2);
         (!paths.is_empty()).then_some(VectorMask {
             paths,
             invert: flags & 1 != 0,
+            density: 1.0,
+            feather: 0.0,
         })
     }
 
-    /// How much of each pixel of a box the mask shows, filled even-odd as
-    /// Photoshop's classic paths are: exact across, four rows down.
+    /// How much of each pixel of a box the mask shows. Each subpath is
+    /// combined with those before it as it says — added, taken away,
+    /// overlapped, or either but not both — from nothing; a file from
+    /// before shapes said how (every one -1) fills them all even-odd, as
+    /// Photoshop's classic paths are. Then inverted and its density laid
+    /// on, as the file says.
     fn coverage(&self, page: (f64, f64), x0: i32, y0: i32, w: usize, h: usize) -> Vec<f32> {
-        let mut edges: Vec<[f64; 4]> = Vec::new();
-        for path in &self.paths {
-            let mut pts: Vec<[f64; 2]> = Vec::new();
-            for i in 0..path.len() {
-                let (a, b) = (path[i], path[(i + 1) % path.len()]);
-                let p = |k: &[f64; 6], j: usize| [k[j] * page.0, k[j + 1] * page.1];
-                let (p0, p1, p2, p3) = (p(&a, 2), p(&a, 4), p(&b, 0), p(&b, 2));
-                for s in 0..16 {
-                    let t = s as f64 / 16.0;
-                    let u = 1.0 - t;
-                    let c = |j: usize| {
-                        u * u * u * p0[j]
-                            + 3.0 * u * u * t * p1[j]
-                            + 3.0 * u * t * t * p2[j]
-                            + t * t * t * p3[j]
+        let mut out = if self.paths.iter().all(|(op, _)| *op < 0) {
+            let all: Vec<&[[f64; 6]]> = self.paths.iter().map(|(_, p)| p.as_slice()).collect();
+            fill_knots(&all, page, x0, y0, w, h)
+        } else {
+            let mut acc = vec![0f32; w * h];
+            for (op, path) in &self.paths {
+                let c = fill_knots(&[path.as_slice()], page, x0, y0, w, h);
+                for (a, c) in acc.iter_mut().zip(c) {
+                    *a = match op {
+                        2 => *a * (1.0 - c),
+                        3 => *a * c,
+                        0 => *a + c - 2.0 * *a * c,
+                        _ => *a + c - *a * c,
                     };
-                    pts.push([c(0), c(1)]);
                 }
             }
-            for i in 0..pts.len() {
-                let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
-                if a[1] != b[1] {
-                    edges.push([a[0], a[1], b[0], b[1]]);
-                }
-            }
-        }
-        let mut out = vec![0f32; w * h];
-        let mut xs: Vec<f64> = Vec::new();
-        for row in 0..h {
-            for sub in 0..4 {
-                let y = (y0 as f64) + row as f64 + (sub as f64 + 0.5) / 4.0;
-                xs.clear();
-                for e in &edges {
-                    let (ya, yb) = (e[1].min(e[3]), e[1].max(e[3]));
-                    if y >= ya && y < yb {
-                        xs.push(e[0] + (y - e[1]) / (e[3] - e[1]) * (e[2] - e[0]));
-                    }
-                }
-                xs.sort_by(|a, b| a.total_cmp(b));
-                for span in xs.chunks_exact(2) {
-                    let a = (span[0] - x0 as f64).clamp(0.0, w as f64);
-                    let b = (span[1] - x0 as f64).clamp(0.0, w as f64);
-                    if b <= a {
-                        continue;
-                    }
-                    let line = &mut out[row * w..(row + 1) * w];
-                    let (ia, ib) = (a.floor() as usize, b.floor() as usize);
-                    if ia == ib {
-                        line[ia.min(w - 1)] += ((b - a) / 4.0) as f32;
-                        continue;
-                    }
-                    line[ia] += ((ia as f64 + 1.0 - a) / 4.0) as f32;
-                    for v in &mut line[ia + 1..ib] {
-                        *v += 0.25;
-                    }
-                    if ib < w {
-                        line[ib] += ((b - ib as f64) / 4.0) as f32;
-                    }
-                }
-            }
-        }
+            acc
+        };
         for v in &mut out {
             *v = v.clamp(0.0, 1.0);
             if self.invert {
                 *v = 1.0 - *v;
             }
+            if self.density < 1.0 {
+                *v = 1.0 - self.density * (1.0 - *v);
+            }
         }
         out
     }
+}
+
+/// Subpaths' knots filled even-odd over a box: exact across, four rows
+/// down, the edges reaching each row kept in a table so that a mask of
+/// twenty thousand knots asks each row about its own few edges rather
+/// than all of them (it took a minute and a half).
+fn fill_knots(
+    paths: &[&[[f64; 6]]],
+    page: (f64, f64),
+    x0: i32,
+    y0: i32,
+    w: usize,
+    h: usize,
+) -> Vec<f32> {
+    let mut edges: Vec<[f64; 4]> = Vec::new();
+    for path in paths {
+        let mut pts: Vec<[f64; 2]> = Vec::new();
+        for i in 0..path.len() {
+            let (a, b) = (path[i], path[(i + 1) % path.len()]);
+            let p = |k: &[f64; 6], j: usize| [k[j] * page.0, k[j + 1] * page.1];
+            let (p0, p1, p2, p3) = (p(&a, 2), p(&a, 4), p(&b, 0), p(&b, 2));
+            // As many steps as the curve is pixels long, up to sixteen:
+            // a straight side is one.
+            let d =
+                |a: [f64; 2], b: [f64; 2]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+            let straight = d(p0, p1) + d(p2, p3) < 1e-9;
+            let steps = if straight {
+                1
+            } else {
+                ((d(p0, p1) + d(p1, p2) + d(p2, p3)) / 2.0).clamp(1.0, 16.0) as usize
+            };
+            for s in 0..steps {
+                let t = s as f64 / steps as f64;
+                let u = 1.0 - t;
+                let c = |j: usize| {
+                    u * u * u * p0[j]
+                        + 3.0 * u * u * t * p1[j]
+                        + 3.0 * u * t * t * p2[j]
+                        + t * t * t * p3[j]
+                };
+                pts.push([c(0), c(1)]);
+            }
+        }
+        for i in 0..pts.len() {
+            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+            if a[1] != b[1] && a.iter().chain(&b).all(|v| v.is_finite()) {
+                edges.push([a[0], a[1], b[0], b[1]]);
+            }
+        }
+    }
+    edges.sort_by(|a, b| a[1].min(a[3]).total_cmp(&b[1].min(b[3])));
+    let mut out = vec![0f32; w * h];
+    let mut xs: Vec<f64> = Vec::new();
+    let (mut waiting, mut live) = (0usize, Vec::<usize>::new());
+    for row in 0..h {
+        let bottom = (y0 as f64) + row as f64 + 1.0;
+        while waiting < edges.len() && edges[waiting][1].min(edges[waiting][3]) < bottom {
+            live.push(waiting);
+            waiting += 1;
+        }
+        let top = bottom - 1.0;
+        live.retain(|&i| edges[i][1].max(edges[i][3]) > top);
+        if live.is_empty() {
+            continue;
+        }
+        for sub in 0..4 {
+            let y = top + (sub as f64 + 0.5) / 4.0;
+            xs.clear();
+            for &i in &live {
+                let e = &edges[i];
+                let (ya, yb) = (e[1].min(e[3]), e[1].max(e[3]));
+                if y >= ya && y < yb {
+                    xs.push(e[0] + (y - e[1]) / (e[3] - e[1]) * (e[2] - e[0]));
+                }
+            }
+            xs.sort_unstable_by(f64::total_cmp);
+            for span in xs.chunks_exact(2) {
+                let a = (span[0] - x0 as f64).clamp(0.0, w as f64);
+                let b = (span[1] - x0 as f64).clamp(0.0, w as f64);
+                if b <= a {
+                    continue;
+                }
+                let line = &mut out[row * w..(row + 1) * w];
+                let (ia, ib) = (a.floor() as usize, b.floor() as usize);
+                if ia == ib {
+                    line[ia.min(w - 1)] += ((b - a) / 4.0) as f32;
+                    continue;
+                }
+                line[ia] += ((ia as f64 + 1.0 - a) / 4.0) as f32;
+                for v in &mut line[ia + 1..ib] {
+                    *v += 0.25;
+                }
+                if ib < w {
+                    line[ib] += ((b - ib as f64) / 4.0) as f32;
+                }
+            }
+        }
+    }
+    for v in &mut out {
+        *v = v.clamp(0.0, 1.0);
+    }
+    out
 }
 
 fn read_layers(
@@ -569,6 +642,21 @@ fn read_layers(
             (Some(m), true) => (Some(m), -3),
             _ => (rec.mask, -2),
         };
+        // How far the mask is softened over: its own feather and the
+        // vector mask's, which are laid on the two together here.
+        let vfeather = rec.vector.as_ref().map_or(0.0, |v| v.feather);
+        let feathered = rec.feather.max(vfeather);
+        if rec.feather > 0.0 && vfeather > 0.0 && rec.feather != vfeather {
+            lost.push(format!(
+                "the separate feathers of the pixel and vector masks of \"{}\" (both are softened by the larger)",
+                rec.name
+            ));
+        }
+        // Softened, a mask reads its edge from past it: grown by twice
+        // the feather, so that what shows past its box is the mask's
+        // default and not the nothing beyond the raster, which faded the
+        // layer's own edges.
+        let margin = (2.0 * feathered).ceil().min(4000.0) as i32;
         // The pixel mask as coverage over its box: the union of the layer
         // and the mask's own, the mask's default where it says nothing.
         let mut cover = match mask_box {
@@ -585,6 +673,9 @@ fn read_layers(
                     y0 = y0.min(0);
                     x1 = x1.max(h.width as i32);
                     y1 = y1.max(h.height as i32);
+                }
+                if default > 0 {
+                    (x0, y0, x1, y1) = (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
                 }
                 let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
                 let plane = get(mask_id).unwrap_or(&[]);
@@ -623,6 +714,7 @@ fn read_layers(
                 } else {
                     (0, 0, h.width as i32, h.height as i32)
                 };
+                let (x0, y0, x1, y1) = (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
                 let (mw, mh) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
                 (x0, y0, mw, mh, vec![1.0; mw * mh])
             });
@@ -650,13 +742,7 @@ fn read_layers(
                 width: mw as u32,
                 height: mh as u32,
                 rgba,
-                // The pixel mask's own feather; a vector mask's edge is
-                // its own, and is not softened with it.
-                feather: if rec.vector.is_none() {
-                    rec.feather
-                } else {
-                    0.0
-                },
+                feather: feathered,
             }
         });
         // A group's record carries a mask the same way a layer's does,
@@ -740,7 +826,18 @@ fn read_layers(
             ));
         }
         match rec.section {
-            Section::Closes => stack.push(Vec::new()),
+            Section::Closes => {
+                // Nested past what a document holds, said before the
+                // groups are built: the building goes as deep as they
+                // do, and a thousand ran the engine out of stack.
+                if stack.len() > chitrakar_doc::MAX_DEPTH {
+                    return Err(bad(format!(
+                        "layers cannot be nested more than {} deep",
+                        chitrakar_doc::MAX_DEPTH
+                    )));
+                }
+                stack.push(Vec::new())
+            }
             Section::Opens => {
                 let children = if stack.len() > 1 {
                     stack.pop().unwrap_or_default()
@@ -888,44 +985,80 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     let n = extra.u32()? as usize;
     let mut m = extra.sub(n)?;
     let mut real_mask = None;
-    let (mut density, mut feather) = (1.0f32, 0.0f32);
+    // The pixel mask's Density and Feather, then the vector mask's.
+    let mut params = [1.0f32, 0.0, 1.0, 0.0];
     let mask = if n >= 18 {
         let (t, l, b, rr) = (m.i32()?, m.i32()?, m.i32()?, m.i32()?);
         let default = m.u8()?;
         let mflags = m.u8()?;
         // A layer with a vector mask as well keeps a second box: the
         // "real" user mask, whose pixels are channel -3. Its parameters
-        // (densities and feathers) come first when the flags say so.
-        if mflags & 0x10 != 0 {
-            if let Ok(which) = m.u8() {
-                for (bit, size) in [(1u8, 1usize), (2, 8), (4, 1), (8, 8)] {
-                    if which & bit != 0 {
-                        if let Ok(v) = m.take(size) {
-                            match bit {
-                                1 => density = v[0] as f32 / 255.0,
-                                2 => {
-                                    let f = f64::from_be_bytes(v.try_into().unwrap_or([0; 8]));
-                                    if f.is_finite() {
-                                        feather = f.clamp(0.0, 1000.0) as f32;
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
+        // (densities and feathers) come before it by the format's own
+        // words, and after it as Photoshop writes some files (psd-tools
+        // and GIMP read it so): the first order is tried, and where it
+        // reads a box no layer could have, the second.
+        let read_params = |m: &mut R, into: &mut [f32; 4]| {
+            if mflags & 0x10 == 0 {
+                return;
             }
-        }
-        if m.left() >= 18 {
-            let rflags = m.u8()?;
-            let rdefault = m.u8()?;
-            let (rt, rl, rb, rr2) = (m.i32()?, m.i32()?, m.i32()?, m.i32()?);
-            real_mask = Some((rt, rl, rb, rr2, rdefault, rflags & 2 != 0));
+            let Ok(which) = m.u8() else {
+                return;
+            };
+            for (k, (bit, size)) in [(1u8, 1usize), (2, 8), (4, 1), (8, 8)]
+                .into_iter()
+                .enumerate()
+            {
+                if which & bit == 0 {
+                    continue;
+                }
+                let Ok(v) = m.take(size) else {
+                    return;
+                };
+                into[k] = if size == 1 {
+                    v[0] as f32 / 255.0
+                } else {
+                    let f = f64::from_be_bytes(v.try_into().unwrap_or([0; 8]));
+                    if f.is_finite() {
+                        f.clamp(0.0, 1000.0) as f32
+                    } else {
+                        0.0
+                    }
+                };
+            }
+        };
+        let read_real = |m: &mut R| -> Option<(i32, i32, i32, i32, u8, bool)> {
+            if m.left() < 18 {
+                return None;
+            }
+            let rflags = m.u8().ok()?;
+            let rdefault = m.u8().ok()?;
+            let (rt, rl, rb, rr2) = (m.i32().ok()?, m.i32().ok()?, m.i32().ok()?, m.i32().ok()?);
+            Some((rt, rl, rb, rr2, rdefault, rflags & 2 != 0))
+        };
+        let sane = |r: &Option<(i32, i32, i32, i32, u8, bool)>| match r {
+            Some((t, l, b, rr, _, _)) => {
+                b >= t && rr >= l && area(*t, *l, *b, *rr) <= chitrakar_doc::MAX_CANVAS_PIXELS
+            }
+            None => true,
+        };
+        let start = m.p;
+        read_params(&mut m, &mut params);
+        real_mask = read_real(&mut m);
+        if mflags & 0x10 != 0 && !sane(&real_mask) {
+            m.p = start;
+            let real = read_real(&mut m);
+            let mut other = [1.0f32, 0.0, 1.0, 0.0];
+            read_params(&mut m, &mut other);
+            if sane(&real) {
+                real_mask = real;
+                params = other;
+            }
         }
         Some((t, l, b, rr, default, mflags & 2 != 0))
     } else {
         None
     };
+    let [density, feather, vdensity, vfeather] = params;
     // A mask's box is drawn over the union of itself and the layer's: a
     // box a billion pixels out made that union the size of a country,
     // and set it aside. One that cannot be held is let go of, and said.
@@ -1044,7 +1177,11 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
         drawn,
         density,
         feather,
-        vector,
+        vector: vector.map(|mut v| {
+            v.density = vdensity;
+            v.feather = vfeather;
+            v
+        }),
         artboard,
     })
 }
@@ -1804,6 +1941,110 @@ mod tests {
         };
         let m = p.mask.as_ref().unwrap();
         assert_eq!((m.rgba[0], m.rgba[((3 * 10 + 3) * 4) as usize]), (255, 0));
+    }
+
+    /// A vector mask of rectangles, each combining with those before it
+    /// as `op` says (1 adds, 2 takes away, 3 overlaps, 0 either).
+    fn vector_mask_of(w: f64, h: f64, rects: &[([f64; 4], i16)]) -> Vec<u8> {
+        let fixed = |v: f64| ((v * (1 << 24) as f64) as i32).to_be_bytes();
+        let mut b = Vec::new();
+        b.extend_from_slice(&3u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        let mut rec = |sel: u16, body: &[u8]| {
+            b.extend_from_slice(&sel.to_be_bytes());
+            b.extend_from_slice(body);
+            b.extend(std::iter::repeat_n(0u8, 24 - body.len()));
+        };
+        rec(6, &[]);
+        for &([x0, y0, x1, y1], op) in rects {
+            let mut head = 4u16.to_be_bytes().to_vec();
+            head.extend_from_slice(&op.to_be_bytes());
+            rec(0, &head);
+            for (x, y) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)] {
+                let mut k = Vec::new();
+                for _ in 0..3 {
+                    k.extend_from_slice(&fixed(y / h));
+                    k.extend_from_slice(&fixed(x / w));
+                }
+                rec(2, &k);
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn a_vector_masks_shapes_combine_as_they_say() {
+        // Two bars crossing in a plus at (5, 4) of a 10 by 8 page.
+        let tall = [4.0, 1.0, 6.0, 7.0];
+        let wide = [1.0, 3.0, 9.0, 5.0];
+        let at = |ops: [i16; 2], x: i32, y: i32| {
+            let mut red = layer("Cut", [0, 0, 8, 10], solid(10, 8, [255, 0, 0, 255]));
+            red.blocks.push((
+                *b"vmsk",
+                vector_mask_of(10.0, 8.0, &[(tall, ops[0]), (wide, ops[1])]),
+            ));
+            let f = read_psd(&write(10, 8, &[red], &solid(10, 8, [0, 0, 0, 255]))).unwrap();
+            let PsdItem::Pixels(p) = &f.items[0] else {
+                panic!()
+            };
+            let m = p.mask.as_ref().unwrap();
+            m.rgba[(((y - m.top) * m.width as i32 + (x - m.left)) * 4) as usize]
+        };
+        // Added: the middle and both arms show; even-odd left a hole.
+        assert_eq!(
+            (at([1, 1], 5, 4), at([1, 1], 2, 4), at([1, 1], 5, 2)),
+            (255, 255, 255)
+        );
+        // Overlapped: the middle alone.
+        assert_eq!((at([1, 3], 5, 4), at([1, 3], 2, 4)), (255, 0));
+        // Taken away: the tall bar with the middle gone.
+        assert_eq!(
+            (at([1, 2], 5, 4), at([1, 2], 5, 2), at([1, 2], 2, 4)),
+            (0, 255, 0)
+        );
+    }
+
+    #[test]
+    fn a_vector_masks_density_comes_in() {
+        // Half density: outside the shape the layer shows at half.
+        let mut red = layer("Soft", [0, 0, 8, 10], solid(10, 8, [255, 0, 0, 255]));
+        red.blocks.push((
+            *b"vmsk",
+            vector_mask_of(10.0, 8.0, &[([2.0, 2.0, 6.0, 6.0], 1)]),
+        ));
+        red.mask = Some(([0, 0, 0, 0], 255, vec![]));
+        red.mask_params = vec![4, 128];
+        let f = read_psd(&write(10, 8, &[red], &solid(10, 8, [0, 0, 0, 255]))).unwrap();
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        let m = p.mask.as_ref().unwrap();
+        let at =
+            |x: i32, y: i32| m.rgba[(((y - m.top) * m.width as i32 + (x - m.left)) * 4) as usize];
+        assert_eq!(at(3, 3), 255);
+        assert_eq!(
+            at(0, 0),
+            chitrakar_color::linear_to_srgb8(1.0 - 128.0 / 255.0)
+        );
+    }
+
+    #[test]
+    fn groups_nested_past_reason_are_refused_in_words() {
+        let mut layers = Vec::new();
+        for _ in 0..1000 {
+            let mut close = layer("</Layer group>", [0, 0, 0, 0], vec![]);
+            close.section = Some(3);
+            layers.push(close);
+        }
+        for _ in 0..1000 {
+            let mut open = layer("G", [0, 0, 0, 0], vec![]);
+            open.section = Some(1);
+            layers.push(open);
+        }
+        let Err(e) = read_psd(&write(2, 2, &layers, &solid(2, 2, [0, 0, 0, 255]))) else {
+            panic!("refused")
+        };
+        assert!(e.to_string().contains("nested"), "{e}");
     }
 
     #[test]

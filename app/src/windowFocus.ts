@@ -56,6 +56,10 @@ function firstStop(win: Element): HTMLElement | null {
         el instanceof HTMLTextAreaElement ||
         (el instanceof HTMLInputElement && el.type !== "checkbox" && el.type !== "radio"),
     ) ??
+    // A window opened on one of its pages (Edit › Toolbar… opens
+    // Preferences on Tools) starts on that page's tab, not the rail's
+    // first, which Enter then switched to.
+    all.find((el) => el.dataset.firstStop !== undefined) ??
     // A window of buttons opens on its first button, as said, and not on
     // a tick box before it ("Don't ask again", ticked by the next Space).
     all.find((el) => el instanceof HTMLButtonElement) ??

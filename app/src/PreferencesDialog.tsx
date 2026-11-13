@@ -462,6 +462,7 @@ export function PreferencesDialog({
                 key={g.id}
                 className={g.id === group ? "prefs-tab active" : "prefs-tab"}
                 aria-pressed={g.id === group}
+                data-first-stop={g.id === group ? "" : undefined}
                 // Named outright: on a phone the word beside the icon is
                 // put away, and a hidden word names nothing.
                 aria-label={g.label}

@@ -553,8 +553,87 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The widest blur brought in, in the page's pixels (`blur`).
+const SVG_BLUR_MOST: f32 = 250.0;
+
 /// The most letters of SVG text brought in (`past_reason`).
 const SVG_LETTERS_MOST: usize = 10_000;
+
+/// How many letters an element draws, `use`s followed (a bounded way,
+/// and each target counted once however often it is reached for, so a
+/// chain that loops or a bomb of uses costs nothing): text, less what is
+/// kept to be referred to (`defs`, `symbol`, unless `referred`) or not
+/// shown.
+struct Letters<'a, 'i> {
+    ids: std::collections::HashMap<&'a str, usvg::roxmltree::Node<'a, 'i>>,
+    known: std::collections::HashMap<&'a str, usize>,
+}
+
+impl<'a, 'i> Letters<'a, 'i> {
+    fn of(doc: &'a usvg::roxmltree::Document<'i>) -> Self {
+        let ids = doc
+            .descendants()
+            .filter_map(|n| n.attribute("id").map(|id| (id, n)))
+            .collect();
+        Letters {
+            ids,
+            known: Default::default(),
+        }
+    }
+
+    fn drawn(&mut self, node: usvg::roxmltree::Node<'a, 'i>, depth: u32, referred: bool) -> usize {
+        if depth > 16 || !node.is_element() || node.attribute("display") == Some("none") {
+            return 0;
+        }
+        let name = node.tag_name().name();
+        if !referred
+            && matches!(
+                name,
+                "defs" | "symbol" | "clipPath" | "mask" | "pattern" | "marker"
+            )
+        {
+            return 0;
+        }
+        if name == "use" {
+            let href = node
+                .attribute(("http://www.w3.org/1999/xlink", "href"))
+                .or_else(|| node.attribute("href"))
+                .unwrap_or("");
+            let Some(id) = href.strip_prefix('#') else {
+                return 0;
+            };
+            let Some((&key, &target)) = self.ids.get_key_value(id) else {
+                return 0;
+            };
+            if let Some(&n) = self.known.get(key) {
+                return n;
+            }
+            // Counted as nothing while it is being counted: a use that
+            // reaches back to itself draws nothing more.
+            self.known.insert(key, 0);
+            let n = self.drawn(target, depth + 1, true);
+            self.known.insert(key, n);
+            return n;
+        }
+        let mut sum = 0usize;
+        for child in node.children() {
+            if child.is_text() {
+                if node.ancestors().any(|a| a.has_tag_name("text")) {
+                    let n = child
+                        .text()
+                        .unwrap_or("")
+                        .chars()
+                        .filter(|c| !c.is_whitespace())
+                        .count();
+                    sum = sum.saturating_add(n);
+                }
+            } else {
+                sum = sum.saturating_add(self.drawn(child, depth, false));
+            }
+        }
+        sum
+    }
+}
 
 fn past_reason(data: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(data).ok()?;
@@ -569,21 +648,12 @@ fn past_reason(data: &[u8]) -> Option<String> {
     // numbers each: eight thousand letters took a quarter of a minute and
     // a 28 MB document, and half a million never came in at all. Past
     // what can be brought in in reason, it is said so.
-    // Text kept in `defs` is drawn only where a `use` reaches for it: a
-    // file carrying a library of unused labels draws none of them.
-    let used = doc.descendants().any(|n| n.has_tag_name("use"));
-    let letters: usize = doc
-        .descendants()
-        .filter(|n| n.is_text() && n.ancestors().any(|a| a.has_tag_name("text")))
-        .filter(|n| used || !n.ancestors().any(|a| a.has_tag_name("defs")))
-        .map(|n| {
-            n.text()
-                .unwrap_or("")
-                .chars()
-                .filter(|c| !c.is_whitespace())
-                .count()
-        })
-        .sum();
+    // Counted as they will be drawn: text kept in `defs` or a `symbol`
+    // only where a `use` reaches for it, as many times as it is reached
+    // for, and none of what is not shown. Counted as written, a library
+    // of unused labels was refused, and one label used sixty times came
+    // in and held the page for two minutes.
+    let letters = Letters::of(&doc).drawn(doc.root_element(), 0, false);
     if letters > SVG_LETTERS_MOST {
         return Some(format!(
             "this file sets {letters} letters of text, and text comes in as the outlines of its \
@@ -1213,8 +1283,12 @@ impl Page {
     fn blur(&self, std_dev: f32) -> f32 {
         let t = self.at;
         let scale = (t.sx.hypot(t.ky)).max(t.kx.hypot(t.sy)).max(1e-6);
-        let s = std_dev * scale;
-        if s <= 0.01 {
+        // Held to what the editor draws in reason: a blur two thousand
+        // wide on a large page asked an export for a surface three times
+        // the page's size each way, and the engine ran out of memory. A
+        // blur that wide is a wash either way.
+        let s = (std_dev * scale).min(SVG_BLUR_MOST);
+        if s.is_nan() || s <= 0.01 {
             return 0.0;
         }
         let spread = |r: f32| (r * (r + 1.0)).sqrt();
@@ -4749,6 +4823,18 @@ mod tests {
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><text id="t">{many}</text></defs><rect width="5" height="5"/></svg>"#
         );
         assert!(past_reason(kept.as_bytes()).is_none());
+        // Used, it is drawn as many times as it is used.
+        let few = "x".repeat(300);
+        let uses: String = (0..40).map(|_| r##"<use href="#t"/>"##).collect();
+        let used = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><text id="t">{few}</text></defs>{uses}</svg>"#
+        );
+        assert!(past_reason(used.as_bytes()).is_some(), "12000 drawn");
+        // Hidden, or in a symbol nobody uses, it is not.
+        let hidden = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text display="none">{many}</text><symbol id="s"><text>{many}</text></symbol><use href="#r"/><rect id="r" width="1" height="1"/></svg>"##
+        );
+        assert!(past_reason(hidden.as_bytes()).is_none());
     }
 
     /// Two squares wound the same way and sharing a corner fill their

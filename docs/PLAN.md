@@ -119,7 +119,10 @@ without reading anything else.*
      thirty-seventh: its own nonzero speed-up freezing the page on long
      edges, a J's hook still cut where the page draws it, history
      holding every picture ever placed, a layered PSD left blank by a
-     hidden adjustment.
+     hidden adjustment. The thirty-eighth: unsaved work read as saved
+     once history had let go of its oldest steps, a starburst redrawn
+     for fifteen seconds a frame, Photoshop's combined shapes cut as
+     holes, a menu a press on the page left open.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12465,6 +12468,71 @@ without reading anything else.*
   the group on the page and not in a PSD; Halftone's dots at a zoom
   between whole steps can differ in size from an export's; with several
   layers picked, the panel's geometry and effects are the first one's.
+  **A thirty-eighth audit (November 2026).** Its check of round 37:
+  once history had let go of its oldest steps, undoing all the rest
+  brought the history's mark back to where a new document's is, and a
+  page never saved read as saved — no dot, no warning on leaving (the
+  mark is the newest step let go of, then); a starburst of a hundred
+  thousand spikes came in quickly and then took fifteen seconds to draw
+  every frame (a row crossed many times more often than it has pixels
+  is sampled once or four times down rather than sixteen, and its
+  crossings are put in order by pixel); the work budget still let a
+  star of eleven hundred points hold the page ten seconds (the work is
+  counted as it is done, and past thirty million edges looked at the
+  path is left as it is); a colour picked in an effect's well, then a
+  slider moved, was three steps (the well's leaving ends only its own
+  gesture); a live copy of text cut its J's hook (a copy of text is
+  repainted as far as its ink reaches), and lines set tighter than
+  their letters cut descenders at the box's foot (the raster and what
+  is repainted reach half an em above and below the box as well);
+  a Photoshop mask's feather was dropped beside a vector mask (the two
+  are softened together, by the larger, and said where they differ);
+  a feathered mask showing by default faded the layer's edges (the
+  mask reaches twice its feather past its box, in its default); Delete
+  on a row the keyboard was on let go of the other picked layers; the
+  SVG letter count counted text in an unused symbol, a hidden one, and
+  a `use` once however often it was used (counted as drawn now); the
+  zoom box's wheel stepped from 1. Its files pass: a Photoshop vector
+  mask's shapes were all filled even-odd, so two combined into a plus
+  had a hole and two intersected showed nothing (each subpath combines
+  as it says: added, taken away, overlapped or either, from nothing;
+  files from before shapes said how are filled even-odd); a vector
+  mask's own Density and Feather were dropped (both come in); a
+  20,000-knot mask took eighty seconds (its edges are kept in a table
+  by height); a file whose second mask's header comes before its
+  parameters, as psd-tools and GIMP read it, lost its mask (both orders
+  are tried); a thousand nested groups ran the engine out of stack
+  (refused in words past 256, before anything is built); an SVG blur
+  two thousand wide ran an export out of memory (held to 250 pixels);
+  a premultiplied floating-point TIFF came in too bright (its colour is
+  taken off its alpha in light, before the screen's curve). Its
+  interface pass: a press on the page or a ruler left an open menu
+  open and painted a stroke under it (the menus hear a press on its
+  way in, and one that only closes them does nothing else); the
+  light theme's ruler ticks were white on near-white; the draft banner's
+  words were white on the accent, whatever the accent (they are what
+  reads on it); a person's own accent coloured the handles over the
+  picture, and a white one made them vanish (what is drawn over the
+  picture keeps its own blue); a menu hovered into left the focus on
+  the first; the phone's drawer came back open on narrowing again;
+  Edit › Toolbar… put the focus on Preferences' first tab rather than
+  Tools; the document's name could be emptied and Escape did not put it
+  back, and the tab never said which document it held. Limits written
+  down: a path of tens of thousands of points crossing itself
+  everywhere still comes in even-odd; a polyline that goes round twice
+  in a few thousand points comes in empty, the trace failing where
+  its two passes cross at a hair's angle; a stroke over fifty thousand
+  long random segments, or four hundred thousand points of fill, takes
+  minutes and can run the engine out of memory; SVG bold text comes in
+  regular, and a filter the importer does not know is dropped without
+  a word; an animated GIF or WebP brings in its first frame; a saved
+  export setup does not keep sharpening, the watermark or camera data;
+  an SVG export says its size in pixels, not inches; the properties
+  sliders make a history step for each press of an arrow, as a nudge
+  does; the wheel only zooms, and a trackpad's two-finger scroll does
+  not pan; Opacity with layers of different opacity picked shows the
+  first one's; comps, regions, export setups and Blend shapes' count
+  are named in the browser's own prompt.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

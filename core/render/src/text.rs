@@ -2093,7 +2093,13 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     // Room either side for ink past the box, in whole raster pixels so
     // the grid the glyphs are laid on is not slid by it.
     let pad = (ink_overhang(spec) * scale).ceil();
-    let (w, h) = (l.width + 2.0 * pad + phase[0], l.height + phase[1]);
+    // And above and below: a descender under lines set tighter than the
+    // letters (a line height of a half) reaches past the box's bottom,
+    // and an accent past its top.
+    let (w, h) = (
+        l.width + 2.0 * pad + phase[0],
+        l.height + 2.0 * pad + phase[1],
+    );
     if !fits(w, h) {
         return TextRaster::nothing();
     }
@@ -2119,7 +2125,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     };
 
     for line_no in 0..l.lines.len() {
-        let baseline = l.tops[line_no] + l.ascents[line_no] + phase[1];
+        let baseline = l.tops[line_no] + l.ascents[line_no] + phase[1] + pad;
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
         let (glyphs, start, _) = set_line(spec, &l, line_no, scale);
@@ -2165,9 +2171,9 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     for (band, whose) in decoration_bands(spec, &l, scale) {
         let [x0, y0, x1, y1] = [
             band[0] + phase[0] + pad,
-            band[1] + phase[1],
+            band[1] + phase[1] + pad,
             band[2] + phase[0] + pad,
-            band[3] + phase[1],
+            band[3] + phase[1] + pad,
         ];
         let tint = cuts.cut(whose).tint;
         for y in (y0.floor().max(0.0) as u32)..(y1.ceil().max(0.0) as u32).min(height) {
@@ -2195,7 +2201,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         coverage,
         colors,
         tint,
-        origin: ((-phase[0] - pad) / scale, -phase[1] / scale),
+        origin: ((-phase[0] - pad) / scale, (-phase[1] - pad) / scale),
         ink,
     }
 }
@@ -2606,9 +2612,14 @@ mod tests {
         let ink = |s: &TextSpec| -> Vec<Option<(u32, u32)>> {
             let r = rasterize(s);
             let block = set(s);
+            // The raster has room above the block for ink past its top.
+            let pad = ink_overhang(s).ceil();
             (0..block.lines.len())
                 .map(|k| {
-                    let (y0, y1) = (k as f32 * block.step, (k + 1) as f32 * block.step);
+                    let (y0, y1) = (
+                        pad + k as f32 * block.step,
+                        pad + (k + 1) as f32 * block.step,
+                    );
                     let rows = (y0.ceil() as u32)..(y1.floor() as u32).min(r.height);
                     let inked = |x: u32| rows.clone().any(|y| r.sample(x, y) > 0.3);
                     let first = (0..r.width).find(|&x| inked(x))?;
@@ -3674,7 +3685,10 @@ mod tests {
         // Under the first line's baseline, where 'Hello' has no
         // descender, a full-width band appears.
         let laid = set(&plain);
-        let y = (laid.ascent + laid.em * 0.1 + 0.5) as u32;
+        // Rows of the raster from the block's top, past the room left
+        // above it for ink.
+        let pad = ink_overhang(&plain).ceil();
+        let y = (pad + laid.ascent + laid.em * 0.1 + 0.5) as u32;
         let inked = |r: &TextRaster, y: u32| (0..r.width).filter(|&x| r.sample(x, y) > 0.5).count();
         let (first_w, second_w) = (laid.lines[0].width, laid.lines[1].width);
         assert!(
@@ -3687,7 +3701,7 @@ mod tests {
             inked(&under, y)
         );
         // The second line gets its own, only as wide as itself.
-        let y2 = (laid.ascent + laid.step + laid.em * 0.1 + 0.5) as u32;
+        let y2 = (pad + laid.ascent + laid.step + laid.em * 0.1 + 0.5) as u32;
         let band2 = inked(&under, y2) as f32;
         assert!(
             band2 >= second_w * 0.95 && band2 < first_w * 0.8,
@@ -3697,7 +3711,7 @@ mod tests {
         let mut struck = plain.clone();
         struck.strike = true;
         let through = rasterize(&struck);
-        let ys = (laid.ascent - laid.em * 0.3 + 0.5) as u32;
+        let ys = (pad + laid.ascent - laid.em * 0.3 + 0.5) as u32;
         assert!(inked(&through, ys) as f32 >= first_w * 0.95);
         assert!(
             inked(&through, y) == inked(&base, y),

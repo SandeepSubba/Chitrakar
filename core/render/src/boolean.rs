@@ -652,6 +652,12 @@ const NONZERO_MOST: usize = 200_000;
 /// they are past `NONZERO_MOST`.
 const NONZERO_FILED_MOST: usize = 4_000_000;
 const NONZERO_PAIRS_MOST: u64 = 40_000_000;
+/// The most edges the work may look at in all, crossing tests and
+/// windings together, counted as it goes: a star of eleven hundred
+/// points, just inside the pairs above, has every edge crossing every
+/// other, and cutting and asking each of its six hundred thousand pieces
+/// took ten seconds.
+const NONZERO_WORK_MOST: u64 = 30_000_000;
 
 /// A cluster's edges filed by the band of heights each spans, so that
 /// where an edge crosses others, and how many times the outline winds
@@ -662,6 +668,8 @@ struct Bands {
     y0: f32,
     step: f32,
     rows: Vec<Vec<u32>>,
+    /// Edges looked at so far (`NONZERO_WORK_MOST`).
+    work: std::cell::Cell<u64>,
 }
 
 impl Bands {
@@ -681,6 +689,7 @@ impl Bands {
             y0,
             step,
             rows: vec![Vec::new(); n],
+            work: std::cell::Cell::new(0),
         };
         let filed: usize = bands
             .edges
@@ -711,12 +720,16 @@ impl Bands {
 
     /// Every edge cut wherever another crosses it, in the order the
     /// edges run — what `split_ring_all(rings, rings)` answers.
-    fn split(&self) -> Vec<(Point, Point)> {
+    /// `None` past `NONZERO_WORK_MOST`.
+    fn split(&self) -> Option<Vec<(Point, Point)>> {
         let mut out = Vec::new();
         let mut asked = vec![u32::MAX; self.edges.len()];
         for (e, &(a0, a1)) in self.edges.iter().enumerate() {
             let mut cuts: Vec<f32> = vec![0.0, 1.0];
             let (r0, r1) = (self.row(a0[1].min(a1[1])), self.row(a0[1].max(a1[1])));
+            if !self.spend((r0..=r1).map(|r| self.rows[r].len() as u64).sum()) {
+                return None;
+            }
             for r in r0..=r1 {
                 for &o in &self.rows[r] {
                     if asked[o as usize] == e as u32 {
@@ -738,14 +751,23 @@ impl Bands {
                 out.push((at(w[0]), at(w[1])));
             }
         }
-        out
+        Some(out)
+    }
+
+    /// Count `edges` more looked at; false once past the most.
+    fn spend(&self, edges: u64) -> bool {
+        let spent = self.work.get() + edges;
+        self.work.set(spent);
+        spent <= NONZERO_WORK_MOST
     }
 
     /// How many times the outline winds round `p`, as `winding` counts
     /// it, from the edges at its height alone.
     fn winding(&self, p: Point) -> i32 {
         let mut w = 0;
-        for &e in &self.rows[self.row(p[1])] {
+        let row = &self.rows[self.row(p[1])];
+        self.spend(row.len() as u64);
+        for &e in row {
             let (a, b) = self.edges[e as usize];
             let side = (b[0] - a[0]) * (p[1] - a[1]) - (p[0] - a[0]) * (b[1] - a[1]);
             if a[1] <= p[1] && b[1] > p[1] && side > 0.0 {
@@ -766,7 +788,10 @@ fn cluster_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
     let bands = Bands::of(rings)?;
     let mut keep = Vec::new();
     let mut inside_twice = false;
-    for (a, b) in bands.split() {
+    for (a, b) in bands.split()? {
+        if bands.work.get() > NONZERO_WORK_MOST {
+            return None;
+        }
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len = (dx * dx + dy * dy).sqrt();
         if len <= 0.0 {

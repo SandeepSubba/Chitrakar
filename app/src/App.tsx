@@ -1071,6 +1071,19 @@ if (typeof window !== "undefined") {
  * document behind it. */
 const WINDOWS = ".modal-scrim, .sheet-scrim, .straighten-panel, .menu-pop";
 
+/** A press on the page or a ruler that put an open menu away does only
+ * that: it went on to paint a stroke or let go of the picked layer under
+ * the menu it closed, as no menu anywhere else lets a press through. A
+ * right press goes on, so that it can open a menu where it lands. */
+function pressOnlyCloses(e: PointerEvent) {
+  if (e.button === 2) return;
+  const t = e.target as Element | null;
+  if (t?.closest?.(".canvas-host, .ruler")) {
+    e.stopPropagation();
+    e.preventDefault();
+  }
+}
+
 /** Files that arrive while a window is up — "Open with", a share, the
  * shell's drop — wait for it to close. Opened under the Develop window,
  * a document took the session the raw was being developed on, and
@@ -2261,6 +2274,11 @@ export function App() {
   const railRef = useRef<HTMLElement>(null);
   /** The drawer the menus fold into on a phone, open. */
   const [menuSheet, setMenuSheet] = useState(false);
+  // Widened past a phone, the drawer is put away for good: kept, it came
+  // back open over the work, with the focus, when the window narrowed.
+  useEffect(() => {
+    if (!compact) setMenuSheet(false);
+  }, [compact]);
   /** A screen that is touched rather than pointed at — a phone, a
    * tablet. It has no keyboard to hold shift on, so the canvas offers
    * the modifier keys itself. Whether a pointer is coarse can change
@@ -2785,6 +2803,11 @@ export function App() {
    * one typed in the bar. Every save and every export is named after it,
    * so a file keeps its name through a session. */
   const [docName, setDocName] = useState("untitled");
+  // The tab says which document it holds, so several can be told apart.
+  useEffect(() => {
+    const name = docName.trim();
+    document.title = name ? `${name} — Chitrakar` : "Chitrakar";
+  }, [docName]);
   /** Where the document lives on disk, in the desktop shell, once it has
    * been opened from or saved to a file: Save writes back there. A
    * browser never learns a path, so there this stays null and every
@@ -5159,7 +5182,9 @@ export function App() {
     // A press inside the menu is the item being chosen: taking the menu
     // away there would delete the button before its click ever landed.
     const away = (e: PointerEvent) => {
-      if (!contextRef.current?.contains(e.target as Node)) setContextAt(null);
+      if (contextRef.current?.contains(e.target as Node)) return;
+      setContextAt(null);
+      pressOnlyCloses(e);
     };
     const key = (e: KeyboardEvent) => e.key === "Escape" && setContextAt(null);
     // A window resized or a phone turned puts it away, as it does the
@@ -5170,11 +5195,13 @@ export function App() {
     // closed at once.
     const wide = window.innerWidth;
     const resized = () => window.innerWidth !== wide && setContextAt(null);
-    document.addEventListener("pointerdown", away);
+    // Heard on the way in: the canvas keeps its presses to itself, and a
+    // press there left the menu open and painted under it.
+    document.addEventListener("pointerdown", away, true);
     document.addEventListener("keydown", key);
     window.addEventListener("resize", resized);
     return () => {
-      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("pointerdown", away, true);
       document.removeEventListener("keydown", key);
       window.removeEventListener("resize", resized);
     };
@@ -8773,6 +8800,19 @@ export function App() {
       return;
     }
     refresh(session);
+    // A row's own layer deleted keeps what was picked, less it: the
+    // panel went empty and the arrows moved nothing.
+    if (only !== undefined && selectionSet.length > 0) {
+      const up = new Map(layers.map((l) => [l.id as NodeId, l.parent as NodeId]));
+      const inside = (id: NodeId) => {
+        for (let at = up.get(id); at !== undefined; at = up.get(at)) if (at === only) return true;
+        return false;
+      };
+      const kept = selectionSet.filter((id) => id !== only && !inside(id));
+      setSelected(kept[0] ?? null);
+      setMultiSel(kept.slice(1));
+      return;
+    }
     setSelected(null);
     setMultiSel([]);
   };
@@ -13346,9 +13386,20 @@ export function App() {
           className="doc-name"
           value={docName}
           onChange={(e) => setDocName(e.target.value)}
+          // What it was called when the box was come to: Escape puts it
+          // back, and a name left empty is that name again rather than
+          // a blank box every save is named after.
+          onFocus={(e) => (e.currentTarget.dataset.was = docName)}
+          onBlur={(e) => {
+            if (docName.trim() === "") setDocName(e.currentTarget.dataset.was || "untitled");
+          }}
           onKeyDown={(e) => {
             if (!e.ctrlKey && !e.metaKey) e.stopPropagation();
             if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") {
+              setDocName(e.currentTarget.dataset.was || docName);
+              e.currentTarget.blur();
+            }
           }}
           spellCheck={false}
           data-own-undo=""
@@ -13652,7 +13703,9 @@ export function App() {
         <label className="zoom-field">
           <input
             type="number"
-            min={Math.round(MIN_ZOOM * 100)}
+            // No least: the browser steps from it, and from 1 its own
+            // stepping (the wheel's) went 100 to 101. The view holds its
+            // own least (`zoomTo`), and a number under it comes back.
             max={Math.round(MAX_ZOOM * 100)}
             step={5}
             // Keyed by what the view actually is, so wheeling or fitting
@@ -17157,7 +17210,12 @@ export function App() {
                                 true,
                               )
                             }
-                            onBlur={endGesture}
+                            // Its own gesture only: the next control's first
+                            // move comes before this blur, and ended here, the
+                            // slider's drag was cut in two.
+                            onBlur={() => {
+                              if (effectGesture.current === `${at}:${field}`) endGesture();
+                            }}
                             title={`${EFFECT_LABELS[kind]} ${called}`}
                             aria-label={`${EFFECT_LABELS[kind]} ${called}`}
                           />
@@ -19857,17 +19915,20 @@ function MenuButton({
   useEffect(() => {
     if (!open) return;
     const away = (e: PointerEvent) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      if (ref.current?.contains(e.target as Node)) return;
+      onClose();
+      pressOnlyCloses(e);
     };
     const key = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       escaped.current = true;
       onClose();
     };
-    document.addEventListener("pointerdown", away);
+    // On the way in, as the canvas's menu is: see there.
+    document.addEventListener("pointerdown", away, true);
     document.addEventListener("keydown", key);
     return () => {
-      document.removeEventListener("pointerdown", away);
+      document.removeEventListener("pointerdown", away, true);
       document.removeEventListener("keydown", key);
     };
   }, [open, onClose]);
@@ -19892,7 +19953,18 @@ function MenuButton({
         ref={labelRef}
         className={open ? "menu-label open" : "menu-label"}
         onClick={onOpen}
-        onPointerEnter={onHover}
+        onPointerEnter={(e) => {
+          // A menu opened by passing over its label takes the focus from
+          // the one it replaced, if the focus was there: left on File's
+          // label, the next ArrowDown opened File again over the Layer
+          // menu the pointer had opened.
+          const was = document.activeElement;
+          const wasMenus = was instanceof Element && !!was.closest(".menubar");
+          onHover();
+          if (wasMenus && document.querySelector(".menubar .menu-label.open") && was !== e.currentTarget) {
+            e.currentTarget.focus({ preventScroll: true });
+          }
+        }}
         onFocus={(e) => {
           // Where the keyboard came to the menus from (F10, Tab): a row
           // chosen gives it back there.

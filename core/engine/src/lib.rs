@@ -694,6 +694,11 @@ pub struct Session {
     /// The last step's number (`HistoryEntry::serial`).
     serials: u64,
     undo: Vec<HistoryEntry>,
+    /// The serial of the newest step history has let go of to hold its
+    /// pictures (`hold_history_in_memory`), 0 for none. With every step
+    /// undone the page is that step's, not the one the document began
+    /// as: said as 0, a page never saved read as saved.
+    forgotten: u64,
     redo: Vec<HistoryEntry>,
     cache: Option<Surface>,
     /// Reused scratch surface for padded region renders under filters.
@@ -867,6 +872,7 @@ impl Session {
             origin: NEXT_ORIGIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             serials: 0,
             undo: Vec::new(),
+            forgotten: 0,
             redo: Vec::new(),
             cache: None,
             scratch: None,
@@ -1584,7 +1590,7 @@ impl Session {
             if self.undo.is_empty() {
                 return;
             }
-            self.undo.remove(0);
+            self.forgotten = self.undo.remove(0).serial;
         }
     }
 
@@ -1598,7 +1604,7 @@ impl Session {
     /// the mark is that — after an undo and a different edit the history
     /// is as long as it was and the mark is not what it was.
     pub fn history_mark(&self) -> u64 {
-        self.undo.last().map_or(0, |e| e.serial)
+        self.undo.last().map_or(self.forgotten, |e| e.serial)
     }
 
     /// Whether a layer is one a live copy has made its own: it stands in
@@ -32017,6 +32023,11 @@ mod tests {
         assert!(s.undo().unwrap());
         assert!(s.undo().unwrap());
         assert!(s.render().is_ok());
+        // Undone as far as it goes, the page is not the one it began as,
+        // and the history's mark does not say it is: a page never saved
+        // read as saved.
+        while s.undo().unwrap() {}
+        assert_ne!(s.history_mark(), 0);
     }
 
     /// Layers pasted into a document too small to hold where they were

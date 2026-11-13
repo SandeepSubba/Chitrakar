@@ -162,6 +162,7 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     }
     // A floating-point file's alpha is coverage, not a colour: it is read
     // straight, where its colours go through the curve a screen shows.
+    let is_float = matches!(data, DecodingResult::F32(_) | DecodingResult::F64(_));
     let float_alpha = match color {
         ColorType::RGBA(_) | ColorType::GrayA(_) => Some(channels - 1),
         _ => None,
@@ -189,16 +190,13 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         // A float TIFF is light, not code values: encoded for the screen
         // — its colour. Its transparency is coverage, and is not: put on
         // the screen's curve, half transparent came in at 188 of 255.
-        DecodingResult::F32(v) => v
-            .into_iter()
-            .enumerate()
-            .map(|(i, x)| float_sample(x as f64, float_alpha == Some(i % channels)))
-            .collect(),
-        DecodingResult::F64(v) => v
-            .into_iter()
-            .enumerate()
-            .map(|(i, x)| float_sample(x, float_alpha == Some(i % channels)))
-            .collect(),
+        DecodingResult::F32(v) => float_samples(
+            v.into_iter().map(f64::from).collect(),
+            channels,
+            float_alpha,
+            premultiplied,
+        ),
+        DecodingResult::F64(v) => float_samples(v, channels, float_alpha, premultiplied),
         _ => return Err(bad("signed or 64-bit samples are not read")),
     };
     if samples.len() < pixels * channels {
@@ -271,7 +269,11 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
         };
         rgba8[i * 4..i * 4 + 4].copy_from_slice(&px);
     }
-    if premultiplied {
+    // A float file's colour was taken off its alpha in light, before the
+    // screen's curve (`float_samples`): taken off again here, in 8-bit
+    // after the curve, it came in far too bright.
+    let floats = is_float && float_alpha.is_some();
+    if premultiplied && !floats {
         for p in rgba8.as_chunks_mut::<4>().0 {
             let a = p[3] as u32;
             if a > 0 && a < 255 {
@@ -486,6 +488,33 @@ fn float_to_srgb8(x: f64) -> u16 {
 
 /// A float sample as eight bits: colour on the screen's curve, coverage
 /// as it is.
+/// A float file's samples, each as 0..=255: its colours on the screen's
+/// curve and its alpha as coverage. Premultiplied, the colour is taken
+/// off the alpha first, in light, where it was multiplied.
+fn float_samples(
+    mut v: Vec<f64>,
+    channels: usize,
+    alpha: Option<usize>,
+    premultiplied: bool,
+) -> Vec<u16> {
+    if let (Some(at), true) = (alpha, premultiplied) {
+        for px in v.chunks_mut(channels) {
+            let a = px.get(at).copied().unwrap_or(1.0);
+            if a.is_finite() && a > 0.0 && a < 1.0 {
+                for (i, c) in px.iter_mut().enumerate() {
+                    if i != at {
+                        *c /= a;
+                    }
+                }
+            }
+        }
+    }
+    v.into_iter()
+        .enumerate()
+        .map(|(i, x)| float_sample(x, alpha == Some(i % channels)))
+        .collect()
+}
+
 fn float_sample(x: f64, coverage: bool) -> u16 {
     if coverage {
         (if x.is_finite() {
@@ -659,6 +688,26 @@ mod tests {
         let img = crate::decode(&out.into_inner()).unwrap();
         assert_eq!(&img.rgba8[..3], &[188, 188, 188]);
         assert_eq!(img.rgba8[3], 128);
+    }
+
+    #[test]
+    fn a_premultiplied_floating_point_colour_is_taken_off_its_alpha_in_light() {
+        // Linear 0.2 at half coverage, premultiplied: 0.1 stored. It is
+        // the same colour as 0.2 straight, 124 on the screen's curve;
+        // taken off its alpha after the curve, it was 177.
+        let mut out = Cursor::new(Vec::new());
+        let mut tiff = TiffEncoder::new(&mut out).unwrap();
+        let mut img = tiff.new_image::<colortype::RGBA32Float>(1, 1).unwrap();
+        img.encoder().write_tag(Tag::ExtraSamples, 1u16).unwrap();
+        img.write_data(&[0.1, 0.1, 0.1, 0.5]).unwrap();
+        let got = crate::decode(&out.into_inner()).unwrap();
+        let want = (chitrakar_color::linear_to_srgb(0.2) * 255.0).round() as u8;
+        assert!(
+            (got.rgba8[0] as i32 - want as i32).abs() <= 1,
+            "{} vs {want}",
+            got.rgba8[0]
+        );
+        assert_eq!(got.rgba8[3], 128);
     }
 
     #[test]

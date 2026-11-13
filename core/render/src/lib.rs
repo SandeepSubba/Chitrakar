@@ -918,7 +918,7 @@ fn bounds_in_parent_space_inner(
             // ink can (`text::ink_overhang`), past the box it is said to be.
             let [x0, y0, x1, y1] = text::bounds(spec);
             let over = text::ink_overhang(spec);
-            transformed_local_bounds(node.transform, (x0 - over, y0, x1 + over, y1))
+            transformed_local_bounds(node.transform, (x0 - over, y0 - over, x1 + over, y1 + over))
         }
         NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
             match painted_bounds(strokes) {
@@ -947,7 +947,14 @@ fn bounds_in_parent_space_inner(
         // there is nothing standing in.
         NodeKind::Instance { of, .. } => match local_bounds_of(doc, id) {
             Ok(Some([x0, y0, x1, y1])) => {
-                transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+                // A copy of text draws its letters' ink past the box as
+                // the text does (`text::ink_overhang`): repainted over
+                // the box alone, a J's hook was cut flat on the copy.
+                let over = text_copied(doc, *of).map_or(0.0, text::ink_overhang);
+                transformed_local_bounds(
+                    node.transform,
+                    (x0 - over, y0 - over, x1 + over, y1 + over),
+                )
             }
             // No box means one of two things and they are opposite. The
             // original may be *gone*, and then the copy draws nothing and
@@ -1042,6 +1049,19 @@ fn copy_reaches_out(doc: &Document, instance: NodeId, of: NodeId) -> bool {
             .children_of(instance)
             .map(|kids| kids.iter().any(|&k| anywhere(doc, k, LINKS)))
             .unwrap_or(false)
+}
+
+/// The text a live copy copies, following a copy of a copy a bounded
+/// way, as a file can chain them.
+fn text_copied(doc: &Document, mut of: NodeId) -> Option<&chitrakar_doc::TextSpec> {
+    for _ in 0..16 {
+        match &doc.node(of).ok()?.kind {
+            NodeKind::Text(spec) => return Some(spec),
+            NodeKind::Instance { of: next, .. } => of = *next,
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Where a live copy wearing an effect (or copying one) can draw, on the
@@ -8580,8 +8600,19 @@ fn fill_path_scanlines(
     }
     edges.sort_by(|a, b| a.y0.partial_cmp(&b.y0).unwrap_or(std::cmp::Ordering::Equal));
     let width = (bbox.x1 - bbox.x0) as usize;
+    // How wide the shape is where it is drawn, whatever part of it is
+    // being repainted: how finely a row is sampled is the shape's to
+    // say, or a region repainted drew it otherwise than the whole page.
+    let (lo, hi) = polys
+        .iter()
+        .flatten()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p.0), hi.max(p.0))
+        });
+    let across = (hi - lo).clamp(1.0, 1e7) as usize;
     let mut cov = vec![0f32; width];
     let mut xs: Vec<f32> = Vec::new();
+    let (mut sorted, mut counts) = (Vec::new(), Vec::new());
     let mut waiting = 0usize;
     let mut live: Vec<usize> = Vec::new();
     for py in bbox.y0..bbox.y1 {
@@ -8595,9 +8626,22 @@ fn fill_path_scanlines(
         if live.is_empty() {
             continue;
         }
-        for j in 0..N {
+        // A row crossed by many times more edges than it has pixels — a
+        // starburst of a hundred thousand spikes, string art — has detail
+        // far finer than a pixel down it as well as across: sixteen
+        // sub-rows of fifty thousand crossings each, sorted, froze the
+        // page for fifteen seconds a frame. Fewer sub-rows there; a row
+        // of the ordinary few edges keeps its sixteen.
+        let n = if live.len() > 64 * across {
+            1
+        } else if live.len() > 8 * across {
+            4
+        } else {
+            N
+        };
+        for j in 0..n {
             // Sample y at the middle of each sub-row, never on its edge.
-            let sy = py as f32 + (j as f32 + 0.5) / N as f32;
+            let sy = py as f32 + (j as f32 + 0.5) / n as f32;
             xs.clear();
             // Crossings from every ring go into one sorted list, which is
             // exactly what makes the fill even-odd across all of them.
@@ -8610,11 +8654,57 @@ fn fill_path_scanlines(
                     xs.push(e.x0 + (sy - e.y0) * e.slope);
                 }
             }
-            xs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            add_spans(&mut cov, &xs, bbox, N);
+            if xs.len() > 2 * width {
+                sort_by_pixel(&mut xs, &mut sorted, &mut counts, bbox);
+            } else {
+                xs.sort_unstable_by(f32::total_cmp);
+            }
+            add_spans(&mut cov, &xs, bbox, n);
         }
         blend_row(dst, doc, inv, paint, mode, mask, &cov, bbox, py);
     }
+}
+
+/// Crossings put in order by the pixel each falls in, then within each
+/// pixel: a row crossed tens of thousands of times spent most of a frame
+/// sorting them all against each other, where a pixel holds a handful.
+/// Those left of the window go first and those right of it last, each
+/// in a bucket of its own, so the order is still the whole row's.
+fn sort_by_pixel(xs: &mut Vec<f32>, sorted: &mut Vec<f32>, counts: &mut Vec<u32>, bbox: ClipRect) {
+    let w = (bbox.x1 - bbox.x0) as usize;
+    let bucket = |x: f32| -> usize {
+        let p = (x - bbox.x0 as f32).floor();
+        if p.is_nan() || p < 0.0 {
+            0
+        } else if p >= w as f32 {
+            w + 1
+        } else {
+            p as usize + 1
+        }
+    };
+    counts.clear();
+    counts.resize(w + 3, 0);
+    for &x in xs.iter() {
+        counts[bucket(x) + 1] += 1;
+    }
+    for i in 1..counts.len() {
+        counts[i] += counts[i - 1];
+    }
+    sorted.clear();
+    sorted.resize(xs.len(), 0.0);
+    for &x in xs.iter() {
+        let b = bucket(x);
+        sorted[counts[b] as usize] = x;
+        counts[b] += 1;
+    }
+    // `counts[b]` is now where bucket `b` ends; each is put in order.
+    let mut start = 0usize;
+    for &end in &counts[..w + 2] {
+        let end = end as usize;
+        sorted[start..end].sort_unstable_by(f32::total_cmp);
+        start = end;
+    }
+    std::mem::swap(xs, sorted);
 }
 
 /// Add one sub-row's inside spans to a row's coverage, each pixel taking
@@ -13865,7 +13955,7 @@ fn draw_text(
     // leaning f's arm), and the raster has room for it: drawn only over
     // the box, it was cut there.
     let over = text::ink_overhang(spec);
-    let (bx0, bx1) = (bx0 - over, bx1 + over);
+    let (bx0, by0, bx1, by1) = (bx0 - over, by0 - over, bx1 + over, by1 + over);
     let (raster, scale) = text_raster_kept(spec, t);
     let color = resolve_color(doc, &spec.fill);
     // A block whose style runs ask for more than one colour says per
