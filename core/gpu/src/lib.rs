@@ -6151,7 +6151,11 @@ fn text(
         grad: [if ink.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         mask: NO_MASK,
     };
-    let (x0, y0, x1, y1) = (bx0 - m, by0 - m, bx1 + m, by1 + m);
+    // As far as the ink can reach past the box either way, as the CPU
+    // draws it (`text::ink_overhang`): over the box alone, a J's hook
+    // was cut where the line starts.
+    let over = chitrakar_render::text::ink_overhang(spec);
+    let (x0, y0, x1, y1) = (bx0 - over - m, by0 - m, bx1 + over + m, by1 + m);
     let quad = out.push(vec![
         corner(x0, y0),
         corner(x1, y0),

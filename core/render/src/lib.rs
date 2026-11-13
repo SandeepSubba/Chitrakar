@@ -13861,6 +13861,11 @@ fn draw_text(
         return;
     };
     let [bx0, by0, bx1, by1] = text::bounds(spec);
+    // A letter's ink reaches past the box either way (a J's hook, a
+    // leaning f's arm), and the raster has room for it: drawn only over
+    // the box, it was cut there.
+    let over = text::ink_overhang(spec);
+    let (bx0, bx1) = (bx0 - over, bx1 + over);
     let (raster, scale) = text_raster_kept(spec, t);
     let color = resolve_color(doc, &spec.fill);
     // A block whose style runs ask for more than one colour says per
@@ -32170,6 +32175,43 @@ mod tests {
             node_bounds(&doc, id).unwrap(),
             Bounds::Rect(2.0, 2.0, 18.0, 18.0)
         );
+    }
+
+    #[test]
+    fn a_letters_ink_past_the_box_is_drawn() {
+        // A J's hook sits left of where its line starts: drawn only over
+        // the box, it was cut flat at the box's left edge, where text
+        // made into shapes draws it whole.
+        let mut doc = Document::new(400, 300, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::text(
+                "J",
+                chitrakar_doc::TextSpec::new("J", 200.0, RED),
+            )),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(100.0, 20.0),
+        })
+        .unwrap();
+        let raster = text::rasterize(&chitrakar_doc::TextSpec::new("J", 200.0, RED));
+        let (ox, _) = raster.origin;
+        let reaches = (0..raster.height)
+            .any(|y| (0..(-ox).max(0.0) as u32).any(|x| raster.sample(x, y) > 0.5));
+        let s = render(&doc).unwrap();
+        let left = (0..300)
+            .flat_map(|y| (0..400).map(move |x| (x, y)))
+            .filter(|&(x, y)| s.get(x, y).a > 0.5)
+            .map(|(x, _)| x)
+            .min()
+            .unwrap();
+        assert!(reaches, "the raster holds the hook past the box");
+        assert!(left < 99, "the hook is drawn past the box: ink from {left}");
     }
 
     #[test]

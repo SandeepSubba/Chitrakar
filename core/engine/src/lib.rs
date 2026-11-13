@@ -32,6 +32,14 @@ const DUPLICATE_OFFSET: f32 = 12.0;
 /// small one is an average and not a scatter of samples.
 const MIN_EXPORT_SCALE: f32 = 0.001;
 
+/// The most bytes of pictures the history keeps that the page itself no
+/// longer shows (`Session::hold_history_in_memory`): a gigabyte, a dozen
+/// developments of a twenty-megapixel photograph to undo through.
+#[cfg(not(test))]
+const HISTORY_PICTURES_MOST: usize = 1 << 30;
+#[cfg(test)]
+const HISTORY_PICTURES_MOST: usize = 4 << 20;
+
 /// The most bleed a PDF is given, in millimetres. Presses ask for three
 /// or five; past this it is a mistyped number, not a bleed.
 pub const MOST_BLEED_MM: f32 = 25.0;
@@ -1516,7 +1524,68 @@ impl Session {
             serial,
         });
         self.redo.clear();
+        self.hold_history_in_memory();
         Ok(true)
+    }
+
+    /// Keep what the history holds onto in memory within reason. A step
+    /// that replaces a picture — Develop again, above all — keeps the one
+    /// it replaced for its undo, eighty megabytes a time for a twenty
+    /// megapixel photograph, and forty-eight of them ran the engine out of
+    /// memory and stopped it. Past `HISTORY_PICTURES_MOST` of pictures
+    /// only the history needs, the oldest steps go, and a picture neither
+    /// the page nor any step left names goes with them.
+    fn hold_history_in_memory(&mut self) {
+        let all: usize = self.doc.resources().map(|(_, r)| r.rgba8.len()).sum();
+        if all <= HISTORY_PICTURES_MOST {
+            return;
+        }
+        let mut used = std::collections::HashSet::new();
+        let mut take = |id: &str| {
+            used.insert(id.to_string());
+        };
+        for (_, node) in self.doc.nodes() {
+            node.each_resource(&mut take);
+        }
+        if let Some(selection) = self.doc.selection() {
+            selection.each_resource(&mut take);
+        }
+        for region in self.doc.regions() {
+            region.mask.each_resource(&mut take);
+        }
+        loop {
+            let spare: Vec<(String, usize)> = self
+                .doc
+                .resources()
+                .filter(|(id, _)| !used.contains(id.as_str()))
+                .map(|(id, r)| (id.clone(), r.rgba8.len()))
+                .collect();
+            if spare.iter().map(|(_, n)| n).sum::<usize>() <= HISTORY_PICTURES_MOST {
+                return;
+            }
+            // Pictures no step still standing names go first.
+            let said: Vec<String> = self
+                .undo
+                .iter()
+                .chain(self.redo.iter())
+                .map(|e| serde_json::to_string(&e.inverse).unwrap_or_default())
+                .collect();
+            let mut freed = false;
+            for (id, _) in &spare {
+                if !said.iter().any(|s| s.contains(id.as_str())) {
+                    self.doc.remove_resource(id);
+                    freed = true;
+                }
+            }
+            if freed {
+                continue;
+            }
+            // Then the oldest step, and round again.
+            if self.undo.is_empty() {
+                return;
+            }
+            self.undo.remove(0);
+        }
     }
 
     fn next_serial(&mut self) -> u64 {
@@ -1649,6 +1718,7 @@ impl Session {
             serial,
         });
         self.redo.clear();
+        self.hold_history_in_memory();
         Ok(())
     }
 
@@ -4660,6 +4730,7 @@ impl Session {
             return Err(EngineError::BadCommand("that layer is not a frame".into()));
         };
         chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map(|bytes| chitrakar_codecs::with_density(bytes, self.doc.meta.dpi * scale))
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -8740,7 +8811,10 @@ impl Session {
         if let Some(mark) = &self.output_watermark {
             mark.lay_on(&mut out)?;
         }
+        // At the document's resolution, times the scale, as the page's
+        // own export says it.
         kind.encode(w, h, &out.to_srgb8())
+            .map(|bytes| chitrakar_codecs::with_density(bytes, self.doc.meta.dpi * scale))
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -10342,7 +10416,10 @@ impl Session {
             // wears is cut by it: effects are drawn from the masked layer,
             // which a mask beside the pixels would not give.
             let own_mask = node.mask.is_some() && node.effects.is_empty();
-            let applies = matches!(node.kind, NodeKind::Adjustment(_) | NodeKind::Filter(_));
+            // A live copy of an adjustment or a filter rewrites what is
+            // under it as its original does: drawn alone, as a picture of
+            // itself, it was nothing, and what it did was lost.
+            let applies = self.rewrites_under(id);
             let (name, rgba) = if applies {
                 note(
                     "adjustments and filters come as pictures of what is under them with them applied",
@@ -10394,7 +10471,9 @@ impl Session {
             // where that picture is see-through they would show through
             // it a second time and darken it. There they are kept, but
             // hidden, so the file looks as the page does.
-            if applies && rgba.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255) {
+            // A hidden one hides nothing: its picture is not shown, and
+            // the file was left blank.
+            if applies && node.visible && rgba.chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255) {
                 note(
                     "under an adjustment over see-through pixels, the layers it was made from are kept hidden",
                     notes,
@@ -10420,6 +10499,21 @@ impl Session {
             out.push(PsdOutItem::Layer(layer));
         }
         Ok(out)
+    }
+
+    /// Whether a layer rewrites what is under it rather than drawing
+    /// anything of its own: an adjustment, a filter, or a live copy of
+    /// one (followed a bounded way, as a file can chain them).
+    fn rewrites_under(&self, id: NodeId) -> bool {
+        let mut at = id;
+        for _ in 0..16 {
+            match self.doc.node(at).map(|n| &n.kind) {
+                Ok(NodeKind::Adjustment(_) | NodeKind::Filter(_)) => return true,
+                Ok(NodeKind::Instance { of, .. }) => at = *of,
+                _ => return false,
+            }
+        }
+        false
     }
 
     /// One layer drawn on its own at page size, shown and at its full
@@ -10616,6 +10710,7 @@ impl Session {
     pub fn render_png(&self) -> Result<Vec<u8>, EngineError> {
         let surface = self.drawn_with_room(1.0, None)?;
         chitrakar_codecs::encode_png(surface.width, surface.height, &surface.to_srgb8())
+            .map(|bytes| chitrakar_codecs::with_density(bytes, self.doc.meta.dpi))
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -29838,6 +29933,73 @@ mod tests {
             .items
             .iter()
             .all(|i| matches!(i, PsdItem::Pixels(p) if p.visible)));
+
+        // A hidden adjustment over see-through pixels hides nothing: the
+        // file was left blank, its stamp hidden and what it was made from
+        // hidden under it.
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        let half = add_rect(&mut s, "Half", 10.0, 10.0);
+        s.apply(Command::SetOpacity {
+            id: half,
+            opacity: 0.5,
+        })
+        .unwrap();
+        let root = s.document().root();
+        let mut hidden =
+            Node::adjustment("Invert", chitrakar_doc::Adjustment::Invert { amount: 1.0 });
+        hidden.visible = false;
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(hidden),
+        })
+        .unwrap();
+        let f = read_psd(&s.export_psd().unwrap().0).unwrap();
+        assert!(
+            matches!(&f.items[0], PsdItem::Pixels(p) if p.name == "Half" && p.visible),
+            "{:?}",
+            f.items[0]
+        );
+    }
+
+    /// A live copy of an adjustment goes into a PSD as what it does to
+    /// what is under it, as its original does: drawn alone it was nothing,
+    /// and its part of the page came out unchanged.
+    #[test]
+    fn a_live_copy_of_an_adjustment_goes_into_a_psd_applied() {
+        use chitrakar_codecs::psd::{read_psd, PsdItem};
+        let mut s = Session::new(20, 20, ColorMode::Rgb);
+        add_rect(&mut s, "Ground", 20.0, 20.0);
+        let root = s.document().root();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::adjustment(
+                "Invert",
+                chitrakar_doc::Adjustment::Invert { amount: 1.0 },
+            )),
+        })
+        .unwrap();
+        let invert = s.document().children_of(root).unwrap()[1];
+        s.make_instance(invert).unwrap();
+        let f = read_psd(&s.export_psd().unwrap().0).unwrap();
+        let names: Vec<String> = f
+            .items
+            .iter()
+            .map(|i| match i {
+                PsdItem::Pixels(p) => p.name.clone(),
+                PsdItem::Group { name, .. } => name.clone(),
+            })
+            .collect();
+        assert!(names.last().unwrap().ends_with("(applied)"), "{names:?}");
+        // Inverted twice is the ground again, and the file's top layer
+        // says so.
+        let PsdItem::Pixels(top) = f.items.last().unwrap() else {
+            panic!()
+        };
+        let composite = s.render_png().unwrap();
+        let page = chitrakar_codecs::decode(&composite).unwrap();
+        assert_eq!(&top.rgba[..4], &page.rgba8[..4]);
     }
 
     /// An SVG larger than a page can be opens on the largest page that
@@ -31738,6 +31900,30 @@ mod tests {
             (150.0f32 / 0.0254).round() as u32,
             "at a half, 150"
         );
+        // The quick export, and a region kept by name at twice, too —
+        // each once.
+        let quick = s.render_png().unwrap();
+        assert_eq!(quick.windows(4).filter(|w| w == b"pHYs").count(), 1);
+        s.pick_region(
+            VectorShape::Rect {
+                width: 20.0,
+                height: 10.0,
+                radius: 0.0,
+            },
+            Transform::translation(8.0, 6.0),
+            "replace",
+        )
+        .unwrap();
+        s.keep_selection("a slice").unwrap();
+        let slice = s.kept_region_png(0, 2.0).unwrap();
+        assert_eq!(slice.windows(4).filter(|w| w == b"pHYs").count(), 1);
+        let at = slice.windows(4).position(|w| w == b"pHYs").unwrap();
+        let per_metre = u32::from_be_bytes(slice[at + 4..at + 8].try_into().unwrap());
+        assert_eq!(
+            per_metre,
+            (600.0f32 / 0.0254).round() as u32,
+            "at twice, 600"
+        );
         let jpeg = s.export_jpeg_at(1.0, None, 90).unwrap();
         assert_eq!(jpeg[13], 1, "a JPEG's density is in inches");
         assert_eq!(u16::from_be_bytes([jpeg[14], jpeg[15]]), 300);
@@ -31782,6 +31968,55 @@ mod tests {
             assert!(s.undo().unwrap());
         }
         assert_eq!(s.save().unwrap(), start);
+    }
+
+    /// Pictures only the history needs are held within reason: a picture
+    /// replaced again and again (Develop again does it) kept every one it
+    /// replaced for its undo, and the engine ran out of memory. Past the
+    /// budget the oldest steps go, and their pictures with them; the
+    /// newest steps still undo.
+    #[test]
+    fn the_history_holds_its_pictures_within_reason() {
+        let mut s = Session::new(256, 256, ColorMode::Rgb);
+        let root = s.document().root();
+        let first = s.doc.add_resource(256, 256, vec![0u8; 256 * 256 * 4]);
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::raster(
+                "Photo",
+                chitrakar_doc::RasterRef {
+                    resource_id: first,
+                    width: 256,
+                    height: 256,
+                    corners: None,
+                    develop: None,
+                },
+            )),
+        })
+        .unwrap();
+        let id = s.document().children_of(root).unwrap()[0];
+        for k in 1..=40u8 {
+            let picture = s.doc.add_resource(256, 256, vec![k; 256 * 256 * 4]);
+            let mut kind = s.document().node(id).unwrap().kind.clone();
+            if let NodeKind::Raster(r) = &mut kind {
+                r.resource_id = picture;
+            }
+            s.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind),
+            })
+            .unwrap();
+        }
+        let held: usize = s.document().resources().map(|(_, r)| r.rgba8.len()).sum();
+        assert!(
+            held <= HISTORY_PICTURES_MOST + 2 * 256 * 256 * 4,
+            "held {held} bytes of pictures"
+        );
+        // The newest steps still undo, to the picture before.
+        assert!(s.undo().unwrap());
+        assert!(s.undo().unwrap());
+        assert!(s.render().is_ok());
     }
 
     /// Layers pasted into a document too small to hold where they were

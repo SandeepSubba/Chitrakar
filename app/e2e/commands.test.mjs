@@ -107,6 +107,34 @@ check(!claimable("shift+mod+k"), "modifiers out of order are not a chord");
   check(Object.keys(k.commandKeys).length === 0, `back at the default, nothing is kept (${JSON.stringify(k.commandKeys)})`);
 }
 
+// A chord given back with Backspace leaves no command without a key:
+// Undo on mod+shift+z (Redo took mod+z), Save on mod+z (Redo took
+// mod+s), then Undo restored — Save takes Undo's chord in exchange.
+{
+  let k = giveChord({ command: "undo" }, "mod+shift+z", {}, {});
+  k = giveChord({ command: "save" }, "mod+z", k.commandKeys, k.menuKeys);
+  k = restoreChord("undo", k.commandKeys, k.menuKeys);
+  const b = boundChords(k.commandKeys, k.menuKeys);
+  check(b.of.undo === "mod+z", `undo has its own chord back (${b.of.undo})`);
+  for (const id of ["undo", "redo", "save"]) check(!!b.of[id], `and ${id} still has a chord (${JSON.stringify(k.commandKeys)})`);
+}
+
+// Put back with both chords free, each goes back to its own: the
+// export window took save's chord and save another; save restored, the
+// export window is its own again rather than keeping save's spare.
+{
+  let k = giveChord({ command: "export-window" }, "mod+alt+e", {}, {});
+  k = giveChord({ command: "save" }, "mod+alt+e", k.commandKeys, k.menuKeys);
+  let b = boundChords(k.commandKeys, k.menuKeys);
+  check(b.of.save === "mod+alt+e" && b.of["export-window"] === "mod+s", `handed over (${b.of.save}, ${b.of["export-window"]})`);
+  k = restoreChord("save", k.commandKeys, k.menuKeys);
+  b = boundChords(k.commandKeys, k.menuKeys);
+  check(
+    b.of.save === "mod+s" && b.of["export-window"] === "mod+shift+e",
+    `both their own again (${b.of.save}, ${b.of["export-window"]})`,
+  );
+}
+
 // Rows' chords that could not be given are passed over on the way in.
 {
   const b = boundChords({}, { a: "k", b: "mod+alt+k" });

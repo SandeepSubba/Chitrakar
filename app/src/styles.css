@@ -1297,7 +1297,17 @@ body {
 /* A layer's own picture, in place of the glyph that says what kind it
    is. Checkered behind it, so a transparent layer reads as transparent
    rather than as the panel's own background. */
+.props-note {
+  margin: 0 0 0.4rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
 .layer-thumb {
+  /* Not the browser's to drag: a row pressed on its picture began the
+     browser's own image drag, which cancelled the reorder. */
+  -webkit-user-drag: none;
+  user-select: none;
   width: 18px;
   height: 18px;
   border-radius: 3px;

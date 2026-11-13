@@ -569,9 +569,13 @@ fn past_reason(data: &[u8]) -> Option<String> {
     // numbers each: eight thousand letters took a quarter of a minute and
     // a 28 MB document, and half a million never came in at all. Past
     // what can be brought in in reason, it is said so.
+    // Text kept in `defs` is drawn only where a `use` reaches for it: a
+    // file carrying a library of unused labels draws none of them.
+    let used = doc.descendants().any(|n| n.has_tag_name("use"));
     let letters: usize = doc
         .descendants()
         .filter(|n| n.is_text() && n.ancestors().any(|a| a.has_tag_name("text")))
+        .filter(|n| used || !n.ancestors().any(|a| a.has_tag_name("defs")))
         .map(|n| {
             n.text()
                 .unwrap_or("")
@@ -582,7 +586,8 @@ fn past_reason(data: &[u8]) -> Option<String> {
         .sum();
     if letters > SVG_LETTERS_MOST {
         return Some(format!(
-            "this file sets {letters} letters of text, and text comes in as the outlines of its              letters: more than {SVG_LETTERS_MOST} is more than the editor brings in"
+            "this file sets {letters} letters of text, and text comes in as the outlines of its \
+             letters: more than {SVG_LETTERS_MOST} is more than the editor brings in"
         ));
     }
     let not_numbers = [
@@ -2942,12 +2947,14 @@ fn as_even_odd(path: &usvg::Path, rings: Vec<Ring>) -> Vec<Ring> {
         return rings;
     }
     let flat: Vec<Vec<[f32; 2]>> = rings.iter().map(Ring::flattened).collect();
-    let edge = chitrakar_render::boolean::nonzero_as_even_odd(&flat)
-        // Where that could not be traced — outlines that only touch, as a
-        // tapered stroke's bands and discs do — rings all wound one way
-        // are still exactly their union, which the shape booleans can say
-        // by nudging what only touches apart.
-        .or_else(|| union_if_wound_alike(&flat));
+    // Where that could not be traced — outlines that only touch, as a
+    // tapered stroke's bands and discs do — rings all wound one way are
+    // still exactly their union, which the shape booleans can say by
+    // nudging what only touches apart. Asked of each cluster of rings
+    // that reach each other, so one far off wound the other way does not
+    // spoil it for the rest.
+    let edge =
+        chitrakar_render::boolean::nonzero_as_even_odd_or(&flat, &|c| union_if_wound_alike(c));
     match edge {
         Some(edge) => edge
             .into_iter()
@@ -4723,6 +4730,37 @@ mod tests {
         let off = covered_otherwise(svg, 64, 48);
         assert!(
             off == 0,
+            "{off} pixels covered otherwise than a reader covers them"
+        );
+    }
+
+    /// Past ten thousand letters of text a file is said to be past what
+    /// comes in, in plain words; text kept in `defs` and never used is
+    /// not counted, since it draws nothing.
+    #[test]
+    fn a_file_of_too_many_letters_is_said_so_plainly() {
+        let many = "x".repeat(10_001);
+        let drawn = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text>{many}</text></svg>"#
+        );
+        let said = past_reason(drawn.as_bytes()).expect("refused");
+        assert!(!said.contains("  "), "{said}");
+        let kept = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><text id="t">{many}</text></defs><rect width="5" height="5"/></svg>"#
+        );
+        assert!(past_reason(kept.as_bytes()).is_none());
+    }
+
+    /// Two squares wound the same way and sharing a corner fill their
+    /// overlap, whatever else the path holds: a third square far off,
+    /// wound the other way, made the union of rings wound alike — asked
+    /// of the whole path — say no, and the overlap came in a hole.
+    #[test]
+    fn a_ring_far_off_does_not_spoil_a_union_of_the_others() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="60" viewBox="0 0 500 300"><path fill="#000" fill-rule="nonzero" d="M50 50 L250 50 L250 250 L50 250 Z M50 50 L150 50 L150 150 L50 150 Z M300 180 L420 180 L420 60 L300 60 Z"/></svg>"##;
+        let off = covered_otherwise(svg, 100, 60);
+        assert!(
+            off <= 2,
             "{off} pixels covered otherwise than a reader covers them"
         );
     }

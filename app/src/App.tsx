@@ -997,14 +997,16 @@ function pinFlyout(el: HTMLDivElement | null) {
  * already be gone: it closes on the same Escape, and React puts that on
  * the page in a microtask, which runs between one listener and the next. */
 let windowUpForKey = false;
+/** Says whether a window is up for the key now on its way, and only for
+ * it: let go once the key has been heard everywhere, in a task of its
+ * own. Kept, it said a window was up long after one closed, and a file
+ * dropped on the panel was taken and nothing placed. */
+function noteWindowForKey() {
+  windowUpForKey = document.querySelector(WINDOWS) !== null;
+  if (windowUpForKey) setTimeout(() => (windowUpForKey = false), 0);
+}
 if (typeof window !== "undefined") {
-  window.addEventListener(
-    "keydown",
-    () => {
-      windowUpForKey = document.querySelector(WINDOWS) !== null;
-    },
-    true,
-  );
+  window.addEventListener("keydown", noteWindowForKey, true);
 }
 /** The controls the focus last came to by a press of the pointer rather
  * than by a key that moves it: a button clicked keeps the focus, and
@@ -3786,7 +3788,7 @@ export function App() {
       // is up, so Ctrl+S closed Straighten and saved nothing, and the
       // browser's own "save page" came up instead.
       flushSync(() => letGo(null));
-      windowUpForKey = document.querySelector(WINDOWS) !== null;
+      noteWindowForKey();
     };
     window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey, true);
@@ -8169,7 +8171,10 @@ export function App() {
   };
 
   /** Commit the running slider/drag gesture as one undo step. */
+  /** Which of an effect's controls the gesture now open is from. */
+  const effectGesture = useRef<string | null>(null);
   const endGesture = () => {
+    effectGesture.current = null;
     if (session?.commit_preview()) refresh(session);
   };
 
@@ -8732,7 +8737,7 @@ export function App() {
    * entry. Only the primary used to, which made Delete with three
    * layers picked take one away and leave the picking in a state that
    * matched nothing on the canvas. */
-  const deleteSelected = () => {
+  const deleteSelected = (only?: NodeId) => {
     // With the node tool, an anchor taken hold of is what Delete takes
     // away, as in every drawing program — not the whole shape round it.
     const anchor = pickedAnchorRef.current;
@@ -8746,7 +8751,7 @@ export function App() {
       }
       return;
     }
-    const ids = withoutNested(selectionSet);
+    const ids = only !== undefined ? [only] : withoutNested(selectionSet);
     if (ids.length === 0 || !session) return;
     // A drag still going is let go of first: the layer it moves is about
     // to be gone, and each move after threw "unknown node id".
@@ -9023,6 +9028,15 @@ export function App() {
         const from = e.target instanceof HTMLElement ? e.target : null;
         if (from?.closest("aside.panel") && !from.closest(".layer-list")) {
           document.querySelector<HTMLElement>("aside.panel .layer-list li.selected")?.focus();
+        }
+        // On a layer's row the keyboard has reached but not picked, Delete
+        // is that layer's, as Shift+F10 there is: it deleted the one
+        // picked elsewhere.
+        const row = from?.matches(".layer-list li[data-id]") ? from : null;
+        const rowId = row ? Number(row.getAttribute("data-id")) : NaN;
+        if (row && Number.isFinite(rowId) && !selectionSet.includes(rowId as NodeId)) {
+          deleteSelected(rowId as NodeId);
+          return;
         }
         deleteSelected();
       }
@@ -10581,6 +10595,18 @@ export function App() {
   };
 
   /** Rewrite one field of the effect at `at`, keeping its variant. */
+  /** An effect moved by its button keeps the focus on the same button
+   * of the effect where it went: its row is drawn afresh in its new
+   * place, and the focus fell to the layer's row, where a second Enter
+   * picked the row rather than moving the effect again. */
+  const keepEffectFocus = (to: number, label: string) => {
+    requestAnimationFrame(() => {
+      const row = document.querySelectorAll<HTMLElement>(".effects > .effect")[to];
+      const button = row?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+      if (button && !button.disabled) button.focus({ preventScroll: true });
+      else row?.querySelector<HTMLButtonElement>("button:not([disabled])")?.focus({ preventScroll: true });
+    });
+  };
   const tuneEffect = (
     at: number,
     patch: Record<string, number | AuthoredColor>,
@@ -10588,6 +10614,14 @@ export function App() {
   ) => {
     const current = selectedEffects[at];
     if (!current) return;
+    // Another control's gesture is that control's step: a colour picked
+    // in a well that kept the focus, then a slider moved, was one step,
+    // and one undo took both back.
+    if (gesture) {
+      const key = `${at}:${Object.keys(patch).sort().join()}`;
+      if (effectGesture.current !== null && effectGesture.current !== key) endGesture();
+      effectGesture.current = key;
+    }
     const kind = effectKind(current);
     const next = [...selectedEffects];
     next[at] = { [kind]: { ...effectBody(current), ...patch } } as Effect;
@@ -10852,6 +10886,12 @@ export function App() {
       // keep empty history on parse issues
     }
   }
+  /** The history as it stands, for the History list's one handler: each
+   * row's own handler held the history of the render that drew it, and
+   * a row React never redraws kept it — four thousand steps held
+   * millions of copies of their labels (memory grew as the square). */
+  const historyNow = useRef(history);
+  historyNow.current = history;
   /** Whether there is work here that has not been saved. */
   // Measured by which step the history stands at, not how long it is:
   // saved, undone and edited otherwise, it is as long as it was and is
@@ -12736,7 +12776,7 @@ export function App() {
         item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
         // Affinity's Duplicate Linked: a copy that follows the original.
         item("instance", "instance", "Duplicate linked", instanceSelected),
-        item("delete", "trash", "Delete", deleteSelected, "Del"),
+        item("delete", "trash", "Delete", () => deleteSelected(), "Del"),
         SEP,
         // What a selection is filled or outlined with, as Photoshop's
         // Edit menu has them.
@@ -13619,7 +13659,20 @@ export function App() {
             // re-reads rather than leaving a stale draft in the field.
             key={Math.round(view.zoom * 1000)}
             defaultValue={Math.round(view.zoom * 100)}
-            onKeyDown={fieldKeys}
+            onKeyDown={(e) => {
+              // The arrows go by fives, to the next five: the browser's own
+              // went from the box's least (1) by fives, 123 to 126 to 131.
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                e.preventDefault();
+                const el = e.currentTarget;
+                const v = Number(el.value);
+                const at = Number.isFinite(v) && v > 0 ? v : Math.round(view.zoom * 100);
+                const next = e.key === "ArrowUp" ? Math.floor(at / 5) * 5 + 5 : Math.ceil(at / 5) * 5 - 5;
+                el.value = String(Math.min(Math.round(MAX_ZOOM * 100), Math.max(Math.round(MIN_ZOOM * 100), next)));
+                return;
+              }
+              fieldKeys(e);
+            }}
             onBlur={(e) => {
               if (asGiven(e.currentTarget)) return;
               const el = e.currentTarget;
@@ -13818,7 +13871,7 @@ export function App() {
                   Rename…
                 </MenuItem>
               )}
-              <MenuItem icon="trash" onClick={deleteSelected} hint="Del">
+              <MenuItem icon="trash" onClick={() => deleteSelected()} hint="Del">
                 Delete
               </MenuItem>
             </>
@@ -16227,7 +16280,7 @@ export function App() {
                 <Icon name="duplicate" size={16} />
               </button>
               <button
-                onClick={deleteSelected}
+                onClick={() => deleteSelected()}
                 disabled={selected === null}
                 title="Delete selected layer (Del)"
                 aria-label="Delete selected layer"
@@ -16388,11 +16441,17 @@ export function App() {
                 onClick={(e) => {
                   if (Date.now() - layerDragDone.current < 300) return;
                   if (e.ctrlKey || e.metaKey || e.shiftKey) {
-                    // Toggle in the multi-selection; primary stays put.
-                    // Shift does it too, since that is what it does on
-                    // the canvas and a modifier should not change its
-                    // mind between one half of the window and the other.
-                    if (l.id === selected) return;
+                    // Toggle in the multi-selection. Shift does it too,
+                    // since that is what it does on the canvas and a
+                    // modifier should not change its mind between one
+                    // half of the window and the other — the primary
+                    // too: let go of, the next picked becomes primary.
+                    if (l.id === selected) {
+                      if (multiSel.length === 0) return;
+                      setSelected(multiSel[0]);
+                      setMultiSel(multiSel.slice(1));
+                      return;
+                    }
                     setMultiSel((prev) =>
                       prev.includes(l.id)
                         ? prev.filter((id) => id !== l.id)
@@ -16495,7 +16554,7 @@ export function App() {
                     so those keep the glyph that says which they are. */}
                 <span className="layer-kind-icon" title={l.kind}>
                   {thumbs[l.id] ? (
-                    <img className="layer-thumb" src={thumbs[l.id]} alt="" />
+                    <img className="layer-thumb" src={thumbs[l.id]} alt="" draggable={false} />
                   ) : (
                     <Icon name={KIND_ICONS[l.kind] ?? "rect"} size={15} />
                   )}
@@ -16549,6 +16608,7 @@ export function App() {
                     {maskThumbs[l.id] ? (
                       <img
                         className="layer-thumb mask-thumb"
+                        draggable={false}
                         src={maskThumbs[l.id]}
                         alt=""
                       />
@@ -16763,6 +16823,16 @@ export function App() {
                   wherever it is put, so its box is the page's and the
                   fields would only ever say 0, 0 and the page's size. */}
               {selBox && !wholePageLayer && <h3 className="props-head">Position and size</h3>}
+              {/* With several picked, these fields and the effects below
+                  are the first-picked layer's; opacity and blend are
+                  every picked layer's. Said, where it was not: W typed
+                  with two picked scaled one, under the box round both. */}
+              {selBox && !wholePageLayer && selectionSet.length > 1 && (
+                <p className="props-note" role="note">
+                  For {clipName(selectedLayer.name)}, the layer picked first. Opacity and blend go to all{" "}
+                  {selectionSet.length} picked.
+                </p>
+              )}
               {selBox && !wholePageLayer && (
                 <div className="geometry" aria-label="Position and size">
                   {(
@@ -16954,10 +17024,17 @@ export function App() {
               <label>
                 Blend
                 <select
-                  value={selectedLayer.blend}
-                  onChange={(e) =>
-                    setBlendOfSelection(e.target.value as BlendMode)
+                  // Layers picked together that blend differently say so:
+                  // shown as the first one's mode, choosing that mode
+                  // changed nothing, and the others kept theirs.
+                  value={
+                    new Set(selectionSet.filter(blends).map((id) => layers.find((l) => l.id === id)?.blend)).size > 1
+                      ? ""
+                      : selectedLayer.blend
                   }
+                  onChange={(e) => {
+                    if (e.target.value) setBlendOfSelection(e.target.value as BlendMode);
+                  }}
                   // An adjustment or a filter rewrites what is under it
                   // and has nothing of its own left to blend: a mode
                   // chosen for one was kept and did nothing.
@@ -16969,6 +17046,9 @@ export function App() {
                   }
                   aria-label="Blend mode"
                 >
+                  <option value="" disabled hidden>
+                    Mixed
+                  </option>
                   {BLEND_GROUPS.map(([label, modes]) =>
                     label === "" ? (
                       modes.map((m) => (
@@ -17065,11 +17145,19 @@ export function App() {
                             value={colorToHex(
                               (effect as never)[kind][field] as AuthoredColor,
                             )}
+                            // One step for a gesture in the well, as the
+                            // fill's and the stroke's: each tick was a
+                            // step of its own.
                             onChange={(e) =>
-                              tuneEffect(at, {
-                                [field]: inkOf(e.target.value),
-                              })
+                              tuneEffect(
+                                at,
+                                {
+                                  [field]: inkOf(e.target.value),
+                                },
+                                true,
+                              )
                             }
+                            onBlur={endGesture}
                             title={`${EFFECT_LABELS[kind]} ${called}`}
                             aria-label={`${EFFECT_LABELS[kind]} ${called}`}
                           />
@@ -17080,7 +17168,10 @@ export function App() {
                           className="mask-button"
                           disabled={at === 0}
                           aria-label={`Move ${EFFECT_LABELS[kind]} down`}
-                          onClick={() => setEffects(swapEffects(at, at - 1))}
+                          onClick={() => {
+                            setEffects(swapEffects(at, at - 1));
+                            keepEffectFocus(at - 1, `Move ${EFFECT_LABELS[kind]} down`);
+                          }}
                         >
                           <Icon name="lower" size={14} />
                         </button>
@@ -17088,7 +17179,10 @@ export function App() {
                           className="mask-button"
                           disabled={at === selectedEffects.length - 1}
                           aria-label={`Move ${EFFECT_LABELS[kind]} up`}
-                          onClick={() => setEffects(swapEffects(at, at + 1))}
+                          onClick={() => {
+                            setEffects(swapEffects(at, at + 1));
+                            keepEffectFocus(at + 1, `Move ${EFFECT_LABELS[kind]} up`);
+                          }}
                         >
                           <Icon name="raise" size={14} />
                         </button>
@@ -17111,20 +17205,13 @@ export function App() {
                           return (
                           <label key={field}>
                             <SliderHead label={label} value={shown} />
-                            <input
-                              type="range"
+                            <StretchRange
                               min={min}
                               max={max}
                               step={step}
                               value={shown}
-                              onChange={(e) =>
-                                tuneEffect(
-                                  at,
-                                  derived
-                                    ? derived.write(Number(e.target.value))
-                                    : { [field]: Number(e.target.value) },
-                                  true,
-                                )
+                              onValue={(v) =>
+                                tuneEffect(at, derived ? derived.write(v) : { [field]: v }, true)
                               }
                               onPointerUp={endGesture}
                               onKeyUp={endGesture}
@@ -17151,6 +17238,15 @@ export function App() {
                         newEffect(kind, ink("#000000"), ink("#ffe08a"), ink("#ffffff")),
                       ]);
                     }}
+                    // An adjustment or a filter has nothing of its own to
+                    // cast a shadow or wear an outline: one given it was a
+                    // history step that changed nothing, as Blend was.
+                    disabled={!!selectedLayer && !blends(selectedLayer.id) && selectedEffects.length === 0}
+                    title={
+                      !!selectedLayer && !blends(selectedLayer.id)
+                        ? "An adjustment or a filter changes what is under it, and has nothing of its own to wear an effect"
+                        : undefined
+                    }
                     aria-label="Add effect"
                   >
                     <option value="">Choose…</option>
@@ -17242,20 +17338,19 @@ export function App() {
               {selectedMask !== null && (
                 <label className="row">
                   Feather
-                  <input
-                    type="range"
+                  <StretchRange
                     min={0}
                     max={40}
                     step={0.5}
                     value={selectedMask.feather ?? 0}
                     aria-label="Mask feather"
-                    onChange={(e) =>
+                    onValue={(v) =>
                       preview({
                         SetMask: {
                           id: selectedLayer.id,
                           mask: {
                             ...selectedMask!,
-                            feather: Number(e.target.value),
+                            feather: v,
                           },
                         },
                       })
@@ -17277,7 +17372,14 @@ export function App() {
           {(history.past.length > 0 || history.future.length > 0) && (
             <div className="history" aria-label="History">
               <h2>History</h2>
-              <ol ref={historyListRef}>
+              <ol
+                ref={historyListRef}
+                onClick={(e) => {
+                  const row = (e.target as Element).closest?.("button[data-step]");
+                  if (!row) return;
+                  jumpHistory(Number(row.getAttribute("data-step")) + 1 - historyNow.current.past.length);
+                }}
+              >
                 {/* Where the document began, as the first row: every
                     step back at once, in one press, which otherwise took
                     as many presses as there were steps. */}
@@ -17285,7 +17387,7 @@ export function App() {
                   <button
                     className={history.past.length === 0 ? "current" : undefined}
                     aria-current={history.past.length === 0 ? "step" : undefined}
-                    onClick={() => jumpHistory(-history.past.length)}
+                    data-step={-1}
                     // Said rather than switched off, so the focus can
                     // stay on it: switched off, it dropped to the page.
                     aria-disabled={history.past.length === 0}
@@ -17305,7 +17407,7 @@ export function App() {
                       <button
                         className={current ? "current" : undefined}
                         aria-current={current ? "step" : undefined}
-                        onClick={() => jumpHistory(step + 1 - history.past.length)}
+                        data-step={step}
                         aria-label={done ? undefined : `${label} (undone)`}
                       >
                         {label}
@@ -18381,7 +18483,9 @@ function RawDevelopDialog({
                   for (let n = 2; taken.has(suggestion); n++) suggestion = `Preset ${n}`;
                   const name = window.prompt("Keep these settings as:", suggestion)?.trim();
                   if (!name) return;
-                  // A name kept again is the new settings under it.
+                  // A name kept again is the new settings under it, once
+                  // asked: the comps and regions ask the same.
+                  if (taken.has(name) && !window.confirm(`Settings called “${name}” are kept already. Keep these in their place?`)) return;
                   onPresets([...presets.filter((p) => p.name !== name), { name, settings: { ...s } }]);
                 }}
               >

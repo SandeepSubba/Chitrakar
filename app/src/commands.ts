@@ -273,15 +273,25 @@ export function restoreChord(
   rebound: CommandKeys,
   menuKeys: MenuKeys,
 ): { commandKeys: CommandKeys; menuKeys: MenuKeys } {
+  // Given back as any chord is given (`giveChord`): whoever holds the
+  // shipped chord now takes this command's in exchange. Taken from it
+  // without one, it went back to its own shipped chord — which a third
+  // command could be holding, and a command was left with no key at all.
+  // The holder goes back to its own shipped chord where that is free,
+  // which is what a person putting things back expects; only where a
+  // third holds that does it keep the one handed over.
   const shipped = COMMANDS.find((c) => c.id === command)!.chord;
-  const commandKeys: CommandKeys = { ...rebound };
-  const rows: MenuKeys = { ...menuKeys };
-  delete commandKeys[command];
-  for (const id of Object.keys(commandKeys) as CommandId[]) {
-    if (commandKeys[id] === shipped) delete commandKeys[id];
-  }
-  for (const row of Object.keys(rows)) if (rows[row] === shipped) delete rows[row];
-  return { commandKeys, menuKeys: rows };
+  const holder = boundChords(rebound, menuKeys).byChord[shipped];
+  const given = giveChord({ command }, shipped, rebound, menuKeys);
+  if (!holder || holder === command) return given;
+  const own = COMMANDS.find((c) => c.id === holder)?.chord;
+  if (!own) return given;
+  const after = boundChords(given.commandKeys, given.menuKeys);
+  const takenBy = after.byChord[own];
+  if ((takenBy && takenBy !== holder) || after.menuByChord[own]) return given;
+  const commandKeys = { ...given.commandKeys };
+  delete commandKeys[holder];
+  return { commandKeys, menuKeys: given.menuKeys };
 }
 
 /** Whether a command fires while the caret is in a field. */

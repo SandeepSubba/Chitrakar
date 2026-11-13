@@ -337,8 +337,22 @@ pub fn with_density(bytes: Vec<u8>, dpi: f32) -> Vec<u8> {
         chunk.extend_from_slice(&9u32.to_be_bytes());
         chunk.extend_from_slice(&body);
         chunk.extend_from_slice(&crc32(&body).to_be_bytes());
-        // After the header, which is 8 + 4 + 4 + 13 + 4 bytes in.
         let mut out = bytes;
+        // One the file says already is said again, not said twice.
+        let mut at = 8;
+        while at + 12 <= out.len() {
+            let len = u32::from_be_bytes([out[at], out[at + 1], out[at + 2], out[at + 3]]) as usize;
+            let kind = &out[at + 4..at + 8];
+            if kind == b"IDAT" || kind == b"IEND" {
+                break;
+            }
+            if kind == b"pHYs" && len == 9 && at + 21 <= out.len() {
+                out[at..at + 21].copy_from_slice(&chunk);
+                return out;
+            }
+            at += 12 + len;
+        }
+        // After the header, which is 8 + 4 + 4 + 13 + 4 bytes in.
         out.splice(33..33, chunk);
         return out;
     }

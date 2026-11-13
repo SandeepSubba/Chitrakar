@@ -665,6 +665,12 @@ impl Document {
         }
     }
 
+    /// Let a picture go: one nothing on the page, and no step of the
+    /// history still standing, names (`Session::hold_history_in_memory`).
+    pub fn remove_resource(&mut self, id: &str) -> Option<Resource> {
+        self.resources.remove(id)
+    }
+
     pub fn resource(&self, id: &str) -> Option<&Resource> {
         self.resources.get(id)
     }

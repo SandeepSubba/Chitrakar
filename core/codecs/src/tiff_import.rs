@@ -160,6 +160,12 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             _ => {}
         }
     }
+    // A floating-point file's alpha is coverage, not a colour: it is read
+    // straight, where its colours go through the curve a screen shows.
+    let float_alpha = match color {
+        ColorType::RGBA(_) | ColorType::GrayA(_) => Some(channels - 1),
+        _ => None,
+    };
     // Each sample as 0..=255 — or, for a palette, as its index.
     let samples: Vec<u16> = match data {
         DecodingResult::U8(v) if bits < 8 => {
@@ -180,9 +186,19 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             .map(|x| ((x as u32 + 128) / 257) as u16)
             .collect(),
         DecodingResult::U32(v) => v.into_iter().map(|x| (x >> 24) as u16).collect(),
-        // A float TIFF is light, not code values: encoded for the screen.
-        DecodingResult::F32(v) => v.into_iter().map(|x| float_to_srgb8(x as f64)).collect(),
-        DecodingResult::F64(v) => v.into_iter().map(float_to_srgb8).collect(),
+        // A float TIFF is light, not code values: encoded for the screen
+        // — its colour. Its transparency is coverage, and is not: put on
+        // the screen's curve, half transparent came in at 188 of 255.
+        DecodingResult::F32(v) => v
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| float_sample(x as f64, float_alpha == Some(i % channels)))
+            .collect(),
+        DecodingResult::F64(v) => v
+            .into_iter()
+            .enumerate()
+            .map(|(i, x)| float_sample(x, float_alpha == Some(i % channels)))
+            .collect(),
         _ => return Err(bad("signed or 64-bit samples are not read")),
     };
     if samples.len() < pixels * channels {
@@ -468,6 +484,21 @@ fn float_to_srgb8(x: f64) -> u16 {
     (chitrakar_color::linear_to_srgb(x.clamp(0.0, 1.0) as f32) * 255.0).round() as u16
 }
 
+/// A float sample as eight bits: colour on the screen's curve, coverage
+/// as it is.
+fn float_sample(x: f64, coverage: bool) -> u16 {
+    if coverage {
+        (if x.is_finite() {
+            x.clamp(0.0, 1.0)
+        } else {
+            0.0
+        } * 255.0)
+            .round() as u16
+    } else {
+        float_to_srgb8(if x.is_finite() { x } else { 0.0 })
+    }
+}
+
 fn ycbcr(y: u16, cb: u16, cr: u16) -> [u8; 4] {
     let (y, cb, cr) = (y as f32, cb as f32 - 128.0, cr as f32 - 128.0);
     let c = |v: f32| v.round().clamp(0.0, 255.0) as u8;
@@ -615,6 +646,19 @@ mod tests {
         assert_eq!(&got.rgba8[..3], &[srgb(want.r), srgb(want.g), srgb(want.b)]);
         // And not the plain subtraction: a press's cyan is not (0, 255, 255).
         assert_ne!(&got.rgba8[..3], &[0, 255, 255]);
+    }
+
+    #[test]
+    fn a_floating_point_alpha_is_coverage_not_a_colour() {
+        // Linear half grey at half coverage: the grey goes through the
+        // screen's curve (188), the coverage does not (128).
+        let mut out = Cursor::new(Vec::new());
+        let mut tiff = TiffEncoder::new(&mut out).unwrap();
+        tiff.write_image::<colortype::RGBA32Float>(1, 1, &[0.5, 0.5, 0.5, 0.5])
+            .unwrap();
+        let img = crate::decode(&out.into_inner()).unwrap();
+        assert_eq!(&img.rgba8[..3], &[188, 188, 188]);
+        assert_eq!(img.rgba8[3], 128);
     }
 
     #[test]

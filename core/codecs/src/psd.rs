@@ -90,6 +90,8 @@ pub struct PsdMask {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// Photoshop's Feather, in pixels.
+    pub feather: f32,
 }
 
 fn bad(what: impl std::fmt::Display) -> CodecError {
@@ -369,6 +371,138 @@ struct Record {
     effects: bool,
     /// A shape or a fill: kept as a drawing, its pixels possibly not at all.
     drawn: bool,
+    /// The pixel mask's Density (1 is all of it) and Feather (pixels).
+    density: f32,
+    feather: f32,
+    /// A vector mask, drawn into the pixel mask on the way in.
+    vector: Option<VectorMask>,
+    /// A group that is an artboard (said: it comes in as a plain group).
+    artboard: bool,
+}
+
+/// A vector mask: its subpaths, each a run of knots (the control point
+/// coming in, the anchor, the control point going out, as x and y in
+/// fractions of the page), and whether it is inverted.
+struct VectorMask {
+    paths: Vec<Vec<[f64; 6]>>,
+    invert: bool,
+}
+
+impl VectorMask {
+    /// Read from a `vmsk` or `vsms` block; `None` when it is switched off
+    /// or says nothing.
+    fn read(d: &mut R) -> Option<VectorMask> {
+        if d.u32().ok()? != 3 {
+            return None;
+        }
+        let flags = d.u32().ok()?;
+        if flags & 4 != 0 {
+            return None;
+        }
+        let mut paths: Vec<Vec<[f64; 6]>> = Vec::new();
+        let fixed =
+            |b: &[u8]| i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as f64 / (1 << 24) as f64;
+        while d.left() >= 26 {
+            let rec = d.take(26).ok()?;
+            match u16::from_be_bytes([rec[0], rec[1]]) {
+                0 | 3 => paths.push(Vec::new()),
+                1 | 2 | 4 | 5 => {
+                    let p = &rec[2..];
+                    // Each point is y, then x.
+                    let knot = [
+                        fixed(&p[4..8]),
+                        fixed(&p[0..4]),
+                        fixed(&p[12..16]),
+                        fixed(&p[8..12]),
+                        fixed(&p[20..24]),
+                        fixed(&p[16..20]),
+                    ];
+                    if let Some(path) = paths.last_mut() {
+                        path.push(knot);
+                    }
+                }
+                _ => {}
+            }
+        }
+        paths.retain(|p| p.len() >= 2);
+        (!paths.is_empty()).then_some(VectorMask {
+            paths,
+            invert: flags & 1 != 0,
+        })
+    }
+
+    /// How much of each pixel of a box the mask shows, filled even-odd as
+    /// Photoshop's classic paths are: exact across, four rows down.
+    fn coverage(&self, page: (f64, f64), x0: i32, y0: i32, w: usize, h: usize) -> Vec<f32> {
+        let mut edges: Vec<[f64; 4]> = Vec::new();
+        for path in &self.paths {
+            let mut pts: Vec<[f64; 2]> = Vec::new();
+            for i in 0..path.len() {
+                let (a, b) = (path[i], path[(i + 1) % path.len()]);
+                let p = |k: &[f64; 6], j: usize| [k[j] * page.0, k[j + 1] * page.1];
+                let (p0, p1, p2, p3) = (p(&a, 2), p(&a, 4), p(&b, 0), p(&b, 2));
+                for s in 0..16 {
+                    let t = s as f64 / 16.0;
+                    let u = 1.0 - t;
+                    let c = |j: usize| {
+                        u * u * u * p0[j]
+                            + 3.0 * u * u * t * p1[j]
+                            + 3.0 * u * t * t * p2[j]
+                            + t * t * t * p3[j]
+                    };
+                    pts.push([c(0), c(1)]);
+                }
+            }
+            for i in 0..pts.len() {
+                let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                if a[1] != b[1] {
+                    edges.push([a[0], a[1], b[0], b[1]]);
+                }
+            }
+        }
+        let mut out = vec![0f32; w * h];
+        let mut xs: Vec<f64> = Vec::new();
+        for row in 0..h {
+            for sub in 0..4 {
+                let y = (y0 as f64) + row as f64 + (sub as f64 + 0.5) / 4.0;
+                xs.clear();
+                for e in &edges {
+                    let (ya, yb) = (e[1].min(e[3]), e[1].max(e[3]));
+                    if y >= ya && y < yb {
+                        xs.push(e[0] + (y - e[1]) / (e[3] - e[1]) * (e[2] - e[0]));
+                    }
+                }
+                xs.sort_by(|a, b| a.total_cmp(b));
+                for span in xs.chunks_exact(2) {
+                    let a = (span[0] - x0 as f64).clamp(0.0, w as f64);
+                    let b = (span[1] - x0 as f64).clamp(0.0, w as f64);
+                    if b <= a {
+                        continue;
+                    }
+                    let line = &mut out[row * w..(row + 1) * w];
+                    let (ia, ib) = (a.floor() as usize, b.floor() as usize);
+                    if ia == ib {
+                        line[ia.min(w - 1)] += ((b - a) / 4.0) as f32;
+                        continue;
+                    }
+                    line[ia] += ((ia as f64 + 1.0 - a) / 4.0) as f32;
+                    for v in &mut line[ia + 1..ib] {
+                        *v += 0.25;
+                    }
+                    if ib < w {
+                        line[ib] += ((b - ib as f64) / 4.0) as f32;
+                    }
+                }
+            }
+        }
+        for v in &mut out {
+            *v = v.clamp(0.0, 1.0);
+            if self.invert {
+                *v = 1.0 - *v;
+            }
+        }
+        out
+    }
 }
 
 fn read_layers(
@@ -419,7 +553,7 @@ fn read_layers(
             // One channel that will not read costs that channel, not the
             // file: the rest of the layers are still worth having.
             match decode_plane(&mut ch, compression, cw, chh, h.depth, h.big) {
-                Ok(plane) => planes.push((id, plane)),
+                Ok(plane) => planes.push((id, coverage_plane(id < 0, h.depth, plane))),
                 Err(e) => lost.push(format!("a channel of \"{}\" ({e})", rec.name)),
             }
         }
@@ -435,10 +569,10 @@ fn read_layers(
             (Some(m), true) => (Some(m), -3),
             _ => (rec.mask, -2),
         };
-        let mask = match mask_box {
+        // The pixel mask as coverage over its box: the union of the layer
+        // and the mask's own, the mask's default where it says nothing.
+        let mut cover = match mask_box {
             Some((t, l, b, rr, default, false)) if get(mask_id).is_some() => {
-                // Over the union of the layer and the mask's own box, the
-                // mask's default where it says nothing.
                 let (mut x0, mut y0) = (rec.left.min(l), rec.top.min(t));
                 let (mut x1, mut y1) = (rec.right.max(rr), rec.bottom.max(b));
                 // A group's record has no box of its own, and Photoshop
@@ -455,11 +589,11 @@ fn read_layers(
                 let (mw, mh) = ((x1 - x0) as usize, (y1 - y0) as usize);
                 let plane = get(mask_id).unwrap_or(&[]);
                 let (pw, _) = ((rr - l) as usize, (b - t) as usize);
-                let mut out = vec![0u8; mw * mh * 4];
+                let mut out = vec![0f32; mw * mh];
                 for y in 0..mh {
                     for x in 0..mw {
                         let (dx, dy) = (x0 + x as i32 - l, y0 + y as i32 - t);
-                        let v = if dx >= 0 && dy >= 0 && dx < rr - l && dy < b - t {
+                        out[y * mw + x] = if dx >= 0 && dy >= 0 && dx < rr - l && dy < b - t {
                             plane
                                 .get(dy as usize * pw + dx as usize)
                                 .copied()
@@ -467,23 +601,64 @@ fn read_layers(
                         } else {
                             default as f32 / 255.0
                         };
-                        // Coverage is read as linear luminance, so the
-                        // grey is stored encoded: v of coverage, v again.
-                        let g = chitrakar_color::linear_to_srgb8(v.clamp(0.0, 1.0));
-                        out[(y * mw + x) * 4..(y * mw + x) * 4 + 4]
-                            .copy_from_slice(&[g, g, g, 255]);
                     }
                 }
-                Some(PsdMask {
-                    left: x0,
-                    top: y0,
-                    width: mw as u32,
-                    height: mh as u32,
-                    rgba: out,
-                })
+                // Density: how much of what the mask hides it hides.
+                if rec.density < 1.0 {
+                    for v in &mut out {
+                        *v = 1.0 - rec.density * (1.0 - v.clamp(0.0, 1.0));
+                    }
+                }
+                Some((x0, y0, mw, mh, out))
             }
             _ => None,
         };
+        // A vector mask cuts the layer as well: drawn over the pixel
+        // mask's box, or the layer's own (a group's, the page), and
+        // multiplied in.
+        if let (Some(v), false) = (&rec.vector, matches!(rec.section, Section::Closes)) {
+            let (x0, y0, mw, mh, mut out) = cover.take().unwrap_or_else(|| {
+                let (x0, y0, x1, y1) = if matches!(rec.section, Section::Pixels) {
+                    (rec.left, rec.top, rec.right, rec.bottom)
+                } else {
+                    (0, 0, h.width as i32, h.height as i32)
+                };
+                let (mw, mh) = ((x1 - x0).max(0) as usize, (y1 - y0).max(0) as usize);
+                (x0, y0, mw, mh, vec![1.0; mw * mh])
+            });
+            if mw > 0 && mh > 0 {
+                let cut = v.coverage((h.width as f64, h.height as f64), x0, y0, mw, mh);
+                for (o, c) in out.iter_mut().zip(cut) {
+                    *o *= c;
+                }
+                cover = Some((x0, y0, mw, mh, out));
+            }
+        }
+        let mask = cover.map(|(x0, y0, mw, mh, out)| {
+            // Coverage is read as linear luminance, so the grey is stored
+            // encoded: v of coverage, v again.
+            let rgba = out
+                .iter()
+                .flat_map(|v| {
+                    let g = chitrakar_color::linear_to_srgb8(v.clamp(0.0, 1.0));
+                    [g, g, g, 255]
+                })
+                .collect();
+            PsdMask {
+                left: x0,
+                top: y0,
+                width: mw as u32,
+                height: mh as u32,
+                rgba,
+                // The pixel mask's own feather; a vector mask's edge is
+                // its own, and is not softened with it.
+                feather: if rec.vector.is_none() {
+                    rec.feather
+                } else {
+                    0.0
+                },
+            }
+        });
         // A group's record carries a mask the same way a layer's does,
         // and nothing else of its own.
         if !matches!(rec.section, Section::Pixels) {
@@ -556,6 +731,12 @@ fn read_layers(
                 "the blend mode of \"{}\" ({})",
                 rec.name,
                 String::from_utf8_lossy(&rec.blend_key).trim()
+            ));
+        }
+        if rec.artboard && matches!(rec.section, Section::Opens) {
+            lost.push(format!(
+                "the artboard \"{}\", which comes in as a plain group: its edges do not clip what is in it, and its background is not drawn",
+                rec.name
             ));
         }
         match rec.section {
@@ -707,6 +888,7 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     let n = extra.u32()? as usize;
     let mut m = extra.sub(n)?;
     let mut real_mask = None;
+    let (mut density, mut feather) = (1.0f32, 0.0f32);
     let mask = if n >= 18 {
         let (t, l, b, rr) = (m.i32()?, m.i32()?, m.i32()?, m.i32()?);
         let default = m.u8()?;
@@ -718,7 +900,18 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
             if let Ok(which) = m.u8() {
                 for (bit, size) in [(1u8, 1usize), (2, 8), (4, 1), (8, 8)] {
                     if which & bit != 0 {
-                        m.take(size).ok();
+                        if let Ok(v) = m.take(size) {
+                            match bit {
+                                1 => density = v[0] as f32 / 255.0,
+                                2 => {
+                                    let f = f64::from_be_bytes(v.try_into().unwrap_or([0; 8]));
+                                    if f.is_finite() {
+                                        feather = f.clamp(0.0, 1000.0) as f32;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -772,6 +965,8 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
     let mut adjustment = false;
     let mut effects = false;
     let mut drawn = false;
+    let mut vector = None;
+    let mut artboard = false;
     let mut group_blend: Option<[u8; 4]> = None;
     while extra.left() >= 12 {
         let sig = extra.take(4)?;
@@ -811,7 +1006,14 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
             }
             b"iOpa" => fill = d.u8().unwrap_or(255) as f32 / 255.0,
             b"lfx2" | b"lrFX" | b"lmfx" => effects = true,
-            b"SoCo" | b"GdFl" | b"PtFl" | b"vmsk" | b"vsms" | b"vogk" => drawn = true,
+            b"vmsk" | b"vsms" => {
+                drawn = true;
+                if vector.is_none() {
+                    vector = VectorMask::read(&mut d);
+                }
+            }
+            b"SoCo" | b"GdFl" | b"PtFl" | b"vogk" => drawn = true,
+            b"artb" | b"artd" | b"abdd" => artboard = true,
             b"levl" | b"curv" | b"brit" | b"blnc" | b"hue2" | b"hue " | b"selc" | b"mixr"
             | b"grdm" | b"phfl" | b"expA" | b"vibA" | b"thrs" | b"post" | b"nvrt" | b"blwh"
             | b"clrL" => adjustment = true,
@@ -840,6 +1042,10 @@ fn read_record(r: &mut R, big: bool) -> Result<Record, CodecError> {
         adjustment,
         effects,
         drawn,
+        density,
+        feather,
+        vector,
+        artboard,
     })
 }
 
@@ -869,6 +1075,21 @@ fn blend_of(key: &[u8; 4]) -> Option<BlendMode> {
         b"lum " => BlendMode::Luminosity,
         _ => return None,
     })
+}
+
+/// A plane read as `samples` reads it, given back as coverage where it
+/// is one — transparency, a mask — rather than colour: a 32-bit file's
+/// samples are light and `samples` puts them on the screen's curve,
+/// which a coverage is not on, and half transparent came in at 188 of
+/// 255, a mask of a half at three quarters.
+fn coverage_plane(coverage: bool, depth: u16, plane: Vec<f32>) -> Vec<f32> {
+    if !coverage || depth != 32 {
+        return plane;
+    }
+    plane
+        .into_iter()
+        .map(|v| chitrakar_color::srgb_to_linear(v).clamp(0.0, 1.0))
+        .collect()
 }
 
 /// One channel's samples, 0..=1, decompressed.
@@ -1069,6 +1290,9 @@ fn read_merged(r: &mut R, h: &Header, colour: &Colour, alpha: bool) -> Result<Ve
         Mode::Grey | Mode::Duotone => 1,
         _ => usize::MAX,
     };
+    if let Some(alpha) = planes.get_mut(alpha_index) {
+        *alpha = coverage_plane(true, h.depth, std::mem::take(alpha));
+    }
     let get = |id: i16| -> Option<&[f32]> {
         let i = if id == -1 { alpha_index } else { id as usize };
         planes.get(i).map(|p| p.as_slice())
@@ -1204,7 +1428,7 @@ impl PsdFile {
                     transform: Transform::translation(m.left as f32, m.top as f32),
                 },
                 invert: false,
-                feather: 0.0,
+                feather: m.feather,
             }
         }
         fn add(
@@ -1319,6 +1543,11 @@ pub mod sample {
         pub section: Option<u32>,
         pub mask: Option<([i32; 4], u8, Vec<u8>)>,
         pub rle: bool,
+        /// The mask's parameters (Density, Feather), as written after
+        /// its flags: the byte saying which, then the values.
+        pub mask_params: Vec<u8>,
+        /// Further tagged blocks, written after the name.
+        pub blocks: Vec<([u8; 4], Vec<u8>)>,
     }
 
     pub fn layer(name: &'static str, rect: [i32; 4], rgba: Vec<u8>) -> Layer {
@@ -1333,6 +1562,8 @@ pub mod sample {
             section: None,
             mask: None,
             rle: false,
+            mask_params: Vec::new(),
+            blocks: Vec::new(),
         }
     }
 
@@ -1414,12 +1645,14 @@ pub mod sample {
             let mut extra = Vec::new();
             match &l.mask {
                 Some((mr, default, _)) => {
-                    extra.extend_from_slice(&20u32.to_be_bytes());
+                    let params = &l.mask_params;
+                    extra.extend_from_slice(&(20 + params.len() as u32).to_be_bytes());
                     for v in mr {
                         extra.extend_from_slice(&v.to_be_bytes());
                     }
                     extra.push(*default);
-                    extra.push(0);
+                    extra.push(if params.is_empty() { 0 } else { 0x10 });
+                    extra.extend_from_slice(params);
                     extra.extend_from_slice(&[0, 0]);
                 }
                 None => extra.extend_from_slice(&0u32.to_be_bytes()),
@@ -1433,6 +1666,15 @@ pub mod sample {
                 extra.extend_from_slice(b"8BIMlsct");
                 extra.extend_from_slice(&4u32.to_be_bytes());
                 extra.extend_from_slice(&kind.to_be_bytes());
+            }
+            for (key, block) in &l.blocks {
+                extra.extend_from_slice(b"8BIM");
+                extra.extend_from_slice(key);
+                extra.extend_from_slice(&(block.len() as u32).to_be_bytes());
+                extra.extend_from_slice(block);
+                if block.len() % 2 == 1 {
+                    extra.push(0);
+                }
             }
             info.extend_from_slice(&(extra.len() as u32).to_be_bytes());
             info.extend(extra);
@@ -1507,6 +1749,106 @@ mod tests {
         assert!(!hd.visible);
         assert!(f.lost.is_empty(), "{:?}", f.lost);
         assert_eq!(&f.composite.unwrap()[..4], &[1, 2, 3, 255]);
+    }
+
+    /// A vector mask block holding one closed path through the corners
+    /// given, in pixels of a page `w` by `h`.
+    fn vector_mask(w: f64, h: f64, corners: &[(f64, f64)], invert: bool) -> Vec<u8> {
+        let fixed = |v: f64| ((v * (1 << 24) as f64) as i32).to_be_bytes();
+        let mut b = Vec::new();
+        b.extend_from_slice(&3u32.to_be_bytes());
+        b.extend_from_slice(&(invert as u32).to_be_bytes());
+        let mut rec = |sel: u16, body: &[u8]| {
+            b.extend_from_slice(&sel.to_be_bytes());
+            b.extend_from_slice(body);
+            b.extend(std::iter::repeat_n(0u8, 24 - body.len()));
+        };
+        rec(6, &[]);
+        rec(0, &(corners.len() as u16).to_be_bytes());
+        for &(x, y) in corners {
+            let mut k = Vec::new();
+            for _ in 0..3 {
+                k.extend_from_slice(&fixed(y / h));
+                k.extend_from_slice(&fixed(x / w));
+            }
+            rec(2, &k);
+        }
+        b
+    }
+
+    #[test]
+    fn a_vector_mask_cuts_the_layer_it_is_on() {
+        // A red layer over all of a 10 by 8 page, its vector mask the
+        // rectangle from (2, 2) to (6, 5).
+        let mut red = layer("Cut", [0, 0, 8, 10], solid(10, 8, [255, 0, 0, 255]));
+        let corners = [(2.0, 2.0), (6.0, 2.0), (6.0, 5.0), (2.0, 5.0)];
+        red.blocks
+            .push((*b"vmsk", vector_mask(10.0, 8.0, &corners, false)));
+        let f = read_psd(&write(10, 8, &[red], &solid(10, 8, [0, 0, 0, 255]))).unwrap();
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        let m = p.mask.as_ref().expect("the vector mask, as a mask");
+        let at =
+            |x: i32, y: i32| m.rgba[(((y - m.top) * m.width as i32 + (x - m.left)) * 4) as usize];
+        assert_eq!((at(3, 3), at(5, 4)), (255, 255), "inside shows");
+        assert_eq!((at(0, 0), at(7, 3), at(3, 6)), (0, 0, 0), "outside hides");
+        assert!(f.lost.is_empty(), "{:?}", f.lost);
+        // Inverted, the other way about.
+        let mut red = layer("Cut", [0, 0, 8, 10], solid(10, 8, [255, 0, 0, 255]));
+        red.blocks
+            .push((*b"vmsk", vector_mask(10.0, 8.0, &corners, true)));
+        let f = read_psd(&write(10, 8, &[red], &solid(10, 8, [0, 0, 0, 255]))).unwrap();
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        let m = p.mask.as_ref().unwrap();
+        assert_eq!((m.rgba[0], m.rgba[((3 * 10 + 3) * 4) as usize]), (255, 0));
+    }
+
+    #[test]
+    fn a_masks_density_and_feather_come_in() {
+        // A mask hiding all of the layer, at half density and feathered
+        // by 4 pixels: half of the layer shows, its edge softened.
+        let mut l = layer("Soft", [0, 0, 4, 4], solid(4, 4, [255, 0, 0, 255]));
+        l.mask = Some(([0, 0, 4, 4], 0, vec![0; 16]));
+        let mut params = vec![1 | 2, 128];
+        params.extend_from_slice(&4.0f64.to_be_bytes());
+        l.mask_params = params;
+        let f = read_psd(&write(4, 4, &[l], &solid(4, 4, [0, 0, 0, 255]))).unwrap();
+        let PsdItem::Pixels(p) = &f.items[0] else {
+            panic!()
+        };
+        let m = p.mask.as_ref().unwrap();
+        let half = chitrakar_color::linear_to_srgb8(1.0 - 128.0 / 255.0);
+        assert_eq!(m.rgba[0], half);
+        assert_eq!(m.feather, 4.0);
+    }
+
+    #[test]
+    fn an_artboard_is_said_to_come_in_as_a_group() {
+        let mut close = layer("</Layer group>", [0, 0, 0, 0], vec![]);
+        close.section = Some(3);
+        let mut open = layer("Phone", [0, 0, 0, 0], vec![]);
+        open.section = Some(1);
+        open.blocks.push((*b"artb", vec![0; 4]));
+        let bytes = write(
+            4,
+            4,
+            &[
+                close,
+                layer("In", [0, 0, 2, 2], solid(2, 2, [9, 9, 9, 255])),
+                open,
+            ],
+            &solid(4, 4, [0, 0, 0, 255]),
+        );
+        let f = read_psd(&bytes).unwrap();
+        assert!(matches!(f.items[0], PsdItem::Group { .. }));
+        assert!(
+            f.lost.iter().any(|l| l.contains("artboard \"Phone\"")),
+            "{:?}",
+            f.lost
+        );
     }
 
     #[test]

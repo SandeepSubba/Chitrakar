@@ -556,6 +556,16 @@ fn leaves_nothing(a: &[Ring], b: &[Ring], op: BoolOp) -> bool {
 /// no piece has the region on both sides there is nothing a hole could
 /// have appeared in, and the rings are left as they are.
 pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
+    nonzero_as_even_odd_or(rings, &|_| None)
+}
+
+/// [`nonzero_as_even_odd`], asking `fallback` of each cluster of rings
+/// whose edge could not be traced. Asked of the whole path instead, one
+/// ring far off wound the other way spoilt it for every cluster.
+pub fn nonzero_as_even_odd_or(
+    rings: &[Ring],
+    fallback: &dyn Fn(&[Ring]) -> Option<Vec<Ring>>,
+) -> Option<Vec<Ring>> {
     // Rings whose boxes do not meet cannot wind round each other's
     // points, so each cluster of rings that do is worked out alone. The
     // work inside one grows as the square of its points: a line of text
@@ -609,12 +619,12 @@ pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
             .push(ring.clone());
     }
     if clusters.len() == 1 {
-        return cluster_as_even_odd(rings);
+        return cluster_as_even_odd(rings).or_else(|| fallback(rings));
     }
     let mut changed = false;
     let mut out = Vec::with_capacity(rings.len());
     for cluster in clusters.into_values() {
-        match cluster_as_even_odd(&cluster) {
+        match cluster_as_even_odd(&cluster).or_else(|| fallback(&cluster)) {
             Some(said) => {
                 changed = true;
                 out.extend(said);
@@ -633,6 +643,16 @@ pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
 /// every edge, it was a minute, and 4000 was the most there was time for.
 const NONZERO_MOST: usize = 200_000;
 
+/// The most edges one cluster's bands may hold between them, counting an
+/// edge once for each band it spans, and the most pairs of edges sharing
+/// a band they may ask about. A starburst's or a string-art figure's
+/// edges each reach across most of the drawing, so they are in most of
+/// the bands, and every pair meets: twenty thousand of them froze the
+/// page for a minute. Past either the rings are left as they are, as
+/// they are past `NONZERO_MOST`.
+const NONZERO_FILED_MOST: usize = 4_000_000;
+const NONZERO_PAIRS_MOST: u64 = 40_000_000;
+
 /// A cluster's edges filed by the band of heights each spans, so that
 /// where an edge crosses others, and how many times the outline winds
 /// round a point, ask only the edges at that height rather than all of
@@ -645,7 +665,8 @@ struct Bands {
 }
 
 impl Bands {
-    fn of(rings: &[Ring]) -> Bands {
+    /// `None` where the bands would hold, or ask, more than is worth it.
+    fn of(rings: &[Ring]) -> Option<Bands> {
         let edges: Vec<(Point, Point)> = rings
             .iter()
             .flat_map(|r| (0..r.len()).map(move |i| (r[i], r[(i + 1) % r.len()])))
@@ -661,13 +682,22 @@ impl Bands {
             step,
             rows: vec![Vec::new(); n],
         };
+        let filed: usize = bands
+            .edges
+            .iter()
+            .map(|(a, b)| bands.row(a[1].max(b[1])) - bands.row(a[1].min(b[1])) + 1)
+            .sum();
+        if filed > NONZERO_FILED_MOST {
+            return None;
+        }
         for (e, (a, b)) in bands.edges.iter().enumerate() {
             let (r0, r1) = (bands.row(a[1].min(b[1])), bands.row(a[1].max(b[1])));
             for r in r0..=r1 {
                 bands.rows[r].push(e as u32);
             }
         }
-        bands
+        let pairs: u64 = bands.rows.iter().map(|r| (r.len() as u64).pow(2)).sum();
+        (pairs <= NONZERO_PAIRS_MOST).then_some(bands)
     }
 
     fn row(&self, y: f32) -> usize {
@@ -733,7 +763,7 @@ fn cluster_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
         return None;
     }
     const SIDE: f32 = 1e-3;
-    let bands = Bands::of(rings);
+    let bands = Bands::of(rings)?;
     let mut keep = Vec::new();
     let mut inside_twice = false;
     for (a, b) in bands.split() {
@@ -907,6 +937,27 @@ mod tests {
         assert!(
             nonzero_as_even_odd(&[square(0.0, 0.0, 5.0)]).is_none(),
             "nothing to do"
+        );
+    }
+
+    /// A figure of long edges each reaching across most of it — string
+    /// art, twenty thousand chords of a circle — is left as it is rather
+    /// than worked out: every edge was filed in nearly every band and
+    /// asked of nearly every other, and the page froze for minutes.
+    #[test]
+    fn a_figure_of_long_edges_is_left_rather_than_frozen_over() {
+        let ring: Ring = (0..20_000)
+            .map(|i| {
+                let t = (i as f32 * 0.4321).rem_euclid(1.0) * std::f32::consts::TAU;
+                [100.0 + 90.0 * t.cos(), 100.0 + 90.0 * t.sin()]
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        assert!(nonzero_as_even_odd(std::slice::from_ref(&ring)).is_none());
+        assert!(
+            started.elapsed().as_secs_f32() < 5.0,
+            "{:?}",
+            started.elapsed()
         );
     }
 

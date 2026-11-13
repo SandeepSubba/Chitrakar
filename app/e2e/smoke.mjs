@@ -1169,7 +1169,7 @@ assert(
 // editor groups them. Difference of a colour with what it sits on is the
 // one with an answer that can be checked without knowing either.
 assert(
-  (await page.locator('select[aria-label="Blend mode"] option').count()) === 16,
+  (await page.locator('select[aria-label="Blend mode"] option:not([value=""])').count()) === 16,
   "every blend mode the spec names is offered",
 );
 await page.selectOption('select[aria-label="Blend mode"]', "Screen");
@@ -21658,6 +21658,83 @@ assert(
     (await page.locator(".panel ul li .layer-name").count()) === rowsBefore,
     `and the document it was opened over is still there (${await page.locator(".panel ul li .layer-name").count()} of ${rowsBefore} rows)`,
   );
+}
+
+// 9dp. The thirty-seventh audit's interface pass. Two layers picked
+// with different blends showed the first one's as if both had it;
+// Delete on a layer's row that the keyboard was on, but not picked,
+// deleted the picked layer instead; the zoom box's arrows stepped by one.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const r = await p.locator("#engine-page").boundingBox();
+  const draw = async (x, y) => {
+    await p.locator("#engine-canvas").hover();
+    await p.keyboard.press("r");
+    await p.mouse.move(r.x + x, r.y + y);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x + 60, r.y + y + 40, { steps: 3 });
+    await p.mouse.up();
+    await p.waitForTimeout(250);
+  };
+  await draw(20, 20);
+  await p.locator('select[aria-label="Blend mode"]').selectOption("Multiply");
+  await p.waitForTimeout(200);
+  await draw(120, 80);
+  const rows = p.locator("aside.panel .layer-list li[data-id]");
+  const before = await rows.count();
+  await rows.nth(1).click({ modifiers: ["Control"] });
+  await p.waitForTimeout(250);
+  const blend = await p.locator('select[aria-label="Blend mode"]').inputValue();
+  assert(blend === "", `two picked layers with different blends say neither (${blend})`);
+  assert((await p.locator(".props-note").count()) > 0, "and the panel says whose the rest of it is");
+  // Pick the top one alone, put the keyboard on the other's row, Delete.
+  await rows.nth(0).click();
+  await p.waitForTimeout(200);
+  const topId = await rows.nth(0).getAttribute("data-id");
+  await rows.nth(1).focus();
+  await p.keyboard.press("Delete");
+  await p.waitForTimeout(300);
+  assert((await rows.count()) === before - 1, "Delete on a row takes one layer");
+  assert((await rows.nth(0).getAttribute("data-id")) === topId, "and it is the row's, not the picked one");
+  const zoom = p.locator('input[aria-label="Zoom"]');
+  await zoom.fill("37");
+  await zoom.press("Enter");
+  await p.waitForTimeout(200);
+  await zoom.focus();
+  await zoom.press("ArrowUp");
+  await p.waitForTimeout(200);
+  const z = Number(await zoom.inputValue());
+  assert(z === 40, `the zoom box's arrow goes to the next five (${z})`);
+  // A window opened and closed by keys, then a picture dropped on the
+  // panel: the editor still thought a window was up, and took nothing.
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("Control+Shift+E");
+  await p.waitForSelector('[role="dialog"]');
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(300);
+  const had = await rows.count();
+  await p.evaluate(async () => {
+    const c = new OffscreenCanvas(30, 20);
+    const g = c.getContext("2d");
+    g.fillStyle = "#2060e0";
+    g.fillRect(0, 0, 30, 20);
+    const blob = await c.convertToBlob({ type: "image/png" });
+    const dt = new DataTransfer();
+    dt.items.add(new File([blob], "dropped.png", { type: "image/png" }));
+    document.querySelector("aside.panel").dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: dt }));
+  });
+  let now = had;
+  for (let i = 0; i < 20 && now === had; i++) {
+    await p.waitForTimeout(200);
+    now = await rows.count();
+  }
+  assert(now === had + 1, `a picture dropped on the panel after a window closed is placed (${had} → ${now})`);
+  await ctx.close();
 }
 
 // 9do. The thirty-sixth audit's interface pass. Shift+F10 with nothing

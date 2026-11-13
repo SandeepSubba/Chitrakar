@@ -115,7 +115,11 @@ without reading anything else.*
      thirty-fifth: a file Repeat could make that would not reopen, a
      mitred border's box, a clip path given twice drawing nothing. The
      thirty-sixth: a file placed past reason carried to infinity by a
-     page change, huge SVG text, a paste off a smaller page.
+     page change, huge SVG text, a paste off a smaller page. The
+     thirty-seventh: its own nonzero speed-up freezing the page on long
+     edges, a J's hook still cut where the page draws it, history
+     holding every picture ever placed, a layered PSD left blank by a
+     hidden adjustment.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12405,6 +12409,62 @@ without reading anything else.*
   of tens of thousands of small rings, or one that crosses itself tens
   of thousands of times, takes seconds to come in; a finger held still
   before drawing still opens the menu, as a phone's long press does.
+  **A thirty-seventh audit (November 2026).** Its check of round 36:
+  the nonzero rule's speed-up filed every edge in each band of heights
+  it crosses, so a starburst, a string-art figure or a star polygon of
+  thousands of points — every edge reaching across most of it — froze
+  the page for minutes (the work is counted before it is done now, and
+  past forty million pairs of edges the path is left as it is, read
+  even-odd, as past the old cap); a path whose overlapping rings could
+  not be traced fell back on their union only when every ring in it was
+  wound alike, so one far off wound the other way left the overlap a
+  hole (asked of each cluster of rings); a J's hook was still cut, the
+  raster having room for it but the page and the graphics card drawing
+  it only over the box (both draw as far as the ink can reach); a file
+  dropped on the panel after a window had been closed by its keys was
+  taken and nothing placed (the note that a window is up lasts only for
+  the key that found it); the quick PNG, a region kept by name and a
+  frame's export said no resolution (each does, once); an SVG's letters
+  kept in `defs` and never used were counted against the cap, and its
+  words ran fourteen spaces together. Its files pass: the history kept
+  every picture ever placed or developed for undo, and a long session of
+  photographs ran the tab out of memory (past a gigabyte of pictures
+  only the history holds, the oldest steps are let go of); a 32-bit
+  Photoshop file's or a floating-point TIFF's alpha and masks were read
+  through the screen's curve, half coverage coming in as a fifth; a
+  Photoshop vector mask was dropped without a word and the layer came
+  in whole (drawn into the layer's mask now, even-odd, inverted where
+  it says so); a mask's Density and Feather were ignored (both come
+  in); an artboard came in as a plain group without a word (said); a
+  develop preset kept under a name already kept wrote over it unasked
+  (asked, as comps and regions are). Its interface pass: a click in
+  History rebuilt a closure a row; a thumbnail dragged out of the
+  panel; Delete on a row the keyboard was on deleted the picked layer
+  instead; layers picked with different blends showed the first one's
+  (said "Mixed"); the panel did not say that its geometry and effects
+  are the first picked layer's (it does, under the name); the zoom
+  box's arrows stepped by one (to the next five); effect sliders and
+  colours made a history step a nudge; Add effect was offered on an
+  adjustment or a filter, where it did nothing (put out, as Blend is).
+  Its editing pass (37 adjustments and filters in nine settings each,
+  RGB and CMYK, a 300-step fuzz saving and reopening at every step, a
+  253-step history): a hidden adjustment or filter over anything
+  see-through left a layered PSD blank, hiding what it was made from
+  under a stamp that was itself hidden (only a shown one hides them);
+  a live copy of an adjustment or a filter went into a PSD as a picture
+  of itself, which is nothing (applied, as its original is). Limits
+  written down: a path of tens of thousands of points whose edges each
+  cross most of the others (a spirograph, a string-art rose) is read
+  even-odd and can come in with holes; the Gradient angle's arrows on a
+  skewed layer lengthen the ramp a little past the box each press;
+  Adjust › Only on a clone or heal layer loses the part of a stroke
+  past the picture's edge; a faded layer's Outline is drawn at its own
+  strength under the layer on the page, where Photoshop (and the
+  editor's own PSD) fades it with the layer; Exposure raised inside a
+  group over something see-through carries light past white through
+  the group on the page and not in a PSD; Halftone's dots at a zoom
+  between whole steps can differ in size from an export's; with several
+  layers picked, the panel's geometry and effects are the first one's.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot
