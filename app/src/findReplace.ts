@@ -17,7 +17,7 @@ export interface FindOptions {
   /** `Cat` is not `cat`. */
   matchCase: boolean;
   /** `cat` is not the start of `category`: a match is not next to a
-   * letter, a digit or an underscore on either side. */
+   * letter, a mark, a digit or an underscore on either side. */
   wholeWord: boolean;
 }
 
@@ -27,7 +27,9 @@ export interface FindOptions {
 function pattern(find: string, opts: FindOptions): RegExp | null {
   if (find.length === 0) return null;
   const literal = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const word = "[\\p{L}\\p{N}_]";
+  // A mark (a vowel sign, a nikkud point, an accent typed on its own)
+  // is part of the word it sits in.
+  const word = "[\\p{L}\\p{M}\\p{N}_]";
   const body = opts.wholeWord ? `(?<!${word})${literal}(?!${word})` : literal;
   return new RegExp(body, opts.matchCase ? "gu" : "giu");
 }

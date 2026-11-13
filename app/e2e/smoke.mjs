@@ -17364,18 +17364,21 @@ assert(
   await newDocument(600, 400, "rgb");
   const b = await page.locator("#engine-page").boundingBox();
 
-  // With nothing picked there is no edge to soften, and it says so
-  // rather than opening an empty window.
-  lastDialog = "";
-  await menuClick("Select", "Feather…");
-  await page.waitForTimeout(300);
+  // With nothing picked there is no edge to soften: the row, the row
+  // it is behind, and the bar's button are greyed out rather than
+  // answering with an alert.
+  assert(await page.locator('button[aria-label="Feather"]').isDisabled(), "with nothing picked the bar's Feather is greyed");
+  await page.click('.menu-label:text-is("Select")');
+  await page.waitForTimeout(150);
   assert(
-    lastDialog.includes("Pick something out first"),
-    `with nothing picked it says why not (${lastDialog})`,
+    await page.locator(".menu-pop:not(.sub) .menu-item.has-sub", { hasText: "Modify" }).isDisabled(),
+    "and so is Modify, which holds nothing else",
   );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
   assert(
     (await page.locator('[role="dialog"][aria-label="Feather"]').count()) === 0,
-    "and does not open the window",
+    "and no window opens",
   );
 
   await page.keyboard.press("m");
@@ -19162,7 +19165,7 @@ assert(
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
   await page.click('.prefs-tab:has-text("Tools")');
   await page.waitForTimeout(120);
-  const keyOf = (t) => page.locator(`button[aria-label="${t} key"]`);
+  const keyOf = (t) => page.locator(`button[aria-label^="${t} key:"]`);
   assert((await keyOf("Crop").textContent()) === "C", "the crop's key is shown beside it");
   assert(
     (await page.locator('.prefs-tool:has-text("Lasso") .hint').textContent()) === "shift+M",
@@ -19417,7 +19420,7 @@ assert(
 // want; a chord another command holds changes hands; Backspace puts it
 // back. The handlers and the menus read the chords as they stand.
 {
-  const chordOf = (label) => page.locator(`button[aria-label="${label} chord"]`);
+  const chordOf = (label) => page.locator(`button[aria-label^="${label} chord:"]`);
   await page.keyboard.press("Control+Comma");
   await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
   await page.click('.prefs-tab:has-text("Keys")');
@@ -19512,7 +19515,7 @@ assert(
 // is a tool's and is refused. Delete leaves a command with no chord at
 // all; the zoom keys and "?" are commands too.
 {
-  const chordOf = (label) => page.locator(`button[aria-label="${label} chord"]`);
+  const chordOf = (label) => page.locator(`button[aria-label^="${label} chord:"]`);
   await newDocument(400, 300, "rgb");
   await page.keyboard.press("Escape");
   const box = await page.locator("#engine-page").boundingBox();
@@ -21655,6 +21658,91 @@ assert(
     (await page.locator(".panel ul li .layer-name").count()) === rowsBefore,
     `and the document it was opened over is still there (${await page.locator(".panel ul li .layer-name").count()} of ${rowsBefore} rows)`,
   );
+}
+
+// 9dm. The thirty-fourth audit's interface pass. A window opened from a
+// menu row gave the focus back to the menu's label, not to where the
+// keyboard had been; F10 did nothing from a field that keeps its keys;
+// Escape on the bar let go of the picked layer and stayed there; a copy
+// made from the menus left the focus on the original's row; the panel's
+// edge could not be moved by keyboard.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1200);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("r");
+  await p.mouse.move(r.x + 40, r.y + 40);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 140, r.y + 120, { steps: 4 });
+  await p.mouse.up();
+  await p.waitForTimeout(300);
+  const picked = () => p.locator("aside.panel .layer-list li.selected").count();
+  const focusIsPickedRow = () =>
+    p.evaluate(() => !!document.activeElement?.matches("aside.panel .layer-list li.selected"));
+  await p.locator("aside.panel .layer-list li.selected").focus();
+  // F10 then Escape: back on the row, the layer still picked.
+  await p.keyboard.press("F10");
+  assert(await p.evaluate(() => !!document.activeElement?.closest(".menubar")), "F10 from a row goes to the bar");
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(150);
+  assert(await focusIsPickedRow(), "Escape leaves the bar for the row it came from");
+  assert((await picked()) === 1, "and the layer is still picked");
+  // A window opened from a row gives the focus back to the layer's row.
+  await p.keyboard.press("F10");
+  for (let i = 0; i < 10; i++) {
+    const label = await p.evaluate(() => document.activeElement?.textContent ?? "");
+    if (label.trim() === "Page") break;
+    await p.keyboard.press("ArrowRight");
+  }
+  await p.keyboard.press("ArrowDown");
+  for (let i = 0; i < 40; i++) {
+    const row = await p.evaluate(() => document.activeElement?.textContent ?? "");
+    if (/^Canvas size/.test(row.trim())) break;
+    await p.keyboard.press("ArrowDown");
+  }
+  await p.keyboard.press("Enter");
+  await p.waitForSelector('[role="dialog"]');
+  await p.waitForTimeout(300);
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(300);
+  assert(await focusIsPickedRow(), "a window opened from the menus gives the focus back to the row");
+  // Duplicate chosen from the menus: the focus is on the copy's row.
+  const before = await p.locator("aside.panel .layer-list li").count();
+  await p.keyboard.press("F10");
+  for (let i = 0; i < 10; i++) {
+    const label = await p.evaluate(() => document.activeElement?.textContent ?? "");
+    if (label.trim() === "Edit") break;
+    await p.keyboard.press("ArrowRight");
+  }
+  await p.keyboard.press("ArrowDown");
+  for (let i = 0; i < 40; i++) {
+    const row = await p.evaluate(() => document.activeElement?.textContent ?? "");
+    if (/^Duplicate/.test(row.trim())) break;
+    await p.keyboard.press("ArrowDown");
+  }
+  await p.keyboard.press("Enter");
+  await p.waitForTimeout(400);
+  assert((await p.locator("aside.panel .layer-list li").count()) === before + 1, "Duplicate made a copy");
+  assert(await focusIsPickedRow(), "and the focus is on the copy's row, which is picked");
+  // F10 from a field that keeps its own keys.
+  await p.locator('input[aria-label="Find layers"]').focus();
+  await p.keyboard.press("F10");
+  assert(await p.evaluate(() => !!document.activeElement?.closest(".menubar")), "F10 from the layer search goes to the bar");
+  await p.keyboard.press("Escape");
+  // The panel's edge by keyboard.
+  const edge = p.locator('[role="separator"][aria-label="Panel width"]');
+  const wide = (await p.locator("aside.panel").boundingBox()).width;
+  await edge.focus();
+  await p.keyboard.press("ArrowLeft");
+  await p.waitForTimeout(150);
+  const wider = (await p.locator("aside.panel").boundingBox()).width;
+  assert(wider > wide + 5, `the left arrow widens the panel (${wide} → ${wider})`);
+  await ctx.close();
 }
 
 // 9dl. The thirty-third audit's interface pass. A row chosen from the

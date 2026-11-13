@@ -13,7 +13,7 @@
  * — the downloads in a browser, one folder in the shell.
  */
 import { useEffect, useRef, useState } from "react";
-import { RAW_DEFAULTS, type DevelopPreset } from "./develop";
+import { withDefaults, type DevelopPreset } from "./develop";
 import { WasmSession } from "./engine";
 import type { Outgoing } from "./files";
 import { developElsewhere } from "./developer";
@@ -104,7 +104,7 @@ export function BatchDialog({
 
   const run = async () => {
     const kept = presets.find((p) => p.name === preset);
-    const settings = JSON.stringify({ ...RAW_DEFAULTS, ...(kept?.settings ?? {}) });
+    const settings = JSON.stringify(withDefaults(kept?.settings ?? {}));
     const opts = {
       longEdge: prefs.exportLongEdge,
       quality: prefs.jpegQuality,

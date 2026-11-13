@@ -863,9 +863,9 @@ fn clip_region(cp: &usvg::ClipPath, at: usvg::Transform) -> Option<Vec<Vec<[f32;
 }
 
 /// The regions a clip path's or a mask's outlines cover, one to an
-/// outline — except that a path whose rule is even-odd is one region of
-/// all its rings, a ring inside another cutting it, as a reader fills
-/// it. Every ring used to be a region of its own and the lot unioned,
+/// outline — a path of several rings being one region of all of them,
+/// filled by its own rule, a ring inside another cutting it as a reader
+/// fills it. Every ring used to be a region of its own and the lot unioned,
 /// so a box with a shape cut out of it (the band an outside border is
 /// cut from) covered the shape as well.
 fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<Vec<[f32; 2]>>>) {
@@ -881,7 +881,15 @@ fn collect_clip(group: &usvg::Group, out: &mut Vec<Vec<Vec<[f32; 2]>>>) {
                 let even_odd = p
                     .fill()
                     .is_some_and(|f| f.rule() == usvg::FillRule::EvenOdd);
-                if even_odd && rings.len() > 1 {
+                if rings.len() > 1 {
+                    // Nonzero, the default, is said as the even-odd rings
+                    // that fill the same: a counter wound against its
+                    // letter, or a compound path's hole, stays open.
+                    let rings = if even_odd {
+                        rings
+                    } else {
+                        chitrakar_render::boolean::nonzero_as_even_odd(&rings).unwrap_or(rings)
+                    };
                     out.push(rings);
                 } else {
                     out.extend(rings.into_iter().map(|ring| vec![ring]));
@@ -4587,6 +4595,24 @@ mod tests {
         assert!(
             ours.get(20, 20).a > 0.95,
             "nonzero fills it: {:?}",
+            ours.get(20, 20)
+        );
+        // Nonzero with the inner ring wound the other way — a compound
+        // path's hole, a letter's counter — leaves the hole open. Each
+        // ring was a region of its own, unioned, and the hole filled.
+        let wound = nonzero.replace(
+            "M10,10 L30,10 L30,30 L10,30 Z",
+            "M10,10 L10,30 L30,30 L30,10 Z",
+        );
+        let ours = chitrakar_render::render(&brought_in(&wound, 40, 40)).unwrap();
+        assert!(
+            ours.get(5, 5).a > 0.95,
+            "the box shows: {:?}",
+            ours.get(5, 5)
+        );
+        assert!(
+            ours.get(20, 20).a < 0.05,
+            "and a hole wound against it does not: {:?}",
             ours.get(20, 20)
         );
     }

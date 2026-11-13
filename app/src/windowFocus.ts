@@ -14,8 +14,7 @@
  * - Tab and Shift+Tab go round inside a modal window and not out of it;
  *   it is marked `aria-modal`, so what is behind is not read either.
  * - A window that goes gives the focus back to what had it before —
- *   for a window opened from a menu row, which is gone by then, the
- *   menu's own label in the bar.
+ *   for a window opened from a menu row, what had it before the menus.
  */
 
 /** A modal window: one over a scrim, which keeps the page behind it. */
@@ -23,6 +22,8 @@ const MODAL = ".modal-scrim [role=dialog], .sheet-scrim [role=dialog]";
 /** A window that leaves the page reachable: it takes the focus when it
  * appears and gives it back when it goes, but Tab may leave it. */
 const PANEL = ".straighten-panel";
+/** The menus: the bar, its popups and the phone's button for them. */
+const MENUS = ".menubar, .menu, [role=menu], .menu-sheet-toggle";
 
 const FOCUSABLE = [
   "a[href]",
@@ -72,8 +73,7 @@ export function watchWindowFocus(doc: Document = document): void {
   if (watching || typeof MutationObserver === "undefined") return;
   watching = true;
   // What had the focus last outside every window: where a window gives
-  // it back. A menu's row is the menu's label, since the row is gone by
-  // the time the window it opened closes.
+  // it back.
   let returnTo: HTMLElement | null = null;
   doc.addEventListener(
     "focusin",
@@ -89,8 +89,26 @@ export function watchWindowFocus(doc: Document = document): void {
         enter(top);
         return;
       }
-      const menu = el.closest(".menu");
-      returnTo = (menu?.querySelector<HTMLElement>(".menu-label") ?? el) as HTMLElement;
+      // The menus are a way to a window, not a place to come back to:
+      // a window opened from a row goes back to where the keyboard (or
+      // the pointer) was before the menus — a layer's row, a field, or
+      // nothing in particular, where the editor's keys are. Given back
+      // to the menu's label, the arrows walked the bar rather than
+      // nudging the layer, and Escape let go of it.
+      if (el.closest(MENUS)) return;
+      returnTo = el;
+    },
+    true,
+  );
+  // Focus let go of to the page itself (a press on the canvas) is
+  // somewhere too: nothing in particular.
+  doc.addEventListener(
+    "focusout",
+    (e) => {
+      const el = e.target;
+      if (e.relatedTarget !== null || !(el instanceof HTMLElement)) return;
+      if (el.closest(`${MODAL}, ${PANEL}, ${MENUS}`)) return;
+      returnTo = null;
     },
     true,
   );

@@ -33,6 +33,12 @@ export type MenuEntry =
       entries: MenuEntry[];
     };
 
+/** Whether every row behind a row of rows is greyed out, so that the
+ * row itself is: there is nothing in it to choose. */
+export const subIsDead = (sub: Extract<MenuEntry, { kind: "sub" }>): boolean =>
+  sub.entries.some((e) => e.kind !== "sep") &&
+  sub.entries.every((e) => e.kind === "sep" || (e.kind === "item" ? !!e.disabled : subIsDead(e)));
+
 /** One menu on the bar. */
 export type MenuSpec = { id: string; label: string; entries: MenuEntry[] };
 
@@ -133,7 +139,7 @@ export async function setNativeMenu(
         e.kind === "sep"
           ? sep()
           : e.kind === "sub"
-            ? Submenu.new({ text: e.label, items: await rows(e.entries) })
+            ? Submenu.new({ text: e.label, items: await rows(e.entries), enabled: !subIsDead(e) })
             : MenuItem.new({
                 id: e.id,
                 // The hint is the tick or the note the in-window row

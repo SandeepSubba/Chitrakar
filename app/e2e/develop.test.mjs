@@ -71,6 +71,9 @@ check(clean.exposure === 5 && clean.contrast === 0 && clean.noise === 0, "held t
 check(clean.white[0] === 2000 && clean.white[1] === 150, "a white balance held to the slider's ends");
 check(d.cleanSettings({ white: [5000] }).white === undefined, "half a white balance is the camera's");
 check(d.cleanSettings(null).exposure === 0, "nothing is the defaults");
+check(d.withDefaults({ noise: 60 }).color_noise === 60, "a picture from before colour noise had its own slider keeps it following Noise");
+check(d.withDefaults({ noise: 60, color_noise: 10 }).color_noise === 10, "one that has its own keeps it");
+check(d.withDefaults({}).color_noise === 0, "and nothing is the default");
 check(
   d.cleanSettings({ masking: 250 }).masking === 100 && d.cleanSettings({}).masking === 0,
   "masking held to 0..100, and none in a preset kept before it",

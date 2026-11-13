@@ -421,7 +421,7 @@ export function PreferencesDialog({
       <button
         type="button"
         className={catching === key ? "prefs-key listening" : "prefs-key"}
-        aria-label={`${label} chord`}
+        aria-label={`${label} chord: ${catching === key ? "waiting for keys" : chord ? chordLabel(chord) : "none"}`}
         title={
           catching === key
             ? "Press the keys for it; Escape leaves it as it is"
@@ -699,7 +699,7 @@ export function PreferencesDialog({
                               className={
                                 listening === t ? "prefs-key listening" : "prefs-key"
                               }
-                              aria-label={`${t} key`}
+                              aria-label={`${t} key: ${listening === t ? "waiting for a key" : keys.hint[t] || "none"}`}
                               title={
                                 listening === t
                                   ? "Press the key for it; Escape leaves it as it is"

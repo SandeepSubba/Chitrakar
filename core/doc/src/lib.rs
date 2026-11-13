@@ -1606,10 +1606,24 @@ impl Document {
                 let filters = self.filter_kinds();
                 self.meta.width = width;
                 self.meta.height = height;
+                // Each way by what fills the page, where the size said is
+                // the scale's own rounded (or the rounding it undoes): a
+                // page of 401 at a half is 201, and at exactly a half its
+                // picture left the last column half covered.
+                let along = |was: u32, now: u32| -> f32 {
+                    let (was_f, now_f) = (was as f32, now as f32);
+                    if was > 0
+                        && ((was_f * factor).round() == now_f || (now_f / factor).round() == was_f)
+                    {
+                        now_f / was_f
+                    } else {
+                        factor
+                    }
+                };
                 self.map_page(
                     Transform {
-                        a: factor,
-                        d: factor,
+                        a: along(prev.0, width),
+                        d: along(prev.1, height),
                         ..Default::default()
                     },
                     prev,
@@ -2203,8 +2217,9 @@ pub enum Command {
     TurnCanvas {
         quarters: u8,
     },
-    /// Scale everything on the page by `factor`, the same both ways, and
-    /// make the page `width` by `height` — Photoshop's Image Size,
+    /// Scale everything on the page by `factor` (each way by exactly what
+    /// fills the page, where `width` and `height` are the factor's own
+    /// rounding), and make the page `width` by `height` — Photoshop's Image Size,
     /// Canva's Resize: the same design at another size, rather than the
     /// same artwork on a page of another size, which is
     /// [`Command::ResizeCanvas`]. One factor rather than one per axis

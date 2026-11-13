@@ -109,7 +109,9 @@ without reading anything else.*
      stretched group, a file's renamed font taking another of its
      names, right-to-left text in SVG and justified. The thirty-third:
      filters left behind by the page's own changes, a file of the
-     editor's own reopened changed.
+     editor's own reopened changed. The thirty-fourth: those filters
+     carried twice inside a group, a crop frame outliving its page,
+     the focus given back to the menus rather than where it was.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12246,6 +12248,53 @@ without reading anything else.*
   move under a crop; the Curves editor is the mouse's alone; on a
   focused layer row the arrows nudge the layer rather than walk the
   rows; an unticked toggle in a menu reads as a plain action.
+  **A thirty-fourth audit (November 2026).** Its files pass: a twirl,
+  a pinch or a radial blur inside a group or a frame left its place on
+  the picture after a crop, Canvas size, Straighten or Resize page (its
+  centre is in the group's own space, which the group's placement
+  carries; it was carried a second time); a twirl cropped to a page a
+  quarter its size was cut short (its reach held to 4 shares; to 30000
+  now); Develop again on a picture developed before colour noise had a
+  slider of its own took its colour noise reduction away
+  (`withDefaults`); an SVG's clip path or mask drawn with the default
+  rule filled its holes — a compound path's, a letter's counters (each
+  path's rings are one region by its own rule now). Its editing pass
+  (fuzz with page operations weighted fifteen times, save and reopen at
+  every step: nothing): a crop frame left waiting outlived the page it
+  was drawn on, and Enter grew a page turned or undone to another size
+  (the frame and a path's anchors so far go when the page's size does,
+  and a frame is held to the page when taken); Resize page by a share a
+  page does not divide into, and an export at one, left the last column
+  and row half covered (each way by what fills the whole pixels); Split
+  at anchor straightened a smooth path's pieces (written out as
+  handles first, as putting an anchor on does); find and replace's
+  whole words took a vowel sign or an accent for the end of a word. Its
+  interface pass: a window opened from a menu row gave the focus back to
+  the menu's label (where the keyboard was before the menus now); F10
+  did nothing from a field that keeps its own keys; Escape on the bar
+  stayed there and let go of the picked layer; the panel's edge did not
+  follow the pointer while the panel was held to two fifths of the
+  window, and could not be moved by keyboard; Undo and Redo on the bar
+  dropped the focus to the page as they greyed out; the Preferences key
+  buttons' names hid the key they hold; Feather and Subject answered
+  with an alert rather than being greyed out, and a row of rows all
+  greyed opened a menu the keys could not get into; at the panel's
+  narrowest the kind drop-down ran past its edge; the phone's drawer of
+  menus had no arrows; a copy made from the menus left the focus on the
+  original's row. Limits written down: a vignette or a lens correction
+  inside a group is measured on the page's frame in the group's own
+  space, so it moves with a page change, having no centre of its own to
+  carry; a frame exported alone after the page is mirrored comes out
+  unmirrored, as one turned comes out upright (a frame's own transform
+  is undone for its export); an ellipse made a path starts its dashes
+  at another point and draws its curve a fifth of a pixel thinner; a
+  path's anchors so far stay where they were through a page flipped; a
+  damaged file's effect held to 4000 (a shadow's blur of ten thousand)
+  is drawn at that size and takes seconds to open, as any effect that
+  large would; pixelate's grid, like ripple's, halftone's and noise's
+  patterns, is anchored to the page's corner. Its check of round 33
+  also found a filter's length carried past its slider's end jumped
+  back to the end on the first nudge (the slider stretches to it now).
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

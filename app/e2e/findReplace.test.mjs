@@ -47,6 +47,8 @@ const loose = { matchCase: false, wholeWord: false };
   check(matchesIn("a.b a+b", ".", loose).length === 1, "a dot is a dot, not any character");
   check(matchesIn("aaaa", "aa", loose).length === 2, "never overlapping");
   check(matchesIn("café cafés", "café", { matchCase: false, wholeWord: true }).length === 1, "a word boundary knows accents");
+  check(matchesIn("कमी है कम", "कम", { matchCase: false, wholeWord: true }).length === 1, "a vowel sign is part of its word");
+  check(matchesIn("cafe\u0301 cafe", "cafe", { matchCase: false, wholeWord: true }).length === 1, "and so is an accent typed on its own");
 }
 
 // Replacing: the text, the count, and nothing changed when nothing matched.

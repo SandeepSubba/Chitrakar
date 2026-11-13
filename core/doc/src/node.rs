@@ -2235,8 +2235,18 @@ impl Filter {
     ) -> Filter {
         let k = if top { m.max_scale() } else { 1.0 };
         let mirrored = m.a * m.d - m.b * m.c < 0.0;
+        // One inside a group reads its centre and reach in the group's
+        // own space, against the page's size: the group's placement takes
+        // the map, so the point it means there stays where it was, and
+        // only the page it is a share of changes.
         let centre = |c: [f32; 2]| -> [f32; 2] {
             let (x, y) = (c[0] * ow, c[1] * oh);
+            if !top {
+                return [
+                    if nw > 0.0 { x / nw } else { c[0] },
+                    if nh > 0.0 { y / nh } else { c[1] },
+                ];
+            }
             let (x, y) = (m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f);
             [
                 if nw > 0.0 { x / nw } else { c[0] },
@@ -2246,7 +2256,7 @@ impl Filter {
         let reach = |r: f32| -> f32 {
             let (was, now) = (ow.min(oh), nw.min(nh));
             if now > 0.0 {
-                r * was * m.max_scale() / now
+                r * was * k / now
             } else {
                 r
             }
@@ -2292,7 +2302,7 @@ impl Filter {
             } => {
                 *center = centre(*center);
                 *radius = reach(*radius);
-                if mirrored {
+                if mirrored && top {
                     *degrees = -*degrees;
                 }
             }

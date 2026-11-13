@@ -6,6 +6,7 @@ import {
   isTauri,
   menuSignature,
   setNativeMenu,
+  subIsDead,
   type MenuEntry,
   type MenuSpec,
 } from "./nativeMenu";
@@ -94,6 +95,7 @@ import {
   type CurveKey,
   sliderToKelvin,
   stepKelvin,
+  withDefaults,
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
@@ -1907,6 +1909,22 @@ function markNeedsALayer(entries: MenuEntry[], nonePicked: boolean) {
   }
 }
 
+/** A button of a pair (Undo and Redo) that greys itself out under the
+ * focus — the last step undone — hands the focus to its neighbour,
+ * which the same press has just made live. Left alone, the focus fell
+ * to the page and the next Tab began again from the top. */
+function keepFocusInGroup(button: HTMLElement) {
+  requestAnimationFrame(() => {
+    if (!(button as HTMLButtonElement).disabled) return;
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (!lost) return;
+    const other = [...(button.parentElement?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (b) => b !== button && !b.disabled,
+    );
+    other?.focus({ preventScroll: true });
+  });
+}
+
 /** Grey out the rows that have nothing to act on now: Undo with nothing
  * done, a row about the region picked out with none, Clear guides with
  * none. They were pressable and answered with nothing, or an alert. */
@@ -2315,14 +2333,19 @@ export function App() {
   };
 
   /** Drag the panel's own edge to give it more or less room. */
+  /** The widest the panel is drawn, in its own units: two fifths of
+   * the window (at least 200 pixels) or 560, whichever is less. */
+  const panelMost = () => Math.min(560, Math.max(200, window.innerWidth * 0.4) / prefs.uiScale);
+  /** A width for the panel, held to what it can be drawn at. */
+  const panelHeld = (w: number) => Math.round(Math.max(180, Math.min(panelMost(), w)));
   const onPanelEdge = (e: React.PointerEvent) => {
     e.preventDefault();
     const startX = e.clientX;
-    const from = panelWidth;
-    const move = (m: PointerEvent) =>
-      setPanelWidth(
-        Math.max(180, Math.min(560, from + (startX - m.clientX) / prefs.uiScale)),
-      );
+    // From the width it is drawn at: one kept wider than the window now
+    // gives it room for did not move under the pointer until the drag
+    // had made up the difference.
+    const from = Math.min(panelWidth, panelMost());
+    const move = (m: PointerEvent) => setPanelWidth(panelHeld(from + (startX - m.clientX) / prefs.uiScale));
     // A cancelled touch (a system gesture, a call) lets go as a lift
     // does: listening for the lift alone, the next finger anywhere went
     // on carrying it.
@@ -3109,6 +3132,13 @@ export function App() {
         s.height !== docSizeRef.current[1]
       ) {
         setDocumentSize(s.width, s.height);
+        // A crop frame waiting for Enter, and a path's anchors so far,
+        // were drawn on the page as it stood: on a page turned, grown or
+        // undone to another size they frame nothing they meant, and a
+        // frame wider than the page grew it when it was taken.
+        setCropFrame(null);
+        setPenPoints([]);
+        setPenHandles([]);
       }
     },
     [setDocumentSize],
@@ -4169,6 +4199,25 @@ export function App() {
     [session, layers, fill, cmyk, run, penPoints, penHandles],
   );
 
+  // F10 goes to the menu bar, as it does in every desktop program: its
+  // first menu, or the button the menus are behind on a phone. Heard on
+  // the way down, since a field keeps its own keys from the editor's
+  // (`fieldKeys`, the layer search, the name, the text box) and F10 is
+  // none of a field's.
+  useEffect(() => {
+    const onF10 = (e: KeyboardEvent) => {
+      if (e.key !== "F10" || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (aWindowIsUp()) return;
+      const bar = document.querySelector<HTMLElement>(".menubar .menu-label, .menu-sheet-toggle");
+      if (!bar) return;
+      e.preventDefault();
+      e.stopPropagation();
+      bar.focus();
+    };
+    window.addEventListener("keydown", onF10, true);
+    return () => window.removeEventListener("keydown", onF10, true);
+  }, []);
+
   // Keyboard: tool shortcuts, undo/redo, space-to-pan, escape-to-cancel.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -4185,16 +4234,11 @@ export function App() {
           e.preventDefault();
         return;
       }
-      // F10 goes to the menu bar, as it does in every desktop program:
-      // its first menu, or the button the menus are behind on a phone.
-      if (e.key === "F10" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        const bar = document.querySelector<HTMLElement>(".menubar .menu-label, .menu-sheet-toggle");
-        if (bar) {
-          e.preventDefault();
-          bar.focus();
-        }
-        return;
-      }
+      // F10 is heard on the way down (below), from any field.
+      if (e.key === "F10" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) return;
+      // An Escape in the menus closes them, and is not the editor's: it
+      // let go of the layer the menus were come to for.
+      if (e.key === "Escape" && e.target instanceof Element && e.target.closest(".menubar, [role=menu]")) return;
       // Shift+F10 or the menu key with nothing in particular focused is
       // the canvas's menu for what is picked, opened in the middle of the
       // view, as a right-click on it would. A row, a field or a button
@@ -4995,7 +5039,20 @@ export function App() {
     focusFirstRow(() => contextRef.current);
     return () => {
       const lost = document.activeElement === null || document.activeElement === document.body;
-      if (lost && back?.isConnected) back.focus({ preventScroll: true });
+      if (!lost) return;
+      // Opened on a layer's row, it goes back to the row of the layer
+      // picked once the row chosen has had its say: a copy made is
+      // picked, and stayed on the original's row.
+      if (back?.closest("aside.panel .layer-list li")) {
+        requestAnimationFrame(() => {
+          const still = document.activeElement === null || document.activeElement === document.body;
+          if (!still) return;
+          const picked = document.querySelector<HTMLElement>("aside.panel .layer-list li.selected");
+          (picked ?? (back.isConnected ? back : null))?.focus({ preventScroll: true });
+        });
+        return;
+      }
+      if (back?.isConnected) back.focus({ preventScroll: true });
     };
   }, [contextOpen]);
   useEffect(() => {
@@ -6292,11 +6349,13 @@ export function App() {
    * undo. */
   const applyCrop = () => {
     if (!session || !cropFrame) return;
+    // Held to the page: a crop only ever takes room away.
+    const [dw, dh] = docSizeRef.current;
     const [bx, by, bw, bh] = cropFrame;
-    const cx = Math.round(bx);
-    const cy = Math.round(by);
-    const cw = Math.round(bx + bw) - cx;
-    const ch = Math.round(by + bh) - cy;
+    const cx = Math.max(0, Math.round(bx));
+    const cy = Math.max(0, Math.round(by));
+    const cw = Math.min(dw, Math.round(bx + bw)) - cx;
+    const ch = Math.min(dh, Math.round(by + bh)) - cy;
     setCropFrame(null);
     if (cw < 1 || ch < 1) return;
     try {
@@ -11725,7 +11784,7 @@ export function App() {
         info: got.info,
         // What the layer was developed with, as it was: a picture
         // developed before there was a base curve has none.
-        initial: { ...RAW_DEFAULTS, ...got.settings, curve: got.settings.curve === true },
+        initial: { ...withDefaults(got.settings), curve: got.settings.curve === true },
         layer: layer.id,
       });
     } catch (err) {
@@ -12867,6 +12926,8 @@ export function App() {
       "zoom-selection": noRegion && selectionSet.length === 0,
       "clear-guides": docGuides.length === 0,
       "paste-style": styleClip.current === null,
+      feather: noRegion,
+      "pick-subject": selected === null && !layers.some((l) => l.kind === "raster" && l.visible),
     });
   }
   const menusRef = useRef(menus);
@@ -13193,6 +13254,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={pickSubject}
+            disabled={selected === null && !layers.some((l) => l.kind === "raster" && l.visible)}
             title="Select the subject of this picture"
             aria-label="Subject"
           >
@@ -13201,6 +13263,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={openFeather}
+            disabled={antRings.length === 0}
             title="Feather — soften the selection's edge…"
             aria-label="Feather"
           >
@@ -13315,7 +13378,10 @@ export function App() {
         <div className="chrome-group" role="group" aria-label="History">
           <button
             className="chrome-button icon-only"
-            onClick={undo}
+            onClick={(e) => {
+              undo();
+              keepFocusInGroup(e.currentTarget);
+            }}
             title={tip("Undo", "undo")}
             disabled={history.past.length === 0}
           >
@@ -13323,7 +13389,10 @@ export function App() {
           </button>
           <button
             className="chrome-button icon-only"
-            onClick={redo}
+            onClick={(e) => {
+              redo();
+              keepFocusInGroup(e.currentTarget);
+            }}
             title={tip("Redo", "redo")}
             disabled={history.future.length === 0}
           >
@@ -15823,7 +15892,26 @@ export function App() {
             role="separator"
             aria-orientation="vertical"
             aria-label="Panel width"
+            aria-valuemin={180}
+            aria-valuemax={Math.round(panelMost())}
+            aria-valuenow={panelHeld(panelWidth)}
+            tabIndex={0}
             onPointerDown={onPanelEdge}
+            onKeyDown={(e) => {
+              // The arrows say which way the edge goes: left widens.
+              const by = e.shiftKey ? 40 : 10;
+              const now = Math.min(panelWidth, panelMost());
+              const to =
+                e.key === "ArrowLeft" ? now + by
+                : e.key === "ArrowRight" ? now - by
+                : e.key === "Home" ? 180
+                : e.key === "End" ? panelMost()
+                : null;
+              if (to === null) return;
+              e.preventDefault();
+              e.stopPropagation();
+              setPanelWidth(panelHeld(to));
+            }}
           />
           <div className="panel-head">
             <h2>Layers</h2>
@@ -18045,7 +18133,7 @@ function RawDevelopDialog({
                     onKeyDown={chipKeys(() => onPresets(presets.filter((o) => o.name !== p.name)))}
                     onClick={(e) => {
                       if (e.altKey) onPresets(presets.filter((o) => o.name !== p.name));
-                      else setS({ ...RAW_DEFAULTS, ...p.settings });
+                      else setS(withDefaults(p.settings));
                     }}
                   >
                     {p.name}
@@ -19384,6 +19472,19 @@ function MenuButton({
         return;
       }
       const back = menusEnteredFrom;
+      // Come from a layer's row, the keyboard goes back to the row of
+      // the layer picked now, once the row chosen has had its say: a
+      // copy made is picked, and a layer deleted has no row to go to.
+      if (back?.closest("aside.panel .layer-list li")) {
+        labelRef.current?.blur();
+        requestAnimationFrame(() => {
+          const lost = document.activeElement === null || document.activeElement === document.body;
+          if (!lost) return;
+          const picked = document.querySelector<HTMLElement>("aside.panel .layer-list li.selected");
+          (picked ?? (back.isConnected ? back : null))?.focus({ preventScroll: true });
+        });
+        return;
+      }
       if (back && back.isConnected && !(back as HTMLButtonElement).disabled) {
         back.focus({ preventScroll: true });
       } else if (back === null) {
@@ -19451,6 +19552,20 @@ function MenuButton({
             e.preventDefault();
             e.stopPropagation();
             across(e.key === "ArrowLeft" ? -1 : 1, open);
+          } else if (e.key === "Escape" && !open && !ref.current?.parentElement?.querySelector(".menu-label.open")) {
+            // (With a neighbour's menu open — the pointer crossed the
+            // bar — this Escape is that menu's to close.)
+            // Escape on the bar leaves it, for where the keyboard came
+            // from — and is no Escape of the editor's, which let go of
+            // the layer the menus were come to for.
+            e.preventDefault();
+            e.stopPropagation();
+            const back = menusEnteredFrom;
+            if (back && back.isConnected && !(back as HTMLButtonElement).disabled) {
+              back.focus({ preventScroll: true });
+            } else {
+              labelRef.current?.blur();
+            }
           }
         }}
         aria-haspopup="menu"
@@ -19607,7 +19722,31 @@ function MenuSheet({ menus, onClose }: { menus: MenuSpec[]; onClose: () => void 
               {m.label}
             </button>
             {open === m.id && (
-              <div className="sheet-rows" role="menu">
+              <div
+                className="sheet-rows"
+                role="menu"
+                aria-label={m.label}
+                onKeyDown={(e) => {
+                  // The arrows walk the rows showing, as in the bar's
+                  // menus; Tab was the only way down them.
+                  const by =
+                    e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : e.key === "Home" ? -Infinity : e.key === "End" ? Infinity : 0;
+                  if (by === 0) return;
+                  const rows = [
+                    ...e.currentTarget.querySelectorAll<HTMLElement>("button.menu-item:not([disabled]), summary.menu-item"),
+                  ].filter((r) => r.getClientRects().length > 0);
+                  if (rows.length === 0) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const at = rows.indexOf(document.activeElement as HTMLElement);
+                  const to =
+                    by === -Infinity ? 0
+                    : by === Infinity ? rows.length - 1
+                    : at < 0 ? (by > 0 ? 0 : rows.length - 1)
+                    : (at + by + rows.length) % rows.length;
+                  rows[to].focus({ preventScroll: false });
+                }}
+              >
                 {rows(m.entries, 0)}
               </div>
             )}
@@ -19646,6 +19785,10 @@ function MenuRows({ entries }: { entries: MenuEntry[] }) {
  * edge. Placed to the right of the row where there is room and to the
  * left where there is not, and never past the bottom of the window. */
 function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
+  /** Every row behind it greyed out: the row is greyed too, and opens
+   * nothing. Live, it opened a menu the keys could not get into, which
+   * stayed open beside the menu as they went on down it. */
+  const dead = subIsDead(entry);
   const [open, setOpen] = useState(false);
   const [at, setAt] = useState<[number, number]>([0, 0]);
   const rowRef = useRef<HTMLButtonElement>(null);
@@ -19706,7 +19849,7 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
       className={open ? "menu-sub open" : "menu-sub"}
       onPointerEnter={() => {
         clear(closing);
-        if (open) return;
+        if (open || dead) return;
         clear(opening);
         opening.current = window.setTimeout(show, 120);
       }}
@@ -19718,6 +19861,7 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
         role="menuitem"
         aria-haspopup="menu"
         aria-expanded={open}
+        disabled={dead}
         onClick={(e) => {
           // A press on the row is for the row, not for the menu it is
           // in: the menu closes on any click inside it, and this one
@@ -19733,7 +19877,7 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
           ▸
         </span>
       </button>
-      {open && (
+      {open && !dead && (
         <div
           className="menu-pop sub"
           role="menu"
@@ -20404,10 +20548,13 @@ function KindProps({
   ) => (
     <label key={label}>
       <SliderHead label={label} value={value} />
+      {/* Stretched to take a value past its ends — a blur Resize page
+          carried to 160 — so a nudge moves it a step from where it is
+          rather than back to the end of the slider. */}
       <input
         type="range"
-        min={min}
-        max={max}
+        min={Math.min(min, value)}
+        max={Math.max(max, value)}
         step={step}
         value={value}
         onChange={(e) => onEdit(set(Number(e.target.value)), true)}

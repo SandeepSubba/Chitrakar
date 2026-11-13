@@ -182,6 +182,18 @@ const RANGES: Record<Exclude<keyof RawSettings, "white" | "uncorrected" | "lens_
   masking: [0, 100],
 };
 
+/** Settings as a layer or a kept preset holds them, filled out with the
+ * defaults — except that a picture developed before colour noise had a
+ * slider of its own reduced it with Noise, and goes on doing so: the
+ * default of 0 laid under it took that away on Develop again. */
+export function withDefaults(settings: Partial<RawSettings>): RawSettings {
+  return {
+    ...RAW_DEFAULTS,
+    ...settings,
+    color_noise: settings.color_noise ?? settings.noise ?? RAW_DEFAULTS.color_noise,
+  };
+}
+
 /** Settings read from somewhere that might say anything (a kept preset,
  * a file): each a number within what it can be, else its default; a
  * white balance of two numbers, else the camera's own. */

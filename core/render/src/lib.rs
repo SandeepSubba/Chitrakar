@@ -11171,14 +11171,20 @@ fn apply_filter(
     }
 }
 
+/// The most of half a page's shorter side a twirl's or a pinch's
+/// radius reaches: a 30000-pixel page cropped to one pixel.
+pub const WARP_REACH: f32 = 30_000.0;
+
 /// A twirl's or a pinch's circle in the filter's own units: its middle,
 /// a share of the page across and down (half and half for no number),
 /// and its radius, a share of half the page's shorter side held to
-/// 0..=4 (one for no number).
+/// 0..=`WARP_REACH` (one for no number). The hold is wide because a
+/// page cropped small keeps its twirl by a larger share of itself
+/// (`Filter::carried_on_page`); a hold of 4 cut it short.
 pub fn warp_circle(radius: f32, center: [f32; 2], page: (f32, f32)) -> ([f32; 2], f32) {
     let at = |v: f32| if v.is_finite() { v } else { 0.5 };
     let share = if radius.is_finite() {
-        radius.clamp(0.0, 4.0)
+        radius.clamp(0.0, WARP_REACH)
     } else {
         1.0
     };

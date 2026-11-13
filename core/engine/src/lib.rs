@@ -5321,7 +5321,17 @@ impl Session {
     /// answer is the path's layer, and the new one when there is one.
     pub fn split_path(&mut self, id: NodeId, index: usize) -> Result<Vec<NodeId>, EngineError> {
         self.unlocked(id)?;
-        let parts = self.open_path_parts(id)?;
+        let (points, mut handles, closed, mut smooth, widths) = self.open_path_parts(id)?;
+        // A smooth path's curve is read off its neighbouring anchors, so
+        // a piece with fewer of them bends otherwise — a piece of two is
+        // a straight line. Written out as the handles it already is
+        // first, as putting an anchor on does, each piece keeps its bends.
+        let authored = handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
+        if smooth && !authored && points.len() >= 3 {
+            handles = chitrakar_render::smooth_handles(&points, closed);
+            smooth = false;
+        }
+        let parts = (points, handles, closed, smooth, widths);
         let (cmds, made, label) = self.split_commands(id, parts, index)?;
         self.apply_labeled(Command::Batch(cmds), Some(label.into()))?;
         Ok(made)
@@ -10673,11 +10683,15 @@ impl Session {
                 x1: pw + 2 * past,
                 y1: ph + 2 * past,
             },
+            // Each way by what fills the whole pixels it comes out at: a
+            // page of 401 at a half is 201 across, and drawn at exactly a
+            // half the last column was half covered — a light line down
+            // the edge of a JPEG.
             Transform {
-                a: scale,
-                d: scale,
-                e: -x * scale + past as f32,
-                f: -y * scale + past as f32,
+                a: pw as f32 / w,
+                d: ph as f32 / h,
+                e: -x * pw as f32 / w + past as f32,
+                f: -y * ph as f32 / h + past as f32,
                 ..Default::default()
             },
         )?;
@@ -31511,6 +31525,169 @@ mod tests {
         assert!(
             matches!(filters(&s)[1], Filter::GaussianBlur { sigma } if (sigma - 16.0).abs() < 1e-5)
         );
+    }
+
+    /// A smooth path cut at an anchor is drawn as it was: each piece keeps
+    /// the bends it had. The curve was read off the anchors either side,
+    /// and a piece of two anchors had none to read — a straight line.
+    #[test]
+    fn a_smooth_path_split_at_an_anchor_keeps_its_bends() {
+        let mut s = Session::new(160, 100, ColorMode::Rgb);
+        let root = s.document().root();
+        let mut n = Node::vector(
+            "line",
+            VectorShape::Path {
+                points: vec![[10.0, 50.0], [50.0, 10.0], [100.0, 90.0], [150.0, 40.0]],
+                closed: false,
+                smooth: true,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut n.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: AuthoredColor::Srgb {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                width: 4.0,
+                widths: Vec::new(),
+                cap: chitrakar_doc::StrokeCap::Round,
+                join: chitrakar_doc::StrokeJoin::Round,
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                align: None,
+                start_marker: chitrakar_doc::Marker::None,
+                end_marker: chitrakar_doc::Marker::None,
+            });
+        }
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(n),
+        })
+        .unwrap();
+        let id = s.document().children_of(root).unwrap()[0];
+        let whole = s.render().unwrap();
+        s.split_path(id, 1).unwrap();
+        let cut = s.render().unwrap();
+        let mut worst = 0.0f32;
+        for y in 0..100u32 {
+            for x in 0..160u32 {
+                // Away from the cut, where two round ends overlap.
+                if (x as f32 - 50.0).hypot(y as f32 - 10.0) < 4.0 {
+                    continue;
+                }
+                worst = worst.max((whole.get(x, y).a - cut.get(x, y).a).abs());
+            }
+        }
+        assert!(worst < 0.05, "the first piece lost its bend: {worst}");
+    }
+
+    /// A page of odd size scaled by a half fills the page it comes to,
+    /// as an export of it at a half fills its file: drawn at exactly a
+    /// half, the last column and row were half covered.
+    #[test]
+    fn a_page_scaled_to_a_size_it_does_not_divide_into_is_filled() {
+        let mut s = Session::new(401, 301, ColorMode::Rgb);
+        add_rect(&mut s, "Photo", 401.0, 301.0);
+        let out = s.render_scaled(0.5, None).unwrap();
+        assert_eq!((out.width, out.height), (201, 151));
+        assert!(out.get(200, 150).a > 0.99, "{:?}", out.get(200, 150));
+        s.scale_canvas(0.5).unwrap();
+        assert_eq!(
+            (s.document().meta.width, s.document().meta.height),
+            (201, 151)
+        );
+        let page = s.render().unwrap();
+        assert!(page.get(200, 150).a > 0.99, "{:?}", page.get(200, 150));
+        assert!(s.undo().unwrap());
+        let back = s.render().unwrap();
+        assert!(
+            back.get(400, 300).a > 0.99,
+            "and back: {:?}",
+            back.get(400, 300)
+        );
+    }
+
+    /// A twirl inside a group stays on the same part of the picture when
+    /// the page grows about its middle, is cropped, or is scaled. Its
+    /// centre is read in the group's own space, which the group's
+    /// placement carries; carried a second time, it landed elsewhere.
+    #[test]
+    fn a_twirl_inside_a_group_is_carried_with_the_page() {
+        use chitrakar_doc::Filter;
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let root = s.document().root();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("G")),
+        })
+        .unwrap();
+        let group = s.document().children_of(root).unwrap()[0];
+        for i in 0..10 {
+            let mut bar = filled_rect("Bar", 12.0, 300.0);
+            bar.transform = Transform::translation(40.0 * i as f32 + 10.0, 0.0);
+            s.apply(Command::AddNode {
+                parent: group,
+                index: i,
+                node: bar,
+            })
+            .unwrap();
+        }
+        s.apply(Command::AddNode {
+            parent: group,
+            index: 10,
+            node: Box::new(Node::filter(
+                "Twirl",
+                Filter::Twirl {
+                    degrees: 120.0,
+                    radius: 0.8,
+                    center: [0.4, 0.5],
+                },
+            )),
+        })
+        .unwrap();
+        let before = s.render().unwrap();
+        let px = |sf: &Surface, x: u32, y: u32| sf.pixels[(y * sf.width + x) as usize];
+        let differs = |a: &Surface, b: &Surface, (dx, dy): (i32, i32), (w, h): (u32, u32)| {
+            let mut worst = 0.0f32;
+            for y in 0..h {
+                for x in 0..w {
+                    let p = px(a, x, y);
+                    let q = px(b, (x as i32 + dx) as u32, (y as i32 + dy) as u32);
+                    worst = worst.max((p.r - q.r).abs()).max((p.a - q.a).abs());
+                }
+            }
+            worst
+        };
+        // Grown about the middle: the old page sits 100 across, 50 down.
+        s.apply(Command::ResizeCanvas {
+            width: 600,
+            height: 400,
+            dx: 100.0,
+            dy: 50.0,
+        })
+        .unwrap();
+        let grown = s.render().unwrap();
+        let worst = differs(&before, &grown, (100, 50), (400, 300));
+        assert!(worst < 0.02, "the twirl moved: {worst}");
+        assert!(s.undo().unwrap());
+        // Cropped to a window 60 across and 40 down, 200 by 200.
+        s.apply(Command::ResizeCanvas {
+            width: 200,
+            height: 200,
+            dx: -60.0,
+            dy: -40.0,
+        })
+        .unwrap();
+        let cropped = s.render().unwrap();
+        let worst = differs(&cropped, &before, (60, 40), (200, 200));
+        assert!(worst < 0.02, "the twirl moved under a crop: {worst}");
     }
 
     /// What the editor itself makes of an effect opens again as it was
