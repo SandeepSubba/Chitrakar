@@ -334,7 +334,14 @@ fn smear(spec: &TextSpec, scale: f32) -> f32 {
 /// descenders lean left of the first glyph's origin, the ascenders right
 /// of the last one's. Nothing, when the lean is the font's own.
 fn lean_room(spec: &TextSpec, font: &impl ScaleFont<&'static FontRef<'static>>) -> (f32, f32) {
-    if synthesized_lean(spec) {
+    // A run set italic in an upright block leans as much as an italic
+    // block does: asked of the block alone, the room was none, and the
+    // top of a leaning "d" at the line's end was cut off flat.
+    let leans = synthesized_lean(spec)
+        || spec.runs.iter().any(|run| {
+            run.italic == Some(true) && synthesized_lean(&spec.styling_under(Some(run)))
+        });
+    if leans {
         (SLANT * -font.descent(), SLANT * font.ascent())
     } else {
         (0.0, 0.0)
@@ -2052,6 +2059,29 @@ pub fn rasterize_at(spec: &TextSpec, scale: f32) -> TextRaster {
 /// drawn as sharp as one on them — read off a grid of its own it was
 /// interpolated between texels, and every stem was smeared across two
 /// pixels at half strength. `origin` says where the slid grid starts.
+/// How far a letter's ink may reach past the block's box either way, in
+/// the block's own pixels: half an em of its largest size. A J's hook
+/// sits left of where the line starts and a leaning f's arm right of
+/// where it ends; the raster was cut at the box, and those were drawn
+/// sliced flat where text made into shapes drew them whole. The box the
+/// layer is said to be stays the letters' advances; the raster, and
+/// what the page repaints for it, reach this much further.
+pub fn ink_overhang(spec: &TextSpec) -> f32 {
+    if spec.along.is_some() {
+        return 0.0;
+    }
+    let most = spec
+        .runs
+        .iter()
+        .filter_map(|r| r.size)
+        .fold(spec.size, f32::max);
+    if most.is_finite() {
+        (most.max(0.0) * 0.5).min(4096.0)
+    } else {
+        0.0
+    }
+}
+
 pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
     if !(scale > 0.0 && scale.is_finite()) {
         return TextRaster::nothing();
@@ -2060,7 +2090,10 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         return rasterize_along(spec, scale, phase);
     }
     let l = layout(spec, scale);
-    let (w, h) = (l.width + phase[0], l.height + phase[1]);
+    // Room either side for ink past the box, in whole raster pixels so
+    // the grid the glyphs are laid on is not slid by it.
+    let pad = (ink_overhang(spec) * scale).ceil();
+    let (w, h) = (l.width + 2.0 * pad + phase[0], l.height + phase[1]);
     if !fits(w, h) {
         return TextRaster::nothing();
     }
@@ -2090,7 +2123,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         // Alignment is within the block's own width, which is the widest
         // line: a short line is pushed right by the slack it leaves.
         let (glyphs, start, _) = set_line(spec, &l, line_no, scale);
-        let start = start + phase[0];
+        let start = start + phase[0] + pad;
         for g in glyphs {
             let cut = cuts.cut(g.run);
             let face = cut.fonts.font.as_scaled(cut.px);
@@ -2131,9 +2164,9 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     let share = |p: u32, lo: f32, hi: f32| (hi.min(p as f32 + 1.0) - lo.max(p as f32)).max(0.0);
     for (band, whose) in decoration_bands(spec, &l, scale) {
         let [x0, y0, x1, y1] = [
-            band[0] + phase[0],
+            band[0] + phase[0] + pad,
             band[1] + phase[1],
-            band[2] + phase[0],
+            band[2] + phase[0] + pad,
             band[3] + phase[1],
         ];
         let tint = cuts.cut(whose).tint;
@@ -2162,7 +2195,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
         coverage,
         colors,
         tint,
-        origin: (-phase[0] / scale, -phase[1] / scale),
+        origin: ((-phase[0] - pad) / scale, -phase[1] / scale),
         ink,
     }
 }
@@ -3007,6 +3040,41 @@ mod tests {
         assert!(inked > 1000, "and glyphs were drawn ({inked})");
     }
 
+    /// A letter whose ink reaches past the block's box — a J's hook left
+    /// of where the line starts — is drawn whole: the raster reaches
+    /// past the box, and it was cut there, sliced flat.
+    #[test]
+    fn a_letter_reaching_past_the_box_is_drawn_whole() {
+        let j = spec("Jjy", 80.0);
+        let r = rasterize(&j);
+        let left_of_box = (-r.origin.0).round() as u32;
+        assert!(left_of_box > 0, "the raster reaches left of the box");
+        let inked_left = (0..r.height)
+            .any(|y| (0..left_of_box).any(|x| r.coverage[(y * r.width + x) as usize] > 0.1));
+        assert!(inked_left, "and the hook's ink is there, left of the box");
+        // The box it is said to be is the letters' advances, as before.
+        assert_eq!(bounds(&j)[0], 0.0);
+    }
+
+    /// An italic run in an upright block is given the room an italic
+    /// block is: asked of the block alone, the top of a leaning "d" at
+    /// the end of the line was cut off flat.
+    #[test]
+    fn an_italic_run_has_room_for_its_lean() {
+        let mut block = spec("Hold", 80.0);
+        block.italic = true;
+        let mut run = spec("Hold", 80.0);
+        run.runs = vec![chitrakar_doc::StyleRun {
+            italic: Some(true),
+            ..chitrakar_doc::StyleRun::over(0, 4)
+        }];
+        assert_eq!(
+            rasterize(&run).width,
+            rasterize(&block).width,
+            "the run's block is as wide as the italic block"
+        );
+    }
+
     #[test]
     fn italic_leans_the_glyphs_when_no_oblique_face_exists() {
         let upright = spec("l", 48.0);
@@ -3020,9 +3088,9 @@ mod tests {
             up.width
         );
         assert_eq!(
-            measure(&italic).0.ceil() as u32,
+            (measure(&italic).0 + 2.0 * ink_overhang(&italic).ceil()).ceil() as u32,
             lean.width,
-            "and measures as wide as it rasterizes"
+            "and measures as wide as it rasterizes, with room either side"
         );
         let tilt = |r: &TextRaster| {
             let (y0, y1) = ink_rows(r);
@@ -3099,9 +3167,9 @@ mod tests {
             light.width
         );
         assert_eq!(
-            measure(&bold).0.ceil() as u32,
+            (measure(&bold).0 + 2.0 * ink_overhang(&bold).ceil()).ceil() as u32,
             heavy.width,
-            "and measures as wide as it rasterizes"
+            "and measures as wide as it rasterizes, with room either side"
         );
         assert_eq!(
             ink_rows(&light),

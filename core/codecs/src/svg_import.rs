@@ -553,6 +553,9 @@ fn unbase64(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// The most letters of SVG text brought in (`past_reason`).
+const SVG_LETTERS_MOST: usize = 10_000;
+
 fn past_reason(data: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(data).ok()?;
     let options = usvg::roxmltree::ParsingOptions {
@@ -562,6 +565,26 @@ fn past_reason(data: &[u8]) -> Option<String> {
     // What will not parse here will not parse for the reader either,
     // which says so in its own words.
     let doc = usvg::roxmltree::Document::parse_with_options(text, options).ok()?;
+    // Text comes in as the outlines of its letters, a few thousand
+    // numbers each: eight thousand letters took a quarter of a minute and
+    // a 28 MB document, and half a million never came in at all. Past
+    // what can be brought in in reason, it is said so.
+    let letters: usize = doc
+        .descendants()
+        .filter(|n| n.is_text() && n.ancestors().any(|a| a.has_tag_name("text")))
+        .map(|n| {
+            n.text()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .count()
+        })
+        .sum();
+    if letters > SVG_LETTERS_MOST {
+        return Some(format!(
+            "this file sets {letters} letters of text, and text comes in as the outlines of its              letters: more than {SVG_LETTERS_MOST} is more than the editor brings in"
+        ));
+    }
     let not_numbers = [
         "id",
         "class",
@@ -4569,6 +4592,18 @@ mod tests {
                 got.err()
             );
         }
+    }
+
+    /// Text past what can be brought in is said so, not set: half a
+    /// million letters never came in, and the page went with them.
+    #[test]
+    fn an_svg_of_too_much_text_is_refused_in_words() {
+        let many = "word ".repeat(3000);
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><text x="0" y="20" font-family="DejaVu Sans">{many}</text></svg>"#
+        );
+        let err = import_svg(svg.as_bytes()).err().expect("refused");
+        assert!(err.contains("12000 letters"), "{err}");
     }
 
     /// A clip path drawn even-odd cuts its inner ring out: a box with a

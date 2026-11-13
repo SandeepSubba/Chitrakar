@@ -785,6 +785,8 @@ const THIS_TAB = Math.random().toString(36).slice(2);
 /** Whether this tab has copied layers this visit: only then has it a
  * copy that another tab's could have made stale. */
 let copiedHere = false;
+/** Whether the eraser has said, this visit, that it needs a layer. */
+let toldEraser = false;
 
 /** Move the draft kept in `from` to a slot no tab holds and no draft
  * is in, and say which (or `null` where none is free). A tab takes a
@@ -4302,13 +4304,13 @@ export function App() {
       // let go of the layer the menus were come to for.
       if (e.key === "Escape" && e.target instanceof Element && e.target.closest(".menubar, [role=menu]")) return;
       // Shift+F10 or the menu key with nothing in particular focused is
-      // the canvas's menu for what is picked, opened in the middle of the
-      // view, as a right-click on it would. A row, a field or a button
+      // the canvas's menu for what is picked — or, with nothing picked,
+      // the bare canvas's (Paste, Select all, Fit) — opened in the middle
+      // of the view, as a right-click on it would. A row, a field or a button
       // has its own (or the browser's).
       if (
         ((e.key === "F10" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) || e.key === "ContextMenu") &&
         (e.target === document.body || hostRef.current?.contains(e.target as Node)) &&
-        selected !== null &&
         !aWindowIsUp()
       ) {
         const r = hostRef.current?.getBoundingClientRect();
@@ -4965,14 +4967,17 @@ export function App() {
   const ignoredRef = useRef<Set<number>>(new Set());
   /** A finger held still on the canvas, waiting to become a long press —
    * a touch screen's right-click. */
-  const longRef = useRef<{ id: number; x: number; y: number; timer: number } | null>(null);
-  const startLong = (e: React.PointerEvent) => {
+  const longRef = useRef<{ id: number; x: number; y: number; timer: number; defer: boolean } | null>(null);
+  /** `defer`: a hold that becomes the menu only if the pointer then lifts
+   * where it is, and a drag as ever if it moves on (`pressedLong`). */
+  const startLong = (e: React.PointerEvent, defer = false) => {
     clearLong();
     longRef.current = {
       id: e.pointerId,
       x: e.clientX,
       y: e.clientY,
       timer: window.setTimeout(pressedLong, LONG_PRESS_MS),
+      defer,
     };
   };
   const clearLong = () => {
@@ -5024,6 +5029,36 @@ export function App() {
     const at = longRef.current;
     if (!at) return;
     clearLong();
+    // A pen is held still a moment before the drag it means — placing the
+    // nib — so its hold only asks for the menu if it then lifts where it
+    // is. Taken as the menu at once, a rectangle begun with a pause was
+    // never drawn.
+    if (at.defer) {
+      const done = () => {
+        window.removeEventListener("pointermove", moved, true);
+        window.removeEventListener("pointerup", lifted, true);
+        window.removeEventListener("pointercancel", done, true);
+      };
+      const moved = (e: PointerEvent) => {
+        if (e.pointerId === at.id && Math.hypot(e.clientX - at.x, e.clientY - at.y) > LONG_PRESS_SLOP) done();
+      };
+      const lifted = (e: PointerEvent) => {
+        if (e.pointerId !== at.id) return;
+        done();
+        // The lift is the question's, not the end of a click on the page.
+        e.stopPropagation();
+        abandonGesture();
+        panDragRef.current = null;
+        tapsRef.current.spoil(at.id);
+        touchesRef.current.delete(at.id);
+        navigator.vibrate?.(12);
+        openContextAt(at.x + 24, at.y - 12);
+      };
+      window.addEventListener("pointermove", moved, true);
+      window.addEventListener("pointerup", lifted, true);
+      window.addEventListener("pointercancel", done, true);
+      return;
+    }
     abandonGesture();
     panDragRef.current = null;
     tapsRef.current.spoil(at.id);
@@ -5737,7 +5772,10 @@ export function App() {
     // A pen held still asks the same: a Pencil has no button to ask with.
     const alone = e.pointerType === "pen" || (e.pointerType === "touch" && touchesRef.current.size === 1);
     if (alone && !replaying.current && !painting && !cloning && tool !== "Pen" && tool !== "Brush") {
-      startLong(e);
+      // A finger asks at once, as a phone's long press does; a pen, which
+      // is held still a moment to place its nib before the drag it
+      // means, asks on the lift.
+      startLong(e, e.pointerType === "pen");
     }
     if (
       e.pointerType === "touch" &&
@@ -6040,7 +6078,19 @@ export function App() {
       // The eraser with nothing it can rub at — nothing picked, or a
       // locked layer — does nothing; it used to make an empty paint layer
       // and rub at that, which changed nothing anyone could see.
-      if (erasing && !onMask && !(picked && picked.kind === "paint" && !picked.locked)) return;
+      if (erasing && !onMask && !(picked && picked.kind === "paint" && !picked.locked)) {
+        // Said once a visit, rather than nothing at all: the stroke
+        // went nowhere and nothing said why.
+        if (!toldEraser) {
+          toldEraser = true;
+          alert(
+            picked?.locked
+              ? `The eraser rubs at the picked layer, and ${picked.name} is locked.`
+              : "The eraser rubs at the picked layer: pick one first. A paint layer is rubbed out; any other has a piece taken out of it, which the brush puts back.",
+          );
+        }
+        return;
+      }
       strokeMade.current = false;
       if (onMask) {
         const hadMask = picked.painted_mask;
@@ -8782,12 +8832,51 @@ export function App() {
       alert(`Paste: ${said(err)}`);
       return;
     }
-    if (ids.length === 0) return;
+    if (ids.length === 0) {
+      // Nothing here to paste, and layers copied in another tab: said,
+      // as it is to a tab whose own copy is older. Without a copy of its
+      // own this tab said nothing at all.
+      if (copiedIn !== null && copiedIn !== THIS_TAB) {
+        alert(
+          "Paste: those layers were copied in another tab, and layers paste only in the tab they were copied in. Save that document and place it here, or copy in this tab.",
+        );
+      }
+      return;
+    }
     // Everything pasted is picked, which is what makes pasting a set of
     // layers and dragging them somewhere one gesture rather than three.
     setSelected(ids[0]);
     setMultiSel(ids.slice(1));
     refresh(session);
+  };
+
+  /** Paste from a menu row (Edit › Paste, the canvas's menu), as the
+   * keystroke pastes: a picture another application put on the system
+   * clipboard first, else the layers copied here. The rows pasted the
+   * layers alone, so a picture Ctrl+V placed was passed over for an
+   * older copy. A row has no paste event to read the clipboard from, so
+   * it asks for it — which a browser may ask the person about, and a
+   * refusal, or no answer in a moment, pastes the layers as before. */
+  const pasteFromMenu = () => {
+    const read = navigator.clipboard?.read?.bind(navigator.clipboard);
+    if (!read) {
+      pasteClipboard();
+      return;
+    }
+    const late = new Promise<null>((done) => setTimeout(() => done(null), 1500));
+    Promise.race([read(), late])
+      .then(async (items) => {
+        for (const item of items ?? []) {
+          const kind = item.types.find((t) => t.startsWith("image/"));
+          if (kind) {
+            const blob = await item.getType(kind);
+            placeImageFile(new File([blob], `image.${kind.slice(6).replace("+xml", "")}`, { type: kind }));
+            return;
+          }
+        }
+        pasteClipboard();
+      })
+      .catch(() => pasteClipboard());
   };
 
   // Layer shortcuts get their own listener, declared after the actions it
@@ -11041,9 +11130,18 @@ export function App() {
     setOpacityDraft(null);
   };
 
+  /** Whether a layer can be blended: an adjustment or a filter rewrites
+   * what is under it and has nothing of its own to blend. */
+  const blends = (id: NodeId) => {
+    const kind = layers.find((l) => l.id === id)?.kind;
+    return kind !== "adjustment" && kind !== "filter";
+  };
   const setBlendOfSelection = (blend: BlendMode) => {
-    if (!session || selectionSet.length === 0) return;
-    session.set_blend_of(new Float64Array(selectionSet), blend);
+    // Given to the picked layers that can take it: a mode written onto
+    // an adjustment picked beside a shape did nothing, and stayed.
+    const ids = selectionSet.filter(blends);
+    if (!session || ids.length === 0) return;
+    session.set_blend_of(new Float64Array(ids), blend);
     refresh(session);
   };
 
@@ -12165,6 +12263,28 @@ export function App() {
   const onShellDropRef = useRef(onShellDrop);
   const takeFilesRef = useRef(takeFiles);
   takeFilesRef.current = takeFiles;
+  // Files dropped anywhere in the window — on the panel, the rail, the
+  // bar — are taken as a drop on the canvas is: there they did nothing,
+  // and the browser was left to open the picture in place of the editor.
+  // Not over a window (its own fields take what they take) or a field.
+  useEffect(() => {
+    const over = (e: DragEvent) => {
+      if (!e.dataTransfer?.types.includes("Files")) return;
+      e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      if (e.defaultPrevented || !e.dataTransfer?.files.length) return;
+      e.preventDefault();
+      if (aWindowIsUp() || isTextEntry(e.target)) return;
+      takeFilesRef.current(Array.from(e.dataTransfer.files));
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
+    };
+  }, []);
 
   // Files given to the app as an app on a phone or a desktop: shared to
   // it from another app's share sheet (the service worker keeps them and
@@ -12611,7 +12731,7 @@ export function App() {
         ...(selectionSet.length > 0 || antRings.length > 0
           ? [item("copy-as-image", "copy", "Copy as image", copyAsImage)]
           : []),
-        item("paste", "paste", "Paste", pasteClipboard, hint("paste")),
+        item("paste", "paste", "Paste", pasteFromMenu, hint("paste")),
         SEP,
         item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
         // Affinity's Duplicate Linked: a copy that follows the original.
@@ -13704,7 +13824,7 @@ export function App() {
             </>
           ) : (
             <>
-              <MenuItem icon="paste" onClick={pasteClipboard} hint={hint("paste")}>
+              <MenuItem icon="paste" onClick={pasteFromMenu} hint={hint("paste")}>
                 Paste
               </MenuItem>
               <MenuItem icon="selectAll" onClick={selectAll} hint={hint("select-all")}>
@@ -14680,7 +14800,9 @@ export function App() {
                     ? " grading"
                     : tool === "Fill"
                       ? " filling"
-                      : ""
+                      : tool === "Text"
+                        ? " texting"
+                        : ""
           }`}
           ref={hostRef}
           onDragOver={(e) => e.preventDefault()}
@@ -14789,6 +14911,13 @@ export function App() {
                 <button
                   className="swatch add"
                   onClick={() => {
+                    // The brush in hand kept already is kept once: pressed
+                    // twice, it made two chips alike, both marked in hand.
+                    const same = prefs.brushes.find((o) => o.size === paintSize && o.softness === paintSoftness);
+                    if (same) {
+                      alert(`This brush is kept already, as ${same.name}.`);
+                      return;
+                    }
                     const taken = new Set(prefs.brushes.map((o) => o.name));
                     let n = prefs.brushes.length + 1;
                     while (taken.has(`Brush ${n}`)) n++;
@@ -16832,9 +16961,9 @@ export function App() {
                   // An adjustment or a filter rewrites what is under it
                   // and has nothing of its own left to blend: a mode
                   // chosen for one was kept and did nothing.
-                  disabled={selectedLayer.kind === "adjustment" || selectedLayer.kind === "filter"}
+                  disabled={!selectionSet.some(blends)}
                   title={
-                    selectedLayer.kind === "adjustment" || selectedLayer.kind === "filter"
+                    !selectionSet.some(blends)
                       ? "An adjustment or a filter changes what is under it, and has nothing of its own to blend"
                       : undefined
                   }
@@ -16865,6 +16994,13 @@ export function App() {
               {selectedKind && (
                 <KindProps
                   kind={selectedKind}
+                  boxAxesSeen={
+                    selLocal && selToScreen
+                      ? boxAxes((a, b) =>
+                          selToScreen!(selLocal![0] + a * (selLocal![2] - selLocal![0]), selLocal![1] + b * (selLocal![3] - selLocal![1])),
+                        )
+                      : null
+                  }
                   bins={histogram}
                   dpi={docDpi}
                   onFrameSize={(w, h) =>
@@ -19310,11 +19446,12 @@ function ScalePageDialog({
     set: (v: number) => void,
     unit: string,
     step: number,
+    least = step,
   ) => (
     <label className="row">
       {label}
       <NumberField
-        min={step}
+        min={least}
         step={step}
         value={value}
         onValue={set}
@@ -19347,12 +19484,16 @@ function ScalePageDialog({
         </p>
         {field("Scale to width", shown(nw), fromWidth, units, units === "px" ? 1 : 0.01)}
         {field("Scale to height", shown(nh), fromHeight, units, units === "px" ? 1 : 0.01)}
+        {/* As small a share as a person types: held to a step of one
+            percent, 0.01 typed became 1 on Enter and the page went to
+            8 by 6, which neither box had said. */}
         {field(
           "Scale by",
-          Math.round(factor * 1000) / 10,
+          Math.round(factor * 100000) / 1000,
           (pct) => setFactor(pct / 100),
           "%",
           1,
+          0.001,
         )}
         {Number.isFinite(factor) && !fits && (
           <p className="modal-aside" role="alert">
@@ -20580,6 +20721,9 @@ interface CurvesPanelProps {
 
 interface KindPropsProps {
   kind: NodeKind;
+  /** How the picked shape's box lies on the screen (`boxAxes`): the
+   * gradient's angle is read and turned as it is seen there. */
+  boxAxesSeen?: [number, number, number, number] | null;
   /** A colour from a well as the document holds it (through the press
    * profile, where there is one). */
   ink?: (hex: string) => AuthoredColor;
@@ -20642,6 +20786,7 @@ function KindProps({
   onLoadLookup,
   onRoundCorners,
   ink,
+  boxAxesSeen,
 }: KindPropsProps) {
   // A colour picked here as the document holds one: through the press
   // profile in a CMYK document that has one, as the bar's well goes.
@@ -21878,12 +22023,58 @@ function KindProps({
       const [dx, dy] = [Math.cos(rad) / 2, Math.sin(rad) / 2];
       return { from: [0.5 - dx, 0.5 - dy], to: [0.5 + dx, 0.5 + dy] };
     };
+    /** Where a ramp's end is seen from its start, on the screen, square to
+     * its bands — the way the Gradient tool drew it — and the same in the
+     * box's own units. Without the box's axes, the box's units. */
+    const seenOf = (g: Extract<NonNullable<typeof grad>, { Linear: unknown }>) => {
+      const { from, to } = g.Linear;
+      const stored: [number, number] = [to[0] - from[0], to[1] - from[1]];
+      if (!boxAxesSeen) return { box: stored, screen: stored };
+      const box = rampSeen(boxAxesSeen, stored);
+      const [a, b, c, d] = boxAxesSeen;
+      return { box, screen: [a * box[0] + b * box[1], c * box[0] + d * box[1]] as [number, number] };
+    };
     const angleOf = (g: typeof grad): number => {
       if (!g || !("Linear" in g)) return 0;
-      const { from, to } = g.Linear;
-      const deg =
-        (Math.atan2(to[1] - from[1], to[0] - from[0]) * 180) / Math.PI;
+      // As it is seen on the page: read in the box's own units, a ramp
+      // the Gradient tool drew at 30° said 11 on a wide shape.
+      const [x, y] = seenOf(g).screen;
+      const deg = (Math.atan2(y, x) * 180) / Math.PI;
       return Math.round(deg < 0 ? deg + 360 : deg);
+    };
+    /** The ramp turned to `deg` as seen, about its own middle and as long
+     * as it was: rebuilt across the whole box, a nudge of a degree moved
+     * its ends and changed its length as well as its angle. */
+    const turnedTo = (g: Extract<NonNullable<typeof grad>, { Linear: unknown }>, deg: number) => {
+      if (!boxAxesSeen) return endpoints(deg);
+      const { from } = g.Linear;
+      const { box, screen } = seenOf(g);
+      const len = Math.hypot(screen[0], screen[1]);
+      const rad = (deg * Math.PI) / 180;
+      const want = [Math.cos(rad) * len, Math.sin(rad) * len];
+      const [a, b, c, d] = boxAxesSeen;
+      const det = a * d - b * c;
+      if (!(Math.abs(det) > 1e-9) || !(len > 1e-9)) return endpoints(deg);
+      // How far across the box a ramp at an angle runs, edge to edge, as
+      // seen: the box's two sides laid along it.
+      const across = (r: number) => Math.abs(Math.cos(r) * a + Math.sin(r) * c) + Math.abs(Math.cos(r) * b + Math.sin(r) * d);
+      // A ramp that spans the box through its middle — what choosing a
+      // gradient gives — goes on spanning it at the new angle, as a CSS
+      // angle does; one drawn by the Gradient tool keeps its length.
+      const now = Math.atan2(screen[1], screen[0]);
+      const centred = Math.abs(from[0] + box[0] / 2 - 0.5) < 1e-3 && Math.abs(from[1] + box[1] / 2 - 0.5) < 1e-3;
+      const spans = centred && Math.abs(len - across(now)) <= 0.01 * len;
+      if (spans) {
+        const l = across(rad);
+        want[0] = Math.cos(rad) * l;
+        want[1] = Math.sin(rad) * l;
+      }
+      // Back into the box's units, and stored as the ramp keeps it.
+      const q: [number, number] = [(d * want[0] - b * want[1]) / det, (-c * want[0] + a * want[1]) / det];
+      const stored = rampStored(boxAxesSeen, q);
+      const mid = [from[0] + box[0] / 2, from[1] + box[1] / 2];
+      const start: [number, number] = [mid[0] - q[0] / 2, mid[1] - q[1] / 2];
+      return { from: start, to: [start[0] + stored[0], start[1] + stored[1]] as [number, number] };
     };
     const setFillKind = (next: string) => {
       const stops = gradStops.length ? gradStops : startingStops();
@@ -21940,7 +22131,7 @@ function KindProps({
               ? slider("Gradient angle", angleOf(grad), 0, 359, 1, (deg) =>
                   patch({
                     gradient: {
-                      Linear: { ...grad.Linear, ...endpoints(deg), stops: gradStops },
+                      Linear: { ...grad.Linear, ...turnedTo(grad, deg), stops: gradStops },
                     },
                   }),
                 )

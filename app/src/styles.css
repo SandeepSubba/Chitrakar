@@ -234,9 +234,17 @@ body {
 
 /* A window too narrow for every group in the buttons' row lets the
    selection's go — each is a row of the Select menu — rather than
-   wrapping the zoom field onto a third line. */
-@media (max-width: 760px) {
+   wrapping the zoom field onto a third line. Measured: at 780 to 840
+   the panel's button, or the zoom with it, went to a third row. */
+@media (max-width: 860px) {
   .topbar-tools .chrome-group[aria-label="Selection"] {
+    display: none;
+  }
+}
+/* And narrower still, before-and-after (View has it), which at 660 left
+   the panel's button alone on a third row. */
+@media (max-width: 700px) {
+  .topbar-tools .chrome-group[aria-label="Before"] {
     display: none;
   }
 }
@@ -2390,6 +2398,21 @@ body {
 
 .canvas-host.filling {
   cursor: cell;
+}
+
+.canvas-host.texting {
+  cursor: text;
+}
+
+/* The page's own canvas covers the host and says crosshair for every
+   tool: the host's cursor for the tools that have one of their own —
+   the hand, the zoom, the fill, the text — never showed. It defers to
+   the host's for those. */
+.canvas-host.handing #engine-canvas,
+.canvas-host.zooming #engine-canvas,
+.canvas-host.filling #engine-canvas,
+.canvas-host.texting #engine-canvas {
+  cursor: inherit;
 }
 
 .canvas-host {

@@ -847,6 +847,34 @@ impl Document {
         held
     }
 
+    /// Every layer placed past what a layer can be placed by — a number
+    /// that is no number, or past a billion, as a hand-written file or
+    /// an older build's Repeat could leave — held to what can be, and
+    /// how many were. Left as they were, the next change of the page
+    /// carried them to infinity and the file would not open again.
+    pub fn hold_places_in_reason(&mut self) -> usize {
+        let mut held = 0;
+        for node in self.nodes.values_mut() {
+            if node.transform.within_reason() {
+                continue;
+            }
+            let t = &mut node.transform;
+            let fallback = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+            for (v, plain) in [&mut t.a, &mut t.b, &mut t.c, &mut t.d, &mut t.e, &mut t.f]
+                .into_iter()
+                .zip(fallback)
+            {
+                *v = if v.is_finite() {
+                    v.clamp(-1e9, 1e9)
+                } else {
+                    plain
+                };
+            }
+            held += 1;
+        }
+        held
+    }
+
     /// The looks kept by name.
     pub fn styles(&self) -> &[KeptStyle] {
         &self.styles
@@ -952,6 +980,22 @@ impl Document {
             kind: Box::new(kind),
         }));
         Command::Batch(cmds)
+    }
+
+    /// Refused, before anything is changed, when the map would carry a
+    /// layer on the page past what a layer can be placed by: a layer
+    /// opened from a file at a scale of 1e38 and the page resized by
+    /// four came to infinity, which saved as null and would not open.
+    fn page_map_fits(&self, m: Transform) -> Result<(), DocError> {
+        let top = self.children.get(&self.root).into_iter().flatten();
+        for id in top {
+            if let Some(node) = self.nodes.get(id) {
+                if !m.compose(node.transform).within_reason() {
+                    return Err(DocError::PlacedPastReason);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn map_page(&mut self, m: Transform, was: (u32, u32)) {
@@ -1449,6 +1493,7 @@ impl Document {
                 if !canvas_fits(width, height) {
                     return Err(DocError::BadCanvasSize(width, height));
                 }
+                self.page_map_fits(Transform::translation(dx, dy))?;
                 let prev = (self.meta.width, self.meta.height);
                 let filters = self.filter_kinds();
                 self.meta.width = width;
@@ -1473,23 +1518,21 @@ impl Document {
             Command::MirrorCanvas { across_x } => {
                 let (w, h) = (self.meta.width as f32, self.meta.height as f32);
                 let same = (self.meta.width, self.meta.height);
-                self.map_page_carrying(
-                    if across_x {
-                        Transform {
-                            a: -1.0,
-                            e: w,
-                            ..Default::default()
-                        }
-                    } else {
-                        Transform {
-                            d: -1.0,
-                            f: h,
-                            ..Default::default()
-                        }
-                    },
-                    same,
-                    false,
-                );
+                let mirror = if across_x {
+                    Transform {
+                        a: -1.0,
+                        e: w,
+                        ..Default::default()
+                    }
+                } else {
+                    Transform {
+                        d: -1.0,
+                        f: h,
+                        ..Default::default()
+                    }
+                };
+                self.page_map_fits(mirror)?;
+                self.map_page_carrying(mirror, same, false);
                 Ok(Command::MirrorCanvas { across_x })
             }
             Command::StraightenCanvas {
@@ -1502,6 +1545,14 @@ impl Document {
                     return Err(DocError::BadCanvasSize(width, height));
                 }
                 let prev = (self.meta.width, self.meta.height);
+                let guides_were = self.guides.clone();
+                let placed_were: Vec<(NodeId, Transform)> = self
+                    .children
+                    .get(&self.root)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.transform)))
+                    .collect();
                 // The radial masks as they are, for the way back.
                 let was: Vec<(NodeId, Mask)> = self
                     .nodes
@@ -1528,6 +1579,7 @@ impl Document {
                     e: nx - (c * cx - s * cy),
                     f: ny - (s * cx + c * cy),
                 };
+                self.page_map_fits(turn)?;
                 self.meta.width = width;
                 self.meta.height = height;
                 let filters = self.filter_kinds();
@@ -1537,7 +1589,7 @@ impl Document {
                         node.mask = Some(mask);
                     }
                 }
-                Ok(Self::with_filters_back(
+                let back = Self::with_filters_back(
                     Command::StraightenCanvas {
                         degrees: -degrees,
                         width: prev.0,
@@ -1545,7 +1597,26 @@ impl Document {
                         keep: was,
                     },
                     filters,
-                ))
+                );
+                // And the guides and the layers' places set back exactly.
+                // A slanted guide is stood level through the page's middle,
+                // which turning back cannot undo: each straighten undone
+                // and redone moved the guides a little further (a guide at
+                // 90 came to 75 in three), and a layer's place came back a
+                // rounding off.
+                let mut cmds = match back {
+                    Command::Batch(cmds) => cmds,
+                    one => vec![one],
+                };
+                cmds.push(Command::SetGuides {
+                    guides: guides_were,
+                });
+                cmds.extend(
+                    placed_were
+                        .into_iter()
+                        .map(|(id, transform)| Command::SetTransform { id, transform }),
+                );
+                Ok(Command::Batch(cmds))
             }
             Command::TurnCanvas { quarters } => {
                 let turns = quarters % 4;
@@ -1584,6 +1655,7 @@ impl Document {
                         f: w,
                     },
                 };
+                self.page_map_fits(turn)?;
                 let was = (self.meta.width, self.meta.height);
                 if turns % 2 == 1 {
                     std::mem::swap(&mut self.meta.width, &mut self.meta.height);
@@ -1616,8 +1688,6 @@ impl Document {
                     .flatten()
                     .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.transform)))
                     .collect();
-                self.meta.width = width;
-                self.meta.height = height;
                 // Each way by what fills the page, where the size said is
                 // the scale's own rounded (or the rounding it undoes): a
                 // page of 401 at a half is 201, and at exactly a half its
@@ -1632,14 +1702,15 @@ impl Document {
                         factor
                     }
                 };
-                self.map_page(
-                    Transform {
-                        a: along(prev.0, width),
-                        d: along(prev.1, height),
-                        ..Default::default()
-                    },
-                    prev,
-                );
+                let scale = Transform {
+                    a: along(prev.0, width),
+                    d: along(prev.1, height),
+                    ..Default::default()
+                };
+                self.page_map_fits(scale)?;
+                self.meta.width = width;
+                self.meta.height = height;
+                self.map_page(scale, prev);
                 let back = Self::with_filters_back(
                     Command::ScaleCanvas {
                         factor: 1.0 / factor,

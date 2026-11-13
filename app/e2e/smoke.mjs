@@ -21660,6 +21660,38 @@ assert(
   );
 }
 
+// 9do. The thirty-sixth audit's interface pass. Shift+F10 with nothing
+// picked opened nothing; the hand's cursor never showed over the page;
+// and Resize page held 0.01% to 1% on Enter.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  await p.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+  await p.keyboard.press("Shift+F10");
+  await p.waitForTimeout(200);
+  assert((await p.locator(".context-menu").count()) === 1, "Shift+F10 with nothing picked opens the bare canvas's menu");
+  await p.keyboard.press("Escape");
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("h");
+  await p.waitForTimeout(150);
+  const cursor = await p.evaluate(() => getComputedStyle(document.querySelector("#engine-canvas")).cursor);
+  assert(cursor === "grab", `the hand's cursor shows over the page (${cursor})`);
+  await p.click('.menu-label:text-is("Page")');
+  await p.click('.menu-pop .menu-item:has-text("Resize page")');
+  await p.waitForSelector('[role="dialog"][aria-label="Resize page"]');
+  const by = p.locator('input[aria-label="Scale by"]');
+  await by.fill("0.5");
+  await by.press("Tab");
+  await p.waitForTimeout(150);
+  const w = await p.locator('input[aria-label="Scale to width"]').inputValue();
+  assert(Number(w) < 10, `a half of one percent is said in the width as typed (${w})`);
+  await ctx.close();
+}
+
 // 9dn. The thirty-fifth audit's interface pass. Resize page took a
 // size past what a page can be, closed, and only then said no; the
 // flyout of tools put away was one row a thousand pixels long, past a

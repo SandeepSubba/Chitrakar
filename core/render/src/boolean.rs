@@ -540,25 +540,6 @@ fn leaves_nothing(a: &[Ring], b: &[Ring], op: BoolOp) -> bool {
     }
 }
 
-/// How many times the rings wind round `p`, counted the way the nonzero
-/// rule counts: up through the point's row one way is one more, the
-/// other way one fewer.
-fn winding(rings: &[Ring], p: Point) -> i32 {
-    let mut w = 0;
-    for ring in rings {
-        for i in 0..ring.len() {
-            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
-            let side = (b[0] - a[0]) * (p[1] - a[1]) - (p[0] - a[0]) * (b[1] - a[1]);
-            if a[1] <= p[1] && b[1] > p[1] && side > 0.0 {
-                w += 1;
-            } else if b[1] <= p[1] && a[1] > p[1] && side < 0.0 {
-                w -= 1;
-            }
-        }
-    }
-    w
-}
-
 /// Rings filled by the nonzero rule, said as rings the even-odd rule
 /// fills the same — or `None` where the two rules already agree, or
 /// where the answer cannot be traced.
@@ -602,10 +583,19 @@ pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
         }
         i
     }
-    for i in 0..rings.len() {
-        for j in i + 1..rings.len() {
-            let (a, b) = (boxes[i], boxes[j]);
-            if a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3] {
+    // Swept across by the boxes' left edges, each box asked only of
+    // those that start before it ends: every pair asked was forty
+    // thousand squares' worth of seconds.
+    let mut order: Vec<usize> = (0..rings.len()).collect();
+    order.sort_by(|&i, &j| boxes[i][0].total_cmp(&boxes[j][0]));
+    for (k, &i) in order.iter().enumerate() {
+        let a = boxes[i];
+        for &j in &order[k + 1..] {
+            let b = boxes[j];
+            if b[0] > a[2] {
+                break;
+            }
+            if a[1] <= b[3] && b[1] <= a[3] {
                 let (ri, rj) = (root(&mut owner, i), root(&mut owner, j));
                 owner[ri] = rj;
             }
@@ -637,19 +627,116 @@ pub fn nonzero_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
 
 /// The most points one cluster of rings is worked out for. Past it the
 /// rings are left as they are — read even-odd, which differs only where
-/// an outline winds round a point twice — rather than the page hanging:
-/// a path of fifty thousand points took a minute, two hundred thousand
-/// twelve.
-const NONZERO_MOST: usize = 4000;
+/// an outline winds round a point twice — rather than the page hanging
+/// on a drawing made to. With the edges filed by height (`Bands`) a
+/// path of fifty thousand points is a fraction of a second; asked of
+/// every edge, it was a minute, and 4000 was the most there was time for.
+const NONZERO_MOST: usize = 200_000;
+
+/// A cluster's edges filed by the band of heights each spans, so that
+/// where an edge crosses others, and how many times the outline winds
+/// round a point, ask only the edges at that height rather than all of
+/// them — which made both grow as the square of the points.
+struct Bands {
+    edges: Vec<(Point, Point)>,
+    y0: f32,
+    step: f32,
+    rows: Vec<Vec<u32>>,
+}
+
+impl Bands {
+    fn of(rings: &[Ring]) -> Bands {
+        let edges: Vec<(Point, Point)> = rings
+            .iter()
+            .flat_map(|r| (0..r.len()).map(move |i| (r[i], r[(i + 1) % r.len()])))
+            .collect();
+        let (y0, y1) = edges.iter().fold((f32::MAX, f32::MIN), |(lo, hi), (a, b)| {
+            (lo.min(a[1]).min(b[1]), hi.max(a[1]).max(b[1]))
+        });
+        let n = ((edges.len() as f32).sqrt() * 2.0).clamp(1.0, 4096.0) as usize;
+        let step = ((y1 - y0) / n as f32).max(1e-6);
+        let mut bands = Bands {
+            edges,
+            y0,
+            step,
+            rows: vec![Vec::new(); n],
+        };
+        for (e, (a, b)) in bands.edges.iter().enumerate() {
+            let (r0, r1) = (bands.row(a[1].min(b[1])), bands.row(a[1].max(b[1])));
+            for r in r0..=r1 {
+                bands.rows[r].push(e as u32);
+            }
+        }
+        bands
+    }
+
+    fn row(&self, y: f32) -> usize {
+        let r = ((y - self.y0) / self.step).floor();
+        if r.is_finite() && r > 0.0 {
+            (r as usize).min(self.rows.len() - 1)
+        } else {
+            0
+        }
+    }
+
+    /// Every edge cut wherever another crosses it, in the order the
+    /// edges run — what `split_ring_all(rings, rings)` answers.
+    fn split(&self) -> Vec<(Point, Point)> {
+        let mut out = Vec::new();
+        let mut asked = vec![u32::MAX; self.edges.len()];
+        for (e, &(a0, a1)) in self.edges.iter().enumerate() {
+            let mut cuts: Vec<f32> = vec![0.0, 1.0];
+            let (r0, r1) = (self.row(a0[1].min(a1[1])), self.row(a0[1].max(a1[1])));
+            for r in r0..=r1 {
+                for &o in &self.rows[r] {
+                    if asked[o as usize] == e as u32 {
+                        continue;
+                    }
+                    asked[o as usize] = e as u32;
+                    let (b0, b1) = self.edges[o as usize];
+                    if let Some((t, _)) = crossing(a0, a1, b0, b1) {
+                        cuts.push(t);
+                    }
+                }
+            }
+            cuts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            let at = |t: f32| [a0[0] + (a1[0] - a0[0]) * t, a0[1] + (a1[1] - a0[1]) * t];
+            for w in cuts.windows(2) {
+                if w[1] - w[0] < 1e-6 {
+                    continue;
+                }
+                out.push((at(w[0]), at(w[1])));
+            }
+        }
+        out
+    }
+
+    /// How many times the outline winds round `p`, as `winding` counts
+    /// it, from the edges at its height alone.
+    fn winding(&self, p: Point) -> i32 {
+        let mut w = 0;
+        for &e in &self.rows[self.row(p[1])] {
+            let (a, b) = self.edges[e as usize];
+            let side = (b[0] - a[0]) * (p[1] - a[1]) - (p[0] - a[0]) * (b[1] - a[1]);
+            if a[1] <= p[1] && b[1] > p[1] && side > 0.0 {
+                w += 1;
+            } else if b[1] <= p[1] && a[1] > p[1] && side < 0.0 {
+                w -= 1;
+            }
+        }
+        w
+    }
+}
 
 fn cluster_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
     if rings.iter().map(Vec::len).sum::<usize>() > NONZERO_MOST {
         return None;
     }
     const SIDE: f32 = 1e-3;
+    let bands = Bands::of(rings);
     let mut keep = Vec::new();
     let mut inside_twice = false;
-    for (a, b) in split_ring_all(rings, rings) {
+    for (a, b) in bands.split() {
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len = (dx * dx + dy * dy).sqrt();
         if len <= 0.0 {
@@ -657,8 +744,8 @@ fn cluster_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
         }
         let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
         let normal = [-dy / len * SIDE, dx / len * SIDE];
-        let left = winding(rings, [mid[0] + normal[0], mid[1] + normal[1]]) != 0;
-        let right = winding(rings, [mid[0] - normal[0], mid[1] - normal[1]]) != 0;
+        let left = bands.winding([mid[0] + normal[0], mid[1] + normal[1]]) != 0;
+        let right = bands.winding([mid[0] - normal[0], mid[1] - normal[1]]) != 0;
         match (left, right) {
             (true, false) => keep.push((a, b)),
             (false, true) => keep.push((b, a)),
@@ -790,6 +877,22 @@ mod tests {
             covers(&out, [10.0, 3.5]),
             "and a point of the star still is"
         );
+        assert!(!covers(&out, [2.0, 18.0]), "and outside is out");
+        // The same star drawn densely — each side cut into eight hundred
+        // and twenty — is worked out the same: held to 4000 points, it
+        // was left with a hole an SVG reader does not draw.
+        let dense: Ring = (0..5)
+            .flat_map(|k| {
+                let (a, b) = (star[k], star[(k + 1) % 5]);
+                (0..820).map(move |s| {
+                    let t = s as f32 / 820.0;
+                    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+                })
+            })
+            .collect();
+        assert_eq!(dense.len(), 4100);
+        let out = nonzero_as_even_odd(std::slice::from_ref(&dense)).expect("a correction");
+        assert!(covers(&out, [10.0, 10.0]), "a dense star keeps its middle");
         assert!(!covers(&out, [2.0, 18.0]), "and outside is out");
         // A square with a hole wound the other way already agrees.
         let ring = square(0.0, 0.0, 10.0);

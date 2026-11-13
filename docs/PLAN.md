@@ -113,7 +113,9 @@ without reading anything else.*
      carried twice inside a group, a crop frame outliving its page,
      the focus given back to the menus rather than where it was. The
      thirty-fifth: a file Repeat could make that would not reopen, a
-     mitred border's box, a clip path given twice drawing nothing.
+     mitred border's box, a clip path given twice drawing nothing. The
+     thirty-sixth: a file placed past reason carried to infinity by a
+     page change, huge SVG text, a paste off a smaller page.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12350,6 +12352,59 @@ without reading anything else.*
   above all; a PNG that states its colour by gAMA, cHRM or cICP rather
   than an ICC profile comes in as sRGB; a WebP's EXIF orientation is
   not applied, as a browser's own does not.
+  **A thirty-sixth audit (November 2026).** Its check of round 35: a
+  file whose layer was placed past reason (by hand, or by an older
+  Repeat) opened as it was, and Resize page then carried it to
+  infinity, saved as null (held to what can be placed on opening, with
+  a note, and a page change that would carry a layer past reason is
+  refused before it changes anything); the nonzero rule's cap of 4000
+  points left a dense star or a circle wound twice with a hole (the
+  edges are filed by height now, so crossings and windings ask only
+  their neighbours, and the cap is 200000); Resize page held 0.01% to
+  1% on Enter and scaled the page to what neither box said; Blend's
+  greying followed the first layer picked (any picked layer that can
+  blend keeps it live, and a mode is given only to those). Its files
+  pass: an SVG of half a million letters never came in (past 10000
+  letters it is said so); after an update, the threaded engine, whose
+  name is not its contents', stayed the old build's offline (asked
+  after again on every visit, at the cost of a revalidation); an
+  italic run in an upright block was cut off where it leaned; a PNG or
+  a JPEG did not say the document's resolution (pHYs, and JFIF's
+  density, at the export's own pixels an inch). Its interface pass:
+  layers pasted into a smaller document landed off its page (brought
+  to its middle, in the same step); Edit › Paste and the canvas's
+  Paste passed over a picture on the system clipboard that Ctrl+V
+  places; a pen held still a moment before dragging opened the
+  canvas's menu (a pen's hold asks only if it lifts where it is); the
+  hand's, the zoom's, the fill's and the text's cursors never showed;
+  the bar went to a third row at 660 and 780 to 840 wide; files
+  dropped on the panel, the rail or the bar did nothing; a paste in a
+  tab that had never copied said nothing; the eraser with nothing
+  picked said nothing; the brushes' + kept the same brush twice;
+  Shift+F10 with nothing picked opened nothing. Its editing pass (two
+  whole-history fuzz runs of 520 and 600 steps, the second saving and
+  reopening at every step, and History jumps checked both ways):
+  Straighten undone and redone moved the guides a little each time —
+  a slanted guide is stood level through the page's middle, which
+  turning back cannot undo — and its layers a rounding off (both are
+  set back exactly now); a letter whose ink reaches past the block's
+  box — a J's hook, a leaning f at a line's end — was cut off flat
+  (the raster, and what is repainted for it, reach half an em past the
+  box; the box the layer is said to be is its advances still); the
+  Gradient angle slider read the ramp in the box's units, 11 for a ramp
+  drawn at 30, and a nudge rebuilt it across the whole box (read and
+  turned as it is seen, about its middle, at its length). Limits
+  written down: a picture dropped on the page is placed in its middle,
+  as Place places it, not under the pointer; a slanted knife cut leaves
+  a faint line along it, both pieces' edges being smoothed where they
+  meet; a layer dragged on the page over another frame stays its first
+  frame's (a drop on the frame's row moves it); scissors on a dashed or
+  arrowed path start the dashes again and give each piece its heads,
+  as Illustrator's do; a WebP export carries no
+  resolution, having nowhere standard to say it; an SVG compound path
+  of tens of thousands of small rings, or one that crosses itself tens
+  of thousands of times, takes seconds to come in; a finger held still
+  before drawing still opens the menu, as a phone's long press does.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

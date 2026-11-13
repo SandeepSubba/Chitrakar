@@ -914,8 +914,11 @@ fn bounds_in_parent_space_inner(
             bounds
         }
         NodeKind::Text(spec) => {
+            // What is repainted for it reaches as far as its letters'
+            // ink can (`text::ink_overhang`), past the box it is said to be.
             let [x0, y0, x1, y1] = text::bounds(spec);
-            transformed_local_bounds(node.transform, (x0, y0, x1, y1))
+            let over = text::ink_overhang(spec);
+            transformed_local_bounds(node.transform, (x0 - over, y0, x1 + over, y1))
         }
         NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
             match painted_bounds(strokes) {
@@ -32195,8 +32198,9 @@ mod tests {
             .filter(|&(x, y)| s.get(x, y).a > 0.5)
             .count() as u32;
         assert!(ink > 100, "glyphs left substantial ink, got {ink} px");
-        // Ink is red (the fill), and confined to the text bounds.
-        let Bounds::Rect(bx0, by0, bx1, by1) = node_bounds(&doc, id).unwrap() else {
+        // Ink is red (the fill), and confined to the text bounds — the
+        // box it is said to be, which these letters' ink stays inside.
+        let Bounds::Rect(bx0, by0, bx1, by1) = node_visual_bounds(&doc, id).unwrap() else {
             panic!("rect bounds");
         };
         assert!(bx0 >= 9.0 && by0 >= 9.0 && bx1 < 200.0 && by1 < 80.0);

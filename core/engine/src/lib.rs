@@ -6375,7 +6375,58 @@ impl Session {
             many => format!("Paste {} layers", many.len()),
         };
         self.apply_labeled(Command::Batch(cmds), Some(label))?;
+        self.bring_onto_page(&ids, now);
         Ok(ids)
+    }
+
+    /// Layers just pasted that landed wholly off the page — copied from
+    /// the far side of a larger document into a smaller one — brought to
+    /// its middle, in the same step as the paste. Where they were copied
+    /// from is where they land when that is anywhere on the page; off it,
+    /// they were there and invisible, and nothing said so.
+    fn bring_onto_page(&mut self, ids: &[NodeId], space: Transform) {
+        let mut seen = chitrakar_render::Bounds::None;
+        for &id in ids {
+            match chitrakar_render::node_visual_bounds(&self.doc, id) {
+                Ok(b) => seen = seen.union(b),
+                Err(_) => return,
+            }
+        }
+        let chitrakar_render::Bounds::Rect(x0, y0, x1, y1) = seen else {
+            return;
+        };
+        let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        if x1 > 0.0 && y1 > 0.0 && x0 < w && y0 < h {
+            return;
+        }
+        let (dx, dy) = (w / 2.0 - (x0 + x1) / 2.0, h / 2.0 - (y0 + y1) / 2.0);
+        // Said on the page and carried into the group pasted into.
+        let Some(back) = chitrakar_render::invert(space) else {
+            return;
+        };
+        let (lx, ly) = (back.a * dx + back.c * dy, back.b * dx + back.d * dy);
+        let step = Transform::translation(lx, ly);
+        let mut moved = Vec::new();
+        for &id in ids {
+            let Ok(node) = self.doc.node(id) else {
+                continue;
+            };
+            moved.push(Command::SetTransform {
+                id,
+                transform: step.compose(node.transform),
+            });
+            // A mask is in the space the layer is placed in, and goes the
+            // same way by hand.
+            if let Some(mask) = &node.mask {
+                moved.push(Command::SetMask {
+                    id,
+                    mask: Some(Box::new(mask.carried_through(step))),
+                });
+            }
+        }
+        if self.apply(Command::Batch(moved)).is_ok() {
+            self.merge_last();
+        }
     }
 
     /// The id every layer in a copied subtree is about to be given, in
@@ -10746,6 +10797,7 @@ impl Session {
     ) -> Result<Vec<u8>, EngineError> {
         let surface = self.render_scaled(scale, region)?;
         kind.encode(surface.width, surface.height, &surface.to_srgb8())
+            .map(|bytes| self.at_density(bytes, surface.width, region, scale))
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -10758,7 +10810,29 @@ impl Session {
     ) -> Result<Vec<u8>, EngineError> {
         let surface = self.render_scaled(scale, region)?;
         chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
+            .map(|bytes| self.at_density(bytes, surface.width, region, scale))
             .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
+    /// An export's file told the document's resolution, as many pixels an
+    /// inch as the export has for each of the page's: a page at 300 dpi
+    /// written at a half is 150, and opens elsewhere the same size on
+    /// paper. Worked from the pixels it came to across the width it is
+    /// of, which a long edge or a rounding makes other than the scale.
+    fn at_density(
+        &self,
+        bytes: Vec<u8>,
+        pixels: u32,
+        region: Option<[f32; 4]>,
+        scale: f32,
+    ) -> Vec<u8> {
+        let across = region.map_or(self.doc.meta.width as f32, |r| r[2]);
+        let per = if across > 0.0 {
+            pixels as f32 / across
+        } else {
+            scale
+        };
+        chitrakar_codecs::with_density(bytes, self.doc.meta.dpi * per)
     }
 
     /// How the photograph on the page was taken, as its camera said: the
@@ -10805,6 +10879,7 @@ impl Session {
     pub fn export_jpeg(&self, quality: u8) -> Result<Vec<u8>, EngineError> {
         let surface = self.drawn_with_room(1.0, None)?;
         chitrakar_codecs::encode_jpeg(surface.width, surface.height, &surface.pixels, quality)
+            .map(|bytes| chitrakar_codecs::with_density(bytes, self.doc.meta.dpi))
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
@@ -12485,6 +12560,8 @@ impl Session {
         // A damaged or hand-written file's effects are held to what can
         // be drawn, rather than freezing the page drawing them.
         let held = opened.doc.hold_effects_in_range();
+        // And a layer placed past reason, held to what can be placed.
+        let placed = opened.doc.hold_places_in_reason();
         let mut session = Self::from_document(opened.doc);
         session.import_notes = renamed
             .iter()
@@ -12500,6 +12577,13 @@ impl Session {
                 "{held} layer effect{} asked for more than can be drawn, and {} held to what can",
                 if held == 1 { "" } else { "s" },
                 if held == 1 { "is" } else { "are" },
+            ));
+        }
+        if placed > 0 {
+            session.import_notes.push(format!(
+                "{placed} layer{} placed further out or larger than a layer can be, and {} held to what can",
+                if placed == 1 { " was" } else { "s were" },
+                if placed == 1 { "is" } else { "are" },
             ));
         }
         // An opened file can already hold copies; the flag is only kept
@@ -31560,6 +31644,185 @@ mod tests {
                 .unwrap()
                 .len(),
             3
+        );
+    }
+
+    /// A layer a file placed past reason is held to what can be placed
+    /// when the file opens, with a note; and a page change that would
+    /// carry a layer past it is refused before it changes anything. A
+    /// layer scaled by 1e38 and the page resized by four came to
+    /// infinity, saved as null, and the file would not open again.
+    #[test]
+    fn a_layer_placed_past_reason_is_held_and_the_page_cannot_push_it_further() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let id = add_rect(&mut s, "Card", 20.0, 10.0);
+        let bytes = s.save().unwrap();
+        // The file, hand-written to place it by 1e38.
+        let doc = chitrakar_codecs::load_chitra(&bytes).unwrap();
+        fn place(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    if o.get("name").and_then(|n| n.as_str()) == Some("Card") {
+                        if let Some(t) = o.get_mut("transform") {
+                            t["a"] = serde_json::json!(1e38);
+                            t["d"] = serde_json::json!(1e38);
+                        }
+                    }
+                    o.values_mut().for_each(place);
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(place),
+                _ => {}
+            }
+        }
+        let mut v = serde_json::to_value(&doc).unwrap();
+        place(&mut v);
+        let doc: Document = serde_json::from_value(v).unwrap();
+        assert!(
+            !doc.node(id).unwrap().transform.within_reason(),
+            "the file says 1e38"
+        );
+        let bytes = chitrakar_codecs::save_chitra(&doc).unwrap();
+        let mut opened = Session::load(&bytes).unwrap();
+        assert!(
+            opened
+                .import_notes()
+                .iter()
+                .any(|n| n.contains("held to what can")),
+            "{:?}",
+            opened.import_notes()
+        );
+        let t = opened.document().node(id).unwrap().transform;
+        assert!(t.within_reason(), "{t:?}");
+        // Resized by four, it would pass a billion: refused, nothing changed.
+        let before = opened.save().unwrap();
+        assert!(opened.scale_canvas(4.0).is_err());
+        assert!(
+            opened.apply(Command::TurnCanvas { quarters: 1 }).is_ok(),
+            "a turn keeps it within reason"
+        );
+        assert!(opened.undo().unwrap());
+        assert_eq!(
+            opened.save().unwrap(),
+            before,
+            "and nothing was changed by the refusal"
+        );
+        let reopened = Session::load(&opened.save().unwrap());
+        assert!(reopened.is_ok(), "and the file opens again");
+    }
+
+    /// An export says the document's resolution: a PNG carries a pHYs
+    /// chunk and a JPEG its JFIF density, at the export's own pixels an
+    /// inch — a page at 300 dpi written at a half says 150. Without it a
+    /// print page opened elsewhere at 72, four times too large.
+    #[test]
+    fn exports_say_the_documents_resolution() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        add_rect(&mut s, "Card", 40.0, 30.0);
+        s.set_dpi(300.0).unwrap();
+        let png = s.render_png_at(1.0, None).unwrap();
+        let at = png
+            .windows(4)
+            .position(|w| w == b"pHYs")
+            .expect("a pHYs chunk");
+        let per_metre = u32::from_be_bytes(png[at + 4..at + 8].try_into().unwrap());
+        assert_eq!(per_metre, (300.0f32 / 0.0254).round() as u32);
+        assert!(
+            chitrakar_codecs::decode(&png).is_ok(),
+            "and the PNG still reads"
+        );
+        let half = s.render_png_at(0.5, None).unwrap();
+        let at = half.windows(4).position(|w| w == b"pHYs").unwrap();
+        let per_metre = u32::from_be_bytes(half[at + 4..at + 8].try_into().unwrap());
+        assert_eq!(
+            per_metre,
+            (150.0f32 / 0.0254).round() as u32,
+            "at a half, 150"
+        );
+        let jpeg = s.export_jpeg_at(1.0, None, 90).unwrap();
+        assert_eq!(jpeg[13], 1, "a JPEG's density is in inches");
+        assert_eq!(u16::from_be_bytes([jpeg[14], jpeg[15]]), 300);
+    }
+
+    /// Straighten undone puts the guides and the layers back exactly, and
+    /// done again lands where it did. A slanted guide is stood level
+    /// through the page's middle, which turning back cannot undo: three
+    /// straightens undone moved a guide at 90 to 75.
+    #[test]
+    fn straighten_undone_puts_guides_and_layers_back_exactly() {
+        use chitrakar_doc::Guide;
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let id = add_rect(&mut s, "Card", 60.0, 40.0);
+        s.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(130.0, 70.0),
+        })
+        .unwrap();
+        s.apply(Command::SetGuides {
+            guides: vec![Guide::Horizontal(181.0), Guide::Vertical(90.0)],
+        })
+        .unwrap();
+        let start = s.save().unwrap();
+        for degrees in [-12.0, 7.0, 3.5] {
+            s.straighten(degrees).unwrap();
+            let done = (
+                s.document().guides().to_vec(),
+                s.document().node(id).unwrap().transform,
+            );
+            assert!(s.undo().unwrap());
+            assert_eq!(s.save().unwrap(), start, "undone at {degrees}: as it was");
+            assert!(s.redo().unwrap());
+            assert_eq!(
+                (
+                    s.document().guides().to_vec(),
+                    s.document().node(id).unwrap().transform
+                ),
+                done,
+                "redone at {degrees}: where it was done"
+            );
+            assert!(s.undo().unwrap());
+        }
+        assert_eq!(s.save().unwrap(), start);
+    }
+
+    /// Layers pasted into a document too small to hold where they were
+    /// land on its page, not off it and unseen — in the same step as the
+    /// paste — while layers that land anywhere on the page stay put.
+    #[test]
+    fn layers_pasted_off_a_smaller_page_land_on_it() {
+        let mut big = Session::new(800, 600, ColorMode::Rgb);
+        let id = add_rect(&mut big, "Card", 40.0, 30.0);
+        big.apply(Command::SetTransform {
+            id,
+            transform: Transform::translation(440.0, 290.0),
+        })
+        .unwrap();
+        big.copy_nodes(&[id]).unwrap();
+        let mut small = Session::new(200, 150, ColorMode::Rgb);
+        let before = small.history_labels().0.len();
+        let pasted = small.paste(None).unwrap();
+        let b = chitrakar_render::node_visual_bounds(small.document(), pasted[0]).unwrap();
+        assert_eq!(
+            b,
+            chitrakar_render::Bounds::Rect(80.0, 60.0, 120.0, 90.0),
+            "in the middle"
+        );
+        assert_eq!(small.history_labels().0.len(), before + 1, "one step");
+        assert!(small.undo().unwrap());
+        assert_eq!(
+            small
+                .document()
+                .children_of(small.document().root())
+                .unwrap()
+                .len(),
+            0
+        );
+        // On a page it reaches, it lands where it was.
+        let mut mid = Session::new(500, 400, ColorMode::Rgb);
+        let pasted = mid.paste(None).unwrap();
+        let b = chitrakar_render::node_visual_bounds(mid.document(), pasted[0]).unwrap();
+        assert_eq!(
+            b,
+            chitrakar_render::Bounds::Rect(440.0, 290.0, 480.0, 320.0)
         );
     }
 

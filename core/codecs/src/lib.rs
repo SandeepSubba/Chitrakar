@@ -316,6 +316,60 @@ pub fn encode_png(width: u32, height: u32, rgba8: &[u8]) -> Result<Vec<u8>, Code
     Ok(out.into_inner())
 }
 
+/// A PNG or a JPEG that says how many of its pixels make an inch, so a
+/// page made at 300 dpi opens elsewhere at its size rather than at 72
+/// and four times too large: a PNG's `pHYs` chunk, put after its header,
+/// and a JPEG's JFIF density. Anything else, or a resolution that is no
+/// number, comes back as it was.
+pub fn with_density(bytes: Vec<u8>, dpi: f32) -> Vec<u8> {
+    if !(dpi.is_finite() && dpi > 0.0) {
+        return bytes;
+    }
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.starts_with(PNG) && bytes.len() >= 33 && &bytes[12..16] == b"IHDR" {
+        let per_metre = (dpi / 0.0254).round().clamp(1.0, u32::MAX as f32) as u32;
+        let mut body = Vec::with_capacity(13);
+        body.extend_from_slice(b"pHYs");
+        body.extend_from_slice(&per_metre.to_be_bytes());
+        body.extend_from_slice(&per_metre.to_be_bytes());
+        body.push(1); // the metre
+        let mut chunk = Vec::with_capacity(21);
+        chunk.extend_from_slice(&9u32.to_be_bytes());
+        chunk.extend_from_slice(&body);
+        chunk.extend_from_slice(&crc32(&body).to_be_bytes());
+        // After the header, which is 8 + 4 + 4 + 13 + 4 bytes in.
+        let mut out = bytes;
+        out.splice(33..33, chunk);
+        return out;
+    }
+    // A JPEG whose first segment is JFIF's: its units and densities.
+    if bytes.len() >= 20 && bytes[0..4] == [0xFF, 0xD8, 0xFF, 0xE0] && &bytes[6..11] == b"JFIF\0" {
+        let d = dpi.round().clamp(1.0, u16::MAX as f32) as u16;
+        let mut out = bytes;
+        out[13] = 1; // dots an inch
+        out[14..16].copy_from_slice(&d.to_be_bytes());
+        out[16..18].copy_from_slice(&d.to_be_bytes());
+        return out;
+    }
+    bytes
+}
+
+/// The CRC a PNG chunk ends in, over its type and data.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
 /// Encode 8-bit sRGB RGBA pixels as lossless WebP.
 ///
 /// The same pixels a PNG holds, transparency and all, usually in less:

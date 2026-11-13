@@ -117,9 +117,15 @@ self.addEventListener("message", (e) => {
         if (named(req.url) && !stays(req.url)) await cache.delete(req);
       }
       for (const url of wanted) {
-        if (!(await cache.match(url))) {
+        // A file named by its contents is right while it is kept. One
+        // that is not (the threaded engine under wasm-threads/, which a
+        // bundler must not rename) is asked after again, so an update's
+        // copy replaces the last build's: kept once, offline the new page
+        // drove the old build's engine. Asked "no-cache", so an unchanged
+        // file costs a revalidation and not its megabytes.
+        if (!named(url) || !(await cache.match(url))) {
           try {
-            const got = await fetch(url);
+            const got = await fetch(url, { cache: "no-cache" });
             if (got.ok) await cache.put(url, got);
           } catch {
             // Offline already: what is kept is what there is.
