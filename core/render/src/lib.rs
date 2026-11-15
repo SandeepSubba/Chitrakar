@@ -3773,7 +3773,13 @@ fn render_child(
                     Some(_) if copy_reaches_out(doc, child, *of) || holds_a_change(doc, *of) => {
                         Bounds::Everything
                     }
-                    Some([x0, y0, x1, y1]) => transformed_local_bounds(t, (x0, y0, x1, y1)),
+                    // A copy of text draws its letters' ink past the box
+                    // as the text does (`text::ink_overhang`): cut to the
+                    // box, a descender under tight lines was cut off.
+                    Some([x0, y0, x1, y1]) => {
+                        let over = text_copied(doc, *of).map_or(0.0, text::ink_overhang);
+                        transformed_local_bounds(t, (x0 - over, y0 - over, x1 + over, y1 + over))
+                    }
                     // A copy of an adjustment or a filter reaches as far
                     // as the original would.
                     None => Bounds::Everything,
@@ -3815,10 +3821,13 @@ fn render_child(
                 // another kind, and the engine knows nothing of a
                 // softening buried inside a group or inside what a copy
                 // copies.
-                let own = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32;
                 let room = soften.ceil() as u32;
+                // Laid down within the region being painted and no
+                // further: grown by the feather, a group's softened edge
+                // was laid past the page, onto the pasteboard, where
+                // nothing ever repainted it.
                 let sub_clip = match extent.to_clip(dst.width, dst.height) {
-                    Some(b) => b.intersect(grow(clip, own, dst.width, dst.height)),
+                    Some(b) => b.intersect(clip),
                     None => return Ok(()),
                 };
                 // Grown from the box as well as from the region: cut to
@@ -4352,10 +4361,13 @@ fn render_child(
                 // another kind, and the engine knows nothing of a
                 // softening buried inside a group or inside what a copy
                 // copies.
-                let own = feathered_reach(node, parent).unwrap_or(0.0).ceil() as u32;
                 let room = soften.ceil() as u32;
+                // Laid down within the region being painted and no
+                // further: grown by the feather, a group's softened edge
+                // was laid past the page, onto the pasteboard, where
+                // nothing ever repainted it.
                 let sub_clip = match extent.to_clip(dst.width, dst.height) {
-                    Some(b) => b.intersect(grow(clip, own, dst.width, dst.height)),
+                    Some(b) => b.intersect(clip),
                     None => return Ok(()),
                 };
                 let draw_clip = match extent.to_clip(dst.width, dst.height) {
@@ -16568,6 +16580,69 @@ mod tests {
             (12..40).all(|x| s.get(x, 8).a == 0.0),
             "and still none of it outside the edge"
         );
+    }
+
+    /// A group whose feathered mask runs past the page's edge is cut at
+    /// the page like every other layer: its softened edge was laid on
+    /// the pasteboard, where nothing repainted it after it moved.
+    #[test]
+    fn a_feathered_group_stays_on_the_page() {
+        let mut doc = Document::new(100, 60, ColorMode::Rgb);
+        let root = doc.root();
+        let mut red = Node::vector(
+            "r",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 60.0,
+                radius: 0.0,
+            },
+        );
+        red.transform = Transform::translation(30.0, 30.0);
+        if let NodeKind::Vector { fill, .. } = &mut red.kind {
+            *fill = Some(RED);
+        }
+        let mut group = Node::group("g");
+        group.mask = Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Vector {
+                shape: VectorShape::Rect {
+                    width: 100.0,
+                    height: 100.0,
+                    radius: 0.0,
+                },
+                transform: Transform::default(),
+            },
+            invert: false,
+            feather: 12.0,
+        });
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(group),
+        })
+        .unwrap();
+        let g = doc.children_of(root).unwrap()[0];
+        doc.apply(Command::AddNode {
+            parent: g,
+            index: 0,
+            node: Box::new(red),
+        })
+        .unwrap();
+        // The page seen with twenty pixels of pasteboard all round.
+        let mut s = Surface::new(140, 100);
+        let view = Transform::translation(20.0, 20.0);
+        let all = ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 140,
+            y1: 100,
+        };
+        render_region_at(&doc, &mut s, all, view).unwrap();
+        assert!(s.get(70, 70).a > 0.5, "on the page, the layer");
+        for y in 81..100 {
+            for x in 0..140 {
+                assert_eq!(s.get(x, y).a, 0.0, "nothing under the page at ({x}, {y})");
+            }
+        }
     }
 
     /// Where a line stops is a question the stroke answers: flat on the

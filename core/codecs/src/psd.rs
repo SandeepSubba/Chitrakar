@@ -830,7 +830,7 @@ fn read_layers(
                 // Nested past what a document holds, said before the
                 // groups are built: the building goes as deep as they
                 // do, and a thousand ran the engine out of stack.
-                if stack.len() > chitrakar_doc::MAX_DEPTH {
+                if stack.len() >= chitrakar_doc::MAX_DEPTH {
                     return Err(bad(format!(
                         "layers cannot be nested more than {} deep",
                         chitrakar_doc::MAX_DEPTH

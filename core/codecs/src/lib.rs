@@ -35,7 +35,7 @@ pub use pdf::{
 };
 pub use svg::export_svg;
 pub use svg_import::{import_svg, ImportedSvg};
-pub use tiff_export::{export_cmyk_tiff, TiffError};
+pub use tiff_export::{export_cmyk_tiff, export_rgb_tiff, TiffError};
 
 /// How many threads the engine's parallel work runs on: the machine's
 /// cores natively, the worker pool in the threaded WebAssembly build,

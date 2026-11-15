@@ -2131,7 +2131,10 @@ body {
      the scrolling does not clip them. */
   overflow-y: auto;
   overflow-x: hidden;
-  scrollbar-width: none;
+  /* Thin, but there: hidden, nothing said that the rail went on below a
+     laptop's window, and a tool's own settings at its foot (the wand's
+     tolerance, a polygon's sides) looked not to exist. */
+  scrollbar-width: thin;
 }
 
 /* The rail scrolls; the tools keep their size, everywhere — on a short
@@ -2433,6 +2436,7 @@ body {
      its own colours, as Appearance says: a person's white accent made
      the handles vanish on a white page. */
   --accent: #6c8cff;
+  --on-accent: #10101a;
   /* Fingers draw and pinch; the browser must not take them for a
      scroll or a page zoom first. */
   touch-action: none;
@@ -4255,7 +4259,9 @@ button.fold:hover {
 .held-key.on {
   background: var(--accent);
   border-color: var(--accent-line);
-  color: var(--accent-text, #fff);
+  /* What reads on the accent: the accent's own text colour is made to
+     read on the panel, and on the accent it was the accent (1.00:1). */
+  color: var(--on-accent);
 }
 
 @media (max-width: 640px), (max-height: 500px) {
@@ -4786,4 +4792,5 @@ button.fold:hover {
 /* The light theme's own, over the picture as everywhere else. */
 :root[data-theme="light"] .canvas-host {
   --accent: #3b5bdb;
+  --on-accent: #ffffff;
 }

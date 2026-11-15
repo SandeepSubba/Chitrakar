@@ -10652,6 +10652,20 @@ impl Session {
         .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
 
+    /// The page as an RGB TIFF with its transparency, at the document's
+    /// resolution: a TIFF for a document with no press profile, which a
+    /// CMYK one cannot be without.
+    pub fn export_rgb_tiff(&self) -> Result<Vec<u8>, EngineError> {
+        let surface = self.drawn_with_room(1.0, None)?;
+        chitrakar_codecs::export_rgb_tiff(
+            surface.width,
+            surface.height,
+            &surface.to_srgb8(),
+            self.doc.meta.dpi,
+        )
+        .map_err(|e| EngineError::BadCommand(e.to_string()))
+    }
+
     /// Export a one-page PDF: live vectors and images where PDF can carry
     /// them, this renderer's pixels where it cannot. With a press profile
     /// loaded the page is written in ink and carries that profile;

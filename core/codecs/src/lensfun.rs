@@ -165,11 +165,47 @@ fn aspect(s: &str) -> Option<f32> {
     }
 }
 
+/// How deep an XML file's elements go, read from its tags alone: an
+/// opening tag goes in, a closing one comes out, and one that closes
+/// itself, a comment, a declaration or an instruction does neither.
+fn nesting(xml: &str) -> usize {
+    let b = xml.as_bytes();
+    let (mut depth, mut most, mut i) = (0usize, 0usize, 0usize);
+    while i < b.len() {
+        if b[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let end = match b[i..].iter().position(|&c| c == b'>') {
+            Some(e) => i + e,
+            None => break,
+        };
+        let tag = &b[i + 1..end];
+        match tag.first() {
+            Some(b'/') => depth = depth.saturating_sub(1),
+            Some(b'?') | Some(b'!') => {}
+            _ if tag.last() == Some(&b'/') => {}
+            _ => {
+                depth += 1;
+                most = most.max(depth);
+            }
+        }
+        i = end + 1;
+    }
+    most
+}
+
 impl Profiles {
     /// Add the lenses and cameras of one of lensfun's XML files; how many
     /// lenses with any correction were in it. A file that is not one is
     /// an error, and adds nothing.
     pub fn add(&mut self, xml: &str) -> Result<usize, String> {
+        // Nested past reason, said before it is read: the reader goes as
+        // deep as the file does, and five thousand levels ran the engine
+        // out of stack. Lensfun's own files are four or five deep.
+        if nesting(xml) > 128 {
+            return Err("lens profiles: nested more deeply than a lensfun database is".into());
+        }
         let doc = roxmltree::Document::parse(xml).map_err(|e| format!("lens profiles: {e}"))?;
         let root = doc.root_element();
         if root.tag_name().name() != "lensdatabase" {
@@ -743,5 +779,16 @@ mod tests {
         assert!(e.vignetting_at(15.0, 1.4, 1000.0).is_none());
         // An aperture not said: none.
         assert!(e.vignetting_at(15.0, 0.0, 1000.0).is_none());
+    }
+
+    #[test]
+    fn a_file_nested_past_reason_is_refused_in_words() {
+        let deep = format!(
+            "<lensdatabase>{}{}</lensdatabase>",
+            "<a>".repeat(5000),
+            "</a>".repeat(5000)
+        );
+        let err = Profiles::default().add(&deep).unwrap_err();
+        assert!(err.contains("nested"), "{err}");
     }
 }

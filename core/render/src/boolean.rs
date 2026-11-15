@@ -656,8 +656,10 @@ const NONZERO_PAIRS_MOST: u64 = 40_000_000;
 /// windings together, counted as it goes: a star of eleven hundred
 /// points, just inside the pairs above, has every edge crossing every
 /// other, and cutting and asking each of its six hundred thousand pieces
-/// took ten seconds.
-const NONZERO_WORK_MOST: u64 = 30_000_000;
+/// took ten seconds. Thirty million was too few: a star of 251 points
+/// that a tenth of a second works out came in with a hole. At this, the
+/// work given up on costs about half a second natively.
+const NONZERO_WORK_MOST: u64 = 150_000_000;
 
 /// A cluster's edges filed by the band of heights each spans, so that
 /// where an edge crosses others, and how many times the outline winds

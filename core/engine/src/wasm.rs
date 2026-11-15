@@ -1985,6 +1985,11 @@ impl WasmSession {
     pub fn export_cmyk_tiff(&self) -> Result<Vec<u8>, JsError> {
         self.inner.export_cmyk_tiff().map_err(to_js)
     }
+
+    /// Export an RGB TIFF with transparency (no press profile needed).
+    pub fn export_rgb_tiff(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.export_rgb_tiff().map_err(to_js)
+    }
 }
 
 fn to_js(e: crate::EngineError) -> JsError {

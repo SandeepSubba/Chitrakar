@@ -70,6 +70,37 @@ pub fn export_cmyk_tiff(
     Ok(out.into_inner())
 }
 
+/// An RGB TIFF of 8-bit sRGB pixels with their transparency (straight,
+/// as ExtraSamples 2 says), LZW-compressed, at the page's resolution:
+/// what a TIFF is when no press profile is loaded to separate through.
+pub fn export_rgb_tiff(
+    width: u32,
+    height: u32,
+    rgba8: &[u8],
+    dpi: f32,
+) -> Result<Vec<u8>, TiffError> {
+    let mut out = Cursor::new(Vec::new());
+    {
+        let mut encoder = TiffEncoder::new(&mut out)?;
+        let mut image = encoder.new_image_with_compression::<colortype::RGBA8, _>(
+            width,
+            height,
+            tiff::encoder::compression::Lzw,
+        )?;
+        image.encoder().write_tag(Tag::ExtraSamples, 2u16)?;
+        let per_inch = (dpi.clamp(1.0, 2400.0) * 100.0).round() as u32;
+        image.resolution(
+            tiff::tags::ResolutionUnit::Inch,
+            tiff::encoder::Rational {
+                n: per_inch,
+                d: 100,
+            },
+        );
+        image.write_data(rgba8)?;
+    }
+    Ok(out.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,5 +175,15 @@ mod tests {
         let icc = chitrakar_color::cms::display_p3_profile_bytes();
         let err = export_cmyk_tiff(&[LinearRgba::TRANSPARENT], 1, 1, &icc, 72.0);
         assert!(matches!(err, Err(TiffError::Color(_))));
+    }
+
+    #[test]
+    fn an_rgb_tiff_comes_back_as_it_went() {
+        let px = [255u8, 0, 0, 255, 0, 0, 255, 128];
+        let bytes = export_rgb_tiff(2, 1, &px, 300.0).unwrap();
+        let back = crate::decode(&bytes).unwrap();
+        assert_eq!((back.width, back.height), (2, 1));
+        assert_eq!(&back.rgba8[..4], &[255, 0, 0, 255]);
+        assert_eq!(back.rgba8[7], 128, "and its transparency");
     }
 }

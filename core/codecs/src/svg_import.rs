@@ -586,13 +586,32 @@ impl<'a, 'i> Letters<'a, 'i> {
             return 0;
         }
         let name = node.tag_name().name();
-        if !referred
-            && matches!(
-                name,
-                "defs" | "symbol" | "clipPath" | "mask" | "pattern" | "marker"
-            )
-        {
-            return 0;
+        // Kept to be referred to: drawn only through a `use`, so counted
+        // only through one — except what is drawn through `url()` (a
+        // clip path, a mask, a pattern, a marker), which is counted where
+        // it stands: skipped, a hundred and fifty thousand letters in a
+        // clip path held the page for over a minute.
+        if !referred && matches!(name, "defs" | "symbol") {
+            let drawn_by_url = |n: &usvg::roxmltree::Node| {
+                matches!(
+                    n.tag_name().name(),
+                    "clipPath" | "mask" | "pattern" | "marker"
+                )
+            };
+            let tops: Vec<_> = node
+                .descendants()
+                .filter(|n| {
+                    drawn_by_url(n)
+                        && !n
+                            .ancestors()
+                            .skip(1)
+                            .take_while(|a| *a != node)
+                            .any(|a| drawn_by_url(&a))
+                })
+                .collect();
+            return tops.into_iter().fold(0usize, |sum, n| {
+                sum.saturating_add(self.drawn(n, depth + 1, true))
+            });
         }
         if name == "use" {
             let href = node
@@ -4835,6 +4854,11 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><text display="none">{many}</text><symbol id="s"><text>{many}</text></symbol><use href="#r"/><rect id="r" width="1" height="1"/></svg>"##
         );
         assert!(past_reason(hidden.as_bytes()).is_none());
+        // In a clip path, it is drawn through `url()`, used or not.
+        let clipped = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><clipPath id="c"><text>{many}</text></clipPath><defs><mask id="m"><text>{many}</text></mask></defs><rect clip-path="url(#c)" width="5" height="5"/></svg>"##
+        );
+        assert!(past_reason(clipped.as_bytes()).is_some());
     }
 
     /// Two squares wound the same way and sharing a corner fill their

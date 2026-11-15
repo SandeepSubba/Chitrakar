@@ -2478,8 +2478,14 @@ impl Mask {
                     let rx = (m.a * dx).hypot(m.c * dy);
                     let ry = (m.b * dx).hypot(m.d * dy);
                     let middle = at(*from);
+                    // On the side of the middle `to` was on: put on the
+                    // positive side each time, a page change that moved
+                    // nothing moved the knob across, and its undo did not
+                    // bring it back.
+                    let side = |v: f32| if v < 0.0 { -1.0 } else { 1.0 };
+                    let (sx, sy) = (side(to[0] - from[0]), side(to[1] - from[1]));
                     *from = middle;
-                    *to = [middle[0] + rx, middle[1] + ry];
+                    *to = [middle[0] + sx * rx, middle[1] + sy * ry];
                 } else {
                     // The fade's lines run across its direction, and a
                     // stretch in one direction or a skew does not keep
@@ -3422,6 +3428,23 @@ mod tests {
             (rx - 15.0).abs() < 1e-3 && (ry - 60.0).abs() < 1e-3,
             "quarter turn: {rx} by {ry}"
         );
+        // Carried only along, `to` stays on its own side of the middle:
+        // put on the positive side, a page change that moved nothing
+        // moved the knob across, and undo did not bring it back.
+        let mask = Mask {
+            kind: MaskKind::Gradient {
+                radial: true,
+                from: [100.0, 80.0],
+                to: [40.0, 120.0],
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let moved = mask.carried_through(Transform::translation(5.0, -3.0));
+        let MaskKind::Gradient { from, to, .. } = moved.kind else {
+            unreachable!()
+        };
+        assert_eq!((from, to), ([105.0, 77.0], [45.0, 117.0]));
     }
     /// Settings written before the lens's fringes, Defringe and a slider
     /// of its own for the colour's noise load as they developed then: no

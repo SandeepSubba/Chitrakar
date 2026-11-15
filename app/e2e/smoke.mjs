@@ -11752,7 +11752,7 @@ assert(
   await page.waitForTimeout(300);
   await rect("#cc3333", 80, 80, 180, 180);
   assert((await rows()) === 2, "a frame with something in it");
-  await page.locator(".panel ul li", { hasText: "Artboard" }).first().click();
+  await page.locator(".panel ul li", { hasText: "Frame " }).first().click();
   await page.waitForTimeout(150);
   await page.keyboard.down("Shift");
   await page
@@ -17792,18 +17792,22 @@ assert(
     "and neither is a multiple of a pixel it does not have",
   );
 
-  // TIFF needs a press profile; without one the window says why rather
-  // than failing when the button is pressed.
+  // TIFF without a press profile is RGB with transparency: it was a
+  // button beside PNG and JPEG that could only say no.
   await page.click('.export-formats .preset:text-is("TIFF")');
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(400);
   assert(
-    (await page.textContent(".export-size")).includes("press profile"),
-    "a CMYK TIFF says what it is waiting for",
+    !(await page.locator(".modal-actions .primary").isDisabled()),
+    "a TIFF can be written without a press profile",
   );
-  assert(
-    await page.locator(".modal-actions .primary").isDisabled(),
-    "and cannot be asked for until it has it",
-  );
+  {
+    const [tif] = await Promise.all([page.waitForEvent("download"), page.click(".modal-actions .primary")]);
+    const bytes = await readFile(await tif.path());
+    const mark = bytes.subarray(0, 2).toString("latin1");
+    assert(mark === "II" || mark === "MM", `and it is a TIFF (${mark})`);
+    await page.keyboard.press("Control+Shift+E");
+    await page.waitForSelector('[role="dialog"][aria-label="Export"]');
+  }
 
   // And it writes the file it promised.
   await page.click('.export-formats .preset:text-is("PNG")');
@@ -20901,8 +20905,8 @@ assert(
   await page.waitForTimeout(300);
   const indent = (name) =>
     page.locator(".panel ul li", { hasText: name }).first().evaluate((el) => parseFloat(el.style.paddingLeft));
-  assert((await indent("Text")) > (await indent("Artboard")), "text drawn inside a frame goes into it");
-  assert((await indent("Path")) > (await indent("Artboard")), "and so does a pen path");
+  assert((await indent("Text")) > (await indent("Frame")), "text drawn inside a frame goes into it");
+  assert((await indent("Path")) > (await indent("Frame")), "and so does a pen path");
 
   // The node tool: Delete with an anchor held takes that anchor.
   await newDocument(800, 600, "rgb");
@@ -22910,7 +22914,7 @@ assert(
   await add.locator(".menu-item", { hasText: "Frame" }).click();
   await p.waitForTimeout(300);
   assert(
-    /^Artboard/.test((await p.locator(".panel ul li.selected .layer-name").textContent()) ?? ""),
+    /^Frame/.test((await p.locator(".panel ul li.selected .layer-name").textContent()) ?? ""),
     "Layer › Add › Frame adds a frame, picked",
   );
   await ctx.close();

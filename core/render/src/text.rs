@@ -759,7 +759,24 @@ fn line_start(spec: &TextSpec, l: &Layout, line_no: usize) -> f32 {
     l.room.0
         + l.indent
         + match spec.align {
-            chitrakar_doc::TextAlign::Left | chitrakar_doc::TextAlign::Justify => 0.0,
+            chitrakar_doc::TextAlign::Left => 0.0,
+            // A justified line fills the width; one that is not filled — a
+            // paragraph's last, a line with no space — sits where its
+            // paragraph reads from: a Hebrew paragraph's last line on the
+            // right, where it was left on the left.
+            chitrakar_doc::TextAlign::Justify => {
+                let (line, at) = &l.lines[line_no];
+                let leftward = word_gap(spec, l, line_no) == 0.0
+                    && matches!(
+                        unicode_bidi::get_base_direction(paragraph_of(spec, *at, line)),
+                        unicode_bidi::Direction::Rtl
+                    );
+                if leftward {
+                    slack
+                } else {
+                    0.0
+                }
+            }
             chitrakar_doc::TextAlign::Center => slack / 2.0,
             chitrakar_doc::TextAlign::Right => slack,
         }

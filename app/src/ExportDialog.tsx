@@ -116,7 +116,7 @@ const FORMATS: Record<
     scales: false,
     area: false,
     shows: false,
-    note: "CMYK, separated through the press profile.",
+    note: "RGB with transparency; CMYK, separated through the press profile, when one is loaded.",
   },
   psd: {
     label: "PSD",
@@ -324,9 +324,6 @@ export function ExportDialog({
         ? `The region “${many[0]}” is not on the page.`
         : "None of the kept regions is on the page.";
     }
-    if (format === "tiff" && !hasIcc) {
-      return "A press profile has to be loaded before a CMYK TIFF can be written.";
-    }
     if (area === "selection" && !hasRegion && !selectionBounds()) {
       return "Nothing is picked.";
     }
@@ -423,8 +420,11 @@ export function ExportDialog({
         return session.export_pdf_marked(false, prefs.pdfBleed, prefs.pdfCropMarks);
       case "svg":
         return new TextEncoder().encode(session.export_svg());
+      // CMYK through the press profile when there is one; RGB, with its
+      // transparency, when there is not — offered beside PNG and JPEG,
+      // it was a button that could only say no.
       case "tiff":
-        return session.export_cmyk_tiff();
+        return hasIcc ? session.export_cmyk_tiff() : session.export_rgb_tiff();
       case "psd": {
         const bytes = session.export_psd();
         setPsdNotes(JSON.parse(session.export_notes()) as string[]);
@@ -470,6 +470,7 @@ export function ExportDialog({
     format,
     area,
     hasRegion,
+    hasIcc,
     prefs.jpegQuality,
     prefs.pdfBleed,
     prefs.pdfCropMarks,
@@ -689,7 +690,10 @@ export function ExportDialog({
               (longEdge > 0 || st.scale === (set ? 0 : scale)) &&
               (format !== "jpeg" || st.jpegQuality === prefs.jpegQuality) &&
               (format !== "pdf" ||
-                (st.pdfBleed === prefs.pdfBleed && st.pdfCropMarks === prefs.pdfCropMarks));
+                (st.pdfBleed === prefs.pdfBleed && st.pdfCropMarks === prefs.pdfCropMarks)) &&
+              (st.sharpen === undefined || st.sharpen === prefs.exportSharpen) &&
+              (st.watermark === undefined || st.watermark === prefs.exportWatermark.on) &&
+              (st.cameraData === undefined || st.cameraData === prefs.exportCameraData);
             return (
               <button
                 key={st.name}
@@ -720,6 +724,14 @@ export function ExportDialog({
                     ...(st.format === "pdf"
                       ? { pdfBleed: st.pdfBleed, pdfCropMarks: st.pdfCropMarks }
                       : {}),
+                    // And how it was finished: kept and not given back, a
+                    // setup said it was in hand with the watermark and the
+                    // sharpening it was kept with both gone.
+                    ...(st.sharpen !== undefined ? { exportSharpen: st.sharpen } : {}),
+                    ...(st.watermark !== undefined
+                      ? { exportWatermark: { ...prefs.exportWatermark, on: st.watermark } }
+                      : {}),
+                    ...(st.cameraData !== undefined ? { exportCameraData: st.cameraData } : {}),
                   });
                 }}
               >
@@ -763,6 +775,9 @@ export function ExportDialog({
                 jpegQuality: prefs.jpegQuality,
                 pdfBleed: prefs.pdfBleed,
                 pdfCropMarks: prefs.pdfCropMarks,
+                sharpen: prefs.exportSharpen,
+                watermark: prefs.exportWatermark.on,
+                cameraData: prefs.exportCameraData,
               };
               setPrefs({ exportSetups: [...prefs.exportSetups, kept] });
             }}

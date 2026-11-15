@@ -2073,6 +2073,15 @@ export function App() {
    * two, since a five-sided thing and a five-pointed one are the same
    * ask made twice. */
   const [sides, setSides] = useState(5);
+  // A tool whose settings sit at the rail's foot brings them into sight
+  // when it is taken up: on a laptop's window they were below the rail's
+  // edge, and the tool looked to have none.
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      const opt = document.querySelector<HTMLElement>(".toolbar .tool-number, .toolbar .tool-ratio, .toolbar .shape-library");
+      opt?.scrollIntoView({ block: "nearest" });
+    });
+  }, [tool]);
   /** Which of the library's shapes the Shape tool draws. */
   const [preset, setPreset] = useState(SHAPE_PRESETS[0].name);
   /** What the crop is held to, by name. */
@@ -4096,7 +4105,7 @@ export function App() {
       frameCount.current += 1;
       try {
         const id = session.add_artboard(
-          `Artboard ${frameCount.current}`,
+          `Frame ${frameCount.current}`,
           Math.round(cx - side / 2),
           Math.round(cy - side / 2),
           side,
@@ -4393,7 +4402,7 @@ export function App() {
           // The size of the brush in hand: the vector brush has a width
           // of its own (to 64), and the keys changed the paint brush's.
           if (tool === "Brush") setBrushSize(step(64));
-          else setPaintSize(step(200));
+          else setPaintSize(step(1000));
         }
       }
       // Undo and redo come off the same table the file and layer keys
@@ -7383,7 +7392,7 @@ export function App() {
       frameCount.current += 1;
       try {
         const id = session.add_artboard(
-          `Artboard ${frameCount.current}`,
+          `Frame ${frameCount.current}`,
           Math.round(x0),
           Math.round(y0),
           Math.round(w),
@@ -8204,6 +8213,21 @@ export function App() {
     effectGesture.current = null;
     if (session?.commit_preview()) refresh(session);
   };
+  // A press anywhere but an effect's own controls finishes its gesture:
+  // the canvas keeps the focus where it was, so a colour picked in a well
+  // and then a click on the page left the colour previewed and never
+  // kept, and the next shape drawn threw it away.
+  const endGestureRef = useRef(endGesture);
+  endGestureRef.current = endGesture;
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      if (effectGesture.current === null) return;
+      if ((e.target as Element | null)?.closest?.(".effect")) return;
+      endGestureRef.current();
+    };
+    document.addEventListener("pointerdown", down, true);
+    return () => document.removeEventListener("pointerdown", down, true);
+  }, []);
 
   /** Every text layer's block, read from the engine, beside its id. */
   const textBlocks = (): { id: NodeId; spec: TextSpec }[] => {
@@ -8577,6 +8601,9 @@ export function App() {
   const [inlineText, setInlineText] = useState<{
     id: NodeId;
     value: string;
+    /** What the block said when it was opened: a block just put down
+     * says its placeholder until something is typed over it. */
+    start?: string;
     /** Where the history stood when the Text tool had just put this
      * block down: the typing then joins the step that added it, and
      * letting it go unwritten takes the block away again. */
@@ -8649,6 +8676,7 @@ export function App() {
     setInlineText({
       id: selectedLayer.id,
       value: selectedKind.Text.text,
+      start: selectedKind.Text.text,
       fresh: fresh ? session.history_mark() : undefined,
     });
     setTimeout(() => {
@@ -8707,12 +8735,17 @@ export function App() {
     // taken out) was never wanted.
     const fresh =
       inlineText.fresh !== undefined && session.history_mark() === inlineText.fresh;
-    if (fresh && (!keep || inlineText.value.trim() === "")) {
+    // Escape on a block just put down keeps what was typed into it, as
+    // Figma and Illustrator do: there is no old text to put back, and the
+    // words were thrown away where no Redo could reach them. On a block
+    // that was already there, Escape still puts its old words back.
+    const typed = inlineText.value.trim() !== "" && inlineText.value !== inlineText.start;
+    if (fresh && (keep ? inlineText.value.trim() === "" : !typed)) {
       session.cancel_preview();
       session.take_back();
       if (selected === inlineText.id) setSelected(null);
       refresh(session);
-    } else if (keep) {
+    } else if (keep || fresh) {
       if (session.commit_preview()) {
         if (fresh) session.merge_last();
         refresh(session);
@@ -13703,9 +13736,11 @@ export function App() {
         <label className="zoom-field">
           <input
             type="number"
-            // No least: the browser steps from it, and from 1 its own
-            // stepping (the wheel's) went 100 to 101. The view holds its
-            // own least (`zoomTo`), and a number under it comes back.
+            // A least of 5, which the browser's own stepping (the wheel's)
+            // starts from: from 1 it went 100 to 101, and with none it
+            // stepped from wherever the view was, 247 to 252. A smaller
+            // zoom can still be typed; the view holds its own least.
+            min={5}
             max={Math.round(MAX_ZOOM * 100)}
             step={5}
             // Keyed by what the view actually is, so wheeling or fitting
@@ -14946,7 +14981,9 @@ export function App() {
                     Width
                     <NumberField
                       min={1}
-                      max={200}
+                      // To a thousand: two hundred was a small brush on
+                      // a five-thousand-pixel photograph.
+                      max={1000}
                       value={paintSize}
                       onValue={setPaintSize}
                       title="Brush width"
@@ -18286,12 +18323,16 @@ function RawDevelopDialog({
   const changed = JSON.stringify(s) !== JSON.stringify(initial);
   const pickingRef = useRef(false);
   pickingRef.current = picking;
+  const changedRef = useRef(changed);
+  changedRef.current = changed;
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         // Escape while picking a grey ends the picking, not the window.
+        // With settings changed it asks first: a key pressed to put a
+        // menu away threw a whole development out, its history with it.
         if (pickingRef.current) setPicking(false);
-        else onCancel();
+        else if (!changedRef.current || window.confirm("Leave without placing it? The settings changed here will be lost.")) onCancel();
       }
       if (e.key === "\\" && !isTextEntry(e.target)) setBefore(true);
     };

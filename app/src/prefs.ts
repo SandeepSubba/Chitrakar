@@ -69,6 +69,12 @@ export type ExportSetup = {
    * it is marked. A setup kept before these were asked reads as none. */
   pdfBleed: number;
   pdfCropMarks: boolean;
+  /** Sharpen for screen, whether the watermark goes on, and whether a
+   * JPEG carries the camera's data, as they were when it was kept: a
+   * setup kept before these were remembered leaves them as they are. */
+  sharpen?: number;
+  watermark?: boolean;
+  cameraData?: boolean;
 };
 
 export const EXPORT_FORMATS: readonly ExportFormat[] = ["png", "jpeg", "webp", "pdf", "svg", "tiff", "psd"];
@@ -494,6 +500,9 @@ export function clamp(p: Prefs): Prefs {
             jpegQuality: n(Math.round(e.jpegQuality), 1, 100, 92),
             pdfBleed: typeof e.pdfBleed === "number" ? n(e.pdfBleed, 0, 25, 0) : 0,
             pdfCropMarks: e.pdfCropMarks === true,
+            ...([0, 0.3, 0.6, 1].includes(e.sharpen as number) ? { sharpen: e.sharpen } : {}),
+            ...(typeof e.watermark === "boolean" ? { watermark: e.watermark } : {}),
+            ...(typeof e.cameraData === "boolean" ? { cameraData: e.cameraData } : {}),
           }))
       : [],
     // Paths each once, as many as the menu shows.
@@ -528,7 +537,7 @@ export function clamp(p: Prefs): Prefs {
           .filter((b, i, all) => all.findIndex((o) => o.name === b.name) === i)
           .map((b) => ({
             name: b.name,
-            size: n(Math.round(b.size), 1, 200, 24),
+            size: n(Math.round(b.size), 1, 1000, 24),
             softness: n(b.softness, 0, 1, 0.5),
           }))
       : [],

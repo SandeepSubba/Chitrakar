@@ -122,7 +122,10 @@ without reading anything else.*
      hidden adjustment. The thirty-eighth: unsaved work read as saved
      once history had let go of its oldest steps, a starburst redrawn
      for fifteen seconds a frame, Photoshop's combined shapes cut as
-     holes, a menu a press on the page left open.
+     holes, a menu a press on the page left open. The thirty-ninth: a
+     feathered group laid past the page, a live copy of text still cut,
+     a budget that gave stars back their holes, a rail cut off on a
+     laptop.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12533,6 +12536,76 @@ without reading anything else.*
   not pan; Opacity with layers of different opacity picked shows the
   first one's; comps, regions, export setups and Blend shapes' count
   are named in the browser's own prompt.
+  **A thirty-ninth audit (November 2026).** Its check of round 38: the
+  nonzero conversion's budget of thirty million gave up on stars and
+  chord patterns of a few hundred points that a tenth of a second works
+  out, and they came in with holes again (a hundred and fifty million:
+  those come in right, and what is given up on costs about half a second
+  natively); text in a clip path, a mask, a pattern or a marker was not
+  counted against the letter limit, and a hundred and fifty thousand
+  letters in a clip path held the page for over a minute (what is drawn
+  through `url()` is counted where it stands); a live copy of text was
+  still drawn only over its box, and lost a J's hook and every
+  descender under tight lines (it is drawn as far as its ink reaches,
+  as the text is); a held Shift on a touch screen said so in the accent
+  on the accent (what reads on it now); an effect's colour picked and
+  then a click on the page was never kept, and the next shape threw it
+  away (a press anywhere else finishes the gesture); the zoom box's
+  wheel stepped from wherever the view was; 256 groups deep was refused
+  by the document rather than by the reader. Its editing pass (about
+  4,200 random edits through the page and the engine, saving and
+  reopening at every step): a group with a feathered mask laid its
+  softened edge past the page, onto the pasteboard, where nothing ever
+  repainted it (a group is laid down within the region painted, as
+  every layer is); a justified right-to-left paragraph's last line sat
+  on the left (it sits where its paragraph reads from); a radial mask's
+  outer point was put back on the positive side by every page change,
+  and Undo did not bring it back (it keeps its side). Its interface
+  pass: the tool rail ran off a laptop's window with nothing to say it
+  scrolled, and a polygon's sides or the wand's tolerance looked not to
+  exist (a thin scrollbar, and a tool's settings scroll into sight when
+  it is taken up); a TIFF could be written only through a press profile
+  (without one it is RGB with its transparency); Escape in the Develop
+  window threw a development away unasked (it asks once something has
+  changed); Escape while typing into a new text block threw the words
+  away where no Redo reached them (they are kept; on a block that was
+  there, Escape still puts its words back); frames were named
+  Artboards; a paint brush stopped at 200 pixels (a thousand). Its
+  files pass: a lens profile file nested five thousand deep ran the
+  engine out of stack (past 128 levels it is refused in words); a PDF
+  page placed at 300 dpi came in a pixel short of what the window said,
+  its last row lost (the scale is nudged so a whole size lands whole);
+  an export setup kept and pressed again left out Sharpen for screen,
+  the watermark and the camera's data while saying it was in hand (it
+  keeps and gives back all three). Limits written down: a path of a hundred thousand spikes still takes two or
+  three seconds a frame in the page; a knife laid exactly through an
+  outline's corners cuts nothing; offset path works in page pixels and
+  rounded corners in the shape's own; dragging an anchor is called
+  "Multiple edits" in History; groups always isolate what is inside
+  them, where Photoshop's pass through; a turned shape's edge can differ
+  by a few levels between the page and an export depending on where the
+  view starts; a feathered Photoshop mask showing by default fades a
+  layer's very edge by a level or two; text hidden by a style rather
+  than an attribute still counts against the letter limit; Ctrl+S with
+  the document's name box emptied saves as untitled; a tap straight
+  after a quick touch stroke can be swallowed (seen with synthetic
+  touch); frames export only as PNGs from the File menu, not through the
+  Export window; Heal asks for its source in an alert; opening several
+  PDF pages of a hundred megapixels one after another in one tab can
+  run the engine out of memory (a reload between them is enough); a
+  small PDF of form objects nested to draw each other twice over holds
+  the page, which draws PDFs on its own thread; text costs about the
+  square of its length to lay out, so a block of twenty thousand
+  letters takes seconds; the resolution a PNG, JPEG, TIFF, PSD or PDF
+  says is not read on the way in, so such a file opens at 72 dpi;
+  Photoshop's text, smart object and fill layers come in as pictures
+  without a note, and its layer comps do not come in; a TIFF's second
+  page and Photoshop's layers inside a TIFF are passed over without a
+  note; a long-edge export says its resolution as the page's times its
+  scale, which is a small number for a photograph; a PDF's UserUnit is
+  not read; tens of thousands of layers take seconds to open; repeated
+  and reflected radial gradients differ from the page in a PDF's outer
+  rings; a camera's name outside ASCII comes out with question marks.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

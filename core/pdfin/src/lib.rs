@@ -94,6 +94,11 @@ pub fn render_pdf_page(bytes: &[u8], page: usize, dpi: f32) -> Result<Page, PdfE
     if longest > SIDE_MOST as f32 {
         scale *= SIDE_MOST as f32 / longest;
     }
+    // The renderer floors its size, and in single precision a letter
+    // page at 300 dpi is 3299.9998 pixels tall: a pixel short of what the
+    // window promised, the page's last row lost. Nudged up by a part in a
+    // hundred thousand, a whole size lands whole.
+    scale *= 1.0 + 1e-5;
     if (w * scale).round() < 1.0 || (h * scale).round() < 1.0 {
         return Err(bad("a page with no size"));
     }
