@@ -892,6 +892,11 @@ if (typeof document !== "undefined") {
       for (const label of TEXT_BOXES) {
         const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
         if (el && el !== at && el.selectionStart !== el.selectionEnd) {
+          // Kept in words as well as collapsed: a newer Chromium put a box's
+          // selection back after the press, and Bold went on meaning the
+          // word. While the box is not where the caret is, that stretch
+          // is one let go of (`textRange`).
+          letGoOf.set(el, [el.selectionStart, el.selectionEnd]);
           el.setSelectionRange(el.selectionEnd, el.selectionEnd);
           letGo = true;
         }
@@ -931,9 +936,32 @@ if (typeof document !== "undefined") {
   );
 }
 
+/** The stretch of each text box a press elsewhere let go of, until the
+ * box has the caret again. */
+const letGoOf = new WeakMap<HTMLTextAreaElement, [number, number]>();
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "focusin",
+    (e) => {
+      if (e.target instanceof HTMLTextAreaElement) letGoOf.delete(e.target);
+    },
+    true,
+  );
+}
+
 function textRange(t: TextSpec): [number, number] | null {
   for (const label of TEXT_BOXES) {
     const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
+    const gone = el ? letGoOf.get(el) : undefined;
+    if (
+      el &&
+      gone &&
+      document.activeElement !== el &&
+      gone[0] === el.selectionStart &&
+      gone[1] === el.selectionEnd
+    ) {
+      continue;
+    }
     if (el && el.selectionStart !== el.selectionEnd) {
       const [a, b] = [
         Math.min(el.selectionStart, el.selectionEnd),
