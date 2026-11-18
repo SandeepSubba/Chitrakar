@@ -2870,6 +2870,18 @@ body {
   color: var(--text);
 }
 
+/* A row is pressed and dragged, not read: names swept over by a drag
+   were left picked as text, and the next press on one started the
+   browser's own drag of the words instead of the row's. */
+.panel li[data-id] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+.panel li[data-id] input {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .layer-name {
   overflow: hidden;
   text-overflow: ellipsis;

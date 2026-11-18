@@ -1334,14 +1334,24 @@ const nextPaint = () =>
  * no more places than it has: 48 rather than 48.00, 0.5 rather than
  * 0.50. In figures of one width, so the value does not shift as it is
  * dragged. */
-function SliderHead({ label, value, unit = "" }: { label: string; value: number; unit?: string }) {
+function SliderHead({
+  label,
+  value,
+  unit = "",
+  mixed = false,
+}: {
+  label: string;
+  value: number;
+  unit?: string;
+  /** Layers picked together that differ say so, as Blend does. */
+  mixed?: boolean;
+}) {
   const shown = Math.round(value * 100) / 100;
   return (
     <span className="slider-head">
       <span>{label}</span>
       <span className="slider-value">
-        {Object.is(shown, -0) ? 0 : shown}
-        {unit}
+        {mixed ? "Mixed" : `${Object.is(shown, -0) ? 0 : shown}${unit}`}
       </span>
     </span>
   );
@@ -4022,8 +4032,21 @@ export function App() {
       strokeMade.current = false;
       refresh(session);
     } else if (cancelled) refresh(session);
+    // The opacity slider keeps what it shows as a draft, written down
+    // when it is let go of: Escape took its preview away and the release
+    // kept the value anyway, the one slider Escape did not cancel.
+    if (cancelled) setOpacityDraft(null);
     return inFlight || cancelled;
   }, [session, refresh, dropCopies]);
+
+  // A window opened by its chord in the middle of a drag takes the drag
+  // back: it went on under the window and was written down on release,
+  // with the window open over a change nobody could see being made.
+  useEffect(() => {
+    if (!handleHeld() && zoomBoxRef.current === null) return;
+    if (document.querySelector(".modal-scrim") === null) return;
+    cancelGesture(true);
+  });
 
   /** Undo pressed with a drag still held takes back the drag, as Escape
    * would, rather than the step before it — which used to vanish with
@@ -5050,6 +5073,17 @@ export function App() {
     // as well as the menu opened.
     if (longRef.current) {
       pressedLong();
+      return;
+    }
+    // The other button pressed in the middle of a drag takes the drag
+    // back, as Escape does, and asks nothing: the menu opened over a
+    // drag that went on following the pointer with no button held, and
+    // was only written down when the next one began.
+    if (handleHeld() || zoomBoxRef.current !== null || marqueeRef.current !== null) {
+      cancelGesture(true);
+      marqueeRef.current = null;
+      setMarquee(null);
+      if (session) refresh(session);
       return;
     }
     openContextAt(e.clientX, e.clientY);
@@ -8463,8 +8497,18 @@ export function App() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
       if (layerDragRef.current === drag) layerDragRef.current = null;
       setLayerDrag(null);
+    };
+    // Escape takes the drag back, as it takes back a drag on the page:
+    // it let go of the picked layers and left the line standing, and the
+    // release dropped the row anyway.
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape" || !drag.active) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      onCancel();
     };
     const onMove = (ev: PointerEvent) => {
       const drag = layerDragRef.current;
@@ -8477,6 +8521,10 @@ export function App() {
       if (!drag.active) {
         if (Math.abs(ev.clientY - drag.startY) < 4) return;
         drag.active = true;
+        // Names a drag swept over are not words picked out of the page:
+        // left picked, the next press on one began the browser's own drag
+        // of the text, which took the pointer and the row drag with it.
+        window.getSelection()?.removeAllRanges();
         // Held at the list's top or bottom edge, the list scrolls under
         // the row — a long list had no way to the rows past its end but
         // a wheel turned mid-drag.
@@ -8532,6 +8580,7 @@ export function App() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
       const drag2 = layerDragRef.current;
       if (drag2 !== drag) return;
       layerDragRef.current = null;
@@ -8546,6 +8595,7 @@ export function App() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
   };
   // Once a row has lifted under a finger, the finger's movement is the
   // row's and not a scroll: the rows let a vertical swipe scroll the list
@@ -11288,7 +11338,11 @@ export function App() {
    * to the save panel as they were, and "x.chitra" as "x.chitra.chitra". */
   const fileName = () => {
     const safe = fileSafe(docName.trim().replace(/\.chitra$/i, ""));
-    return /^(con|prn|aux|nul|com\d|lpt\d)$/i.test(safe) ? `${safe}-` : safe;
+    // Windows reads a device's name before any dot ("con.txt" is CON),
+    // and counts superscript digits and CONIN$/CONOUT$ among them.
+    return /^(con|prn|aux|nul|com[\d\u00b9\u00b2\u00b3]|lpt[\d\u00b9\u00b2\u00b3]|conin\$|conout\$)(\.|$)/i.test(safe)
+      ? safe.replace(/^([^.]*)/, "$1-")
+      : safe;
   };
   /** The document's part of an export's name: sixty at most, so a long
    * document name leaves room for the region, comp or frame the file was
@@ -13195,11 +13249,14 @@ export function App() {
             ]
           : []),
         SEP,
+        // Ticked while they show, as Soft proof is: "Hide guides" with a
+        // tick beside it read as "guides hidden".
         item(
           "guides",
           showGuides ? "check" : "fit",
-          showGuides ? "Hide guides" : "Show guides",
+          "Guides",
           () => setShowGuides((v) => !v),
+          showGuides ? "✓" : undefined,
         ),
         // Nothing to clear is nothing done: it was a step in the history
         // every time it was pressed on a page with no guides.
@@ -15717,6 +15774,13 @@ export function App() {
                     typeInlineText(e.target.value, e.target.selectionEnd);
                     inlineSel.current = [e.target.selectionStart, e.target.selectionEnd];
                   }}
+                  // Text pasted or dropped in is the person's, even the
+                  // very word that was there: pasted over "Text", it
+                  // changed nothing React would call a change, and the
+                  // block went on Escape as though untouched.
+                  onInput={() => {
+                    if (inlineText?.start !== undefined) setInlineText((t) => (t ? { ...t, start: undefined } : t));
+                  }}
                   onSelect={(e) => {
                     inlineSel.current = [e.currentTarget.selectionStart, e.currentTarget.selectionEnd];
                   }}
@@ -17129,6 +17193,10 @@ export function App() {
                   label="Opacity"
                   value={Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}
                   unit="%"
+                  mixed={
+                    opacityDraft === null &&
+                    selectionSet.some((id) => layers.find((l) => l.id === id)?.opacity !== selectedLayer.opacity)
+                  }
                 />
                 <input
                   type="range"
@@ -19108,7 +19176,10 @@ function PdfDialog({
   const [pw, ph] = [Math.max(1, Math.floor(f(f(w) * k))), Math.max(1, Math.floor(f(f(h) * k)))];
   // And a picture past a hundred megapixels is taken down to it when it
   // lands, as any is: said here, where the size was promised.
-  const down = Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph)));
+  // Only a page opened is a document of its own, held to what a document
+  // can be; one placed comes in whole and is scaled onto the page, and
+  // was promised "taken down" all the same.
+  const down = opening ? Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph))) : 1;
   const [lw, lh] = [Math.max(1, Math.floor(pw * down)), Math.max(1, Math.floor(ph * down))];
   const ok = page >= 1 && page <= sizes.length && dpi > 0;
   const go = () => ok && onPlace(page - 1, dpi);

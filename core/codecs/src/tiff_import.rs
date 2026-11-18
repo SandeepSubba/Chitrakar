@@ -23,7 +23,7 @@
 
 use crate::{CodecError, SourceImage};
 use std::io::Cursor;
-use tiff::decoder::{Decoder, DecodingResult};
+use tiff::decoder::{Decoder, DecodingResult, Limits};
 use tiff::tags::Tag;
 use tiff::ColorType;
 
@@ -36,10 +36,24 @@ fn bad(what: impl std::fmt::Display) -> CodecError {
     CodecError::Format(format!("TIFF: {what}"))
 }
 
+/// A decoder held to what the editor holds of any picture rather than to
+/// the crate's own quarter of a gigabyte, which refused a 45-megapixel
+/// 16-bit photograph — a camera's ordinary TIFF — that came in as a PNG.
+fn decoder(bytes: &[u8]) -> Result<Decoder<Cursor<&[u8]>>, CodecError> {
+    let mut limits = Limits::default();
+    // Eight bytes a pixel is sixteen-bit colour with alpha, at the most
+    // pixels any reader takes.
+    limits.decoding_buffer_size = (crate::MAX_PICTURE_PIXELS as usize).saturating_mul(8);
+    Ok(Decoder::new(Cursor::new(bytes))
+        .map_err(bad)?
+        .with_limits(limits))
+}
+
 /// The first picture in a TIFF, as 8-bit sRGB with straight alpha.
 pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
-    let mut dec = Decoder::new(Cursor::new(bytes)).map_err(bad)?;
+    let mut dec = decoder(bytes)?;
     let (width, height) = dec.dimensions().map_err(bad)?;
+    crate::fits(width, height)?;
     let as_grey;
     let mut white_is_zero = false;
     let mut differenced = false;
@@ -65,7 +79,7 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             as_grey = plain.bytes;
             white_is_zero = plain.white_is_zero;
             differenced = plain.differenced;
-            dec = Decoder::new(Cursor::new(&as_grey[..])).map_err(bad)?;
+            dec = decoder(&as_grey[..])?;
             if !matches!(dec.colortype().map_err(bad)?, ColorType::Gray(_)) {
                 return Err(bad("a grey or palette picture that is neither"));
             }

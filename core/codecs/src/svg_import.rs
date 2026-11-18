@@ -597,6 +597,34 @@ impl<'a, 'i> Letters<'a, 'i> {
         n
     }
 
+    /// What the document's style sheets reach with `url(#…)`, wherever
+    /// the sheets are — in `defs` as often as not.
+    ///
+    /// A rule says which elements it reaches in a language of its own,
+    /// so what one reaches is counted as though it reached every shape
+    /// there is (and a marker every point of them): an upper bound, and
+    /// text in a clip path, a mask, a pattern or a marker is rare enough
+    /// that the bound costs nothing. Taken at its word only where it is
+    /// written on an element, a clip path of nine thousand letters used
+    /// by three hundred shapes from a style sheet held the page for a
+    /// minute and a half.
+    fn sheets(&mut self, doc: &'a usvg::roxmltree::Document<'i>) -> usize {
+        let root = doc.root_element();
+        let mut sum = 0usize;
+        for node in doc.descendants().filter(|n| n.has_tag_name("style")) {
+            let sheet: String = node.children().filter_map(|c| c.text()).collect();
+            for (property, id) in references_in(&sheet) {
+                let times = if is_marker(property) {
+                    points_under(root)
+                } else {
+                    shapes_under(root)
+                };
+                sum = sum.saturating_add(self.target(id, 0).saturating_mul(times.max(1)));
+            }
+        }
+        sum
+    }
+
     fn drawn(&mut self, node: usvg::roxmltree::Node<'a, 'i>, depth: u32, referred: bool) -> usize {
         if depth > 16 || !node.is_element() || node.attribute("display") == Some("none") {
             return 0;
@@ -615,39 +643,55 @@ impl<'a, 'i> Letters<'a, 'i> {
         {
             return 0;
         }
-        // A `use`, or a filter's `feImage`, draws what it names.
-        if name == "use" || name == "feImage" {
-            let href = node
-                .attribute(("http://www.w3.org/1999/xlink", "href"))
-                .or_else(|| node.attribute("href"))
-                .unwrap_or("");
-            return href
-                .strip_prefix('#')
-                .map_or(0, |id| self.target(id, depth));
+        let href = node
+            .attribute(("http://www.w3.org/1999/xlink", "href"))
+            .or_else(|| node.attribute("href"))
+            .and_then(|h| h.strip_prefix('#'));
+        // A `use`, a filter's `feImage` or a `tref` draws what it names.
+        if matches!(name, "use" | "feImage" | "tref") {
+            return href.map_or(0, |id| self.target(id, depth));
+        }
+        let mut sum = 0usize;
+        // A pattern, a filter, a mask or a clip path naming another takes
+        // what that one holds as its own.
+        if referred && matches!(name, "pattern" | "filter" | "mask" | "clipPath") {
+            if let Some(id) = href {
+                sum = sum.saturating_add(self.target(id, depth));
+            }
+        }
+        // A style sheet is counted on its own (`sheets`), wherever it is.
+        if name == "style" {
+            return sum;
         }
         // And whatever it reaches with `url(#…)` — a clip path, a mask, a
         // fill's pattern, a filter, a marker — once for each time it is
-        // drawn: a marker in the middle is drawn at every point.
-        let mut sum = 0usize;
+        // drawn: a marker in the middle is drawn at every point, and one
+        // set on a group is set on every shape inside it, as a fill is.
         for attr in node.attributes() {
-            let mut rest = attr.value();
-            while let Some(at) = rest.find("url(#") {
-                rest = &rest[at + 5..];
-                let id = rest
-                    .split(')')
-                    .next()
-                    .unwrap_or("")
-                    .trim_matches(['\'', '"', ' ']);
-                let times = if attr.name() == "marker-mid" || attr.name() == "marker" {
-                    let points = node
-                        .attribute("points")
-                        .or_else(|| node.attribute("d"))
-                        .unwrap_or("");
-                    (numbers_in(points).count() / 2).max(1)
+            let pairs: Vec<(&str, &str)> = if attr.name() == "style" {
+                references_in(attr.value())
+            } else {
+                references_in(attr.value())
+                    .into_iter()
+                    .map(|(_, id)| (attr.name(), id))
+                    .collect()
+            };
+            for (property, id) in pairs {
+                let times = if is_marker(property) {
+                    points_under(node)
+                } else if matches!(property, "fill" | "stroke" | "filter" | "mask")
+                    && !is_shape(node)
+                {
+                    // Inherited: a group's fill is every shape's fill.
+                    if matches!(property, "fill" | "stroke") {
+                        shapes_under(node)
+                    } else {
+                        1
+                    }
                 } else {
                     1
                 };
-                sum = sum.saturating_add(self.target(id, depth).saturating_mul(times));
+                sum = sum.saturating_add(self.target(id, depth).saturating_mul(times.max(1)));
             }
         }
         for child in node.children() {
@@ -669,6 +713,75 @@ impl<'a, 'i> Letters<'a, 'i> {
     }
 }
 
+/// Each `url(#id)` in a value or a style sheet, with the property it is
+/// given to where that is said (`marker-mid: url(#m)`), and "" where not.
+fn references_in(text: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(at) = text[from..].find("url(#") {
+        let start = from + at;
+        let id = text[start + 5..]
+            .split(')')
+            .next()
+            .unwrap_or("")
+            .trim_matches(['\'', '"', ' ']);
+        // The property is the name before the nearest colon behind it,
+        // within its own declaration.
+        let before = &text[..start];
+        let decl = before.rsplit([';', '{']).next().unwrap_or("");
+        let property = decl.split(':').next().unwrap_or("").trim();
+        out.push((property, id));
+        from = start + 5;
+    }
+    out
+}
+
+fn is_marker(property: &str) -> bool {
+    matches!(
+        property,
+        "marker" | "marker-mid" | "marker-start" | "marker-end"
+    )
+}
+
+fn is_shape(node: usvg::roxmltree::Node) -> bool {
+    matches!(
+        node.tag_name().name(),
+        "path"
+            | "rect"
+            | "circle"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "text"
+            | "use"
+            | "image"
+    )
+}
+
+/// The shapes at or under `node`: what a fill set on a group is set on.
+fn shapes_under(node: usvg::roxmltree::Node) -> usize {
+    node.descendants()
+        .filter(|n| n.is_element() && is_shape(*n))
+        .count()
+}
+
+/// The points of every outline at or under `node`: where a marker set
+/// there could stand.
+fn points_under(node: usvg::roxmltree::Node) -> usize {
+    node.descendants()
+        .filter(|n| n.is_element())
+        .map(|n| {
+            let points = n
+                .attribute("points")
+                .or_else(|| n.attribute("d"))
+                .unwrap_or("");
+            numbers_in(points).count() / 2
+        })
+        .fold(0usize, |a, b| a.saturating_add(b))
+        .max(1)
+}
+
 fn past_reason(data: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(data).ok()?;
     let options = usvg::roxmltree::ParsingOptions {
@@ -687,7 +800,10 @@ fn past_reason(data: &[u8]) -> Option<String> {
     // for, and none of what is not shown. Counted as written, a library
     // of unused labels was refused, and one label used sixty times came
     // in and held the page for two minutes.
-    let letters = Letters::of(&doc).drawn(doc.root_element(), 0, false);
+    let mut counted = Letters::of(&doc);
+    let letters = counted
+        .drawn(doc.root_element(), 0, false)
+        .saturating_add(counted.sheets(&doc));
     if letters > SVG_LETTERS_MOST {
         return Some(format!(
             "this file sets {letters} letters of text, and text comes in as the outlines of its \
@@ -4885,6 +5001,47 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><clipPath id="c"><text>{many}</text></clipPath><rect width="5" height="5"/></svg>"##
         );
         assert!(past_reason(unused.as_bytes()).is_none());
+        // Reached for from a style sheet, in `defs` as one usually is, or
+        // from a style attribute, a group, another pattern or a `tref`:
+        // each was counted as nothing, and the page held for a minute.
+        let a_thousand = "x".repeat(1_000);
+        let shapes: String = (0..12)
+            .map(|_| r#"<rect class="r" width="5" height="5"/>"#)
+            .collect();
+        for (how, svg) in [
+            (
+                "a style sheet",
+                format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs><style>.r {{ clip-path: url(#c) }}</style><clipPath id="c"><text>{a_thousand}</text></clipPath></defs>{shapes}</svg>"##
+                ),
+            ),
+            (
+                "a style attribute's marker",
+                format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><marker id="m"><text>{a_thousand}</text></marker><polyline style="fill:none;marker-mid:url(#m)" points="0,0 1,1 2,0 3,1 4,0 5,1 6,0 7,1 8,0 9,1 10,0 11,1"/></svg>"##
+                ),
+            ),
+            (
+                "a group's marker",
+                format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><marker id="m"><text>{a_thousand}</text></marker><g marker-mid="url(#m)"><polyline points="0,0 1,1 2,0 3,1 4,0 5,1"/><polyline points="0,0 1,1 2,0 3,1 4,0 5,1 6,0"/></g></svg>"##
+                ),
+            ),
+            (
+                "a pattern another names",
+                format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><pattern id="p1" width="2" height="2"><text>{many}</text></pattern><pattern id="p2" href="#p1"/><rect fill="url(#p2)" width="5" height="5"/></svg>"##
+                ),
+            ),
+            (
+                "a tref",
+                format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10"><defs><text id="t">{many}</text></defs><text><tref xlink:href="#t"/></text></svg>"##
+                ),
+            ),
+        ] {
+            assert!(past_reason(svg.as_bytes()).is_some(), "{how} is counted");
+        }
     }
 
     /// Two squares wound the same way and sharing a corner fill their

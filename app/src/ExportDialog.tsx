@@ -264,12 +264,23 @@ export function ExportDialog({
    * and a hundred megapixels). Held to sixteen times alone, a long edge
    * typed past it was shown as "as large as it goes" at a size the
    * window then refused. */
-  const heldScale = (w: number, h: number) =>
-    Math.min(
+  const heldScale = (w: number, h: number) => {
+    let k = Math.min(
       MOST_SCALE,
       (format === "webp" ? 16383 : 30000) / Math.max(1, w, h),
       Math.sqrt(100_000_000 / Math.max(1, w * h)),
     );
+    // Each side is rounded to whole pixels, and rounded up both can come
+    // to a hair past a hundred megapixels: an A4 page "as large as it
+    // goes" was 8409 × 11893, which the same window then refused.
+    for (let i = 0; i < 64; i++) {
+      const across = Math.max(1, Math.round(w * k));
+      const down = Math.max(1, Math.round(h * k));
+      if (across * down <= 100_000_000) break;
+      k *= 1 - 1 / Math.max(across, down);
+    }
+    return k;
+  };
   /** The one scale everything shown is worked out at; the set's other
    * two are multiples of it. A long edge is a scale worked out from
    * the size, so 2048 is 2048 whatever the photograph was. */

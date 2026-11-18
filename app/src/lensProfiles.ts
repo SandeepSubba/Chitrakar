@@ -125,7 +125,7 @@ export async function addLensFiles(
       lenses = session.add_lens_profiles(text);
     } catch (err) {
       refused.push(file.name);
-      why.push(String(err instanceof Error ? err.message : err).replace(/^lens profiles:\s*/, ""));
+      why.push(String(err instanceof Error ? err.message : err).replace(/^(invalid command:\s*)?lens profiles:\s*/, ""));
       continue;
     }
     const entry: LensFile = { name: file.name, text, lenses };

@@ -50,8 +50,8 @@ export const isTauri = () =>
 /** What the menu looks like, as a string: rebuilding the native menu on
  * every render would tear it down under the pointer, so the caller only
  * rebuilds when this changes. Labels and hints carry the state that shows
- * — a tick beside the current units, "Hide guides" against "Show
- * guides" — so they are what the signature is made of. */
+ * — a tick beside the current units, beside Guides while they show —
+ * so they are what the signature is made of. */
 const entriesSignature = (entries: MenuEntry[]): string =>
   entries
     .map((e) =>

@@ -2760,26 +2760,68 @@ impl Session {
             .ok_or_else(|| EngineError::BadCommand("the root has no outline".into()))?;
         // The distance asked for is in page pixels, and the outline is
         // in the shape's own units: a shape drawn at twice its size moved
-        // out twice as far. Scaled unevenly there is no one distance
-        // that is that many pixels every way; the average scale is used.
+        // out twice as far.
         let seen = chitrakar_render::ancestor_space(&self.doc, id).compose(node.transform);
         let scale = (seen.a * seen.d - seen.b * seen.c).abs().sqrt();
         // The history says the distance as it was asked for, in page
         // pixels, not the one the outline is moved by in its own units:
         // 8 typed in a group three times the size read "2.666641 px".
         let asked = by;
-        let by = if scale > 1e-6 && scale.is_finite() {
-            by / scale
-        } else {
-            by
-        };
-        let rings = chitrakar_render::offset_outline(shape, by).ok_or_else(|| {
-            EngineError::BadCommand(if by < 0.0 {
+        let refused = || {
+            EngineError::BadCommand(if asked < 0.0 {
                 "moved in that far, nothing of the shape is left".into()
             } else {
                 "there is no distance to move the outline by".into()
             })
-        })?;
+        };
+        // Stretched more one way than the other, no one distance in the
+        // shape's units is that many pixels every way: dividing by the
+        // average scale moved a shape twice as wide as tall ten pixels
+        // across and two and a half down. So the outline is moved where
+        // it is seen — carried onto the page's axes, moved there, and
+        // carried back.
+        let (e, f) = ((seen.a + seen.d) / 2.0, (seen.a - seen.d) / 2.0);
+        let (g, h) = ((seen.b + seen.c) / 2.0, (seen.c - seen.b) / 2.0);
+        let (q, r) = (e.hypot(h), f.hypot(g));
+        let (most, least) = (q + r, (q - r).abs());
+        let uneven = most.is_finite() && least > 1e-6 && (most - least) > most * 1e-4;
+        let rings = if uneven {
+            let det = seen.a * seen.d - seen.b * seen.c;
+            let there =
+                |p: &[f32; 2]| [seen.a * p[0] + seen.c * p[1], seen.b * p[0] + seen.d * p[1]];
+            let back = |p: &[f32; 2]| {
+                [
+                    (seen.d * p[0] - seen.c * p[1]) / det,
+                    (-seen.b * p[0] + seen.a * p[1]) / det,
+                ]
+            };
+            let seen_rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
+                .iter()
+                .map(|ring| ring.iter().map(there).collect())
+                .collect();
+            let Some((first, rest)) = seen_rings.split_first() else {
+                return Err(refused());
+            };
+            let outline = chitrakar_doc::VectorShape::Path {
+                points: first.clone(),
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: rest.to_vec(),
+            };
+            chitrakar_render::offset_outline(&outline, by)
+                .ok_or_else(refused)?
+                .iter()
+                .map(|ring| ring.iter().map(back).collect())
+                .collect()
+        } else {
+            let by = if scale > 1e-6 && scale.is_finite() {
+                by / scale
+            } else {
+                by
+            };
+            chitrakar_render::offset_outline(shape, by).ok_or_else(refused)?
+        };
         let (mut x0, mut y0) = (f32::MAX, f32::MAX);
         for p in rings.iter().flatten() {
             x0 = x0.min(p[0]);
@@ -11677,10 +11719,21 @@ impl Session {
             let k = (chitrakar_doc::MAX_CANVAS_SIDE as f64 / w)
                 .min(chitrakar_doc::MAX_CANVAS_SIDE as f64 / h)
                 .min((chitrakar_doc::MAX_CANVAS_PIXELS as f64 / (w * h)).sqrt());
-            let (fw, fh) = (
-                ((w * k).floor() as u32).max(1),
-                ((h * k).floor() as u32).max(1),
+            // Each side to the nearest whole pixel where the page that
+            // makes still fits: floored, a picture 30001 by 10 opened on
+            // a page 9 high and was squashed a tenth down and not across.
+            let near = (
+                ((w * k).round() as u32).max(1),
+                ((h * k).round() as u32).max(1),
             );
+            let (fw, fh) = if chitrakar_doc::canvas_fits(near.0, near.1) {
+                near
+            } else {
+                (
+                    ((w * k).floor() as u32).max(1),
+                    ((h * k).floor() as u32).max(1),
+                )
+            };
             if chitrakar_doc::canvas_fits(fw, fh) {
                 node.transform = Transform {
                     a: fw as f32 / width as f32,
@@ -16153,13 +16206,16 @@ mod tests {
         let id = s
             .place_rendered(31_000, 2, vec![200; 31_000 * 2 * 4], "wide.png")
             .unwrap();
+        // Two rows taken down by 30000/31000 are 1.94, which is two: the
+        // picture is taken down across and hardly at all down, where a
+        // page of one row halved it.
         assert_eq!(
             (s.document().meta.width, s.document().meta.height),
-            (30_000, 1)
+            (30_000, 2)
         );
         let t = s.document().node(id).unwrap().transform;
         assert!(
-            (t.a - 30_000.0 / 31_000.0).abs() < 1e-6 && (t.d - 0.5).abs() < 1e-6,
+            (t.a - 30_000.0 / 31_000.0).abs() < 1e-6 && (t.d - 1.0).abs() < 1e-6,
             "{t:?}"
         );
         assert_eq!(s.import_notes().len(), 1, "and it is said");
@@ -21013,6 +21069,35 @@ mod tests {
             "nothing would be left"
         );
         assert!(session.offset_path(root, 5.0).is_err());
+
+        // Stretched twice as wide as it is tall, every side still moves
+        // out the same number of pixels on the page: the average scale
+        // moved it ten pixels across and two and a half down.
+        let stretched = session.document().peek_next_id();
+        let mut wide = card.clone();
+        wide.transform = Transform {
+            a: 2.0,
+            b: 0.0,
+            c: 0.0,
+            d: 0.5,
+            e: 100.0,
+            f: 100.0,
+        };
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(wide),
+            })
+            .unwrap();
+        let grown = session.offset_path(stretched, 5.0).unwrap();
+        assert!(
+            near(extent(&session, grown), [95.0, 95.0, 185.0, 120.0]),
+            "{:?}",
+            extent(&session, grown)
+        );
+        session.undo().unwrap();
+        session.undo().unwrap();
 
         let history = session.history_labels().0.len();
         session.undo().unwrap();
@@ -31918,11 +32003,41 @@ mod tests {
             effects: vec![shadow.clone()],
         })
         .unwrap();
+        // And the page's own picked region, a region kept by name and a
+        // comp, which drifted the same way.
+        s.pick_region(
+            VectorShape::Rect {
+                width: 50.0,
+                height: 40.0,
+                radius: 0.0,
+            },
+            Transform::translation(30.0, 20.0),
+            "replace",
+        )
+        .unwrap();
+        s.feather_selection(5.5).unwrap();
+        s.keep_selection("kept").unwrap();
+        let picked = format!("{:?}", s.document().selection());
+        let kept = format!("{:?}", s.document().regions());
+        let comps = format!("{:?}", s.document().comps());
+        s.scale_canvas(0.8).unwrap();
+        let forward = format!("{:?}", s.document().selection());
+        assert!(s.undo().unwrap());
+        assert!(s.redo().unwrap());
+        assert_eq!(
+            format!("{:?}", s.document().selection()),
+            forward,
+            "redone as done"
+        );
+        assert!(s.undo().unwrap());
         for _ in 0..20 {
             s.scale_canvas(0.8).unwrap();
             assert!(s.undo().unwrap());
         }
         assert_eq!(s.document().node(id).unwrap().effects, vec![shadow]);
+        assert_eq!(format!("{:?}", s.document().selection()), picked);
+        assert_eq!(format!("{:?}", s.document().regions()), kept);
+        assert_eq!(format!("{:?}", s.document().comps()), comps);
     }
 
     /// An export says the document's resolution: a PNG carries a pHYs

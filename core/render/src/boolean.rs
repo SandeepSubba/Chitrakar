@@ -443,7 +443,17 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
         rings.extend(b.iter().cloned());
         return Some(rings);
     }
-    let (a, b) = (oriented(a), oriented(b));
+    // An outline that crosses itself — a star drawn in five clicks, a
+    // bow tie, rings of one path running across each other — has edges
+    // that cross with nothing of the other shape there to split them,
+    // and the pieces could not be chained: refused as edges that
+    // overlapped exactly. Said first as the rings it draws, which cross
+    // nothing.
+    let (a, b) = (
+        uncrossed(a).unwrap_or_else(|| a.to_vec()),
+        uncrossed(b).unwrap_or_else(|| b.to_vec()),
+    );
+    let (a, b) = (oriented(&a), oriented(&b));
     let fragments = fragments(&a, &b, op);
     if fragments.is_empty() {
         return None;
@@ -765,6 +775,24 @@ impl Bands {
 
     /// How many times the outline winds round `p`, as `winding` counts
     /// it, from the edges at its height alone.
+    /// Whether the outline crosses a ray to the right of `p` an odd
+    /// number of times: [`covers`], asking only the edges at its height.
+    fn parity(&self, p: Point) -> bool {
+        let row = &self.rows[self.row(p[1])];
+        self.spend(row.len() as u64);
+        let mut inside = false;
+        for &e in row {
+            let (a, b) = self.edges[e as usize];
+            if (a[1] > p[1]) != (b[1] > p[1]) {
+                let t = (p[1] - a[1]) / (b[1] - a[1]);
+                if p[0] < a[0] + t * (b[0] - a[0]) {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
+
     fn winding(&self, p: Point) -> i32 {
         let mut w = 0;
         let row = &self.rows[self.row(p[1])];
@@ -832,6 +860,72 @@ fn cluster_as_even_odd(rings: &[Ring]) -> Option<Vec<Ring>> {
     chain(keep)
 }
 
+/// Rings that cross themselves or one another said again as the even-odd
+/// region's own edges, which cross nothing: each piece between two
+/// crossings kept where the region is on one side of it and not the
+/// other, turned to run with the region on its left. `None` where
+/// nothing crosses (they are their own answer) or the work is past what
+/// is worth doing.
+pub fn uncrossed(rings: &[Ring]) -> Option<Vec<Ring>> {
+    if rings.iter().map(Vec::len).sum::<usize>() > NONZERO_MOST {
+        return None;
+    }
+    const SIDE: f32 = 1e-3;
+    let bands = Bands::of(rings)?;
+    let pieces = bands.split()?;
+    if pieces.len() <= bands.edges.len() {
+        return None;
+    }
+    let mut keep = Vec::new();
+    for (a, b) in pieces {
+        if bands.work.get() > NONZERO_WORK_MOST {
+            return None;
+        }
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let normal = [-dy / len * SIDE, dx / len * SIDE];
+        let left = bands.parity([mid[0] + normal[0], mid[1] + normal[1]]);
+        let right = bands.parity([mid[0] - normal[0], mid[1] - normal[1]]);
+        match (left, right) {
+            (true, false) => keep.push((a, b)),
+            (false, true) => keep.push((b, a)),
+            _ => {}
+        }
+    }
+    if keep.is_empty() {
+        return None;
+    }
+    // Where a crossing landed on a piece that runs straight on through
+    // it, the point is no corner: kept, it was a corner more in every
+    // answer built from these rings.
+    let rings = chain(keep)?;
+    Some(
+        rings
+            .into_iter()
+            .map(|ring| {
+                let n = ring.len();
+                let straight = |i: usize| {
+                    let (p, q, r) = (ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]);
+                    let (u, v) = ([q[0] - p[0], q[1] - p[1]], [r[0] - q[0], r[1] - q[1]]);
+                    let cross = u[0] * v[1] - u[1] * v[0];
+                    let dot = u[0] * v[0] + u[1] * v[1];
+                    dot > 0.0 && cross.abs() <= 1e-5 * u[0].hypot(u[1]) * v[0].hypot(v[1])
+                };
+                let kept: Ring = (0..n).filter(|&i| !straight(i)).map(|i| ring[i]).collect();
+                if kept.len() >= 3 {
+                    kept
+                } else {
+                    ring
+                }
+            })
+            .collect(),
+    )
+}
+
 fn split_ring_all(rings: &[Ring], other: &[Ring]) -> Vec<(Point, Point)> {
     rings.iter().flat_map(|r| split_ring(r, other)).collect()
 }
@@ -896,6 +990,39 @@ mod tests {
         let cut = combine(&holed, &[square(10.0, -2.0, 15.0)], BoolOp::Intersect).unwrap();
         // Ten by thirteen of the ring, less the five by eight of the hole.
         assert_eq!(covered_area(&cut), 10.0 * 13.0 - 5.0 * 8.0);
+    }
+
+    /// A star drawn in five clicks crosses itself, and so does a bow
+    /// tie: combined with anything that reaches past a crossing they were
+    /// refused as "edges that overlap exactly". Each operation now
+    /// answers what even-odd says the shapes cover.
+    #[test]
+    fn a_shape_that_crosses_itself_combines() {
+        let star: Ring = (0..5)
+            .map(|k| {
+                let t = std::f32::consts::PI * 2.0 * (k as f32 * 2.0) / 5.0;
+                [10.0 + 8.0 * t.sin(), 10.0 - 8.0 * t.cos()]
+            })
+            .collect();
+        let bow: Ring = vec![[2.0, 2.0], [18.0, 18.0], [18.0, 2.0], [2.0, 18.0]];
+        // Not centred: a square whose corners sit on the bow tie's own
+        // diagonals is a question of points meeting exactly, which is
+        // another one.
+        let middle = vec![vec![[6.0, 8.5], [12.0, 8.5], [12.0, 14.5], [6.0, 14.5]]];
+        for shape in [star, bow] {
+            let a = vec![shape];
+            for op in [BoolOp::Union, BoolOp::Intersect, BoolOp::Subtract] {
+                let got = combine_or_nudge(&a, &middle, op)
+                    .unwrap_or_else(|| panic!("{op:?} is answered"));
+                assert!(agrees(&a, &middle, &got, op), "{op:?}: {got:?}");
+                let got = combine_or_nudge(&middle, &a, op)
+                    .unwrap_or_else(|| panic!("{op:?} the other way is answered"));
+                assert!(
+                    agrees(&middle, &a, &got, op),
+                    "{op:?} the other way: {got:?}"
+                );
+            }
+        }
     }
 
     /// Two ends a hair apart meet, even where they round to two cells.
@@ -1166,8 +1293,17 @@ mod tests {
         );
         // And the shape of it, since an area can be right for the wrong
         // reasons: the chain found every corner it should have.
-        let verts: usize = got.iter().map(|r| r.len()).sum();
-        assert_eq!(verts, 9, "nine corners, one of which a coarse weld eats");
+        // The ring's own crossing is a point of the answer now — the two
+        // lobes meet there, and the outline that crossed itself is said
+        // as two that touch — so it is there twice, and is the tenth.
+        let mut corners: Vec<Point> = got.iter().flatten().copied().collect();
+        corners.sort_by(|p, q| p[0].total_cmp(&q[0]).then(p[1].total_cmp(&q[1])));
+        corners.dedup_by(|p, q| (p[0] - q[0]).abs() < 1e-4 && (p[1] - q[1]).abs() < 1e-4);
+        assert_eq!(
+            corners.len(),
+            10,
+            "nine corners, one of which a coarse weld eats, and the crossing"
+        );
         // The other two operations lose vertices rather than area, which
         // is the same fault seen from the other side.
         let sub = combine(

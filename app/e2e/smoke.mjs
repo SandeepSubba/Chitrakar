@@ -21673,6 +21673,122 @@ assert(
   );
 }
 
+// 9dr. The forty-first audit's interface pass. The other button pressed
+// mid-drag opened the canvas's menu and left the drag following the
+// pointer with no button down; a second drag of a layer's row did
+// nothing (the first left the names picked as text); Escape neither
+// took back an Opacity drag nor a row drag; a window opened by its
+// chord mid-drag let the drag go on under it; View › Guides is ticked.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const r = await p.locator("#engine-page").boundingBox();
+  for (const [x, y] of [[40, 40], [160, 40], [40, 160], [160, 160]]) {
+    await p.locator("#engine-canvas").hover();
+    await p.keyboard.press("r");
+    await p.mouse.move(r.x + x, r.y + y);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x + 60, r.y + y + 40, { steps: 3 });
+    await p.mouse.up();
+    await p.waitForTimeout(150);
+  }
+  const steps = () => p.locator(".history li:not(.history-start)").count();
+  const xOf = () => p.locator('input[aria-label="X position"]').inputValue();
+  const names = () => p.locator(".layer-list li[data-id] .layer-name").allTextContents();
+
+  // The other button in the middle of a move takes the move back.
+  await p.keyboard.press("v");
+  const before = await steps();
+  const x0 = await xOf();
+  await p.mouse.move(r.x + 190, r.y + 180);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 230, r.y + 200, { steps: 4 });
+  await p.mouse.down({ button: "right" });
+  await p.mouse.up({ button: "right" });
+  await p.mouse.move(r.x + 260, r.y + 220, { steps: 3 });
+  await p.mouse.up();
+  await p.waitForTimeout(150);
+  await p.mouse.move(r.x + 300, r.y + 260, { steps: 3 });
+  await p.waitForTimeout(200);
+  assert((await p.locator(".context-menu").count()) === 0, "the other button mid-drag asks nothing");
+  assert(
+    (await xOf()) === x0 && (await steps()) === before,
+    `and takes the move back: nothing follows the pointer, nothing is written (${await xOf()} vs ${x0})`,
+  );
+
+  // Opacity dragged, Escape, let go: as it was, and no step.
+  const slider = p.locator('input[aria-label="Layer opacity"]');
+  const sb = await slider.boundingBox();
+  await p.mouse.move(sb.x + sb.width - 4, sb.y + sb.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(sb.x + sb.width * 0.3, sb.y + sb.height / 2, { steps: 4 });
+  await p.keyboard.press("Escape");
+  await p.mouse.up();
+  await p.waitForTimeout(200);
+  assert(
+    Number(await slider.inputValue()) === 1 && (await steps()) === before,
+    `Escape takes an opacity drag back (${await slider.inputValue()})`,
+  );
+
+  // Two row drags in a row both move the row.
+  const rowDrag = async (from, to, escape = false) => {
+    const a = await p.locator(".layer-list li[data-id]").nth(from).boundingBox();
+    const b = await p.locator(".layer-list li[data-id]").nth(to).boundingBox();
+    await p.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+    await p.mouse.down();
+    await p.mouse.move(b.x + b.width / 2, b.y + b.height * 0.85, { steps: 8 });
+    if (escape) await p.keyboard.press("Escape");
+    await p.mouse.up();
+    await p.waitForTimeout(250);
+  };
+  const order0 = await names();
+  await rowDrag(0, 3);
+  const order1 = await names();
+  assert(order1[3] === order0[0], `a row dragged down lands there (${order1})`);
+  await rowDrag(0, 3);
+  const order2 = await names();
+  assert(order2[3] === order1[0], `and so does a second one (${order2})`);
+  const picked = await p.locator(".layer-list li.selected").count();
+  const stepsBefore = await steps();
+  await rowDrag(0, 3, true);
+  assert(
+    JSON.stringify(await names()) === JSON.stringify(order2) && (await steps()) === stepsBefore,
+    `Escape takes a row drag back (${await names()})`,
+  );
+  assert((await p.locator(".layer-list li.selected").count()) >= Math.min(picked, 1), "and keeps a layer picked");
+
+  // A window's chord mid-drag takes the drag back.
+  await p.keyboard.press("v");
+  await p.mouse.click(r.x + 70, r.y + 60);
+  await p.waitForTimeout(150);
+  const x1 = await xOf();
+  const s1 = await steps();
+  await p.mouse.move(r.x + 70, r.y + 60);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 110, r.y + 90, { steps: 4 });
+  await p.keyboard.press("Control+Comma");
+  await p.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await p.mouse.move(r.x + 130, r.y + 110, { steps: 2 });
+  await p.mouse.up();
+  await p.waitForTimeout(200);
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(200);
+  assert(
+    (await steps()) === s1 && (await xOf()) === x1,
+    `a window opened mid-drag takes the drag back (${await xOf()} vs ${x1})`,
+  );
+
+  await p.click('.menu-label:text-is("View")');
+  const guides = p.locator('.menu-pop .menu-item:has-text("Guides")').first();
+  assert((await guides.textContent()).includes("\u2713"), `View › Guides is ticked while they show (${await guides.textContent()})`);
+  await p.keyboard.press("Escape");
+  await ctx.close();
+}
+
 // 9dq. The thirty-eighth audit's interface pass. A press on the page
 // left an open menu open and painted under it; a menu switched to by
 // hovering left the focus on the first, so ArrowDown reopened that one;

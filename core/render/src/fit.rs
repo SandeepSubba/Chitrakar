@@ -38,10 +38,16 @@ pub fn fit_curves(points: &[P], closed: bool, tolerance: f32) -> (Vec<P>, Vec<[f
     if closed && pts.len() > 1 && dist(pts[0], *pts.last().unwrap()) <= 1e-4 {
         pts.pop();
     }
-    let n = pts.len();
-    if n < 3 {
+    if pts.len() < 3 {
         return (pts.clone(), Vec::new());
     }
+    // A long straight step is said again as short ones along it, marked
+    // as not the outline's own. The fit measures how far it strays at
+    // the points it is given, and given only the corners of an octagon
+    // it laid a circle through all eight and called that within a
+    // twentieth of a pixel, bulging four pixels off every side.
+    let (pts, own) = along_the_sides(&pts, closed, tolerance);
+    let n = pts.len();
     // Where the outline turns sharply, it is cut: each stretch between
     // two cuts is fitted on its own and meets the next at a corner.
     let turn_at = |i: usize| -> bool {
@@ -63,18 +69,28 @@ pub fn fit_curves(points: &[P], closed: bool, tolerance: f32) -> (Vec<P>, Vec<[f
         // to itself, its ends' tangent the same one.
         let mut ring = pts.clone();
         ring.push(pts[0]);
+        let mut ring_own = own.clone();
+        ring_own.push(own[0]);
         let t = unit(sub(pts[1], pts[n - 1]));
-        fit_stretch(&ring, t, [-t[0], -t[1]], tolerance, &mut segments);
+        fit_stretch(
+            &ring,
+            &ring_own,
+            t,
+            [-t[0], -t[1]],
+            tolerance,
+            &mut segments,
+        );
     } else {
         if closed {
             cuts.push(cuts[0] + n);
         }
         for w in cuts.windows(2) {
             let stretch: Vec<P> = (w[0]..=w[1]).map(|i| pts[i % n]).collect();
+            let stretch_own: Vec<bool> = (w[0]..=w[1]).map(|i| own[i % n]).collect();
             let m = stretch.len();
             let start = unit(sub(stretch[1], stretch[0]));
             let end = unit(sub(stretch[m - 2], stretch[m - 1]));
-            fit_stretch(&stretch, start, end, tolerance, &mut segments);
+            fit_stretch(&stretch, &stretch_own, start, end, tolerance, &mut segments);
         }
     }
     // Each segment's start is an anchor; its handles are the offsets of
@@ -108,7 +124,7 @@ pub fn fit_curves(points: &[P], closed: bool, tolerance: f32) -> (Vec<P>, Vec<[f
 
 /// Fit one stretch, whose end tangents point into it, as few cubics as
 /// stay within `tolerance` of every point.
-fn fit_stretch(pts: &[P], t0: P, t1: P, tolerance: f32, out: &mut Vec<[P; 4]>) {
+fn fit_stretch(pts: &[P], own: &[bool], t0: P, t1: P, tolerance: f32, out: &mut Vec<[P; 4]>) {
     let (a, b) = (pts[0], pts[pts.len() - 1]);
     // Along its own chord: a straight segment.
     if pts.iter().all(|&p| segment_distance(p, a, b) <= tolerance) && dist(a, b) > 1e-4 {
@@ -141,10 +157,55 @@ fn fit_stretch(pts: &[P], t0: P, t1: P, tolerance: f32, out: &mut Vec<[P; 4]>) {
     }
     // Split at the worst point, the tangent there the one through its
     // neighbours, and fit each half.
-    let at = at.clamp(1, pts.len() - 2);
+    let mut at = at.clamp(1, pts.len() - 2);
+    // At the outline's own point nearest the worst, where there is one:
+    // an anchor in the middle of a straight side is one nobody drew.
+    if !own[at] {
+        let nearest = (1..pts.len() - 1)
+            .filter(|&i| own[i])
+            .min_by_key(|&i| i.abs_diff(at));
+        if let Some(i) = nearest {
+            at = i;
+        }
+    }
     let centre = unit(sub(pts[at - 1], pts[at + 1]));
-    fit_stretch(&pts[..=at], t0, centre, tolerance, out);
-    fit_stretch(&pts[at..], [-centre[0], -centre[1]], t1, tolerance, out);
+    fit_stretch(&pts[..=at], &own[..=at], t0, centre, tolerance, out);
+    fit_stretch(
+        &pts[at..],
+        &own[at..],
+        [-centre[0], -centre[1]],
+        t1,
+        tolerance,
+        out,
+    );
+}
+
+/// `pts` with a point every so often along each step longer than that,
+/// and which of them are the outline's own. The spacing is a pixel, or
+/// twice the tolerance where that is coarser; however many there are, a
+/// step is given at most a thousand.
+fn along_the_sides(pts: &[P], closed: bool, tolerance: f32) -> (Vec<P>, Vec<bool>) {
+    let spacing = (tolerance * 2.0).max(1.0);
+    let n = pts.len();
+    let steps = if closed { n } else { n - 1 };
+    let mut out = Vec::with_capacity(n);
+    let mut own = Vec::with_capacity(n);
+    for i in 0..steps {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        out.push(a);
+        own.push(true);
+        let pieces = ((dist(a, b) / spacing).ceil() as usize).clamp(1, 1000);
+        for k in 1..pieces {
+            let t = k as f32 / pieces as f32;
+            out.push(add(a, scale(sub(b, a), t)));
+            own.push(false);
+        }
+    }
+    if !closed {
+        out.push(pts[n - 1]);
+        own.push(true);
+    }
+    (out, own)
 }
 
 /// The cubic from the first point to the last along the two tangents,
@@ -354,6 +415,40 @@ mod tests {
         for p in &line {
             let r = (p[0] - 50.0).hypot(p[1] - 50.0);
             assert!((r - 40.0).abs() < 0.3, "{r}");
+        }
+    }
+
+    #[test]
+    fn an_octagon_stays_within_its_tolerance_along_its_sides() {
+        // Eight corners too gentle to count as corners: a fit that only
+        // measured itself at them laid a circle through all eight and
+        // bulged nearly four pixels off every side.
+        let ring: Vec<P> = (0..8)
+            .map(|i| {
+                let a = i as f32 / 8.0 * std::f32::consts::TAU;
+                [60.0 + 50.0 * a.cos(), 60.0 + 50.0 * a.sin()]
+            })
+            .collect();
+        for tolerance in [0.05, 0.25, 1.0] {
+            let (anchors, handles) = fit_curves(&ring, true, tolerance);
+            let line = drawn(&anchors, &handles, true);
+            let mut sides = ring.clone();
+            sides.push(ring[0]);
+            let off = line
+                .iter()
+                .map(|&p| {
+                    sides
+                        .windows(2)
+                        .map(|w| segment_distance(p, w[0], w[1]))
+                        .fold(f32::MAX, f32::min)
+                })
+                .fold(0.0, f32::max);
+            assert!(
+                off <= tolerance * 1.5 + 0.02,
+                "{tolerance}: {off} off the sides"
+            );
+            // And no anchors in the middle of a side nobody drew.
+            assert!(anchors.len() <= 8, "{tolerance}: {anchors:?}");
         }
     }
 

@@ -1140,7 +1140,8 @@ impl Document {
             Command::MoveNode { id, .. } | Command::SetKind { id, .. } => Some(Arrived::Node(*id)),
             _ => None,
         };
-        let inverse = self.apply_inner(cmd)?;
+        let was_palette = matches!(cmd, Command::SetSwatches { .. });
+        let mut inverse = self.apply_inner(cmd)?;
         // Depth first, and iteratively: the check below recurses, so a
         // command that nested the layers past what a stack can walk would
         // take the process with it rather than being refused.
@@ -1178,6 +1179,9 @@ impl Document {
             Unsettled::Nothing => {}
             Unsettled::Layer(id) => self.settle_layer_swatches(id),
             Unsettled::Regions => self.settle_region_swatches(),
+            Unsettled::Everything if was_palette => {
+                inverse = self.settle_for_palette(inverse);
+            }
             Unsettled::Everything => {
                 self.settle_swatches();
             }
@@ -1706,6 +1710,13 @@ impl Document {
                     .map(|(id, n)| (*id, n.effects.clone(), n.mask.clone().map(Box::new)))
                     .collect();
                 let guides_were = self.guides.clone();
+                // And the page's own picked region, the regions kept by
+                // name and the comps' places, the same way: carried there
+                // and back, a selection's softness grew from 5.5 to 6.5
+                // in fifty.
+                let selection_was = self.selection.clone();
+                let regions_were = self.regions.clone();
+                let comps_were = self.comps.clone();
                 // Each way by what fills the page, where the size said is
                 // the scale's own rounded (or the rounding it undoes): a
                 // page of 401 at a half is 201, and at exactly a half its
@@ -1753,6 +1764,13 @@ impl Document {
                 cmds.push(Command::SetGuides {
                     guides: guides_were,
                 });
+                cmds.push(Command::SetSelection {
+                    selection: selection_was,
+                });
+                cmds.push(Command::SetRegions {
+                    regions: regions_were,
+                });
+                cmds.push(Command::SetComps { comps: comps_were });
                 Ok(Command::Batch(cmds))
             }
             Command::SetGuides { guides } => {
@@ -2040,6 +2058,72 @@ impl Document {
             kept.mask.each_color_mut(&mut settle);
         }
         moved
+    }
+
+    /// [`Document::settle_swatches`] after a palette change, with what it
+    /// moved written into the change's inverse.
+    ///
+    /// Undoing the palette settles against the old one, which puts back
+    /// every colour that reached for an entry the old palette had. It
+    /// cannot put back one whose name the old palette did not hold — a
+    /// colour pasted in from another file, or left behind by an entry
+    /// taken out — so an entry added under that name moved it for good,
+    /// and undo left it in the new colour. The colours that are about to
+    /// move are kept as they stand and given back with the old palette.
+    fn settle_for_palette(&mut self, inverse: Command) -> Command {
+        if self.swatches.is_empty() {
+            return inverse;
+        }
+        let palette = self.palette();
+        let would = |c: &mut chitrakar_color::AuthoredColor| {
+            let mut probe = c.clone();
+            settle_color(&palette, &mut probe)
+        };
+        let mut moving: Vec<(NodeId, Node)> = Vec::new();
+        for (id, node) in self.nodes.iter_mut() {
+            let mut moves = false;
+            node.each_color_mut(&mut |c| moves |= would(c));
+            if moves {
+                moving.push((*id, node.clone()));
+            }
+        }
+        let mut picked_moves = false;
+        if let Some(picked) = &mut self.selection {
+            picked.each_color_mut(&mut |c| picked_moves |= would(c));
+        }
+        let picked_was = picked_moves.then(|| self.selection.clone());
+        let mut kept_moves = false;
+        for kept in &mut self.regions {
+            kept.mask.each_color_mut(&mut |c| kept_moves |= would(c));
+        }
+        let kept_was = kept_moves.then(|| self.regions.clone());
+        self.settle_swatches();
+        if moving.is_empty() && picked_was.is_none() && kept_was.is_none() {
+            return inverse;
+        }
+        moving.sort_by_key(|(id, _)| *id);
+        let mut back = vec![inverse];
+        for (id, node) in moving {
+            back.push(Command::SetKind {
+                id,
+                kind: Box::new(node.kind),
+            });
+            back.push(Command::SetEffects {
+                id,
+                effects: node.effects,
+            });
+            back.push(Command::SetMask {
+                id,
+                mask: node.mask.map(Box::new),
+            });
+        }
+        if let Some(selection) = picked_was {
+            back.push(Command::SetSelection { selection });
+        }
+        if let Some(regions) = kept_was {
+            back.push(Command::SetRegions { regions });
+        }
+        Command::Batch(back)
     }
 
     /// [`Document::settle_swatches`] for one layer — what a command that
@@ -3763,6 +3847,34 @@ mod tests {
             was,
             "a name the palette has lost is left alone"
         );
+        // Given an entry under that name again, it follows the entry; and
+        // undoing that gives it back what it was carrying, though the
+        // palette it goes back to has nothing to say about "ink".
+        let undo_add = doc
+            .apply(Command::SetSwatches {
+                swatches: vec![Swatch {
+                    name: "ink".into(),
+                    color: red.clone(),
+                }],
+            })
+            .unwrap();
+        assert_eq!(
+            ink(&doc, f.under).flat(),
+            &red,
+            "an entry added is followed"
+        );
+        let redo_add = doc.apply(undo_add).unwrap();
+        assert_eq!(
+            ink(&doc, f.under),
+            was,
+            "and undone, the colour is as it was"
+        );
+        doc.apply(redo_add).unwrap();
+        assert_eq!(ink(&doc, f.under).flat(), &red, "redone, it follows again");
+        doc.apply(Command::SetSwatches {
+            swatches: Vec::new(),
+        })
+        .unwrap();
 
         // And a colour arriving with its own idea of what a name means —
         // which a layer from a document with a palette of its own would

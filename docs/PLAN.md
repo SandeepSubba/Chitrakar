@@ -128,7 +128,11 @@ without reading anything else.*
      laptop. The fortieth: an old tab pruning a new build's offline
      files, shadows growing a third of a percent each Resize page undone,
      a clip path's letters counted once though drawn on every shape,
-     every lensfun file of today refused.
+     every lensfun file of today refused. The forty-first: a clip path
+     reached from a style sheet counted as nothing again, a selection's
+     softness growing through Resize page undone, a star that could not
+     be combined, Simplify bulging four pixels past its tolerance, a
+     drag left following the pointer after a right-click.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12666,6 +12670,77 @@ without reading anything else.*
   there is no unit of points; nothing is announced to a screen reader
   as it happens, and menu rows read their chords as part of their
   names; a raw that will not read says the reader's own words.
+  **A forty-first audit (November 2026).** Its check of round 40: the
+  SVG letter count counted what was reached from an element's own
+  attribute and nothing else, so a clip path of 150,000 letters used
+  from a style sheet came in after a freeze where round 39 refused it at
+  once (a style sheet's references count as reaching every shape, and a
+  marker every point; a style attribute's, a group's, a pattern or
+  filter naming another and a `tref` are counted too); a long edge "as
+  large as it goes" rounded both sides up past a hundred megapixels and
+  the window then refused what it had promised on a third of page
+  shapes (held to whole pixels); Resize page undone put the layers back
+  exactly but not the picked region, the kept regions or the comps — a
+  selection's softness grew from 5.5 to 6.5 in fifty (set back as they
+  were, and redone as done); the PDF window promised a placed page
+  "taken down" to a hundred megapixels, which only an opened one is;
+  "Text" pasted over a new block's "Text" lost it on Escape; a refused
+  lens file's reason kept "invalid command:"; "con.txt", CONIN$ and
+  COM¹ were offered to the save panel. Its editing pass (some three
+  thousand engine fuzz steps in RGB and CMYK, 1,944 mask cases, every
+  page operation): a pen star or a bow tie — an outline crossing itself
+  — could not be combined with anything reaching past a crossing, and
+  the knife cut it into nothing (said first as the rings it draws, which
+  cross nothing); Simplify measured itself at the anchors only, and an
+  octagon at a twentieth of a pixel came back a circle four pixels off
+  every side (measured along the sides, and split at the outline's own
+  points); Offset path on a layer stretched unevenly moved its sides by
+  different amounts (moved on the page's axes and carried back); undo of
+  a palette entry added under a name a colour already carried, with no
+  entry of its own, left the colour in the entry's (what the palette
+  moved is given back with it). Its interface pass: the other button
+  pressed during a drag opened the canvas's menu and left the drag
+  following the pointer with no button down (it takes the drag back);
+  a second drag of a layer's row did nothing, the first having left the
+  names picked as text (rows are not text, and a drag lets go of any);
+  Escape took back every slider but Opacity, and neither took back a
+  row drag nor kept the picked layers; a window opened by its chord
+  during a drag let the drag go on under it; layers picked together
+  with different opacities showed the first's; View › Hide guides was
+  ticked while they showed (Guides, ticked). Its files pass (59 DNGs
+  made for it, every slider at both ends, batches with failures mixed
+  in, every export area and format, PSDs checked byte by byte, odd ICC
+  profiles): a TIFF was held to the reader crate's own quarter of a
+  gigabyte, and a 45-megapixel 16-bit photograph that opened as a PNG
+  was "larger than the editor can read" (held to the 150 megapixels any
+  picture is, and refused past them in words); a picture 30001 wide and
+  10 high opened on a page 9 high, squashed a tenth one way (each side
+  to the nearest pixel that fits); a DNG opcode with a NaN or an
+  infinity in it turned the whole picture one colour (left out). Limits
+  written down, each wanting the CPU renderer, the GPU and the
+  exporters changed together: a layer with a blend mode, or faded, lays
+  its shadow and outline under its whole silhouette, so its own fill
+  blends with them where Photoshop and the SVG export knock them out
+  (at full opacity in Normal, which is most layers, the two agree), and
+  a PSD or PDF of a faded layer with an effect differs from the page by
+  as much; a radial gradient mask is upright and a
+  painted stroke round, so Ungroup and Straighten cannot carry them
+  through a turn or an uneven stretch and they come back upright and
+  round; a rectangle's or ellipse's inside or outside dashes are laid
+  along the band's middle where a path's are laid along its edge, so
+  Make a path moves them; a pixelate's grid is the document's and moves
+  with a crop or a turn; Offset path closes an open path; the engine
+  itself lets align, flip and reparent move a locked layer (the app
+  never asks it to); a numbered list in Arabic numbers on the left; a
+  layer following a style lets go of it when pasted into another
+  document; text being typed into is ended by a menu or a window, and
+  the focus comes back to the page; recent colours are the rail's and
+  the eyedropper's, not the panel's; the canvas's corner buttons are
+  eighteen pixels on a touch screen; a floating-point DNG that gives no
+  white level opens black, and a DNG's DefaultScale is not applied;
+  several files of mixed kinds dropped at once open on the first one's
+  page, with the raws after the rest; a raw thousands of pixels long and
+  a few wide previews a few levels brighter than it develops.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

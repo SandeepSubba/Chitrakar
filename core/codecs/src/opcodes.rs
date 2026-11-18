@@ -114,11 +114,17 @@ pub fn parse(list: &[u8]) -> Vec<Op> {
         fn u32(&mut self) -> Option<u32> {
             Some(u32::from_be_bytes(self.bytes(4)?.try_into().ok()?))
         }
+        // A number that is not one — NaN, or past what an f32 holds —
+        // makes the opcode nothing at all: a warp about a NaN centre made
+        // the whole picture its corner pixel's colour, and a gain map from
+        // a NaN origin made it black.
         fn f64(&mut self) -> Option<f32> {
-            Some(f64::from_be_bytes(self.bytes(8)?.try_into().ok()?) as f32)
+            let v = f64::from_be_bytes(self.bytes(8)?.try_into().ok()?) as f32;
+            v.is_finite().then_some(v)
         }
         fn f32(&mut self) -> Option<f32> {
-            Some(f32::from_be_bytes(self.bytes(4)?.try_into().ok()?))
+            let v = f32::from_be_bytes(self.bytes(4)?.try_into().ok()?);
+            v.is_finite().then_some(v)
         }
     }
     let mut out = Vec::new();
@@ -309,6 +315,20 @@ pub(crate) mod tests {
             assert!(parse(&bytes[..end]).len() <= 3);
         }
         assert!(parse(&[]).is_empty());
+        // A number that is not one leaves its opcode out, and only it.
+        let wild = list(&[
+            (3, f64s(&[0.5, 0.0, 0.0, 0.0, 0.0, f64::NAN, 0.5])),
+            (
+                1,
+                [
+                    1u32.to_be_bytes().to_vec(),
+                    f64s(&[1.0, 0.1, 0.0, 0.0, 0.0, 0.0, f64::INFINITY, 0.5]),
+                ]
+                .concat(),
+            ),
+            (3, f64s(&[0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5])),
+        ]);
+        assert_eq!(parse(&wild).len(), 1);
     }
 
     #[test]
