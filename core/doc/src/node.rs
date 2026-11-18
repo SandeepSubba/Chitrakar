@@ -2393,6 +2393,23 @@ impl Mask {
     /// is drawn. They are still written down, though, and something that
     /// walks every colour in a document to keep it in step — the palette
     /// does — would leave a lie behind if it skipped them.
+    /// Whether every number in the mask is one a document can hold and
+    /// carry through a page operation: its softness, its gradient's points
+    /// and its shape's place, each within the bounds a layer's place is.
+    pub fn within_reason(&self) -> bool {
+        let fine = |v: f32| v.is_finite() && v.abs() <= 1e9;
+        fine(self.feather)
+            && match &self.kind {
+                MaskKind::Gradient { from, to, .. } => from.iter().chain(to).all(|v| fine(*v)),
+                MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
+                    transform.within_reason()
+                }
+                MaskKind::Painted { strokes } => strokes
+                    .iter()
+                    .all(|s| s.points.iter().flatten().chain(&s.radii).all(|v| fine(*v))),
+            }
+    }
+
     pub fn each_color_mut(&mut self, f: &mut impl FnMut(&mut AuthoredColor)) {
         match &mut self.kind {
             MaskKind::Vector { .. } | MaskKind::Raster { .. } | MaskKind::Gradient { .. } => {}

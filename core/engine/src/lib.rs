@@ -3138,12 +3138,37 @@ impl Session {
             (g, _) => g,
         };
         let stroke = stroke.map(|s| stroke_as_path(&bottom_shape, &s));
+        // Said again in curves where the outline bends: combined, an
+        // ellipse came back as fifty-six straight steps, faceted close to
+        // and fifty anchors to edit. Within a quarter of a unit, or a
+        // little more on a large outline — as far as the flattened curve
+        // it was worked from already lies from the true one — so the page
+        // does not move; corners stay corners and a polygon stays a
+        // polygon. Only a single outline: holes have no handles to hold
+        // curves.
+        let (points, handles) = if subpaths.is_empty() && points.len() > 8 {
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for p in &points {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            let size = (hi[0] - lo[0]).max(hi[1] - lo[1]);
+            let tolerance = (size * 0.0015).max(0.25);
+            let (anchors, handles) = chitrakar_render::fit::fit_curves(&points, true, tolerance);
+            if anchors.len() >= 3 && anchors.len() < points.len() {
+                (anchors, handles)
+            } else {
+                (points, Vec::new())
+            }
+        } else {
+            (points, Vec::new())
+        };
         node.kind = NodeKind::Vector {
             shape: chitrakar_doc::VectorShape::Path {
                 points,
                 closed: true,
                 smooth: false,
-                handles: Vec::new(),
+                handles,
                 subpaths,
             },
             fill,
@@ -3816,14 +3841,23 @@ impl Session {
         self.add_layer_to_paint(chitrakar_doc::Node::paint(name), Some((x, y)))
     }
 
-    /// [`Session::add_clone_layer`], into the frame the stroke begins in.
+    /// [`Session::add_clone_layer`], into the frame the stroke begins in
+    /// where that frame stands upright. A clone inside a turned frame
+    /// lifts nothing — what it reads is the frame's own surface, which is
+    /// not laid out the way the page is — so there it goes on the page,
+    /// where it always went, and clones as it did.
     pub fn add_clone_layer_at(
         &mut self,
         name: &str,
         x: f32,
         y: f32,
     ) -> Result<NodeId, EngineError> {
-        self.add_layer_to_paint(chitrakar_doc::Node::clone_layer(name), Some((x, y)))
+        let upright = self.frame_at(x, y).is_none_or(|frame| {
+            chitrakar_render::own_space(&self.doc, frame)
+                .is_ok_and(|t| t.b.abs() < 1e-6 && t.c.abs() < 1e-6)
+        });
+        let node = chitrakar_doc::Node::clone_layer(name);
+        self.add_layer_to_paint(node, upright.then_some((x, y)))
     }
 
     fn add_layer_to_paint(
@@ -9158,6 +9192,12 @@ impl Session {
 
     /// Set the opacity of several layers as one undo step.
     pub fn set_opacity_of(&mut self, ids: &[NodeId], opacity: f32) -> Result<(), EngineError> {
+        // NaN is no opacity: kept, the file saved after it would not open.
+        if !opacity.is_finite() {
+            return Err(EngineError::BadCommand(
+                "an opacity is a number from 0 to 1".into(),
+            ));
+        }
         self.set_each(ids, "Opacity", |id| Command::SetOpacity { id, opacity })
     }
 
@@ -10464,10 +10504,16 @@ impl Session {
                 _ => page,
             };
         }
-        let need = (kept + 2 * page) * 4;
-        // Set between what was measured to write (eight layers of 24
-        // megapixels, one of 100) and what ran out (four of 61).
-        const PSD_BUDGET: u64 = 1_300_000_000;
+        // Each layer kept as eight bits a channel, twice over (its pixels
+        // and the file's run-length copy of them), and the page drawn
+        // three times over at sixteen bytes a pixel while a layer is
+        // drawn alone. Counted as four bytes a pixel of layers and two
+        // pages, four layers of a 45-megapixel photograph passed and then
+        // stopped the engine, as did a single 140-megapixel one.
+        let need = kept * 8 + page * 48;
+        // Set under what was measured to stop the engine (six layers of
+        // 24 megapixels; four of 45), with room for the document itself.
+        const PSD_BUDGET: u64 = 2_200_000_000;
         if need > PSD_BUDGET {
             return Err(EngineError::BadCommand(format!(
                 "a layered Photoshop file holds every layer's pixels at once: \
@@ -11889,6 +11935,9 @@ impl Session {
         // Into an empty document it is the file being opened, and the page
         // takes the drawing's size, as a picture's or a Photoshop file's.
         self.import_notes.clear();
+        // What the reader leaves out, said: a picture the file only links
+        // to was dropped without a word.
+        self.import_notes.extend(imported.notes.iter().cloned());
         let (width, height) = (
             imported.width.round() as u32,
             imported.height.round() as u32,
@@ -12834,7 +12883,7 @@ fn parse_command(json: &str) -> Result<Command, EngineError> {
 
 /// Whether any number in `value` is past the largest a single-precision
 /// number holds, walked without recursing (a command can be deep).
-fn past_f32(value: &serde_json::Value) -> bool {
+pub(crate) fn past_f32(value: &serde_json::Value) -> bool {
     let mut stack = vec![value];
     while let Some(v) = stack.pop() {
         match v {
@@ -18713,6 +18762,56 @@ mod tests {
             page.get(110, 80).a > 0.9,
             "the stroke lands where it was drawn"
         );
+    }
+
+    /// An ellipse combined with a rectangle comes back in curves where it
+    /// bends, not as dozens of straight steps, and covers what it did.
+    #[test]
+    fn a_combined_curve_stays_a_curve() {
+        let mut s = Session::new(200, 200, ColorMode::Rgb);
+        let root = s.document().root();
+        let mut ellipse = Node::vector("e", VectorShape::Ellipse { rx: 50.0, ry: 40.0 });
+        ellipse.transform = Transform::translation(80.0, 80.0);
+        if let NodeKind::Vector { fill, .. } = &mut ellipse.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.4,
+                b: 0.9,
+                a: 1.0,
+            });
+        }
+        let e = s.document().peek_next_id();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(ellipse),
+        })
+        .unwrap();
+        let r = add_rect(&mut s, "r", 60.0, 30.0);
+        s.apply(Command::SetTransform {
+            id: r,
+            transform: Transform::translation(100.0, 70.0),
+        })
+        .unwrap();
+        let united = s.boolean_nodes(&[e, r], "union").unwrap();
+        let NodeKind::Vector {
+            shape: VectorShape::Path {
+                points, handles, ..
+            },
+            ..
+        } = &s.document().node(united).unwrap().kind
+        else {
+            panic!("a path")
+        };
+        assert!(points.len() < 24, "{} anchors", points.len());
+        // Still the union, to within the flattening it was made from.
+        let page = chitrakar_render::render(s.document()).unwrap();
+        assert!(
+            page.get(130, 120).a > 0.99 && page.get(150, 85).a > 0.99,
+            "covering both"
+        );
+        assert!(page.get(85, 85).a < 0.01, "and nothing past them");
+        assert_eq!(handles.len(), points.len(), "with handles");
     }
 
     #[test]

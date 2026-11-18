@@ -83,6 +83,11 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
+/// The highest a layer's number may be. The page names layers by number
+/// and its numbers are exact only to 2^53; this is half that, so a
+/// document opened at the edge has room for every layer anybody adds.
+pub const LAST_SAFE_ID: u64 = 1 << 52;
+
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum DocError {
     #[error("unknown node id {0:?}")]
@@ -1443,7 +1448,11 @@ impl Document {
                     .kind
                     .holds_children();
                 if held && !holds {
-                    if self.children.get(&id).is_some_and(|kids| !kids.is_empty()) {
+                    // The page itself always holds: made a leaf while
+                    // empty, nothing could be added to it ever again.
+                    if id == self.root
+                        || self.children.get(&id).is_some_and(|kids| !kids.is_empty())
+                    {
                         return Err(DocError::KindHoldsChildren(id));
                     }
                     self.children.remove(&id);
@@ -1510,6 +1519,12 @@ impl Document {
                 Ok(Command::SetName { id, name: prev })
             }
             Command::SetMask { id, mask } => {
+                // A mask's points and softness held to what a layer's place
+                // is held to: past it, the next page operation carried them
+                // to infinity, and the file saved after would not open.
+                if mask.as_ref().is_some_and(|m| !m.within_reason()) {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = std::mem::replace(&mut node.mask, mask.map(|m| *m));
                 Ok(Command::SetMask {
@@ -1985,14 +2000,18 @@ impl Document {
         // A counter a file says is far past every layer it holds is put
         // back just past them: at the top of its range the next layer
         // took the last number and the count wrapped round to nought.
-        self.next_id = if self.next_id >= 1u64 << 53 {
+        // Held well short of where the page can no longer count (2^53):
+        // put back at the edge itself, two layers added later crossed it,
+        // and the file then saved was refused when opened.
+        self.next_id = if self.next_id >= LAST_SAFE_ID {
             past
         } else {
             self.next_id.max(past)
         };
     }
 
-    /// The largest number any layer has, if there is a layer.
+    /// The largest number any layer has, if there is a layer. A file
+    /// whose layers reach [`LAST_SAFE_ID`] is refused when it is opened.
     pub fn highest_id(&self) -> Option<u64> {
         self.nodes.keys().map(|id| id.0).max()
     }
@@ -3801,6 +3820,35 @@ mod tests {
         history.undo(&mut doc).unwrap();
         assert_eq!(doc.node(id).unwrap().mask.as_ref(), Some(&mask));
         history.undo(&mut doc).unwrap();
+        assert!(doc.node(id).unwrap().mask.is_none());
+
+        // A mask whose numbers are past what a page operation can carry is
+        // refused, softness and gradient alike.
+        let far = Mask {
+            kind: MaskKind::Gradient {
+                radial: false,
+                from: [3.4e38, 3.4e38],
+                to: [0.0, 0.0],
+            },
+            invert: false,
+            feather: 0.0,
+        };
+        let soft = Mask {
+            feather: f32::INFINITY,
+            ..mask.clone()
+        };
+        for m in [far, soft] {
+            assert!(matches!(
+                history.apply(
+                    &mut doc,
+                    Command::SetMask {
+                        id,
+                        mask: Some(Box::new(m)),
+                    },
+                ),
+                Err(DocError::PlacedPastReason)
+            ));
+        }
         assert!(doc.node(id).unwrap().mask.is_none());
     }
 

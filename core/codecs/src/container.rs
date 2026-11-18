@@ -348,7 +348,11 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     // opened with every picture said to be missing.
     let entries: Vec<(String, String)> = zip
         .file_names()
-        .map(|n| (n.to_string(), n.replace('\\', "/")))
+        .map(|n| {
+            // And "./resources/…", as some tools write a folder's own.
+            let meant = n.replace('\\', "/");
+            (n.to_string(), meant.trim_start_matches("./").to_string())
+        })
         .collect();
     let named = |wanted: &str| {
         entries
@@ -380,7 +384,10 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     // exact only to two to the fifty-third: past it a layer opened and
     // could not be picked, and at the very top the count wrapped round
     // to nought and the next layer drawn replaced the page's own.
-    if doc.highest_id().is_some_and(|id| id >= 1u64 << 53) {
+    if doc
+        .highest_id()
+        .is_some_and(|id| id >= chitrakar_doc::LAST_SAFE_ID)
+    {
         return Err(ContainerError::IdsTooLarge);
     }
     // A resolution the file says that is no resolution: printed at it,

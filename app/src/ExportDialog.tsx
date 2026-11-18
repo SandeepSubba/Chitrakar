@@ -39,6 +39,9 @@ import { enterMeansGo } from "./dialogKeys";
 
 /** As far as the engine scales a page going out (`render_scaled`). */
 const MOST_SCALE = 16;
+/** The least scale the engine draws at (`MIN_EXPORT_SCALE`): a long edge
+ * of 16 on a page 20,000 wide was said 16 × 1 and written 20 × 1. */
+const LEAST_SCALE = 0.001;
 import { fileSafe, type Outgoing } from "./files";
 
 /** What each format is called, what it writes, and what it can do.
@@ -268,7 +271,7 @@ export function ExportDialog({
    * out — in single precision — so the size said is the size written:
    * worked out in double, a long edge of 175 said 122 across and wrote 123. */
   const px = (side: number, k: number) =>
-    Math.max(1, Math.round(Math.fround(Math.fround(side) * Math.fround(k))));
+    Math.max(1, Math.round(Math.fround(Math.fround(side) * Math.fround(Math.max(LEAST_SCALE, k)))));
   const heldScale = (w: number, h: number) => {
     let k = Math.min(
       MOST_SCALE,

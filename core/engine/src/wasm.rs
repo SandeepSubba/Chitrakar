@@ -349,7 +349,7 @@ impl WasmSession {
         let color = if background.is_empty() {
             None
         } else {
-            Some(serde_json::from_str(background).map_err(|e| JsError::new(&e.to_string()))?)
+            Some(from_page(background).map_err(|e| JsError::new(&e))?)
         };
         self.inner
             .add_artboard(name, x, y, width, height, color)
@@ -535,8 +535,7 @@ impl WasmSession {
         erase: bool,
         on_mask: bool,
     ) -> Result<(), JsError> {
-        let color =
-            serde_json::from_str(color).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        let color = from_page(color).map_err(|e| JsError::new(&format!("colour: {e}")))?;
         self.inner
             .paint_begin(
                 NodeId(layer as u64),
@@ -817,6 +816,16 @@ impl WasmSession {
         points: Vec<f64>,
         how: &str,
     ) -> Result<(), JsError> {
+        // A place or a size past what the editor holds (infinity, NaN) was
+        // kept, and the file saved after it would not open again.
+        let finite = |v: f64| v.is_finite() && v.abs() <= f32::MAX as f64;
+        if ![x, y, width, height]
+            .into_iter()
+            .chain(points.iter().copied())
+            .all(finite)
+        {
+            return Err(JsError::new("a number past what the editor can hold"));
+        }
         let shape = match kind {
             "rect" => crate::VectorShape::Rect {
                 width: width as f32,
@@ -1068,7 +1077,7 @@ impl WasmSession {
         index: usize,
         node_json: &str,
     ) -> Result<f64, JsError> {
-        let node = serde_json::from_str(node_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let node = from_page(node_json).map_err(|e| JsError::new(&e))?;
         self.inner
             .add_over_selection(NodeId(parent as u64), index, node)
             .map(|id| id.0 as f64)
@@ -1212,8 +1221,7 @@ impl WasmSession {
     /// colour given as an AuthoredColor's JSON — the same way every
     /// other colour crosses this boundary. Returns the new layer's id.
     pub fn fill_selection(&mut self, color_json: &str) -> Result<f64, JsError> {
-        let color =
-            serde_json::from_str(color_json).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        let color = from_page(color_json).map_err(|e| JsError::new(&format!("colour: {e}")))?;
         self.inner
             .fill_selection(color)
             .map(|id| id.0 as f64)
@@ -1229,8 +1237,7 @@ impl WasmSession {
         width: f32,
         align: &str,
     ) -> Result<f64, JsError> {
-        let color =
-            serde_json::from_str(color_json).map_err(|e| JsError::new(&format!("colour: {e}")))?;
+        let color = from_page(color_json).map_err(|e| JsError::new(&format!("colour: {e}")))?;
         self.inner
             .stroke_selection(color, width, align)
             .map(|id| id.0 as f64)
@@ -1241,8 +1248,7 @@ impl WasmSession {
     /// node (as AddNode's node JSON) go into a group together. Returns the
     /// group's id.
     pub fn adjust_node(&mut self, id: f64, node_json: &str) -> Result<f64, JsError> {
-        let node: crate::Node =
-            serde_json::from_str(node_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let node: crate::Node = from_page(node_json).map_err(|e| JsError::new(&e))?;
         self.inner
             .adjust_node(NodeId(id as u64), node)
             .map(|id| id.0 as f64)
@@ -2055,4 +2061,15 @@ fn image_of(rgba8: Vec<u8>, width: u32, height: u32) -> chitrakar_codecs::Source
 /// Develop settings from the page.
 fn raw_settings(json: &str) -> Result<crate::RawDevelop, JsError> {
     serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// JSON from the page, refused where a number in it is past what a
+/// single-precision number holds: it came in as infinity, which a file
+/// cannot say, and the document saved after it would not open again.
+fn from_page<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, String> {
+    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if crate::past_f32(&value) {
+        return Err("a number in it is past what the editor can hold".into());
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
 }

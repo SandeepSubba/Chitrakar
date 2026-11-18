@@ -31,6 +31,8 @@ pub struct ImportedSvg {
     pub groups: Vec<ImportedGroup>,
     /// Which of `groups` each of `shapes` is in, if any.
     pub shape_groups: Vec<Option<usize>>,
+    /// What the file holds that does not come in, in words.
+    pub notes: Vec<String>,
 }
 
 /// A group a file's layers come in inside rather than flattened: one
@@ -326,6 +328,16 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     if let Some(why) = past_reason(data) {
         return Err(why);
     }
+    let notes = left_out(data);
+    // A colour the reader does not know by name came in black; said by
+    // its number instead.
+    let renamed;
+    let data = if contains_ignoring_case(data, b"rebeccapurple") {
+        renamed = replace_ignoring_case(data, b"rebeccapurple", b"#663399");
+        &renamed[..]
+    } else {
+        data
+    };
     let mut opt = usvg::Options::default();
     // A picture the file holds that is stored on its side (a camera's
     // JPEG with Orientation 5 to 8) is handed to the reader upright:
@@ -373,7 +385,70 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
         images: got.pics,
         masks: got.masks,
         groups: got.groups,
+        notes,
     })
+}
+
+/// What a file asks for that does not come in, said rather than dropped:
+/// a picture it only links to (another file on the machine it was made
+/// on), and a line kept the same width however it is scaled.
+fn left_out(data: &[u8]) -> Vec<String> {
+    let mut notes = Vec::new();
+    let Ok(text) = std::str::from_utf8(data) else {
+        return notes;
+    };
+    let options = usvg::roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let Ok(doc) = usvg::roxmltree::Document::parse_with_options(text, options) else {
+        return notes;
+    };
+    let linked = doc
+        .descendants()
+        .filter(|n| n.has_tag_name("image"))
+        .filter(|n| {
+            let href = n
+                .attribute(("http://www.w3.org/1999/xlink", "href"))
+                .or_else(|| n.attribute("href"))
+                .unwrap_or("");
+            !href.trim_start().starts_with("data:") && !href.trim().is_empty()
+        })
+        .count();
+    if linked > 0 {
+        notes.push(format!(
+            "{linked} {} the file links to rather than holds {} not come in: only a picture inside the file can",
+            if linked == 1 { "picture" } else { "pictures" },
+            if linked == 1 { "does" } else { "do" },
+        ));
+    }
+    if text.contains("non-scaling-stroke") {
+        notes.push(
+            "a line kept the same width however it is scaled (non-scaling-stroke) comes in scaled with its shape"
+                .into(),
+        );
+    }
+    notes
+}
+
+fn contains_ignoring_case(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len())
+        .any(|w| w.eq_ignore_ascii_case(needle))
+}
+
+fn replace_ignoring_case(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(hay.len());
+    let mut i = 0;
+    while i < hay.len() {
+        if hay.len() - i >= needle.len() && hay[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            out.extend_from_slice(with);
+            i += needle.len();
+        } else {
+            out.push(hay[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// The most an SVG file is unpacked to: far past any drawing, and short
@@ -567,6 +642,9 @@ const SVG_LETTERS_MOST: usize = 10_000;
 struct Letters<'a, 'i> {
     ids: std::collections::HashMap<&'a str, usvg::roxmltree::Node<'a, 'i>>,
     known: std::collections::HashMap<&'a str, usize>,
+    /// Whether a chain of references ran past the depth followed: what is
+    /// past it is not counted, so the file is not taken on trust either.
+    deep: bool,
 }
 
 impl<'a, 'i> Letters<'a, 'i> {
@@ -578,6 +656,7 @@ impl<'a, 'i> Letters<'a, 'i> {
         Letters {
             ids,
             known: Default::default(),
+            deep: false,
         }
     }
 
@@ -610,9 +689,37 @@ impl<'a, 'i> Letters<'a, 'i> {
     /// reaching every shape in the file, an eleven-letter clip used once
     /// beside twelve hundred rectangles was refused.
     fn sheets(&mut self, doc: &'a usvg::roxmltree::Document<'i>) -> usize {
+        use std::collections::{HashMap, HashSet};
+        let sheets: Vec<String> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("style"))
+            .map(|n| without_comments(&n.children().filter_map(|c| c.text()).collect::<String>()))
+            .filter(|sheet| sheet.contains("url("))
+            .collect();
+        if sheets.is_empty() {
+            return 0;
+        }
+        // The elements filed by what a selector's last part names, so a
+        // rule asks only those that could answer: every rule asking every
+        // element made a file of four thousand rules and forty thousand
+        // shapes take a minute.
+        let elements: Vec<usvg::roxmltree::Node<'a, 'i>> =
+            doc.descendants().filter(|n| n.is_element()).collect();
+        let mut by_class: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut by_id: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (k, n) in elements.iter().enumerate() {
+            for c in n.attribute("class").unwrap_or("").split_whitespace() {
+                by_class.entry(c).or_default().push(k);
+            }
+            if let Some(id) = n.attribute("id") {
+                by_id.entry(id).or_default().push(k);
+            }
+            by_name.entry(n.tag_name().name()).or_default().push(k);
+        }
+        let all: Vec<usize> = (0..elements.len()).collect();
         let mut sum = 0usize;
-        for node in doc.descendants().filter(|n| n.has_tag_name("style")) {
-            let sheet: String = node.children().filter_map(|c| c.text()).collect();
+        for sheet in &sheets {
             for rule in sheet.split('}') {
                 let mut halves = rule.rsplitn(2, '{');
                 let (Some(declarations), Some(before)) = (halves.next(), halves.next()) else {
@@ -623,14 +730,51 @@ impl<'a, 'i> Letters<'a, 'i> {
                     continue;
                 }
                 let selectors = before.rsplit('{').next().unwrap_or("");
-                let reached: Vec<usvg::roxmltree::Node> = doc
-                    .descendants()
-                    .filter(|n| n.is_element() && selectors.split(',').any(|s| may_match(s, *n)))
-                    .collect();
+                let mut reached: HashSet<usize> = HashSet::new();
+                for selector in selectors.split(',') {
+                    let (name, wanted) = last_part(selector);
+                    let candidates = wanted
+                        .iter()
+                        .find(|(kind, _)| *kind == '#')
+                        .map(|(_, w)| by_id.get(w.as_str()))
+                        .or_else(|| {
+                            wanted
+                                .iter()
+                                .find(|(kind, _)| *kind == '.')
+                                .map(|(_, w)| by_class.get(w.as_str()))
+                        })
+                        .or_else(|| {
+                            (!name.is_empty() && name != "*").then(|| by_name.get(name.as_str()))
+                        })
+                        .unwrap_or(Some(&all));
+                    for &k in candidates.into_iter().flatten() {
+                        if may_match(selector, elements[k]) {
+                            reached.insert(k);
+                        }
+                    }
+                }
+                if reached.is_empty() {
+                    continue;
+                }
+                let reached_ids: HashSet<usvg::roxmltree::NodeId> =
+                    reached.iter().map(|&k| elements[k].id()).collect();
                 for (property, id) in found {
+                    // What is passed down reaches the shapes inside an
+                    // element once, however many of the groups round them
+                    // the rule also matches: counted at each, six groups
+                    // deep was six times the letters.
+                    let passed_down = matches!(
+                        property,
+                        "fill" | "stroke" | "marker" | "marker-mid" | "marker-start" | "marker-end"
+                    );
                     let times = reached
                         .iter()
-                        .map(|n| times_drawn(property, *n))
+                        .map(|&k| elements[k])
+                        .filter(|n| {
+                            !passed_down
+                                || !n.ancestors().skip(1).any(|a| reached_ids.contains(&a.id()))
+                        })
+                        .map(|n| times_drawn(property, n))
                         .fold(0usize, |a, b| a.saturating_add(b));
                     if times > 0 {
                         sum = sum.saturating_add(self.target(id, 0).saturating_mul(times));
@@ -642,7 +786,11 @@ impl<'a, 'i> Letters<'a, 'i> {
     }
 
     fn drawn(&mut self, node: usvg::roxmltree::Node<'a, 'i>, depth: u32, referred: bool) -> usize {
-        if depth > 128 || !node.is_element() || node.attribute("display") == Some("none") {
+        if depth > 128 {
+            self.deep = true;
+            return 0;
+        }
+        if !node.is_element() || node.attribute("display") == Some("none") {
             return 0;
         }
         let name = node.tag_name().name();
@@ -684,8 +832,10 @@ impl<'a, 'i> Letters<'a, 'i> {
         // drawn: a marker in the middle is drawn at every point, and one
         // set on a group is set on every shape inside it, as a fill is.
         for attr in node.attributes() {
+            let uncommented;
             let pairs: Vec<(&str, &str)> = if attr.name() == "style" {
-                references_in(attr.value())
+                uncommented = without_comments(attr.value());
+                references_in(&uncommented)
             } else {
                 references_in(attr.value())
                     .into_iter()
@@ -751,20 +901,32 @@ fn times_drawn(property: &str, node: usvg::roxmltree::Node) -> usize {
     }
 }
 
-/// Whether `selector` could match `node`, read loosely: its last part's
-/// element name, classes and id, and nothing it says about where the
-/// element stands or what state it is in — so it matches at least what
-/// a browser would.
-fn may_match(selector: &str, node: usvg::roxmltree::Node) -> bool {
+/// A style sheet with its comments taken out: a comment in a selector
+/// ("/*x*/.a") was read as part of an element's name, and the rule was
+/// counted as reaching nothing while every shape it named drew the clip.
+fn without_comments(sheet: &str) -> String {
+    let mut out = String::with_capacity(sheet.len());
+    let mut rest = sheet;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        out.push(' ');
+        rest = rest[at + 2..]
+            .find("*/")
+            .map_or("", |end| &rest[at + 2 + end + 2..]);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A selector's last part — what the element it picks out is — as its
+/// element name and its classes ('.') and ids ('#'), with what it says
+/// about state or attributes set aside.
+fn last_part(selector: &str) -> (String, Vec<(char, String)>) {
     let last = selector
         .rsplit(|c: char| c.is_whitespace() || matches!(c, '>' | '+' | '~'))
         .find(|p| !p.is_empty())
         .unwrap_or("");
-    // What a part says about state or attributes is set aside.
     let last = last.split([':', '[']).next().unwrap_or("");
-    if last.is_empty() || last == "*" {
-        return true;
-    }
     let mut name = String::new();
     let mut wanted: Vec<(char, String)> = Vec::new();
     let mut kind = ' ';
@@ -781,6 +943,15 @@ fn may_match(selector: &str, node: usvg::roxmltree::Node) -> bool {
             word.push(c);
         }
     }
+    (name, wanted)
+}
+
+/// Whether `selector` could match `node`, read loosely: its last part's
+/// element name, classes and id, and nothing it says about where the
+/// element stands or what state it is in — so it matches at least what
+/// a browser would.
+fn may_match(selector: &str, node: usvg::roxmltree::Node) -> bool {
+    let (name, wanted) = last_part(selector);
     if !name.is_empty() && name != "*" && node.tag_name().name() != name {
         return false;
     }
@@ -852,6 +1023,12 @@ fn past_reason(data: &[u8]) -> Option<String> {
     let letters = counted
         .drawn(doc.root_element(), 0, false)
         .saturating_add(counted.sheets(&doc));
+    if counted.deep {
+        return Some(
+            "this file refers to what it refers to more than 128 deep, which is past what the editor follows"
+                .into(),
+        );
+    }
     if letters > SVG_LETTERS_MOST {
         return Some(format!(
             "this file sets {letters} letters of text, and text comes in as the outlines of its \
@@ -5120,6 +5297,39 @@ mod tests {
             past_reason(deep.as_bytes()).is_some(),
             "a deep chain is counted"
         );
+        // A comment in the selector is no way round the count.
+        let hidden = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>/*x*/.r {{ clip-path: url(#c) }}</style><clipPath id="c"><text>{a_thousand}</text></clipPath>{shapes}</svg>"##
+        );
+        assert!(
+            past_reason(hidden.as_bytes()).is_some(),
+            "a commented selector"
+        );
+        // A rule matching groups inside groups reaches the shapes once.
+        let mut nested = String::new();
+        for _ in 0..6 {
+            nested.push_str("<g>");
+        }
+        nested.push_str(&rects[..rects.len() / 2]);
+        for _ in 0..6 {
+            nested.push_str("</g>");
+        }
+        let grouped = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>g {{ fill: url(#p) }}</style><pattern id="p" width="2" height="2"><text>DRAFT</text></pattern>{nested}</svg>"##
+        );
+        assert!(
+            past_reason(grouped.as_bytes()).is_none(),
+            "nested groups count the shapes once"
+        );
+        // References past 128 deep are refused, not taken on trust.
+        let mut chain = r##"<text id="u0">x</text>"##.to_string();
+        for k in 1..140 {
+            chain.push_str(&format!(r##"<use id="u{k}" href="#u{}"/>"##, k - 1));
+        }
+        let long = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><defs>{chain}</defs><use href="#u139"/></svg>"##
+        );
+        assert!(past_reason(long.as_bytes()).is_some(), "a chain past 128");
     }
 
     /// Two squares wound the same way and sharing a corner fill their

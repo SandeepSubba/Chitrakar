@@ -488,6 +488,13 @@ fn shape_line_in(
 /// Whether a character reads right to left, or opens a stretch that
 /// does: Hebrew, Arabic and their kin, and the marks that say so.
 fn reads_leftward(c: char) -> bool {
+    // Nothing before Hebrew's block reads leftward, and that is all of
+    // Latin, Greek and Cyrillic: answered without the table, which asked
+    // of every letter of every line of a page of text was a twentieth of
+    // a second a layout.
+    if c < '\u{0590}' {
+        return false;
+    }
     use unicode_bidi::BidiClass::*;
     matches!(unicode_bidi::bidi_class(c), R | AL | RLE | RLO | RLI)
 }

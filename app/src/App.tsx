@@ -878,20 +878,54 @@ let lastInlinePick: { range: [number, number]; text: string; at: number } | null
 // once the box has lost it: a word picked in the panel's Text box, and
 // a press on the page after, left Italic meaning that word, with nothing
 // on the screen to say so. A press anywhere but the panel's controls
-// (Bold, the colour), the bar's (the palette, recent colours, styles) or
-// an open menu lets it go.
+// (Bold, the colour), the bar's colours (the palette, recent colours,
+// styles, the fill) or an open menu lets it go.
 if (typeof document !== "undefined") {
   document.addEventListener(
     "pointerdown",
     (e) => {
       const at = e.target instanceof Element ? e.target : null;
-      if (at?.closest(".layer-props, .toolbar, .menu-pop, .modal-scrim")) return;
+      // The bar's colours only, not its tools: a press on Rect and then
+      // Move kept the word, and Bold made only it bold.
+      if (at?.closest(".layer-props, .palette, .fill-swatch, .menu-pop, .modal-scrim")) return;
+      let letGo = false;
       for (const label of TEXT_BOXES) {
         const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
         if (el && el !== at && el.selectionStart !== el.selectionEnd) {
           el.setSelectionRange(el.selectionEnd, el.selectionEnd);
+          letGo = true;
         }
       }
+      // The selectionchange this makes can come after the focus has left
+      // the box, when nothing re-renders for it: Bold went on showing
+      // the word's bold. Say so in words the buttons hear either way.
+      if (letGo) document.dispatchEvent(new Event("chitrakar:textpick"));
+    },
+    true,
+  );
+}
+
+/** Whether a layer's row was reached by the keyboard (Tab, or the arrows
+ * going through the list) rather than pressed with the pointer. Chromium
+ * matches `:focus-visible` on a pressed row as soon as any key is
+ * pressed, Shift included, so Shift+arrow on a clicked row went through
+ * the list instead of nudging the layer. */
+let pointerAt = -Infinity;
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      pointerAt = performance.now();
+      const row = e.target instanceof Element ? e.target.closest<HTMLElement>(".layer-list li[data-id]") : null;
+      if (row) row.dataset.keys = "";
+    },
+    true,
+  );
+  document.addEventListener(
+    "focusin",
+    (e) => {
+      const row = e.target instanceof HTMLElement && e.target.matches(".layer-list li[data-id]") ? e.target : null;
+      if (row) row.dataset.keys = performance.now() - pointerAt > 300 ? "1" : "";
     },
     true,
   );
@@ -1062,6 +1096,9 @@ if (typeof window !== "undefined") {
 const clickedControls = new WeakSet<Element>();
 let pressedLast = false;
 let navigating = false;
+/** The tools that paint where they are pressed, which no handle on the
+ * page takes a press from. */
+const BRUSH_TOOLS = new Set<string>(["Paint", "Brush", "Eraser", "Clone", "Heal"]);
 const MOVES_FOCUS = new Set(["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
 if (typeof window !== "undefined") {
   window.addEventListener(
@@ -5500,6 +5537,10 @@ export function App() {
     // one opened the menu after as well. Let through to the canvas round
     // it, which does what they mean.
     if (e.pointerType !== "touch" && (e.button !== 0 || spaceRef.current || tool === "Hand")) return true;
+    // Nor a brush's: a heal begun on a graduated mask's line moved the
+    // mask, and a strip down the middle of the photograph could not be
+    // healed while that adjustment was picked.
+    if (BRUSH_TOOLS.has(tool)) return true;
     if (rejectPalm(e)) {
       e.stopPropagation();
       return true;
@@ -5863,7 +5904,8 @@ export function App() {
       // Into the frame the stroke begins in, as a shape drawn there goes.
       const id = (
         clone
-          ? s.add_clone_layer_at(`Clone ${paintCount.current}`, at[0], at[1])
+          ? // A heal is named for what it does: it made "Clone 1".
+            s.add_clone_layer_at(`${tool === "Heal" ? "Heal" : "Clone"} ${paintCount.current}`, at[0], at[1])
           : s.add_paint_layer_at(`Paint ${paintCount.current}`, at[0], at[1])
       ) as NodeId;
       strokeMade.current = true;
@@ -6623,12 +6665,26 @@ export function App() {
     const [bx, by, bw, bh] = cropFrame;
     const cx = Math.max(0, Math.round(bx));
     const cy = Math.max(0, Math.round(by));
-    const cw = Math.min(dw, Math.round(bx + bw)) - cx;
-    const ch = Math.min(dh, Math.round(by + bh)) - cy;
+    let cw = Math.min(dw, Math.round(bx + bw)) - cx;
+    let ch = Math.min(dh, Math.round(by + bh)) - cy;
+    // A ratio asked for is kept in whole pixels: each edge rounded on its
+    // own, a square came out 446 by 445. The height follows the width,
+    // or the width the height where the page has no more room down.
+    const ratio = cropRatioOf(cropRatio, docSize);
+    if (ratio !== null && cw >= 1 && ch >= 1) {
+      const down = Math.max(1, Math.round(cw / ratio));
+      if (cy + down <= dh) ch = down;
+      else cw = Math.max(1, Math.min(dw - cx, Math.round(ch * ratio)));
+    }
     setCropFrame(null);
     if (cw < 1 || ch < 1) return;
     try {
-      session.resize_canvas(cw, ch, -cx, -cy);
+      // Said in the history as what it was: a crop, where it read
+      // "Resize canvas to 1382x983".
+      session.apply_as(
+        JSON.stringify({ ResizeCanvas: { width: cw, height: ch, dx: -cx, dy: -cy } }),
+        `Crop to ${cw} × ${ch}`,
+      );
     } catch (err) {
       alert(`Crop: ${said(err)}`);
       return;
@@ -8308,13 +8364,22 @@ export function App() {
     // the region is why the layer is being added, and the graph its
     // numbers are set against is already the region's own. So it
     // arrives holding the region, in one entry.
+    // Just above the picked layer, as Photoshop puts one: on top of the
+    // whole page it greyed the text and shapes above a photograph too.
+    // In a group or a frame it goes in beside it; nothing picked, or a
+    // copy's own layer picked, it goes on top of the page.
+    const picked = selected === null ? undefined : layers.find((l) => l.id === selected);
+    const holder = picked ? layers.find((l) => l.id === picked.parent) : undefined;
+    const beside =
+      picked !== undefined &&
+      (picked.parent === session.root_id || holder?.kind === "group" || holder?.kind === "artboard");
     try {
       const id = session.add_over_selection(
-        session.root_id,
+        beside ? picked.parent : session.root_id,
         // The page's own count, not the rows at the top of the panel: a
         // live copy's own layers are listed there too, and an adjustment
         // asked for with one picked was put past the page's end.
-        session.child_count(session.root_id),
+        beside ? picked.index + 1 : session.child_count(session.root_id),
         JSON.stringify(nodePayload(preset.name, preset.kind)),
       ) as number;
       setSelected(id as NodeId);
@@ -8442,8 +8507,13 @@ export function App() {
         noteSelection((n) => n + 1);
       }
     };
+    const letGo = () => noteSelection((n) => n + 1);
     document.addEventListener("selectionchange", onSelect);
-    return () => document.removeEventListener("selectionchange", onSelect);
+    document.addEventListener("chitrakar:textpick", letGo);
+    return () => {
+      document.removeEventListener("selectionchange", onSelect);
+      document.removeEventListener("chitrakar:textpick", letGo);
+    };
   }, []);
 
   /** Turn the page a quarter of the way round, carrying everything on it
@@ -9223,6 +9293,9 @@ export function App() {
       }
       if (!typing && (e.key === "Delete" || e.key === "Backspace")) {
         e.preventDefault();
+        // With a modifier held it is somebody else's chord — Alt+Backspace
+        // is Photoshop's fill — and it deleted the picked layer whole.
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
         // With a path half drawn, the key takes back its last anchor —
         // what it does in every pen tool — and never the picked layer.
         if (tool === "Pen" && penPoints.length > 0) {
@@ -9246,6 +9319,14 @@ export function App() {
         const rowId = row ? Number(row.getAttribute("data-id")) : NaN;
         if (row && Number.isFinite(rowId) && !selectionSet.includes(rowId as NodeId)) {
           deleteSelected(rowId as NodeId);
+          return;
+        }
+        // With a region picked out on the page, Delete is about the region,
+        // as it is in every editor: what is inside it goes from the picked
+        // layer — hidden by a mask here, since nothing is cut away — where
+        // the whole photograph went with no word. On a row, it is the row's.
+        if (!row && antRings.length > 0 && selected !== null) {
+          maskFromSelection(true);
           return;
         }
         deleteSelected();
@@ -9341,9 +9422,26 @@ export function App() {
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLSelectElement ||
         isTextEntry(e.target);
-      if (!step || !session || inControl || selectionSet.length === 0 || aWindowIsUp()) {
+      if (!step || !session || inControl || aWindowIsUp()) {
         return;
       }
+      // On a layer's row the arrows go through the list, as they do in
+      // every list: they moved the layer a pixel on the page a press,
+      // each a step in the history, with the focus left where it was.
+      // Only where the keyboard brought the focus (`dataset.keys`): a row
+      // pressed with the mouse picks its layer, and the arrows then nudge
+      // it, as they do everywhere else in the editor.
+      const row = e.target instanceof Element ? e.target.closest<HTMLElement>(".layer-list li[data-id]") : null;
+      if (row && row.dataset.keys === "1") {
+        e.preventDefault();
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          const rows = [...document.querySelectorAll<HTMLElement>(".layer-list li[data-id]")];
+          const at = rows.indexOf(row);
+          rows[Math.max(0, Math.min(rows.length - 1, at + (e.key === "ArrowDown" ? 1 : -1)))]?.focus();
+        }
+        return;
+      }
+      if (selectionSet.length === 0) return;
       e.preventDefault();
       const k = e.shiftKey ? prefs.nudgeBig : prefs.nudge;
       const moving = movableSelection.map((id) => ({
@@ -13694,7 +13792,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={openDocument}
-            title="Open…"
+            title={tip("Open…", "open")}
             aria-label="Open"
           >
             <Icon name="open" />
@@ -13718,7 +13816,7 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={exportPng}
-            title="Quick export as PNG"
+            title={tip("Quick export as PNG", "export")}
             aria-label="Quick export as PNG"
           >
             <Icon name="export" />
@@ -14944,7 +15042,7 @@ export function App() {
               setFill(e.target.value);
               setInkFrom(null);
             }}
-            title="Fill color"
+            title="Fill colour"
             aria-label="Fill colour"
             className="fill-swatch"
           />
@@ -16506,7 +16604,16 @@ export function App() {
             </ActionSelect>
             <div className="panel-head-actions">
               <button
-                onClick={() => reorderSelected(1)}
+                onClick={(e) => {
+                  // At the end of the stack the button goes grey and lets
+                  // the focus go — to Group, where the next Enter grouped
+                  // the layer. It goes to the layer's row instead.
+                  const button = e.currentTarget;
+                  reorderSelected(1);
+                  requestAnimationFrame(() => {
+                    if (button.disabled) document.querySelector<HTMLElement>(".layer-list li.selected")?.focus();
+                  });
+                }}
                 // Enabled when something picked would actually move —
                 // asked of the same working-out that does the moving, so
                 // the button cannot say yes and then do nothing.
@@ -16517,7 +16624,16 @@ export function App() {
                 <Icon name="raise" size={16} />
               </button>
               <button
-                onClick={() => reorderSelected(-1)}
+                onClick={(e) => {
+                  // At the end of the stack the button goes grey and lets
+                  // the focus go — to Group, where the next Enter grouped
+                  // the layer. It goes to the layer's row instead.
+                  const button = e.currentTarget;
+                  reorderSelected(-1);
+                  requestAnimationFrame(() => {
+                    if (button.disabled) document.querySelector<HTMLElement>(".layer-list li.selected")?.focus();
+                  });
+                }}
                 disabled={reorderCommands(-1).length === 0}
                 title="Lower layer"
                 aria-label="Lower layer"
@@ -17775,7 +17891,7 @@ const keyHelp = (
         [shifted("Clone"), "Heal — the same, laid down in the colour of the place it lands"],
         ["Alt-click (clone, heal)", "Set the place to clone from"],
         ["[  ]", "Thinner, thicker brush"],
-        ["Alt-click (brush)", "Take the colour under the brush"],
+        ["Alt-click (Paint)", "Take the colour under the brush"],
         ["Shift-click (brush)", "Paint a straight line on from the last stroke"],
         [k("Text"), "Text"],
         [k("Crop"), "Crop — drag a frame, adjust it, Enter or double-click to take it"],

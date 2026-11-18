@@ -135,7 +135,11 @@ without reading anything else.*
      drag left following the pointer after a right-click. The
      forty-second: a page of wrapped text seconds a keystroke, a picked
      word steering Bold after it was let go of, flyouts off the window,
-     a white accent unseen on the light theme.
+     a white accent unseen on the light theme. The forty-third: Delete
+     with a region picked deleting the photograph, arrows on a row moving
+     the layer, adjustments over the whole page, combined curves in
+     straight steps, a mask's numbers carried to infinity, a brush
+     stroke caught by a mask's handles.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12823,6 +12827,76 @@ without reading anything else.*
   gradient stop past 0–1 given by a command is read as it is where SVG
   and PDF clamp it; effects past their bounds given by a command are
   held to them only when the file is opened again.
+  **A forty-third audit (November 2026).** Its check of round 42: a
+  clone or heal stroke begun in a turned frame made its layer in the
+  frame and lifted nothing there (in an upright frame only; a turned
+  one leaves it on the page); a comment in a style sheet's selector was
+  read as an element's name, and the letter count was bypassed (comments
+  taken out first); a rule matching groups inside groups counted their
+  shapes once a level, and refused an ordinary file (once, at the
+  outermost); a style sheet's rules each asked every element, five times
+  slower on a file of four thousand rules (asked only of those their
+  selector names); references past 128 deep were not counted, and a
+  chain of `use` past 155 stopped the engine inside the reader (refused
+  in words before it is read); a document's counter put back at the
+  very edge of what the page counts saved files it then refused (held
+  to 2^52); a page of 9,000 wrapped letters still took three seconds a
+  keystroke, every letter of every line asked whether it reads leftward
+  (answered at once for every script before Hebrew); infinity and NaN
+  still came in through an opacity, a region's place and the JSON of a
+  fill, a frame's background or a node (refused); a word picked in the
+  Text box survived a press on a tool (only the bar's colours keep it);
+  the Export window drew at a scale the engine floors at a thousandth
+  (floored the same); the page could be made a leaf; "./resources/"
+  entries were missing. Amber and Teal on the light theme are held to
+  three to one like any accent, which darkens them a little.
+  Its interface pass was three
+  people for an hour each — someone from Photoshop on a laptop, someone
+  on the keyboard with a screen reader, someone on a tablet: Delete with
+  a region picked out deleted the whole picked photograph, and
+  Alt+Backspace did too (the region is hidden on the layer, as Layer ›
+  Mask › Hide selection does, and a modifier with Delete is another
+  chord's); the arrows on a layer's row moved the layer a pixel a press
+  (they go through the list); Enter on Lower layer at the bottom of the
+  stack handed the focus to Group, and the next Enter grouped the layer
+  (the focus goes to the layer's row); a crop held to 1:1 came out 446
+  by 445 (the ratio kept in whole pixels); combined, an ellipse came
+  back as fifty-six straight steps (said again in curves where it
+  bends); an adjustment from the Adjust menu went over the whole page
+  and greyed the text above the photograph (just above the picked
+  layer); a heal layer was named "Clone 1", a crop "Resize canvas to",
+  the keys sheet said Alt-click takes a colour with the brush (with
+  Paint), and two tooltips left out their chords. Limits written down:
+  Heal needs a source picked first and says so in an alert, and the
+  app's other alerts and confirms are the browser's own; there is no
+  New layer, and Photoshop's adjustment chords (Ctrl+L, M, U, B) and
+  Ctrl+T, R, ;, ', Y do nothing; effects are reached only from the
+  panel; a trackpad's sideways swipe does not pan; the page exports
+  transparent where it looks white; text and shapes start in the same
+  colour; menus skip their disabled rows and never say why a row is
+  disabled; arrow presses on a slider are a step each; the canvas is not
+  in the tab order; a long press on a layer's row opens no menu; drafts
+  piling up across reloads are offered with no name or time.
+  Its editing pass: a brush stroke begun over a picked layer's mask
+  handles (a gradient's ends, a frame's corners) dragged the handle
+  instead of painting (the brush tools paint through them); a mask's
+  gradient end or softness at 3.4e38 was taken, and the next Resize
+  page carried it to infinity, so the file saved after would not open
+  (a mask's numbers are held to what a layer's place is). Its files
+  pass: a layered PSD export of a page big enough to need more memory
+  than the engine has was begun and died part-way (the budget counts
+  each layer's pixels and the page's working copies, and says so
+  before it begins); an SVG's linked images and `non-scaling-stroke`
+  were dropped without a word (said in the import's notes);
+  `rebeccapurple` came in black (read as #663399). Limits written down:
+  a turned isolated group redrawn in part can show a seam at the edge
+  of the part; a PSD export clips every layer to the page; a PSB larger
+  than a page opens at the page's size; reading and writing a large PSD
+  takes seconds on one thread; an SVG is placed at the page's corner,
+  not under the pointer; a sixteen-bit picture is kept at eight bits;
+  "What is picked" exports what is on the page of a layer partly off
+  it; Heal draws its conic falloff at 1x; pasting a lone copy into a
+  frame places it on the page.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

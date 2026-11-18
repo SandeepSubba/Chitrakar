@@ -21673,6 +21673,70 @@ assert(
   );
 }
 
+// 9dt. The forty-third audit's interface pass. Delete with a region
+// picked out deleted the whole picked layer; the arrows on a layer's row
+// moved the layer on the page; an adjustment from the menu went on top
+// of the whole page rather than above the picked layer.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [s.x + (x / 400) * s.width, s.y + (y / 300) * s.height];
+  for (const [x, y] of [[40, 40], [160, 60], [260, 120]]) {
+    await pickTool("Rect");
+    await page.mouse.move(...at(x, y));
+    await page.mouse.down();
+    await page.mouse.move(...at(x + 90, y + 70), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+  }
+  const rows = page.locator(".panel ul.layer-list li[data-id]");
+  const names = () => rows.locator(".layer-name").allTextContents();
+  const steps = () => page.locator(".history li:not(.history-start)").count();
+
+  // An adjustment goes just above the picked layer.
+  await rows.filter({ hasText: "Rect 1" }).first().click();
+  await page.waitForTimeout(150);
+  await menuClick("Adjust", "Exposure");
+  await page.waitForTimeout(300);
+  const order = await names();
+  assert(
+    order.indexOf("Exposure") === order.indexOf("Rect 1") - 1,
+    `an adjustment goes just above the picked layer (${order})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+
+  // The arrows on a row go through the list, and move nothing.
+  const before = await steps();
+  await rows.nth(0).focus();
+  // The keyboard's own focus: a key pressed first, as a person reaching
+  // the row by Tab would have.
+  await page.keyboard.press("Shift");
+  await page.keyboard.press("ArrowDown");
+  await page.waitForTimeout(150);
+  const focused = await page.evaluate(() => document.activeElement?.textContent ?? "");
+  assert(focused.includes((await names())[1]), `ArrowDown on a row goes to the next row (${focused})`);
+  assert((await steps()) === before, "and moves nothing on the page");
+
+  // Delete with a region picked out hides the region on the picked layer.
+  await rows.filter({ hasText: "Rect 3" }).first().click();
+  await page.waitForTimeout(150);
+  await pickTool("Select");
+  await page.mouse.move(...at(250, 110));
+  await page.mouse.down();
+  await page.mouse.move(...at(300, 160), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const count = await rows.count();
+  await page.locator("#engine-canvas").hover();
+  await page.keyboard.press("Delete");
+  await page.waitForTimeout(300);
+  assert((await rows.count()) === count, `Delete with a region picked keeps the layer (${await names()})`);
+  const last = await page.locator(".history li:not(.history-start)").last().textContent();
+  assert(!/^Delete/.test(last ?? ""), `and hides the region instead (${last})`);
+  await page.keyboard.press("Escape");
+}
+
 // 9ds. The forty-second audit's interface pass. A word picked in the
 // panel's Text box went on steering Bold and Italic after a press on the
 // page, with nothing shown picked; Escape did not take back a guide
@@ -21707,7 +21771,9 @@ assert(
   assert((await bold.getAttribute("aria-pressed")) === "true", "Bold on the word picked in the box");
   // A press on the page lets the box's word go: Bold reads the block.
   await p.mouse.click(r.x + 110, r.y + 108);
-  await p.waitForTimeout(300);
+  for (let i = 0; i < 20 && (await bold.getAttribute("aria-pressed")) === "true"; i++) {
+    await p.waitForTimeout(100);
+  }
   assert(
     (await box.evaluate((t) => t.selectionStart === t.selectionEnd)) &&
       (await bold.getAttribute("aria-pressed")) !== "true",
