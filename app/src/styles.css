@@ -4794,3 +4794,31 @@ button.fold:hover {
   --accent: #3b5bdb;
   --on-accent: #ffffff;
 }
+
+/* Pressed, chosen and current are told apart by a tint, which a high
+   contrast mode paints over: the tool in hand, the format and scale
+   chosen in Export, a toggle held, History's step all looked like their
+   neighbours. Outlined in the system's own highlight there. */
+@media (forced-colors: active) {
+  [aria-pressed="true"],
+  [aria-current="step"],
+  [aria-current="true"],
+  [aria-checked="true"],
+  .preset.active,
+  .tool.active {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* Asked for less motion, the marching ants stand still and nothing
+   slides or fades: they ran on whatever the system said. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

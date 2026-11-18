@@ -190,7 +190,12 @@ export async function writeFiles(
   const named = distinctNames(files.map((f) => fileSafe(f.name)));
   files = files.map((f, i) => ({ ...f, name: named[i] }));
   if (!isTauri()) {
-    for (const f of files) download(f.make(), f.name, f.type);
+    // A breath apart: a browser lets a page start ten downloads at once
+    // and quietly drops the rest, so twelve slices wrote ten.
+    for (const [i, f] of files.entries()) {
+      if (i > 0 && files.length > 1) await new Promise((r) => setTimeout(r, 250));
+      download(f.make(), f.name, f.type);
+    }
     return true;
   }
   if (files.length === 1) {

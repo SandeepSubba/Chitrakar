@@ -24,6 +24,7 @@ import {
   readPath,
   writeFiles,
   graphemes,
+  fileSafe,
   canShareFiles,
   shareFiles,
   writePath,
@@ -785,8 +786,10 @@ const THIS_TAB = Math.random().toString(36).slice(2);
 /** Whether this tab has copied layers this visit: only then has it a
  * copy that another tab's could have made stale. */
 let copiedHere = false;
-/** Whether the eraser has said, this visit, that it needs a layer. */
-let toldEraser = false;
+/** Which of its reasons the eraser has said, this visit: each once.
+ * One flag for all of them said nothing of a locked layer to someone
+ * already told to pick one. */
+const toldEraser = new Set<string>();
 
 /** Move the draft kept in `from` to a slot no tab holds and no draft
  * is in, and say which (or `null` where none is free). A tab takes a
@@ -2078,8 +2081,12 @@ export function App() {
   // edge, and the tool looked to have none.
   useEffect(() => {
     requestAnimationFrame(() => {
-      const opt = document.querySelector<HTMLElement>(".toolbar .tool-number, .toolbar .tool-ratio, .toolbar .shape-library");
-      opt?.scrollIntoView({ block: "nearest" });
+      // All of them: the last first and then the first, so as many as
+      // fit are in sight with the first of them always — only the first
+      // was, and the wand's reach stayed below the edge.
+      const opts = document.querySelectorAll<HTMLElement>(".toolbar .tool-number, .toolbar .tool-ratio, .toolbar .shape-library");
+      opts[opts.length - 1]?.scrollIntoView({ block: "nearest" });
+      opts[0]?.scrollIntoView({ block: "nearest" });
     });
   }, [tool]);
   /** Which of the library's shapes the Shape tool draws. */
@@ -2609,7 +2616,15 @@ export function App() {
   const TOOL_HINT = keys.hint;
   /** A tool's tooltip: its name and its key, or its name alone when
    * another tool has taken its key — "Rect ()" said nothing. */
-  const toolTitle = (t: Tool) => (TOOL_HINT[t] ? `${t} (${TOOL_HINT[t]})` : t);
+  // A tool that shares its key is reached by the key and then Shift+the
+  // key along its family: "Knife (A)" picked the Node tool.
+  const toolTitle = (t: Tool) => {
+    const k = TOOL_HINT[t];
+    if (!k) return t;
+    const at = KEY_FAMILIES.find((f) => f.includes(t))?.indexOf(t) ?? 0;
+    if (at <= 0) return `${t} (${k})`;
+    return `${t} (${k}, then Shift+${k}${at > 1 ? ` ×${at}` : ""})`;
+  };
   /** The command chords as they stand, and what a menu row writes for
    * one: the person's rebindings over what each shipped with. */
   const chords = useMemo(
@@ -3334,6 +3349,7 @@ export function App() {
       setGamutWarn(false);
       shapeCount.current = 0;
       paintCount.current = 0;
+      frameCount.current = 0;
       setCloneFrom(null);
       setDocName("untitled");
       setDocPath(null);
@@ -3596,6 +3612,10 @@ export function App() {
     // "several pictures" with nothing to show for it.
     const pictures = layers.filter((l) => l.kind === "raster" && l.visible);
     const id = selected ?? (pictures.length === 1 ? pictures[0].id : null);
+    // A shape picked is read by colour alone: the model is for
+    // photographs, and offering its download for a rectangle is a
+    // question nobody should be asked.
+    const isPicture = pictures.some((p) => p.id === id);
     if (id === null) {
       alert(
         pictures.length === 0
@@ -3643,7 +3663,7 @@ export function App() {
     // In a browser, the subject model where it has been fetched; offered
     // once (its size said) where it has not, unless the person said they
     // would rather pick by colour.
-    if (!isTauri()) {
+    if (!isTauri() && isPicture) {
       if (await hasSubjectModel()) {
         if (await subjectFromModel(id)) return;
       } else if (!prefs.subjectQuick) {
@@ -6119,8 +6139,9 @@ export function App() {
       if (erasing && !onMask && !(picked && picked.kind === "paint" && !picked.locked)) {
         // Said once a visit, rather than nothing at all: the stroke
         // went nowhere and nothing said why.
-        if (!toldEraser) {
-          toldEraser = true;
+        const why = picked?.locked ? "locked" : "none";
+        if (!toldEraser.has(why)) {
+          toldEraser.add(why);
           alert(
             picked?.locked
               ? `The eraser rubs at the picked layer, and ${picked.name} is locked.`
@@ -8705,7 +8726,9 @@ export function App() {
       !("Text" in selectedKind)
     )
       return;
-    setInlineText({ ...inlineText, value });
+    // Typed into: what it says now is the person's, even the very word
+    // the placeholder was ("Text" typed over "Text" went on Escape).
+    setInlineText({ ...inlineText, value, start: undefined });
     const was = selectedKind.Text;
     preview({
       SetKind: {
@@ -11258,9 +11281,15 @@ export function App() {
     refresh(session);
   };
 
-  /** The document's name as a file's: trimmed, and never empty. */
-  const fileName = () =>
-    docName.trim().replace(/[\\/:*?"<>|]/g, "-") || "untitled";
+  /** The document's name as a file's: made safe as an export's is (no
+   * tab, no control characters, no name past what a system holds), less
+   * a `.chitra` the name already ends in, and not a name Windows keeps
+   * for a device. Saved, a tab and three hundred letters were offered
+   * to the save panel as they were, and "x.chitra" as "x.chitra.chitra". */
+  const fileName = () => {
+    const safe = fileSafe(docName.trim().replace(/\.chitra$/i, ""));
+    return /^(con|prn|aux|nul|com\d|lpt\d)$/i.test(safe) ? `${safe}-` : safe;
+  };
   /** The document's part of an export's name: sixty at most, so a long
    * document name leaves room for the region, comp or frame the file was
    * made from. A save keeps the whole name — it is the document's. */
@@ -11545,11 +11574,25 @@ export function App() {
     savedAt: number;
     proofing: boolean;
     gamutWarn: boolean;
+    /** How it stood: its layers' numbering, what was picked, the view. */
+    counts: [number, number, number];
+    picked: [NodeId | null, NodeId[]];
+    view: View;
   } | null>(null);
   const openForeign = (file: File) => {
     pendingOpen.current = file;
     openedOver.current = session
-      ? { session, name: docName, path: docPath, savedAt, proofing, gamutWarn }
+      ? {
+          session,
+          name: docName,
+          path: docPath,
+          savedAt,
+          proofing,
+          gamutWarn,
+          counts: [shapeCount.current, paintCount.current, frameCount.current],
+          picked: [selected, multiSel],
+          view,
+        }
       : null;
     // The page it is opened onto is not something done until the file
     // lands on it: a file that could not be read, or a window for it let
@@ -11627,6 +11670,8 @@ export function App() {
     name: string;
     bytes: Uint8Array;
     sizes: [number, number][];
+    /** Opened as a document rather than placed into one: said so. */
+    opening?: boolean;
   } | null>(null);
 
   /** After it is placed: pick it, and frame the page if the page took
@@ -11700,10 +11745,10 @@ export function App() {
             pdfUndoOpen.current = undoOpen ?? null;
             await new Promise<void>((answered) => {
               pdfAnswered.current = answered;
-              setPdfAsk({ name, bytes: raw, sizes });
+              setPdfAsk({ name, bytes: raw, sizes, opening: !!undoOpen });
             });
           } catch (err) {
-            alert(`Could not open ${name}: ${said(err)}`);
+            alert(`Could not ${undoOpen ? "open" : "place"} ${name}: ${said(err)}`);
             undoOpen?.();
           } finally {
             setImporting(null);
@@ -11778,10 +11823,13 @@ export function App() {
             // The session kept its proof; the buttons say so again.
             setProofing(before.proofing);
             setGamutWarn(before.gamutWarn);
-            setSelected(null);
-            setMultiSel([]);
+            // And it comes back as it stood: numbered from where it was
+            // (a new Rect 1 beside the old), picked and seen as it was.
+            [shapeCount.current, paintCount.current, frameCount.current] = before.counts;
+            setSelected(before.picked[0]);
+            setMultiSel(before.picked[1]);
             refresh(s);
-            fitView();
+            setView(before.view);
           }
         : undefined,
     );
@@ -11882,10 +11930,10 @@ export function App() {
       // know yet", and the browser's own words after it.
       alert(
         navigator.onLine === false
-          ? `Could not open ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
+          ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
           : /outside the bounds/i.test(String(err))
-            ? `Could not open ${next.name}: the file is damaged (its parts point outside it).`
-            : `Could not open ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
+            ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the file is damaged (its parts point outside it).`
+            : `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
       );
       next.undoOpen?.();
       rawDone.current += 1;
@@ -14186,6 +14234,7 @@ export function App() {
         <PdfDialog
           name={pdfAsk.name}
           sizes={pdfAsk.sizes}
+          opening={!!pdfAsk.opening}
           onCancel={() => {
             setPdfAsk(null);
             pdfUndoOpen.current?.();
@@ -14264,11 +14313,13 @@ export function App() {
           onListLensFiles={() => void lensFiles(session).then(setLensList)}
           onAddLensFiles={async (picked) => {
             if (!session) return;
-            const { refused } = await addLensFiles(session, picked);
+            const { refused, why } = await addLensFiles(session, picked);
             setLensList(await lensFiles(session));
+            // Each with the reader's own reason: one sentence for every
+            // refusal said a file nested too deep was not lensfun's.
             if (refused.length > 0)
               alert(
-                `${refused.join(", ")} ${refused.length === 1 ? "is" : "are"} not one of lensfun's database files, and ${refused.length === 1 ? "was" : "were"} not added.`,
+                `Not added:\n${refused.map((name, i) => `${name}: ${why[i] || "not one of lensfun's database files"}`).join("\n")}`,
               );
           }}
           onForgetLensFile={async (name) => {
@@ -19022,11 +19073,14 @@ function RawDevelopDialog({
 function PdfDialog({
   name,
   sizes,
+  opening,
   onCancel,
   onPlace,
 }: {
   name: string;
   sizes: [number, number][];
+  /** Opened as a document, not placed into one: said with its own verb. */
+  opening: boolean;
   onCancel: () => void;
   onPlace: (page: number, dpi: number) => void;
 }) {
@@ -19040,11 +19094,18 @@ function PdfDialog({
     return () => document.removeEventListener("keydown", key);
   }, [onCancel]);
   const [w, h] = sizes[Math.min(sizes.length, Math.max(1, page)) - 1] ?? [0, 0];
-  // The renderer goes no further than 16384 pixels on a side.
-  const k = Math.min(dpi / 72, 16384 / Math.max(w, h, 1));
+  // The scale as the reader works it out, in its own single precision
+  // (`render_pdf_page`): no further than 16384 pixels on a side, then
+  // nudged up by a part in a hundred thousand. Worked out here in double
+  // precision, 612 points at 46 dpi said 390 and gave 391.
+  const f = Math.fround;
+  let k = f(f(dpi) / 72);
+  const longest = f(f(Math.max(w, h)) * k);
+  if (longest > 16384) k = f(k * f(16384 / longest));
+  k = f(k * f(1 + 1e-5));
   // Whole pixels as the reader makes them, which drops the part of a
   // pixel left over: rounded, it said 417 and gave 416.
-  const [pw, ph] = [Math.max(1, Math.floor(w * k)), Math.max(1, Math.floor(h * k))];
+  const [pw, ph] = [Math.max(1, Math.floor(f(f(w) * k))), Math.max(1, Math.floor(f(f(h) * k)))];
   // And a picture past a hundred megapixels is taken down to it when it
   // lands, as any is: said here, where the size was promised.
   const down = Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph)));
@@ -19074,7 +19135,9 @@ function PdfDialog({
         aria-label="Place PDF"
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <h2>Place {name}</h2>
+        <h2>
+          {opening ? "Open" : "Place"} {name}
+        </h2>
         {sizes.length > 1 && (
           <label className="row">
             Page
@@ -19118,7 +19181,7 @@ function PdfDialog({
         <div className="modal-actions">
           <button onClick={onCancel}>Cancel</button>
           <button className="primary" disabled={!ok} onClick={go}>
-            Place
+            {opening ? "Open" : "Place"}
           </button>
         </div>
       </div>

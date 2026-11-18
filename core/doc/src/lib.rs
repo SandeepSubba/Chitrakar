@@ -1694,6 +1694,18 @@ impl Document {
                     .flatten()
                     .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.transform)))
                     .collect();
+                // And every layer's effects and mask, and the guides, as
+                // they were: a blur or a feather is carried by the larger
+                // of the two scales, which differ on a rounded page, and
+                // the way back by its own larger — undo after undo the
+                // shadows grew, a third of a percent each time.
+                let looks: Vec<(NodeId, Vec<Effect>, Option<Box<Mask>>)> = self
+                    .nodes
+                    .iter()
+                    .filter(|(_, n)| !n.effects.is_empty() || n.mask.is_some())
+                    .map(|(id, n)| (*id, n.effects.clone(), n.mask.clone().map(Box::new)))
+                    .collect();
+                let guides_were = self.guides.clone();
                 // Each way by what fills the page, where the size said is
                 // the scale's own rounded (or the rounding it undoes): a
                 // page of 401 at a half is 201, and at exactly a half its
@@ -1734,6 +1746,13 @@ impl Document {
                         .into_iter()
                         .map(|(id, transform)| Command::SetTransform { id, transform }),
                 );
+                for (id, effects, mask) in looks {
+                    cmds.push(Command::SetEffects { id, effects });
+                    cmds.push(Command::SetMask { id, mask });
+                }
+                cmds.push(Command::SetGuides {
+                    guides: guides_were,
+                });
                 Ok(Command::Batch(cmds))
             }
             Command::SetGuides { guides } => {

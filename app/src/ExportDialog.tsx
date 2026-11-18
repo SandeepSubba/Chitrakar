@@ -259,26 +259,40 @@ export function ExportDialog({
     return [pageW, pageH];
   };
   const [baseW, baseH] = baseSize();
+  /** The largest scale a long edge can ask for: sixteen times, and no
+   * more than what can be held at once (30,000 a side, or WebP's 16,383,
+   * and a hundred megapixels). Held to sixteen times alone, a long edge
+   * typed past it was shown as "as large as it goes" at a size the
+   * window then refused. */
+  const heldScale = (w: number, h: number) =>
+    Math.min(
+      MOST_SCALE,
+      (format === "webp" ? 16383 : 30000) / Math.max(1, w, h),
+      Math.sqrt(100_000_000 / Math.max(1, w * h)),
+    );
   /** The one scale everything shown is worked out at; the set's other
    * two are multiples of it. A long edge is a scale worked out from
    * the size, so 2048 is 2048 whatever the photograph was. */
   const scale =
     spec.scales && !set
       ? longEdge > 0
-        ? Math.min(MOST_SCALE, longEdge / Math.max(1, baseW, baseH))
+        ? Math.min(heldScale(baseW, baseH), longEdge / Math.max(1, baseW, baseH))
         : prefs.exportScale
       : 1;
   /** A long edge further than the engine will scale to: what goes out is
    * as long as it can be, and the window says so rather than promising
    * 4000 and writing 3200. */
-  const capped = longEdge > 0 && !set && longEdge / Math.max(1, baseW, baseH) > MOST_SCALE;
+  const capped = longEdge > 0 && !set && longEdge / Math.max(1, baseW, baseH) > heldScale(baseW, baseH);
   /** The scale a slice is written at: a long edge is each kept
    * region's own, since they are different sizes; anything else is the
    * one scale. */
   const scaleFor = (at: number | null): number => {
     if (longEdge > 0 && !set && area === "regions" && at !== null) {
       const box = regionBox(at);
-      if (box) return Math.min(MOST_SCALE, longEdge / Math.max(1, box[2] - box[0], box[3] - box[1]));
+      if (box) {
+        const [bw, bh] = [box[2] - box[0], box[3] - box[1]];
+        return Math.min(heldScale(bw, bh), longEdge / Math.max(1, bw, bh));
+      }
     }
     return scale;
   };
@@ -896,7 +910,7 @@ export function ExportDialog({
                 ? `${outW} × ${outH} px, ×2, ×3`
                 : area === "regions"
                   ? `${outW} × ${outH} px, and each other region's own`
-                  : `${outW} × ${outH} px${capped ? ` — as large as it goes, ${MOST_SCALE} times the page` : ""}`}
+                  : `${outW} × ${outH} px${capped ? ` — as large as it goes, ${+scale.toFixed(2)} times the page` : ""}`}
           </span>
         </div>
 

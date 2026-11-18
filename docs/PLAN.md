@@ -125,7 +125,10 @@ without reading anything else.*
      holes, a menu a press on the page left open. The thirty-ninth: a
      feathered group laid past the page, a live copy of text still cut,
      a budget that gave stars back their holes, a rail cut off on a
-     laptop.
+     laptop. The fortieth: an old tab pruning a new build's offline
+     files, shadows growing a third of a percent each Resize page undone,
+     a clip path's letters counted once though drawn on every shape,
+     every lensfun file of today refused.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12606,6 +12609,63 @@ without reading anything else.*
   not read; tens of thousands of layers take seconds to open; repeated
   and reflected radial gradients differ from the page in a PDF's outer
   rings; a camera's name outside ASCII comes out with question marks.
+  **A fortieth audit (November 2026).** Its check of round 39: the SVG
+  letter limit counted a clip path's or a marker's text once, though it
+  is drawn on every shape that refers to it and at every point a marker
+  stands on, and a filter's `feImage` not at all — a clip path of nine
+  thousand letters on three hundred shapes held the page for minutes
+  (counted once for each reference, a marker in the middle for each
+  point, and an unreferenced clip path not at all); every file of
+  today's lensfun database begins with a DOCTYPE, which the reader
+  refused, and the window said each "is not one of lensfun's" (read,
+  and a file refused for another reason says the reason); the PDF
+  window worked out the size in double precision and the reader in
+  single, and at 46 dpi promised 390 and gave 391 (it works it out as
+  the reader does); picking the wand scrolled its tolerance into sight
+  and not its reach (every setting, the first kept in sight); "Text"
+  typed over a new block's "Text" went on Escape; frames were numbered
+  on from the last document. Its editing pass (thousands of engine and
+  page fuzz steps, 1,296 adjustment-and-filter cases and 336 effect
+  cases in each of RGB and CMYK): Resize page undone did not give back
+  effects, masks' feathers or guides — carried each way by the larger
+  of two scales that differ on a rounded page, a shadow grew a third of
+  a percent each time, eighteen percent in fifty (they are set back as
+  they were, as the layers' places are). Its files pass: a tab of the
+  last build still open after an update pruned every file the new build
+  had kept, and the editor opened blank offline (a page prunes only
+  what was kept before it opened, and an older page prunes nothing);
+  an export of more than ten files in a browser wrote ten (a quarter of
+  a second apart); the desktop shell offered a name with a tab, three
+  hundred letters, ".chitra.chitra" or "CON" to its save panel (made
+  safe as an export's name is). Its interface pass: a file that could
+  not be opened, or a PDF window let go of, gave the document back with
+  its layers numbered from one again, unpicked and refitted (as it
+  stood); high contrast painted over every pressed tool, chosen format
+  and current step (outlined in the system's highlight); the marching
+  ants ignored a request for less motion; Select › Subject with a shape
+  picked offered a 176 MB download; a long edge past a hundred
+  megapixels was shown as "as large as it goes" at a size then refused
+  (held to what can be held); the eraser said one of its reasons once a
+  visit and then nothing for the other; a softness of 300 was taken and
+  kept as 200; a PDF being opened said Place, and a raw being placed
+  said open; the tools sharing a key were titled with the key that
+  picks the first ("Knife (A)"). Limits written down: an ellipse under
+  a filter, or in a document with a clone or heal layer, can differ at
+  its edge by a few levels between the page and an export at zooms
+  that are not a whole or half step, and shift as the view pans;
+  incremental repaints under a coloured, blurred group shadow can miss
+  a few pixels when an edge-finding or emboss filter lies over it;
+  undoing a flip, turn, canvas size or crop is right to a hundred
+  thousandth rather than exactly; text the font has no letter for
+  copies out of an exported PDF as the first such letter; a picture's
+  name does not come back through an SVG; a hidden layer is left out
+  of an SVG without a note; a draft past the browser's quota keeps
+  what it last could; New document's first click can land where Create
+  was before the window grew; Canvas size and the geometry fields
+  refuse what cannot be without saying why; text size is a slider, and
+  there is no unit of points; nothing is announced to a screen reader
+  as it happens, and menu rows read their chords as part of their
+  names; a raw that will not read says the reader's own words.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

@@ -206,7 +206,15 @@ impl Profiles {
         if nesting(xml) > 128 {
             return Err("lens profiles: nested more deeply than a lensfun database is".into());
         }
-        let doc = roxmltree::Document::parse(xml).map_err(|e| format!("lens profiles: {e}"))?;
+        // Allowing the DOCTYPE lensfun's own files now begin with: refused,
+        // every file of today's database was "not one of lensfun's". The
+        // reader expands no entity past its own limit, as before.
+        let options = roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
+        let doc = roxmltree::Document::parse_with_options(xml, options)
+            .map_err(|e| format!("lens profiles: {e}"))?;
         let root = doc.root_element();
         if root.tag_name().name() != "lensdatabase" {
             return Err("lens profiles: not a lensfun database".into());
@@ -790,5 +798,14 @@ mod tests {
         );
         let err = Profiles::default().add(&deep).unwrap_err();
         assert!(err.contains("nested"), "{err}");
+    }
+
+    #[test]
+    fn a_file_with_lensfuns_own_doctype_is_read() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE lensdatabase SYSTEM "lensfun-database.dtd">
+<lensdatabase version="2">
+</lensdatabase>"#;
+        assert!(Profiles::default().add(xml).is_ok());
     }
 }

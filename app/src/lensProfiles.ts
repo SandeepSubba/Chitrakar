@@ -112,17 +112,20 @@ export async function lensFiles(session: WasmSession | null): Promise<Omit<LensF
 export async function addLensFiles(
   session: WasmSession,
   picked: File[],
-): Promise<{ added: number; refused: string[] }> {
+): Promise<{ added: number; refused: string[]; why: string[] }> {
   const list = await all();
   const refused: string[] = [];
+  /** What the reader said of each refused, in its own words. */
+  const why: string[] = [];
   let added = 0;
   for (const file of picked) {
     const text = await file.text();
     let lenses: number;
     try {
       lenses = session.add_lens_profiles(text);
-    } catch {
+    } catch (err) {
       refused.push(file.name);
+      why.push(String(err instanceof Error ? err.message : err).replace(/^lens profiles:\s*/, ""));
       continue;
     }
     const entry: LensFile = { name: file.name, text, lenses };
@@ -138,7 +141,7 @@ export async function addLensFiles(
     added += 1;
   }
   version += 1;
-  return { added, refused };
+  return { added, refused, why };
 }
 
 /** Forget a file the person added. The system's own are not theirs to

@@ -12374,9 +12374,9 @@ assert(
   await page.mouse.up();
   await page.waitForTimeout(300);
 
-  await page.click('button[aria-label="More ways to select"]');
-  await page.waitForTimeout(200);
-  await page.click('.tool-flyout button[aria-label="Wand"]');
+  // Through the helper, which brings the corner into sight first: a
+  // click scrolling the rail to reach it put the flyout away again.
+  await pickTool("Wand");
   await page.waitForTimeout(250);
   assert(
     await page.locator('input[aria-label="Wand tolerance"]').isVisible(),
@@ -12416,9 +12416,9 @@ assert(
   await page.mouse.move(...on(360, 160), { steps: 6 });
   await page.mouse.up();
   await page.waitForTimeout(300);
-  await page.click('button[aria-label="More ways to select"]');
-  await page.waitForTimeout(200);
-  await page.click('.tool-flyout button[aria-label="Wand"]');
+  // Through the helper, which brings the corner into sight first: a
+  // click scrolling the rail to reach it put the flyout away again.
+  await pickTool("Wand");
   await page.waitForTimeout(250);
   await page.mouse.click(...on(120, 120));
   await page.waitForTimeout(450);
@@ -12448,9 +12448,9 @@ assert(
   await page.waitForTimeout(250);
   await page.keyboard.press("Delete");
   await page.waitForTimeout(400);
-  await page.click('button[aria-label="More ways to select"]');
-  await page.waitForTimeout(200);
-  await page.click('.tool-flyout button[aria-label="Wand"]');
+  // Through the helper, which brings the corner into sight first: a
+  // click scrolling the rail to reach it put the flyout away again.
+  await pickTool("Wand");
   await page.waitForTimeout(250);
 
   // Clicking the ground picks the ground, with the square as a hole in
@@ -12562,19 +12562,15 @@ assert(
     "and how readily a colour counts as background",
   );
 
-  // The first time, in a browser, the subject model is offered with its
-  // size said; this block is about the colour pick, so it says no and
-  // asks not to be asked again (9al5 takes the model).
+  // The picture here is drawn shapes, which the model (for photographs)
+  // is not offered for: a shape goes straight to the colour pick. This
+  // block is about that pick, so before its photograph it asks, in
+  // Preferences, not to be offered the model at all (9al5 takes it back
+  // and takes the model).
   await page.click('button[aria-label="Select subject"]');
   const offer = page.locator('[role="dialog"][aria-label="Select subject"]');
-  await offer.waitFor();
-  assert(
-    (await offer.locator("button.primary").textContent()).includes("176 MB"),
-    "the subject model is offered with its size",
-  );
-  await offer.locator('input[aria-label="Don\'t ask again"]').check();
-  await offer.locator('button:text-is("Pick by colour")').click();
   await page.waitForTimeout(700);
+  assert((await offer.count()) === 0, "a shape is not offered the photograph model's download");
   assert((await page.locator(".ants").count()) === 1, "a subject was picked out");
   const antBox = async () => {
     const polys = await page.$$eval(".ants polygon", (els) =>
@@ -12663,6 +12659,15 @@ assert(
   await page.waitForTimeout(700);
   await page.keyboard.press("Escape");
   await page.waitForTimeout(300);
+  await page.keyboard.press("Control+Comma");
+  await page.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  await page.click('.prefs-rail button[aria-label="Selection"]');
+  await page.waitForTimeout(300);
+  await page
+    .locator('[role=dialog][aria-label="Preferences"] input[aria-label="Offer the subject model"]')
+    .uncheck();
+  await page.click('.modal-actions .primary:text-is("Done")');
+  await page.waitForTimeout(200);
   await pickTool("Select");
   await page.waitForTimeout(250);
   assert(
@@ -12737,6 +12742,10 @@ assert(
   await page.click('button[aria-label="Select subject"]');
   const offer = page.locator('[role="dialog"][aria-label="Select subject"]');
   await offer.waitFor();
+  assert(
+    (await offer.locator("button.primary").textContent()).includes("176 MB"),
+    "the subject model is offered with its size",
+  );
   await offer.locator("button.primary").click();
   await page.waitForTimeout(1500);
   assert(lastDialog.includes("not the one expected"), `a download that is not the model is refused (${lastDialog})`);

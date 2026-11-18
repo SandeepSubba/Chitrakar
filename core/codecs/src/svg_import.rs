@@ -581,60 +581,75 @@ impl<'a, 'i> Letters<'a, 'i> {
         }
     }
 
+    /// How many letters what `id` names draws, once (each counted the
+    /// first time it is reached, and nothing while it is being counted, so
+    /// one that reaches back to itself draws nothing more).
+    fn target(&mut self, id: &str, depth: u32) -> usize {
+        let Some((&key, &target)) = self.ids.get_key_value(id) else {
+            return 0;
+        };
+        if let Some(&n) = self.known.get(key) {
+            return n;
+        }
+        self.known.insert(key, 0);
+        let n = self.drawn(target, depth + 1, true);
+        self.known.insert(key, n);
+        n
+    }
+
     fn drawn(&mut self, node: usvg::roxmltree::Node<'a, 'i>, depth: u32, referred: bool) -> usize {
         if depth > 16 || !node.is_element() || node.attribute("display") == Some("none") {
             return 0;
         }
         let name = node.tag_name().name();
-        // Kept to be referred to: drawn only through a `use`, so counted
-        // only through one — except what is drawn through `url()` (a
-        // clip path, a mask, a pattern, a marker), which is counted where
-        // it stands: skipped, a hundred and fifty thousand letters in a
-        // clip path held the page for over a minute.
-        if !referred && matches!(name, "defs" | "symbol") {
-            let drawn_by_url = |n: &usvg::roxmltree::Node| {
-                matches!(
-                    n.tag_name().name(),
-                    "clipPath" | "mask" | "pattern" | "marker"
-                )
-            };
-            let tops: Vec<_> = node
-                .descendants()
-                .filter(|n| {
-                    drawn_by_url(n)
-                        && !n
-                            .ancestors()
-                            .skip(1)
-                            .take_while(|a| *a != node)
-                            .any(|a| drawn_by_url(&a))
-                })
-                .collect();
-            return tops.into_iter().fold(0usize, |sum, n| {
-                sum.saturating_add(self.drawn(n, depth + 1, true))
-            });
+        // Kept to be referred to — in `defs` or a `symbol`, or a clip
+        // path, a mask, a pattern, a marker, a filter — drawn only where
+        // something refers to it, and counted there, once for each time
+        // it is: a clip path of nine thousand letters on three hundred
+        // shapes is two million and seven hundred thousand letters drawn.
+        if !referred
+            && matches!(
+                name,
+                "defs" | "symbol" | "clipPath" | "mask" | "pattern" | "marker" | "filter"
+            )
+        {
+            return 0;
         }
-        if name == "use" {
+        // A `use`, or a filter's `feImage`, draws what it names.
+        if name == "use" || name == "feImage" {
             let href = node
                 .attribute(("http://www.w3.org/1999/xlink", "href"))
                 .or_else(|| node.attribute("href"))
                 .unwrap_or("");
-            let Some(id) = href.strip_prefix('#') else {
-                return 0;
-            };
-            let Some((&key, &target)) = self.ids.get_key_value(id) else {
-                return 0;
-            };
-            if let Some(&n) = self.known.get(key) {
-                return n;
-            }
-            // Counted as nothing while it is being counted: a use that
-            // reaches back to itself draws nothing more.
-            self.known.insert(key, 0);
-            let n = self.drawn(target, depth + 1, true);
-            self.known.insert(key, n);
-            return n;
+            return href
+                .strip_prefix('#')
+                .map_or(0, |id| self.target(id, depth));
         }
+        // And whatever it reaches with `url(#…)` — a clip path, a mask, a
+        // fill's pattern, a filter, a marker — once for each time it is
+        // drawn: a marker in the middle is drawn at every point.
         let mut sum = 0usize;
+        for attr in node.attributes() {
+            let mut rest = attr.value();
+            while let Some(at) = rest.find("url(#") {
+                rest = &rest[at + 5..];
+                let id = rest
+                    .split(')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches(['\'', '"', ' ']);
+                let times = if attr.name() == "marker-mid" || attr.name() == "marker" {
+                    let points = node
+                        .attribute("points")
+                        .or_else(|| node.attribute("d"))
+                        .unwrap_or("");
+                    (numbers_in(points).count() / 2).max(1)
+                } else {
+                    1
+                };
+                sum = sum.saturating_add(self.target(id, depth).saturating_mul(times));
+            }
+        }
         for child in node.children() {
             if child.is_text() {
                 if node.ancestors().any(|a| a.has_tag_name("text")) {
@@ -4859,6 +4874,17 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><clipPath id="c"><text>{many}</text></clipPath><defs><mask id="m"><text>{many}</text></mask></defs><rect clip-path="url(#c)" width="5" height="5"/></svg>"##
         );
         assert!(past_reason(clipped.as_bytes()).is_some());
+        // Once for each shape it clips: nine thousand letters on two
+        // shapes is eighteen thousand drawn. Unused, none.
+        let nine = "x".repeat(9_000);
+        let twice = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><clipPath id="c"><text>{nine}</text></clipPath><rect clip-path="url(#c)" width="5" height="5"/><rect clip-path="url(#c)" width="5" height="5"/></svg>"##
+        );
+        assert!(past_reason(twice.as_bytes()).is_some());
+        let unused = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><clipPath id="c"><text>{many}</text></clipPath><rect width="5" height="5"/></svg>"##
+        );
+        assert!(past_reason(unused.as_bytes()).is_none());
     }
 
     /// Two squares wound the same way and sharing a corner fill their

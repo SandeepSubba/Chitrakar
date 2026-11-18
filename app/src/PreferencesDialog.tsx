@@ -783,7 +783,7 @@ export function PreferencesDialog({
               <>
                 {num("Soften the edge by", prefs.feather, (v) =>
                   setPrefs({ feather: v }),
-                  { min: 0, max: 500, hint: "px · what a new region starts at" },
+                  { min: 0, max: 200, hint: "px · what a new region starts at" },
                 )}
                 <label className="row">
                   Subject pick lets go at

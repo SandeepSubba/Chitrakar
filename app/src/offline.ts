@@ -34,7 +34,9 @@ export function keepForOffline() {
               .map((e) => e.name)
               .filter((u) => new URL(u).origin === location.origin),
           ];
-          void built.then((build) => reg.active?.postMessage({ keep, build }));
+          // With when this page was opened: it prunes only what was kept
+          // before then, never a newer build's files (`sw.js`).
+          void built.then((build) => reg.active?.postMessage({ keep, build, since: performance.timeOrigin }));
         };
         say();
         // And, once the editor is up and quiet, the readers a file is
@@ -51,7 +53,8 @@ export function keepForOffline() {
               const readers = build.filter((u) =>
                 /chitrakar_(pdf|raw)_in|rawWorker|rawThread|developWorker|wasm-threads\//.test(u),
               );
-              if (readers.length > 0) reg.active?.postMessage({ keep: [new URL("./", location.href).href, ...readers], build });
+              if (readers.length > 0)
+                reg.active?.postMessage({ keep: [new URL("./", location.href).href, ...readers], build, since: performance.timeOrigin });
             });
           }, 15000);
         }

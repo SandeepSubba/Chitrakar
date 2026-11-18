@@ -31892,6 +31892,39 @@ mod tests {
         assert!(reopened.is_ok(), "and the file opens again");
     }
 
+    /// Resize page undone puts every effect back as it was, however many
+    /// times it is done and undone: on a page whose new size is rounded,
+    /// the two ways scale differently, and a shadow grew a third of a
+    /// percent each round trip.
+    #[test]
+    fn resize_page_undone_puts_effects_back_exactly() {
+        let mut s = Session::new(301, 203, ColorMode::Rgb);
+        let id = add_rect(&mut s, "Card", 40.0, 30.0);
+        let shadow = chitrakar_doc::Effect::DropShadow {
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            opacity: 0.6,
+            dx: 3.0,
+            dy: 4.0,
+            blur: 10.0,
+            spread: 0.0,
+        };
+        s.apply(Command::SetEffects {
+            id,
+            effects: vec![shadow.clone()],
+        })
+        .unwrap();
+        for _ in 0..20 {
+            s.scale_canvas(0.8).unwrap();
+            assert!(s.undo().unwrap());
+        }
+        assert_eq!(s.document().node(id).unwrap().effects, vec![shadow]);
+    }
+
     /// An export says the document's resolution: a PNG carries a pHYs
     /// chunk and a JPEG its JFIF density, at the export's own pixels an
     /// inch — a page at 300 dpi written at a half says 150. Without it a

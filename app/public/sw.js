@@ -70,18 +70,26 @@ self.addEventListener("fetch", (e) => {
   e.respondWith(answer(req).then(isolated));
 });
 
+// Kept with when it was kept: a page prunes only what was kept before it
+// was opened (see "message"), never what a newer build's page has kept.
+async function keepIt(cache, req, res) {
+  const headers = new Headers(res.headers);
+  headers.set("X-Kept-At", String(Date.now()));
+  await cache.put(req, new Response(await res.blob(), { status: res.status, statusText: res.statusText, headers }));
+}
+
 async function answer(req) {
   const cache = await caches.open(CACHE);
   if (named(req.url)) {
     const kept = await cache.match(req);
     if (kept) return kept;
     const got = await fetch(req);
-    if (got.ok) await cache.put(req, got.clone());
+    if (got.ok) await keepIt(cache, req, got.clone());
     return got;
   }
   try {
     const got = await fetch(req);
-    if (got.ok) await cache.put(req, got.clone());
+    if (got.ok) await keepIt(cache, req, got.clone());
     // A host that has no page at an address with a query in it — the
     // share's "?shared=1" — still has the page.
     if (!got.ok && req.mode === "navigate") {
@@ -113,8 +121,15 @@ self.addEventListener("message", (e) => {
         ? new Set(e.data.build.filter((u) => typeof u === "string" && ours(u)).map((u) => new URL(u).href))
         : null;
       const stays = (url) => wanted.has(url) || (build !== null && build.size > 0 && build.has(url));
+      // Only what was kept before this page was opened: a page of the
+      // last build still open after an update pruned every file the new
+      // build had kept, and the editor opened blank offline. A page that
+      // does not say when it was opened (an older build's) prunes nothing.
+      const since = typeof e.data?.since === "number" ? e.data.since : -Infinity;
       for (const req of await cache.keys()) {
-        if (named(req.url) && !stays(req.url)) await cache.delete(req);
+        if (!named(req.url) || stays(req.url)) continue;
+        const kept = Number((await cache.match(req))?.headers.get("X-Kept-At") ?? 0);
+        if (kept < since) await cache.delete(req);
       }
       for (const url of wanted) {
         // A file named by its contents is right while it is kept. One
@@ -126,7 +141,7 @@ self.addEventListener("message", (e) => {
         if (!named(url) || !(await cache.match(url))) {
           try {
             const got = await fetch(url, { cache: "no-cache" });
-            if (got.ok) await cache.put(url, got);
+            if (got.ok) await keepIt(cache, url, got);
           } catch {
             // Offline already: what is kept is what there is.
           }
