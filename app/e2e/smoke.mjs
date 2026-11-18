@@ -21673,6 +21673,89 @@ assert(
   );
 }
 
+// 9ds. The forty-second audit's interface pass. A word picked in the
+// panel's Text box went on steering Bold and Italic after a press on the
+// page, with nothing shown picked; Escape did not take back a guide
+// being dragged; an accent the panel would hide (white on the light
+// theme) left the active tool and the Export button unseen.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("t");
+  await p.mouse.click(r.x + 100, r.y + 100);
+  await p.waitForTimeout(400);
+  await p.keyboard.type("Hello brave new world");
+  await p.keyboard.press("Control+Enter");
+  await p.waitForTimeout(400);
+  await p.keyboard.press("Escape");
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("v");
+  await p.mouse.click(r.x + 110, r.y + 108);
+  await p.waitForTimeout(300);
+  const box = p.locator('textarea[aria-label="Text content"]');
+  await box.click();
+  await box.evaluate((t) => t.setSelectionRange(6, 11));
+  const bold = p.locator('aside.panel button[aria-label="Bold"]');
+  await bold.click();
+  await p.waitForTimeout(300);
+  assert((await bold.getAttribute("aria-pressed")) === "true", "Bold on the word picked in the box");
+  // A press on the page lets the box's word go: Bold reads the block.
+  await p.mouse.click(r.x + 110, r.y + 108);
+  await p.waitForTimeout(300);
+  assert(
+    (await box.evaluate((t) => t.selectionStart === t.selectionEnd)) &&
+      (await bold.getAttribute("aria-pressed")) !== "true",
+    `a press on the page lets the word picked in the box go (${await bold.getAttribute("aria-pressed")})`,
+  );
+
+  // A guide drawn out of the ruler and let go of after Escape is none.
+  const guides = () => p.locator(".guide-overlay line.guide:not(.dragging)").count();
+  const before = await guides();
+  const ruler = await p.locator(".ruler-top").boundingBox();
+  await p.mouse.move(r.x + 200, ruler.y + ruler.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 200, r.y + 150, { steps: 5 });
+  await p.keyboard.press("Escape");
+  await p.mouse.up();
+  await p.waitForTimeout(250);
+  assert((await guides()) === before, `Escape takes back a guide being drawn (${before} -> ${await guides()})`);
+  await p.mouse.move(r.x + 200, ruler.y + ruler.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(r.x + 200, r.y + 150, { steps: 5 });
+  await p.mouse.up();
+  await p.waitForTimeout(250);
+  assert((await guides()) === before + 1, `and without it, the guide is drawn (${await guides()})`);
+  await ctx.close();
+
+  // White on the light theme is held to where it can be seen.
+  const lit = await browser.newContext({ viewport: { width: 1200, height: 800 }, colorScheme: "light" });
+  await lit.addInitScript(() => {
+    try {
+      if (!localStorage.getItem("chitrakar:prefs"))
+        localStorage.setItem("chitrakar:prefs", JSON.stringify({ theme: "light", accent: "#ffffff" }));
+    } catch {}
+  });
+  const q = await lit.newPage();
+  await q.goto("http://localhost:8123/");
+  await q.waitForSelector("#engine-canvas");
+  await q.waitForTimeout(800);
+  const accent = await q.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim());
+  const lum = (hex) =>
+    [1, 3, 5]
+      .map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+      .map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
+      .reduce((a, v, i) => a + v * [0.2126, 0.7152, 0.0722][i], 0);
+  const against = (1 + 0.05) / (lum(accent) + 0.05);
+  assert(against >= 3, `a white accent on the light theme is held to three to one (${accent}, ${against.toFixed(2)})`);
+  await lit.close();
+}
+
 // 9dr. The forty-first audit's interface pass. The other button pressed
 // mid-drag opened the canvas's menu and left the drag following the
 // pointer with no button down; a second drag of a layer's row did

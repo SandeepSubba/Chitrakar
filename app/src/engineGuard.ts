@@ -28,15 +28,30 @@ export function isEngineTrap(err: unknown): boolean {
 
 let stopped = false;
 
+/** Whether the person keeps a crash-recovery draft, read as the
+ * preferences keep it — their own reader is not to hand here. */
+function draftsKept(): boolean {
+  try {
+    const kept = JSON.parse(localStorage.getItem("chitrakar:prefs") ?? "{}") as { keepDraft?: unknown };
+    return kept.keepDraft !== false;
+  } catch {
+    return true;
+  }
+}
+
 /** Say once that the engine stopped, and open the page again. */
 export function engineStopped(err: unknown): void {
   if (stopped) return;
   stopped = true;
   console.error("engine stopped:", err);
   try {
+    // With the draft turned off there is nothing to offer: promised, the
+    // page opened again empty and the work was simply gone.
     alert(
       "The editor's engine stopped on the last thing it was asked to do, and cannot go on. " +
-        "The page will open again and offer your work as it was just before.",
+        (draftsKept()
+          ? "The page will open again and offer your work as it was just before."
+          : "The page will open again. The crash-recovery draft is turned off (Preferences), so the work since it was last saved cannot be offered back."),
     );
   } finally {
     location.reload();

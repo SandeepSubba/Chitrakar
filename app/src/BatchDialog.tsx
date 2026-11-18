@@ -87,7 +87,15 @@ export function BatchDialog({
   onClose: () => void;
 }) {
   /** Which settings: "" is the plain development, else a kept one's name. */
-  const [preset, setPreset] = useState("");
+  // The one last used, while it is still kept: chosen again each time,
+  // where the rest of the window was remembered.
+  const [preset, choosePreset] = useState(() =>
+    presets.some((p) => p.name === prefs.batchPreset) ? prefs.batchPreset : "",
+  );
+  const setPreset = (name: string) => {
+    choosePreset(name);
+    setPrefs({ batchPreset: name });
+  };
   const [running, setRunning] = useState<string | null>(null);
   const [failures, setFailures] = useState<string[]>([]);
   const stop = useRef(false);
@@ -117,7 +125,15 @@ export function BatchDialog({
     const done: Outgoing[] = [];
     const failed: string[] = [];
     for (const [i, f] of files.entries()) {
-      if (stop.current) break;
+      if (stop.current) {
+        // Stopped is said, with what was left: the window closed on one
+        // of two written and nothing said of the other.
+        const left = files.slice(i).map((g) => g.name);
+        failed.push(
+          `Stopped: ${left.length} not developed (${left.slice(0, 6).join(", ")}${left.length > 6 ? ", …" : ""})`,
+        );
+        break;
+      }
       setRunning(`Developing ${i + 1} of ${files.length}: ${f.name}`);
       try {
         done.push(await developToJpeg(f, settings, opts));

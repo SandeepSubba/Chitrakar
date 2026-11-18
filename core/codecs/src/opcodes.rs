@@ -104,6 +104,7 @@ pub enum Op {
 /// The opcodes of a list this reads, in order; an empty or garbled list
 /// is none.
 pub fn parse(list: &[u8]) -> Vec<Op> {
+    const MOST: f32 = 1000.0;
     struct Cursor<'a>(&'a [u8], usize);
     impl Cursor<'_> {
         fn bytes(&mut self, n: usize) -> Option<&[u8]> {
@@ -114,17 +115,19 @@ pub fn parse(list: &[u8]) -> Vec<Op> {
         fn u32(&mut self) -> Option<u32> {
             Some(u32::from_be_bytes(self.bytes(4)?.try_into().ok()?))
         }
-        // A number that is not one — NaN, or past what an f32 holds —
-        // makes the opcode nothing at all: a warp about a NaN centre made
-        // the whole picture its corner pixel's colour, and a gain map from
-        // a NaN origin made it black.
+        // A number that is not one — NaN, past what an f32 holds, or a
+        // thousand times past anything an opcode means (its centres and
+        // spacings are fractions of the picture, its gains and terms
+        // small) — makes the opcode nothing at all: a warp about a NaN
+        // centre, or one at 1e30, made the whole picture its corner
+        // pixel's colour, and a vignette of 1e30 made it white.
         fn f64(&mut self) -> Option<f32> {
             let v = f64::from_be_bytes(self.bytes(8)?.try_into().ok()?) as f32;
-            v.is_finite().then_some(v)
+            (v.is_finite() && v.abs() <= MOST).then_some(v)
         }
         fn f32(&mut self) -> Option<f32> {
             let v = f32::from_be_bytes(self.bytes(4)?.try_into().ok()?);
-            v.is_finite().then_some(v)
+            (v.is_finite() && v.abs() <= MOST).then_some(v)
         }
     }
     let mut out = Vec::new();
@@ -326,6 +329,7 @@ pub(crate) mod tests {
                 ]
                 .concat(),
             ),
+            (3, f64s(&[1e30, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5])),
             (3, f64s(&[0.5, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5])),
         ]);
         assert_eq!(parse(&wild).len(), 1);

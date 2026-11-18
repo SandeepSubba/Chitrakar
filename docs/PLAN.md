@@ -132,7 +132,10 @@ without reading anything else.*
      reached from a style sheet counted as nothing again, a selection's
      softness growing through Resize page undone, a star that could not
      be combined, Simplify bulging four pixels past its tolerance, a
-     drag left following the pointer after a right-click.
+     drag left following the pointer after a right-click. The
+     forty-second: a page of wrapped text seconds a keystroke, a picked
+     word steering Bold after it was let go of, flyouts off the window,
+     a white accent unseen on the light theme.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12741,6 +12744,85 @@ without reading anything else.*
   several files of mixed kinds dropped at once open on the first one's
   page, with the raws after the rest; a raw thousands of pixels long and
   a few wide previews a few levels brighter than it develops.
+  **A forty-second audit (November 2026).** Its check of round 41:
+  saying a crossing outline again as the rings it draws let a few that
+  round 41 combined as drawn go unchained, and they were refused (asked
+  as drawn when said again they will not chain); the letter count
+  counted a style sheet's reference as reaching every shape in the file
+  and an end marker at every point, and refused an eleven-letter clip
+  used once beside twelve hundred rectangles (a rule counts the elements
+  its selector could match, and an end marker once an outline), while a
+  chain of references past sixteen deep was not followed (128); the
+  Export window worked its sizes out in double precision and the engine
+  in single, so a long edge of 175 said 122 and wrote 123, and one size
+  in two thousand "as large as it goes" was refused (worked out as the
+  engine does); a PDF placed on an empty page, which opens it, was no
+  longer said to be taken down; a DNG opcode a thousand times past
+  anything one means (a centre at 1e30) still made the picture one
+  colour; "Mixed" was not said to a screen reader. Its interface pass:
+  a page of wrapped text took seconds a keystroke, each word measured
+  reading its whole paragraph for a letter read leftward (once a
+  paragraph); a word picked in the panel's Text box went on steering
+  Bold and Italic after a press on the page, with nothing shown picked
+  (a press anywhere but the panel, the bar or a menu lets it go); the
+  toolbar moved to the right edge opened its flyouts past the window
+  (on the side with room); an accent the panel would hide — white on
+  the light theme, black on the dark — left the active tool, the picked
+  layer, the chosen format and the Export button unseen (held to three
+  to one against the panel); Escape did not take back a guide being
+  dragged, and a guide held off the page was thrown away unsaid (it is
+  drawn as going while held there); the Batch window's Stop closed it
+  without saying what was left, and its development was not remembered;
+  the panel's Text box set Hebrew left to right; the watermark's box sat
+  against its word. Its editing pass (some 3,300 engine fuzz steps in
+  RGB and CMYK, 825 calls with wrong or missing layers, half-failing
+  batches of every kind, a history of 1,400 steps): a change of kind
+  between a layer that holds others and one that does not was taken —
+  a paint layer made a frame had no list of children and the next layer
+  moved into it stopped the engine for good; a frame made a filter kept
+  children nothing drew, and undo failed half done (refused); a number
+  past single precision (1e39) came in as infinity through a command or
+  a brush, and the file saved after it would not open (refused at the
+  door); a brush, clone or heal stroke begun inside a frame made its
+  layer on the page, not cut to the frame nor in its export (made in
+  the frame, as a shape is). Its files pass (old builds' files, files
+  edited by hand in 58 ways, odd and hostile ZIPs, documents of 20,000
+  layers and 800 pictures, drafts, the shell's stand-in, CMYK, text
+  through every format): a file whose layer counter stood at the top of
+  its range took the last number for its next layer and wrapped round to
+  nought, and the layer after that replaced the page's own (a counter
+  far past the layers is put back just past them, and layers numbered
+  past what the page can count are refused); a manifest a text editor
+  began with a byte-order mark was refused as damaged, and a file zipped
+  again with backslashes opened with every picture missing (both read);
+  a resolution of nought or less was printed eighty inches wide (put
+  back to 72); with the crash-recovery draft turned off, a stopped
+  engine still promised the work back (it says it cannot). Limits
+  written down: a photograph is kept as a PNG, which holds a photograph
+  barely smaller than its pixels, and every picture's PNG is kept for
+  the session — about a dozen twenty-megapixel photographs is past the
+  four gigabytes a browser page has, and Save stops the engine (keeping
+  a placed JPEG as the JPEG it came as is the way out); a draft from a
+  newer build is written over by the first edit; CMYK files open as RGB
+  documents through their profile, which is not kept; old files draw
+  with today's formulas for grain, sharpen and the rest; a hand-edited
+  file can lose layers nothing points at; a ZIP with everything in a
+  folder, or entries in bzip2, is refused; twenty thousand layers take
+  seconds to open; an export to a folder stops at the first file it
+  cannot write. And from the other passes: undo inside a text edit goes a
+  letter at a time; the colour subject pick and the Export window's
+  size freeze the page for seconds on a large photograph, unsaid;
+  transform handles under a ruler belong to the ruler; a toolbar floated
+  low shows two tools; Auto white balance can stop at the end of Tint;
+  letters the font has none of (CJK) are drawn as boxes; Offset path on
+  an unevenly stretched layer makes ten times the anchors; some dense
+  stars ({7/3}, {8/3}) still cannot be combined, and the knife leaves
+  them whole unsaid; a clone or heal layer inside a group reads only
+  what is under it in the group; each frame as a picture writes hidden
+  and nested frames where All frames as a PDF leaves them out; a
+  gradient stop past 0–1 given by a command is read as it is where SVG
+  and PDF clamp it; effects past their bounds given by a command are
+  held to them only when the file is opened again.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

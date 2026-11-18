@@ -874,6 +874,29 @@ let lastInlinePick: { range: [number, number]; text: string; at: number } | null
  * as bytes into its words — or what was picked in the on-canvas editor a
  * press just closed. What a style button, the panel's colour and a
  * palette swatch all apply to when there is one. */
+// A text box's selection outlives the box's focus, and shows nothing
+// once the box has lost it: a word picked in the panel's Text box, and
+// a press on the page after, left Italic meaning that word, with nothing
+// on the screen to say so. A press anywhere but the panel's controls
+// (Bold, the colour), the bar's (the palette, recent colours, styles) or
+// an open menu lets it go.
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "pointerdown",
+    (e) => {
+      const at = e.target instanceof Element ? e.target : null;
+      if (at?.closest(".layer-props, .toolbar, .menu-pop, .modal-scrim")) return;
+      for (const label of TEXT_BOXES) {
+        const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
+        if (el && el !== at && el.selectionStart !== el.selectionEnd) {
+          el.setSelectionRange(el.selectionEnd, el.selectionEnd);
+        }
+      }
+    },
+    true,
+  );
+}
+
 function textRange(t: TextSpec): [number, number] | null {
   for (const label of TEXT_BOXES) {
     const el = document.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`);
@@ -977,9 +1000,19 @@ function pinFlyout(el: HTMLDivElement | null) {
   // flyout was one row a thousand pixels long, and on a phone or a
   // tablet the tools past the window's edge could not be reached.
   if (getComputedStyle(rail).flexDirection === "column") {
-    const left = Math.round(at.right + 6);
-    el.style.left = `${left}px`;
-    el.style.maxWidth = `${Math.max(48, window.innerWidth - left - 8)}px`;
+    // On the side with the more room: a rail moved to the window's right
+    // edge opened its flyouts past it, with a sliver of them in sight.
+    const right = window.innerWidth - at.right;
+    const toLeft = at.left > right;
+    const room = toLeft ? at.left - 14 : right - 14;
+    el.style.maxWidth = `${Math.max(48, room)}px`;
+    if (toLeft) {
+      el.style.left = "auto";
+      el.style.right = `${Math.round(window.innerWidth - at.left + 6)}px`;
+    } else {
+      el.style.right = "auto";
+      el.style.left = `${Math.round(at.right + 6)}px`;
+    }
     const tall = el.getBoundingClientRect().height;
     el.style.top = `${Math.round(Math.max(8, Math.min(at.top, window.innerHeight - tall - 8)))}px`;
     return;
@@ -2680,11 +2713,30 @@ export function App() {
   // an accent (and what reads on it), the sliders' and ticks' colour,
   // and how large the chrome is drawn. Nothing set is nothing laid, so
   // the theme's own show through.
+  // The accent as a fill is held to three to one against the panel, what
+  // anything that is not text needs to be seen: white on the light theme,
+  // or black on the dark, left the active tool, the picked layer and the
+  // chosen format looking like everything else, and the Export button
+  // white on a white window. Which panel depends on the theme, and on the
+  // system's when that is what the theme follows.
+  // Read as the theme reads it: light only when the system says light.
+  const [systemLight, setSystemLight] = useState(
+    () => typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches,
+  );
+  useEffect(() => {
+    if (typeof matchMedia !== "function") return;
+    const media = matchMedia("(prefers-color-scheme: light)");
+    const heard = () => setSystemLight(media.matches);
+    media.addEventListener("change", heard);
+    return () => media.removeEventListener("change", heard);
+  }, []);
   useEffect(() => {
     const root = document.documentElement.style;
     if (prefs.accent) {
-      root.setProperty("--accent", prefs.accent);
-      root.setProperty("--on-accent", onColour(prefs.accent));
+      const light = prefs.theme === "light" || (prefs.theme === "system" && systemLight);
+      const fill = accentAsText(prefs.accent, light ? "#ffffff" : "#2a2a30", 3);
+      root.setProperty("--accent", fill);
+      root.setProperty("--on-accent", onColour(fill));
       root.setProperty("--accent-on-dark", accentAsText(prefs.accent, "#2a2a30"));
       root.setProperty("--accent-on-light", accentAsText(prefs.accent, "#ffffff"));
     } else {
@@ -2700,7 +2752,7 @@ export function App() {
       prefs.uiScale < 1 ? "compact" : prefs.uiScale > 1.2 ? "larger" : prefs.uiScale > 1 ? "large" : "";
     if (scaleName) document.documentElement.dataset.scale = scaleName;
     else delete document.documentElement.dataset.scale;
-  }, [prefs.accent, prefs.sliderColor, prefs.uiScale]);
+  }, [prefs.accent, prefs.sliderColor, prefs.uiScale, prefs.theme, systemLight]);
   /** Which tools are on the rail. Put away in Preferences is not gone:
    * the tool keeps its key and sits behind the slot at the rail's end.
    * The one tool that cannot be put away is the one that moves things. */
@@ -5673,12 +5725,22 @@ export function App() {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
       setGuideDrag(null);
+    };
+    // Escape takes the guide back, as it takes back a layer's drag: it
+    // was placed, or moved, on release all the same.
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      onCancel();
     };
     const onUp = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("keydown", onKey, true);
       setGuideDrag(null);
       const at = Math.round(positionOf(ev) * 100) / 100;
       const limit = vertical ? docSizeRef.current[0] : docSizeRef.current[1];
@@ -5695,6 +5757,7 @@ export function App() {
     window.addEventListener("pointerup", onUp);
     // Cancelled, the guide is left where it was (or not made at all).
     window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("keydown", onKey, true);
   };
 
   /** A double-click on a picked text block opens it for typing in place. */
@@ -5791,16 +5854,17 @@ export function App() {
   /** The layer a paint stroke should land on: the picked one when it is a
    * paint layer, and a fresh one when it is not — so the first stroke of a
    * session makes its own layer and every stroke after it joins that one. */
-  const paintTarget = (s: WasmSession, clone: boolean): NodeId | null => {
+  const paintTarget = (s: WasmSession, clone: boolean, at: [number, number]): NodeId | null => {
     const want = clone ? "clone" : "paint";
     const picked = layers.find((l) => l.id === selected);
     if (picked && picked.kind === want && !picked.locked) return picked.id;
     paintCount.current += 1;
     try {
+      // Into the frame the stroke begins in, as a shape drawn there goes.
       const id = (
         clone
-          ? s.add_clone_layer(`Clone ${paintCount.current}`)
-          : s.add_paint_layer(`Paint ${paintCount.current}`)
+          ? s.add_clone_layer_at(`Clone ${paintCount.current}`, at[0], at[1])
+          : s.add_paint_layer_at(`Paint ${paintCount.current}`, at[0], at[1])
       ) as NodeId;
       strokeMade.current = true;
       setSelected(id);
@@ -6119,7 +6183,7 @@ export function App() {
         return;
       }
       strokeMade.current = false;
-      const layer = paintTarget(session, true);
+      const layer = paintTarget(session, true, [x, y]);
       if (layer === null) return;
       try {
         session.paint_begin(
@@ -6199,7 +6263,7 @@ export function App() {
         if (!hadMask) strokeMade.current = true;
         layer = picked.id;
       } else {
-        layer = paintTarget(session, false);
+        layer = paintTarget(session, false, [x, y]);
       }
       if (layer === null) return;
       // Shift starts the stroke where the last one ended and runs it
@@ -11726,6 +11790,8 @@ export function App() {
     sizes: [number, number][];
     /** Opened as a document rather than placed into one: said so. */
     opening?: boolean;
+    /** Placed on a page with nothing on it, which it then fills. */
+    fills?: boolean;
   } | null>(null);
 
   /** After it is placed: pick it, and frame the page if the page took
@@ -11799,7 +11865,19 @@ export function App() {
             pdfUndoOpen.current = undoOpen ?? null;
             await new Promise<void>((answered) => {
               pdfAnswered.current = answered;
-              setPdfAsk({ name, bytes: raw, sizes, opening: !!undoOpen });
+              // A page placed on a page with nothing on it and nothing
+              // done is opened (the engine's own rule), and is taken down
+              // as one: said "comes in at" the size it was not.
+              let pristine = false;
+              try {
+                pristine =
+                  !!session &&
+                  layers.length === 0 &&
+                  (JSON.parse(session.history_json()) as { past: unknown[] }).past.length === 0;
+              } catch {
+                pristine = false;
+              }
+              setPdfAsk({ name, bytes: raw, sizes, opening: !!undoOpen, fills: pristine });
             });
           } catch (err) {
             alert(`Could not ${undoOpen ? "open" : "place"} ${name}: ${said(err)}`);
@@ -14292,6 +14370,7 @@ export function App() {
           name={pdfAsk.name}
           sizes={pdfAsk.sizes}
           opening={!!pdfAsk.opening}
+          fills={!!pdfAsk.fills}
           onCancel={() => {
             setPdfAsk(null);
             pdfUndoOpen.current?.();
@@ -15346,7 +15425,13 @@ export function App() {
               })}
               {guideDrag && (
                 <line
-                  className="guide dragging"
+                  // Off the page a guide let go of is thrown away: said
+                  // while it is held there, where it went without a word.
+                  className={
+                    guideDrag.at < 0 || guideDrag.at > (guideDrag.vertical ? docSize[0] : docSize[1])
+                      ? "guide dragging leaving"
+                      : "guide dragging"
+                  }
                   x1={
                     guideDrag.vertical ? view.x + guideDrag.at * view.zoom : 0
                   }
@@ -17227,7 +17312,12 @@ export function App() {
                   onKeyUp={commitOpacity}
                   onBlur={commitOpacity}
                   aria-label="Layer opacity"
-                  aria-valuetext={`${Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%`}
+                  aria-valuetext={
+                    opacityDraft === null &&
+                    selectionSet.some((id) => layers.find((l) => l.id === id)?.opacity !== selectedLayer.opacity)
+                      ? "Mixed"
+                      : `${Math.round((opacityDraft ?? selectedLayer.opacity) * 100)}%`
+                  }
                 />
               </label>
               <label>
@@ -19142,6 +19232,7 @@ function PdfDialog({
   name,
   sizes,
   opening,
+  fills,
   onCancel,
   onPlace,
 }: {
@@ -19149,6 +19240,9 @@ function PdfDialog({
   sizes: [number, number][];
   /** Opened as a document, not placed into one: said with its own verb. */
   opening: boolean;
+  /** Placed on a page with nothing on it, which takes its size as an
+   * opened one does — and is held to what a document can be the same. */
+  fills: boolean;
   onCancel: () => void;
   onPlace: (page: number, dpi: number) => void;
 }) {
@@ -19179,7 +19273,7 @@ function PdfDialog({
   // Only a page opened is a document of its own, held to what a document
   // can be; one placed comes in whole and is scaled onto the page, and
   // was promised "taken down" all the same.
-  const down = opening ? Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph))) : 1;
+  const down = opening || fills ? Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph))) : 1;
   const [lw, lh] = [Math.max(1, Math.floor(pw * down)), Math.max(1, Math.floor(ph * down))];
   const ok = page >= 1 && page <= sizes.length && dpi > 0;
   const go = () => ok && onPlace(page - 1, dpi);
@@ -21965,6 +22059,10 @@ function KindProps({
             }}
             onSelect={(e) => textSelections.set(e.currentTarget, [e.currentTarget.selectionStart, e.currentTarget.selectionEnd])}
             onBlur={onGestureEnd}
+            // Each paragraph read the way its first letter goes, as the
+            // page sets it: Hebrew came out left to right here.
+            dir="auto"
+            style={{ unicodeBidi: "plaintext" }}
             aria-label="Text content"
           />
         </label>

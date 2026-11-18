@@ -134,6 +134,9 @@ export type Prefs = {
    * whatever the photograph's own — which then stands in for the scale;
    * 0 for none. */
   exportLongEdge: number;
+  /** The kept development a batch was last made with, by name: "" for
+   * the plain one. */
+  batchPreset: string;
   /** Whether a JPEG goes out with how its photograph was taken (camera,
    * lens, exposure, date — never place) as its EXIF. */
   exportCameraData: boolean;
@@ -239,6 +242,7 @@ export const DEFAULTS: Prefs = {
   exportArea: "page",
   exportScale: 1,
   exportLongEdge: 0,
+  batchPreset: "",
   exportCameraData: true,
   exportSharpen: 0,
   exportWatermark: { on: false, text: "", size: 0.03, corner: "bottom-right", dark: false, opacity: 0.7 },
@@ -302,14 +306,14 @@ function contrast(a: number, b: number): number {
  * where it reads (4.5:1, what small text needs), or as little of it
  * mixed toward white on a dark panel, black on a light one, as gets it
  * there. Amber as text on the light theme's white read at 2.2:1. */
-export function accentAsText(hex: string, panel: string): string {
+export function accentAsText(hex: string, panel: string, least = 4.5): string {
   const ground = luminance(panel);
   const toward = ground < 0.5 ? 255 : 0;
   const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
   for (let k = 0; k <= 20; k++) {
     const t = k / 20;
     const mixed = "#" + rgb.map((v) => Math.round(v + (toward - v) * t).toString(16).padStart(2, "0")).join("");
-    if (contrast(luminance(mixed), ground) >= 4.5) return mixed;
+    if (contrast(luminance(mixed), ground) >= least) return mixed;
   }
   return toward ? "#ffffff" : "#000000";
 }
@@ -398,6 +402,7 @@ export function clamp(p: Prefs): Prefs {
     developFolded: Array.isArray(p.developFolded)
       ? p.developFolded.filter((t): t is string => typeof t === "string").slice(0, 32)
       : [],
+    batchPreset: typeof p.batchPreset === "string" ? p.batchPreset.slice(0, 200) : "",
     // None, or a whole number of pixels a long edge can be.
     exportLongEdge:
       typeof p.exportLongEdge === "number" && p.exportLongEdge > 0

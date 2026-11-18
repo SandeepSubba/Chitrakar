@@ -1481,6 +1481,13 @@ body {
   stroke-dasharray: 4 3;
 }
 
+/* Held off the page, where letting go throws it away. */
+.guide-overlay .guide.dragging.leaving {
+  stroke: #e5484d;
+  stroke-dasharray: 2 4;
+  opacity: 0.8;
+}
+
 /* Position and size, typed rather than nudged: X and Y, then the two
    sides with the chain that ties them between, then the angle and the
    lean. Two to a row: four to a row left a panel's width a few
@@ -4768,6 +4775,12 @@ button.fold:hover {
 .row.watermark input[type="text"] {
   flex: 1;
   min-width: 8em;
+}
+/* Its box and its word apart: "☐Watermark" read as one thing. */
+.row.watermark label.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 /* In a forced-colours (high contrast) mode the system repaints every

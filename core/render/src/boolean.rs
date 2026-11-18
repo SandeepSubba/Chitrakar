@@ -449,11 +449,25 @@ pub fn combine(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
     // and the pieces could not be chained: refused as edges that
     // overlapped exactly. Said first as the rings it draws, which cross
     // nothing.
-    let (a, b) = (
-        uncrossed(a).unwrap_or_else(|| a.to_vec()),
-        uncrossed(b).unwrap_or_else(|| b.to_vec()),
+    let (said_a, said_b) = (uncrossed(a), uncrossed(b));
+    let either = said_a.is_some() || said_b.is_some();
+    let first = combine_as_given(
+        &said_a.unwrap_or_else(|| a.to_vec()),
+        &said_b.unwrap_or_else(|| b.to_vec()),
+        op,
     );
-    let (a, b) = (oriented(&a), oriented(&b));
+    // Said again, the rings can meet at a point where the outline crossed
+    // itself, and two pieces leaving one point can be chained the wrong
+    // way round; then the outline as it was drawn is asked instead, which
+    // answers many shapes that cross themselves on its own.
+    if first.is_none() && either {
+        return combine_as_given(a, b, op);
+    }
+    first
+}
+
+fn combine_as_given(a: &[Ring], b: &[Ring], op: BoolOp) -> Option<Vec<Ring>> {
+    let (a, b) = (oriented(a), oriented(b));
     let fragments = fragments(&a, &b, op);
     if fragments.is_empty() {
         return None;
@@ -1021,6 +1035,45 @@ mod tests {
                     agrees(&middle, &a, &got, op),
                     "{op:?} the other way: {got:?}"
                 );
+            }
+        }
+    }
+
+    /// Shapes that cross themselves which the outline as drawn already
+    /// answered keep being answered when the rings said again do not
+    /// chain: found by a check of the change above, which refused them.
+    #[test]
+    fn a_crossing_shape_answered_as_drawn_is_still_answered() {
+        let rect = |x: f32, y: f32, w: f32, h: f32| {
+            vec![vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]]]
+        };
+        let pen: Ring = vec![
+            [209.0, 196.0],
+            [226.0, 194.0],
+            [204.0, 177.0],
+            [63.0, 186.0],
+            [72.0, 181.0],
+            [177.0, 55.0],
+            [63.0, 197.0],
+            [155.0, 69.0],
+        ];
+        let seven: Ring = vec![
+            [194.0, 69.0],
+            [118.0, 22.0],
+            [187.0, 37.0],
+            [209.0, 101.0],
+            [129.0, 214.0],
+            [104.0, 54.0],
+            [196.0, 46.0],
+        ];
+        for (shape, cut) in [
+            (vec![pen], rect(128.0, 154.0, 24.0, 88.0)),
+            (vec![seven], rect(71.0, 62.0, 82.0, 43.0)),
+        ] {
+            for op in [BoolOp::Union, BoolOp::Intersect, BoolOp::Subtract] {
+                let got = combine_or_nudge(&shape, &cut, op)
+                    .unwrap_or_else(|| panic!("{op:?} is answered"));
+                assert!(agrees(&shape, &cut, &got, op), "{op:?}");
             }
         }
     }

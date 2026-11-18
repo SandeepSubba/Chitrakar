@@ -264,6 +264,11 @@ export function ExportDialog({
    * and a hundred megapixels). Held to sixteen times alone, a long edge
    * typed past it was shown as "as large as it goes" at a size the
    * window then refused. */
+  /** A side at a scale in whole pixels, worked out as the engine works it
+   * out — in single precision — so the size said is the size written:
+   * worked out in double, a long edge of 175 said 122 across and wrote 123. */
+  const px = (side: number, k: number) =>
+    Math.max(1, Math.round(Math.fround(Math.fround(side) * Math.fround(k))));
   const heldScale = (w: number, h: number) => {
     let k = Math.min(
       MOST_SCALE,
@@ -274,8 +279,8 @@ export function ExportDialog({
     // to a hair past a hundred megapixels: an A4 page "as large as it
     // goes" was 8409 × 11893, which the same window then refused.
     for (let i = 0; i < 64; i++) {
-      const across = Math.max(1, Math.round(w * k));
-      const down = Math.max(1, Math.round(h * k));
+      const across = px(w, k);
+      const down = px(h, k);
       if (across * down <= 100_000_000) break;
       k *= 1 - 1 / Math.max(across, down);
     }
@@ -311,7 +316,7 @@ export function ExportDialog({
   const edgeOf = (at: number | null): number => {
     if (at !== null && area === "regions") {
       const box = regionBox(at);
-      if (box) return Math.max(1, Math.round(Math.max(box[2] - box[0], box[3] - box[1]) * scaleFor(at)));
+      if (box) return px(Math.max(box[2] - box[0], box[3] - box[1]), scaleFor(at));
     }
     return Math.max(outW, outH);
   };
@@ -319,8 +324,8 @@ export function ExportDialog({
   const scales = set ? SET : [scale];
   /** What will actually be written, in pixels. */
   const [outW, outH] = [
-    Math.max(1, Math.round(baseW * scale)),
-    Math.max(1, Math.round(baseH * scale)),
+    px(baseW, scale),
+    px(baseH, scale),
   ];
 
   /** Every file's size, for the regions each its own: judged by the
@@ -332,7 +337,7 @@ export function ExportDialog({
           const b = regionBox(i);
           const k = scaleFor(i);
           return b
-            ? [Math.max(1, Math.round((b[2] - b[0]) * k)), Math.max(1, Math.round((b[3] - b[1]) * k))]
+            ? [px(b[2] - b[0], k), px(b[3] - b[1], k)]
             : [outW, outH];
         })
       : [[outW, outH]];

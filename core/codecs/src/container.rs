@@ -36,6 +36,8 @@ pub enum ContainerError {
     /// editor makes ever does.
     #[error("that file's layers do not make sense together: {0}")]
     BadStructure(chitrakar_doc::DocError),
+    #[error("that file numbers its layers past what the editor can count")]
+    IdsTooLarge,
 }
 
 /// What is wrong with a page a file says it has: none at all, or more
@@ -341,10 +343,26 @@ pub fn load_chitra(bytes: &[u8]) -> Result<Document, ContainerError> {
 /// Load a document and the fonts it carries from `.chitra` bytes.
 pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     let mut zip = ZipArchive::new(Cursor::new(bytes))?;
+    // Each entry's name as written and as meant: a file zipped again on
+    // Windows by an older tool names its entries with backslashes, and
+    // opened with every picture said to be missing.
+    let entries: Vec<(String, String)> = zip
+        .file_names()
+        .map(|n| (n.to_string(), n.replace('\\', "/")))
+        .collect();
+    let named = |wanted: &str| {
+        entries
+            .iter()
+            .find(|(_, meant)| meant == wanted)
+            .map(|(written, _)| written.clone())
+            .unwrap_or_else(|| wanted.to_string())
+    };
     let mut manifest_json = String::new();
-    zip.by_name(MANIFEST_PATH)?
+    zip.by_name(&named(MANIFEST_PATH))?
         .read_to_string(&mut manifest_json)?;
-    let manifest: Manifest = serde_json::from_str(&manifest_json)?;
+    // A manifest saved by a text editor that begins it with a byte-order
+    // mark was refused as damaged.
+    let manifest: Manifest = serde_json::from_str(manifest_json.trim_start_matches('\u{feff}'))?;
     if manifest.format_version > FORMAT_VERSION {
         return Err(ContainerError::UnsupportedVersion {
             found: manifest.format_version,
@@ -358,6 +376,18 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     // under it. Bookkeeping rather than artwork, so it is put right rather
     // than being grounds to refuse the file.
     doc.settle_next_id();
+    // Layers are named to the page by number, and the page's numbers are
+    // exact only to two to the fifty-third: past it a layer opened and
+    // could not be picked, and at the very top the count wrapped round
+    // to nought and the next layer drawn replaced the page's own.
+    if doc.highest_id().is_some_and(|id| id >= 1u64 << 53) {
+        return Err(ContainerError::IdsTooLarge);
+    }
+    // A resolution the file says that is no resolution: printed at it,
+    // a page of nought or minus three hundred came out eighty inches.
+    if !(doc.meta.dpi.is_finite() && (1.0..=100_000.0).contains(&doc.meta.dpi)) {
+        doc.meta.dpi = 72.0;
+    }
     // And what each copy's own layers stand in for, if the file says it
     // in the older way. A stand-in used to be a position among the
     // original's layers and is the layer itself now, because a position
@@ -388,18 +418,17 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
             height: doc.meta.height,
         });
     }
-    let entries: Vec<String> = zip.file_names().map(String::from).collect();
-    for name in &entries {
+    for (written, name) in &entries {
         let Some(id) = name.strip_prefix(ORIGINALS) else {
             continue;
         };
         let mut bytes = Vec::new();
-        zip.by_name(name)?.read_to_end(&mut bytes)?;
+        zip.by_name(written)?.read_to_end(&mut bytes)?;
         // Kept only when they are the bytes the manifest names: a file
         // that has been tampered with is not developed from.
         doc.restore_original_bytes(id, bytes);
     }
-    for name in entries {
+    for (written, name) in &entries {
         let Some(id) = name
             .strip_prefix("resources/")
             .and_then(|n| n.strip_suffix(".png"))
@@ -412,7 +441,7 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         // does not hold (`missing_pictures`). One damaged mask's picture
         // refused the whole document, every other layer with it.
         let mut png = Vec::new();
-        let Ok(mut entry) = zip.by_name(&name) else {
+        let Ok(mut entry) = zip.by_name(written) else {
             continue;
         };
         if entry.read_to_end(&mut png).is_err() {
@@ -426,7 +455,7 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         // size disagrees — the manifest is the source of truth.
         doc.restore_resource_bytes(&id, img.rgba8);
     }
-    if let Ok(mut entry) = zip.by_name(CMYK_PROFILE_PATH) {
+    if let Ok(mut entry) = zip.by_name(&named(CMYK_PROFILE_PATH)) {
         let mut icc = Vec::new();
         entry.read_to_end(&mut icc)?;
         // Best effort: a profile that no longer parses is dropped.
@@ -436,7 +465,7 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     for font in manifest.fonts {
         // A listed face whose file is missing is left out rather than
         // failing the open; its text falls back to the bundled face.
-        let Ok(mut entry) = zip.by_name(&font.file) else {
+        let Ok(mut entry) = zip.by_name(&named(&font.file)) else {
             continue;
         };
         let mut bytes = Vec::new();
@@ -1263,6 +1292,74 @@ mod tests {
     /// difference is the same one: a counter is bookkeeping and there is a
     /// right answer to put in it, where a cycle is not something anybody
     /// meant and has no reading that keeps their work.
+    /// A file zipped again by other tools still opens: a manifest begun
+    /// with a byte-order mark, and entries named with backslashes, whose
+    /// pictures were all said to be missing. A resolution that is none is
+    /// put back to 72, and layers numbered past what the page can count
+    /// are refused rather than opened and lost.
+    #[test]
+    fn a_file_zipped_again_elsewhere_opens() {
+        let mut doc = Document::new(4, 4, ColorMode::Rgb);
+        let red = doc.add_resource(2, 2, [255, 0, 0, 255].repeat(4));
+        showing(&mut doc, &red, None);
+        let good = save_chitra(&doc).unwrap();
+        let rezip = |manifest: &dyn Fn(String) -> String, name: &dyn Fn(&str) -> String| {
+            let mut zip = ZipArchive::new(Cursor::new(good.clone())).unwrap();
+            let names: Vec<String> = zip.file_names().map(String::from).collect();
+            let mut out = Vec::new();
+            {
+                let mut w = ZipWriter::new(Cursor::new(&mut out));
+                for n in names {
+                    let mut body = Vec::new();
+                    zip.by_name(&n).unwrap().read_to_end(&mut body).unwrap();
+                    if n == MANIFEST_PATH {
+                        body = manifest(String::from_utf8(body).unwrap()).into_bytes();
+                    }
+                    w.start_file(name(&n), SimpleFileOptions::default())
+                        .unwrap();
+                    w.write_all(&body).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            out
+        };
+        let marked = rezip(&|m| format!("\u{feff}{m}"), &|n| n.to_string());
+        assert!(load_chitra(&marked).is_ok(), "a byte-order mark");
+        let slashed = rezip(&|m| m, &|n| n.replace('/', "\\"));
+        let opened = load_chitra(&slashed).expect("backslashes");
+        assert!(
+            opened.resource(&red).is_some_and(|r| !r.rgba8.is_empty()),
+            "with its pictures"
+        );
+        let nowhere = rezip(
+            &|m| {
+                let mut v: serde_json::Value = serde_json::from_str(&m).unwrap();
+                v["document"]["meta"]["dpi"] = serde_json::json!(-300.0);
+                v.to_string()
+            },
+            &|n| n.to_string(),
+        );
+        assert_eq!(load_chitra(&nowhere).unwrap().meta.dpi, 72.0);
+        let counted = rezip(
+            &|m| {
+                let mut v: serde_json::Value = serde_json::from_str(&m).unwrap();
+                v["document"]["next_id"] = serde_json::json!(u64::MAX);
+                v.to_string()
+            },
+            &|n| n.to_string(),
+        );
+        let mut reopened = load_chitra(&counted).expect("a counter far past is put back");
+        let root = reopened.root();
+        reopened
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("next")),
+            })
+            .unwrap();
+        assert!(reopened.highest_id().unwrap() < 1 << 53);
+    }
+
     #[test]
     fn a_file_whose_layers_are_not_a_tree_is_refused() {
         let mut doc = Document::new(20, 16, ColorMode::Rgb);

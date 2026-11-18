@@ -600,33 +600,49 @@ impl<'a, 'i> Letters<'a, 'i> {
     /// What the document's style sheets reach with `url(#…)`, wherever
     /// the sheets are — in `defs` as often as not.
     ///
-    /// A rule says which elements it reaches in a language of its own,
-    /// so what one reaches is counted as though it reached every shape
-    /// there is (and a marker every point of them): an upper bound, and
-    /// text in a clip path, a mask, a pattern or a marker is rare enough
-    /// that the bound costs nothing. Taken at its word only where it is
-    /// written on an element, a clip path of nine thousand letters used
-    /// by three hundred shapes from a style sheet held the page for a
-    /// minute and a half.
+    /// A rule is counted for the elements its selectors could match —
+    /// their last part's element name, classes and id, read loosely, so
+    /// what is counted is never fewer than what is drawn — and for every
+    /// shape inside them where the property is one that is passed down.
+    /// Taken at its word only where it is written on an element, a clip
+    /// path of nine thousand letters used by three hundred shapes from a
+    /// style sheet held the page for a minute and a half; counted as
+    /// reaching every shape in the file, an eleven-letter clip used once
+    /// beside twelve hundred rectangles was refused.
     fn sheets(&mut self, doc: &'a usvg::roxmltree::Document<'i>) -> usize {
-        let root = doc.root_element();
         let mut sum = 0usize;
         for node in doc.descendants().filter(|n| n.has_tag_name("style")) {
             let sheet: String = node.children().filter_map(|c| c.text()).collect();
-            for (property, id) in references_in(&sheet) {
-                let times = if is_marker(property) {
-                    points_under(root)
-                } else {
-                    shapes_under(root)
+            for rule in sheet.split('}') {
+                let mut halves = rule.rsplitn(2, '{');
+                let (Some(declarations), Some(before)) = (halves.next(), halves.next()) else {
+                    continue;
                 };
-                sum = sum.saturating_add(self.target(id, 0).saturating_mul(times.max(1)));
+                let found = references_in(declarations);
+                if found.is_empty() {
+                    continue;
+                }
+                let selectors = before.rsplit('{').next().unwrap_or("");
+                let reached: Vec<usvg::roxmltree::Node> = doc
+                    .descendants()
+                    .filter(|n| n.is_element() && selectors.split(',').any(|s| may_match(s, *n)))
+                    .collect();
+                for (property, id) in found {
+                    let times = reached
+                        .iter()
+                        .map(|n| times_drawn(property, *n))
+                        .fold(0usize, |a, b| a.saturating_add(b));
+                    if times > 0 {
+                        sum = sum.saturating_add(self.target(id, 0).saturating_mul(times));
+                    }
+                }
             }
         }
         sum
     }
 
     fn drawn(&mut self, node: usvg::roxmltree::Node<'a, 'i>, depth: u32, referred: bool) -> usize {
-        if depth > 16 || !node.is_element() || node.attribute("display") == Some("none") {
+        if depth > 128 || !node.is_element() || node.attribute("display") == Some("none") {
             return 0;
         }
         let name = node.tag_name().name();
@@ -677,20 +693,7 @@ impl<'a, 'i> Letters<'a, 'i> {
                     .collect()
             };
             for (property, id) in pairs {
-                let times = if is_marker(property) {
-                    points_under(node)
-                } else if matches!(property, "fill" | "stroke" | "filter" | "mask")
-                    && !is_shape(node)
-                {
-                    // Inherited: a group's fill is every shape's fill.
-                    if matches!(property, "fill" | "stroke") {
-                        shapes_under(node)
-                    } else {
-                        1
-                    }
-                } else {
-                    1
-                };
+                let times = times_drawn(property, node);
                 sum = sum.saturating_add(self.target(id, depth).saturating_mul(times.max(1)));
             }
         }
@@ -736,11 +739,56 @@ fn references_in(text: &str) -> Vec<(&str, &str)> {
     out
 }
 
-fn is_marker(property: &str) -> bool {
-    matches!(
-        property,
-        "marker" | "marker-mid" | "marker-start" | "marker-end"
-    )
+/// How many times what `property` on `node` names is drawn: a marker in
+/// the middle at every point of every outline it reaches, one at an end
+/// once an outline, a fill or a stroke once for every shape it is passed
+/// down to, and anything else once.
+fn times_drawn(property: &str, node: usvg::roxmltree::Node) -> usize {
+    match property {
+        "marker" | "marker-mid" => points_under(node),
+        "marker-start" | "marker-end" | "fill" | "stroke" => shapes_under(node).max(1),
+        _ => 1,
+    }
+}
+
+/// Whether `selector` could match `node`, read loosely: its last part's
+/// element name, classes and id, and nothing it says about where the
+/// element stands or what state it is in — so it matches at least what
+/// a browser would.
+fn may_match(selector: &str, node: usvg::roxmltree::Node) -> bool {
+    let last = selector
+        .rsplit(|c: char| c.is_whitespace() || matches!(c, '>' | '+' | '~'))
+        .find(|p| !p.is_empty())
+        .unwrap_or("");
+    // What a part says about state or attributes is set aside.
+    let last = last.split([':', '[']).next().unwrap_or("");
+    if last.is_empty() || last == "*" {
+        return true;
+    }
+    let mut name = String::new();
+    let mut wanted: Vec<(char, String)> = Vec::new();
+    let mut kind = ' ';
+    let mut word = String::new();
+    for c in last.chars().chain(std::iter::once('.')) {
+        if c == '.' || c == '#' {
+            if kind == ' ' {
+                name = std::mem::take(&mut word);
+            } else if !word.is_empty() {
+                wanted.push((kind, std::mem::take(&mut word)));
+            }
+            kind = c;
+        } else {
+            word.push(c);
+        }
+    }
+    if !name.is_empty() && name != "*" && node.tag_name().name() != name {
+        return false;
+    }
+    let classes = node.attribute("class").unwrap_or("");
+    wanted.iter().all(|(kind, word)| match kind {
+        '.' => classes.split_whitespace().any(|c| c == word),
+        _ => node.attribute("id") == Some(word.as_str()),
+    })
 }
 
 fn is_shape(node: usvg::roxmltree::Node) -> bool {
@@ -5042,6 +5090,36 @@ mod tests {
         ] {
             assert!(past_reason(svg.as_bytes()).is_some(), "{how} is counted");
         }
+        // And not more than it is: a rule reaches what its selector picks
+        // out, and a marker at an end stands once on its outline.
+        let rects: String = (0..1200)
+            .map(|_| r#"<rect width="1" height="1"/>"#)
+            .collect();
+        let once = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><style>.held {{ clip-path: url(#c) }}</style><clipPath id="c"><text>ELEVENWORDS</text></clipPath><g class="held"><rect width="5" height="5"/></g>{rects}</svg>"##
+        );
+        assert!(past_reason(once.as_bytes()).is_none(), "a clip used once");
+        let points: String = (0..11_000).map(|i| format!("{i},{} ", i % 2)).collect();
+        let ended = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><marker id="m"><text>x</text></marker><polyline marker-end="url(#m)" points="{points}"/></svg>"##
+        );
+        assert!(
+            past_reason(ended.as_bytes()).is_none(),
+            "a marker at the end"
+        );
+        // A chain of patterns past sixteen deep is followed to its end.
+        let mut chain =
+            format!(r##"<pattern id="p0" width="2" height="2"><text>{many}</text></pattern>"##);
+        for k in 1..20 {
+            chain.push_str(&format!(r##"<pattern id="p{k}" href="#p{}"/>"##, k - 1));
+        }
+        let deep = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">{chain}<rect fill="url(#p19)" width="5" height="5"/></svg>"##
+        );
+        assert!(
+            past_reason(deep.as_bytes()).is_some(),
+            "a deep chain is counted"
+        );
     }
 
     /// Two squares wound the same way and sharing a corner fill their

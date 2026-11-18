@@ -89,6 +89,8 @@ pub enum DocError {
     UnknownNode(NodeId),
     #[error("node {0:?} is not a group")]
     NotAGroup(NodeId),
+    #[error("a layer that holds others and one that does not are not the same kind of layer: {0:?} cannot become the other")]
+    KindHoldsChildren(NodeId),
     #[error("node {0:?} is not a paint layer")]
     NotAPaintLayer(NodeId),
     #[error("no stroke {index} on paint layer {id:?}, which has {len}")]
@@ -1425,9 +1427,30 @@ impl Document {
                 })
             }
             Command::SetKind { id, kind } => {
+                // A layer made one that holds others (a group, a frame, a
+                // live copy) is given its list of children, and one that
+                // holds none any more gives its list up — and one still
+                // holding layers cannot become a kind that holds none.
+                // Taken as it came, a layer made a frame had no list, and
+                // the next layer moved into it stopped the engine for good;
+                // a frame made a filter kept children nothing drew, and its
+                // undo failed half done.
+                let holds = kind.holds_children();
+                let held = self
+                    .nodes
+                    .get(&id)
+                    .ok_or(DocError::UnknownNode(id))?
+                    .kind
+                    .holds_children();
+                if held && !holds {
+                    if self.children.get(&id).is_some_and(|kids| !kids.is_empty()) {
+                        return Err(DocError::KindHoldsChildren(id));
+                    }
+                    self.children.remove(&id);
+                } else if holds && !held {
+                    self.children.entry(id).or_default();
+                }
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
-                // Structural kinds (Group) can't be swapped with leaf kinds;
-                // this command is for parameter edits on leaves.
                 let prev = std::mem::replace(&mut node.kind, *kind);
                 Ok(Command::SetKind {
                     id,
@@ -1959,7 +1982,19 @@ impl Document {
             .map(|id| id.0.saturating_add(1))
             .max()
             .unwrap_or(1);
-        self.next_id = self.next_id.max(past);
+        // A counter a file says is far past every layer it holds is put
+        // back just past them: at the top of its range the next layer
+        // took the last number and the count wrapped round to nought.
+        self.next_id = if self.next_id >= 1u64 << 53 {
+            past
+        } else {
+            self.next_id.max(past)
+        };
+    }
+
+    /// The largest number any layer has, if there is a layer.
+    pub fn highest_id(&self) -> Option<u64> {
+        self.nodes.keys().map(|id| id.0).max()
     }
 
     /// Read every copy's stand-ins as *positions* among the original's
@@ -3337,6 +3372,85 @@ mod tests {
             doc.apply(Command::RemoveNode { id: root }).unwrap_err(),
             DocError::CannotRemoveRoot
         );
+    }
+
+    /// A leaf cannot be made a group, nor a group a leaf, by changing its
+    /// kind: the first had no list of children for the next layer moved
+    /// into it, and the second kept children nothing drew.
+    #[test]
+    fn a_kind_change_cannot_cross_between_holding_and_not() {
+        let mut doc = Document::new(100, 100, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: rect("r"),
+        })
+        .unwrap();
+        let leaf = doc.children_of(root).unwrap()[0];
+        let was_leaf = doc.node(leaf).unwrap().kind.clone();
+        let back = doc
+            .apply(Command::SetKind {
+                id: leaf,
+                kind: Box::new(NodeKind::Group),
+            })
+            .unwrap();
+        assert_eq!(
+            doc.children_of(leaf).unwrap().len(),
+            0,
+            "made a group, it can hold"
+        );
+        doc.apply(Command::AddNode {
+            parent: leaf,
+            index: 0,
+            node: rect("inside"),
+        })
+        .unwrap();
+        assert_eq!(
+            doc.apply(back).unwrap_err(),
+            DocError::KindHoldsChildren(leaf),
+            "holding a layer, it cannot go back"
+        );
+        let inside = doc.children_of(leaf).unwrap()[0];
+        doc.apply(Command::RemoveNode { id: inside }).unwrap();
+        doc.apply(Command::SetKind {
+            id: leaf,
+            kind: Box::new(was_leaf),
+        })
+        .unwrap();
+        assert_eq!(
+            doc.apply(Command::AddNode {
+                parent: leaf,
+                index: 0,
+                node: rect("x"),
+            })
+            .unwrap_err(),
+            DocError::NotAGroup(leaf),
+            "and empty, it can, and holds nothing after"
+        );
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let group = doc.children_of(root).unwrap()[1];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: rect("kept"),
+        })
+        .unwrap();
+        let was = doc.node(leaf).unwrap().kind.clone();
+        assert_eq!(
+            doc.apply(Command::SetKind {
+                id: group,
+                kind: Box::new(was),
+            })
+            .unwrap_err(),
+            DocError::KindHoldsChildren(group)
+        );
+        assert!(doc.children_of(group).is_ok(), "and the group is as it was");
     }
 
     #[test]

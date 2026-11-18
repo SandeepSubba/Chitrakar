@@ -416,12 +416,45 @@ struct Shaped {
 /// way a typesetter letter-spaces: between the glyphs, never inside a
 /// ligature's own shape.
 fn shape_line(line: &str, at: usize, spec: &TextSpec, scale: f32) -> (Vec<Shaped>, f32) {
+    shape_line_in(line, at, spec, scale, None)
+}
+
+/// What a paragraph says about the lines and words in it that the
+/// wrapping asks about again and again: whether it holds a letter read
+/// leftward, and which way it reads. Worked out for every word measured
+/// instead, a page of text wrapped took seconds a keystroke — each word
+/// read its whole paragraph twice over.
+#[derive(Clone, Copy)]
+struct ParagraphWay {
+    leftward: bool,
+    /// The paragraph's first strong letter reads right to left.
+    rtl: bool,
+}
+
+impl ParagraphWay {
+    fn of(paragraph: &str) -> ParagraphWay {
+        let leftward = paragraph.chars().any(reads_leftward);
+        ParagraphWay {
+            leftward,
+            rtl: leftward
+                && unicode_bidi::get_base_direction(paragraph) == unicode_bidi::Direction::Rtl,
+        }
+    }
+}
+
+fn shape_line_in(
+    line: &str,
+    at: usize,
+    spec: &TextSpec,
+    scale: f32,
+    way: Option<ParagraphWay>,
+) -> (Vec<Shaped>, f32) {
     let track = tracking(spec, scale);
     let mut glyphs = Vec::new();
     let mut pen = 0f32;
     // A block with no runs is one piece: the common case pays nothing
     // for the machinery and shapes exactly as it always did.
-    for (from, to, run, rtl) in in_reading_order(line, at, spec) {
+    for (from, to, run, rtl) in in_reading_order_in(line, at, spec, way) {
         let styling = spec.styling_under(run.map(|i| &spec.runs[i]));
         let first = glyphs.len();
         shape_piece(
@@ -490,22 +523,26 @@ fn paragraph_reads_leftward(spec: &TextSpec, at: usize, line: &str) -> bool {
 /// as every browser draws it. Which way the line's own paragraph reads
 /// is decided by its first strong letter, so a line wrapped out of a
 /// Hebrew paragraph is ordered as Hebrew even when it holds none.
-fn in_reading_order(
+///
+/// `way` is what the paragraph says, where the caller already knows.
+fn in_reading_order_in(
     line: &str,
     at: usize,
     spec: &TextSpec,
+    way: Option<ParagraphWay>,
 ) -> Vec<(usize, usize, Option<usize>, bool)> {
     let pieces = pieces_in(spec, at, line.len());
-    let paragraph = paragraph_of(spec, at, line);
-    if !paragraph.chars().any(reads_leftward) && !line.chars().any(reads_leftward) {
+    let way = way.unwrap_or_else(|| ParagraphWay::of(paragraph_of(spec, at, line)));
+    if !way.leftward && !line.chars().any(reads_leftward) {
         return pieces
             .into_iter()
             .map(|(f, t, r)| (f, t, r, false))
             .collect();
     }
-    let base = match unicode_bidi::get_base_direction(paragraph) {
-        unicode_bidi::Direction::Rtl => unicode_bidi::Level::rtl(),
-        _ => unicode_bidi::Level::ltr(),
+    let base = if way.rtl {
+        unicode_bidi::Level::rtl()
+    } else {
+        unicode_bidi::Level::ltr()
     };
     let info = unicode_bidi::BidiInfo::new(line, Some(base));
     let mut out = Vec::new();
@@ -1709,7 +1746,7 @@ pub struct SetLine {
     pub marker: Option<SetMarker>,
     /// Whether the line's paragraph reads right to left — its first
     /// strong letter is Hebrew or Arabic — which is how the line's mixed
-    /// stretches are ordered (`in_reading_order`), and what a reader of
+    /// stretches are ordered (`in_reading_order_in`), and what a reader of
     /// an exported line has to be told to order them the same.
     pub rtl: bool,
 }
@@ -1913,14 +1950,15 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
         let mut used = 0f32; // its width so far
         let mut first = true;
         let mut pos = 0usize; // where the current word begins
+        let way = Some(ParagraphWay::of(paragraph));
         for word in paragraph.split(' ') {
-            let w = line_width(word, para_at + pos, spec, scale);
+            let w = shape_line_in(word, para_at + pos, spec, scale, way).1;
             // A space is measured where it stands, since the styling
             // there is what sets its width.
             let space = if pos == 0 {
                 0.0
             } else {
-                line_width(" ", para_at + pos - 1, spec, scale)
+                shape_line_in(" ", para_at + pos - 1, spec, scale, way).1
             };
             if first {
                 used = w;
@@ -2887,6 +2925,34 @@ mod tests {
                 "{ch}: shaped {w} vs ab_glyph {expected}"
             );
         }
+    }
+
+    /// Wrapping a block costs as much as its words, not its words times
+    /// its paragraph: each word measured read the whole paragraph for a
+    /// letter read leftward, and a page of text took seconds a keystroke.
+    #[test]
+    fn wrapping_a_long_paragraph_costs_its_length() {
+        let timed = |words: usize| {
+            let text = "lorem ipsum dolor sit amet ".repeat(words / 5);
+            let mut s = spec(&text, 16.0);
+            s.width = 500.0;
+            (0..3)
+                .map(|_| {
+                    let at = std::time::Instant::now();
+                    let lines = lines_of(&s, 1.0);
+                    assert!(lines.len() > 1);
+                    at.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        let _ = timed(500);
+        let (small, large) = (timed(1500), timed(6000));
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
+        assert!(
+            ratio < 8.0,
+            "four times the words cost {ratio:.1} times as much ({small:?} against {large:?})"
+        );
     }
 
     #[test]

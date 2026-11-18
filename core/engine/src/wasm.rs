@@ -318,6 +318,22 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// The same, into the frame the stroke begins in at (x, y), if any.
+    pub fn add_paint_layer_at(&mut self, name: &str, x: f32, y: f32) -> Result<f64, JsError> {
+        self.inner
+            .add_paint_layer_at(name, x, y)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
+    /// A clone layer into the frame the stroke begins in at (x, y), if any.
+    pub fn add_clone_layer_at(&mut self, name: &str, x: f32, y: f32) -> Result<f64, JsError> {
+        self.inner
+            .add_clone_layer_at(name, x, y)
+            .map(|id| id.0 as f64)
+            .map_err(to_js)
+    }
+
     /// Put a frame on the page at (x, y), `width`×`height` in document
     /// units, with `background` an authored colour as JSON (or empty for
     /// a frame with no ground of its own). Returns its id.

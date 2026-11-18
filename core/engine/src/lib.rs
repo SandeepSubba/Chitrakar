@@ -3799,12 +3799,46 @@ impl Session {
 
     /// Add an empty layer to paint on at the top of the document.
     pub fn add_paint_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
-        let parent = self.doc.root();
+        self.add_layer_to_paint(chitrakar_doc::Node::paint(name), None)
+    }
+
+    /// [`Session::add_paint_layer`], at the top of the frame the stroke
+    /// about to be laid on it begins in, where there is one — as a shape
+    /// drawn there goes into it. On the page, a brush stroke begun inside
+    /// a frame was not cut to the frame, did not move with it, and was
+    /// left out of the frame's export.
+    pub fn add_paint_layer_at(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<NodeId, EngineError> {
+        self.add_layer_to_paint(chitrakar_doc::Node::paint(name), Some((x, y)))
+    }
+
+    /// [`Session::add_clone_layer`], into the frame the stroke begins in.
+    pub fn add_clone_layer_at(
+        &mut self,
+        name: &str,
+        x: f32,
+        y: f32,
+    ) -> Result<NodeId, EngineError> {
+        self.add_layer_to_paint(chitrakar_doc::Node::clone_layer(name), Some((x, y)))
+    }
+
+    fn add_layer_to_paint(
+        &mut self,
+        node: chitrakar_doc::Node,
+        at: Option<(f32, f32)>,
+    ) -> Result<NodeId, EngineError> {
+        let parent = at
+            .and_then(|(x, y)| self.frame_at(x, y))
+            .unwrap_or_else(|| self.doc.root());
         let index = self.doc.children_of(parent)?.len();
         self.apply(Command::AddNode {
             parent,
             index,
-            node: Box::new(chitrakar_doc::Node::paint(name)),
+            node: Box::new(node),
         })?;
         Ok(self.doc.children_of(parent)?[index])
     }
@@ -3825,6 +3859,11 @@ impl Session {
     ) -> Result<NodeId, EngineError> {
         if !(width > 0.0 && height > 0.0) {
             return Err(EngineError::BadCommand("a frame needs a size".into()));
+        }
+        if !(width.is_finite() && height.is_finite()) {
+            return Err(EngineError::BadCommand(
+                "a frame larger than the editor can hold".into(),
+            ));
         }
         let parent = self.doc.root();
         let mut node = chitrakar_doc::Node::artboard(name, width, height, background);
@@ -4798,6 +4837,13 @@ impl Session {
         erase: bool,
         on_mask: bool,
     ) -> Result<(), EngineError> {
+        // A number past what the editor holds came in as infinity and was
+        // kept, and the file saved after it would not open again.
+        if !(x.is_finite() && y.is_finite() && radius.is_finite() && softness.is_finite()) {
+            return Err(EngineError::BadCommand(
+                "a number past what the editor can hold".into(),
+            ));
+        }
         let index = self.stroke_count(layer, on_mask)?;
         let Some((lx, ly)) = self.point_in_layer(layer, on_mask, x, y)? else {
             return Ok(());
@@ -4836,6 +4882,13 @@ impl Session {
     /// moved has nothing to add, and the stroke is redrawn every time it
     /// grows.
     pub fn paint_extend(&mut self, x: f32, y: f32, radius: f32) -> Result<(), EngineError> {
+        // A number past what the editor holds came in as infinity and
+        // was kept, and the file saved after it would not open again.
+        if !(x.is_finite() && y.is_finite() && radius.is_finite()) {
+            return Err(EngineError::BadCommand(
+                "a number past what the editor can hold".into(),
+            ));
+        }
         let Some(painting) = self.painting.as_ref() else {
             return Ok(());
         };
@@ -5866,14 +5919,7 @@ impl Session {
 
     /// Add an empty layer to clone onto at the top of the document.
     pub fn add_clone_layer(&mut self, name: &str) -> Result<NodeId, EngineError> {
-        let parent = self.doc.root();
-        let index = self.doc.children_of(parent)?.len();
-        self.apply(Command::AddNode {
-            parent,
-            index,
-            node: Box::new(chitrakar_doc::Node::clone_layer(name)),
-        })?;
-        Ok(self.doc.children_of(parent)?[index])
+        self.add_layer_to_paint(chitrakar_doc::Node::clone_layer(name), None)
     }
 
     /// Where the stroke being drawn reads from, as an offset in the
@@ -5882,6 +5928,11 @@ impl Session {
     /// set after it has begun still takes both, since the whole stroke
     /// is one preview.
     pub fn paint_source(&mut self, dx: f32, dy: f32, heal: bool) -> Result<(), EngineError> {
+        if !(dx.is_finite() && dy.is_finite()) {
+            return Err(EngineError::BadCommand(
+                "a number past what the editor can hold".into(),
+            ));
+        }
         let Some(painting) = self.painting.as_ref() else {
             return Ok(());
         };
@@ -7342,6 +7393,11 @@ impl Session {
     /// the mask panel shows, set before the handing over rather than
     /// after.
     pub fn feather_selection(&mut self, feather: f32) -> Result<bool, EngineError> {
+        if !feather.is_finite() {
+            return Err(EngineError::BadCommand(
+                "a softness past what the editor can hold".into(),
+            ));
+        }
         let Some(mut selection) = self.doc.selection().cloned() else {
             return Ok(false);
         };
@@ -12763,7 +12819,36 @@ impl Session {
 }
 
 fn parse_command(json: &str) -> Result<Command, EngineError> {
-    serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| EngineError::BadCommand(e.to_string()))?;
+    // Past what a single-precision number holds, a number comes in as
+    // infinity, which a file cannot say: a width of 1e39 was taken, and
+    // the document saved after it would not open again.
+    if past_f32(&value) {
+        return Err(EngineError::BadCommand(
+            "a number in it is past what the editor can hold".into(),
+        ));
+    }
+    serde_json::from_value(value).map_err(|e| EngineError::BadCommand(e.to_string()))
+}
+
+/// Whether any number in `value` is past the largest a single-precision
+/// number holds, walked without recursing (a command can be deep).
+fn past_f32(value: &serde_json::Value) -> bool {
+    let mut stack = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::Number(n) => {
+                if n.as_f64().is_some_and(|f| f.abs() > f32::MAX as f64) {
+                    return true;
+                }
+            }
+            serde_json::Value::Array(items) => stack.extend(items),
+            serde_json::Value::Object(map) => stack.extend(map.values()),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A path with an anchor put on its outline, as `Session::anchored`
@@ -18602,6 +18687,34 @@ mod tests {
         assert_eq!(&png[1..4], b"PNG");
     }
 
+    /// A paint layer made for a stroke begun inside a frame goes into the
+    /// frame, as a shape drawn there does, and the stroke lands where it
+    /// was drawn; begun on the page, it goes on the page.
+    #[test]
+    fn a_stroke_begun_in_a_frame_paints_in_the_frame() {
+        let mut s = Session::new(300, 200, ColorMode::Rgb);
+        let frame = s.add_artboard("F", 50.0, 40.0, 150.0, 100.0, None).unwrap();
+        let inside = s.add_paint_layer_at("P", 100.0, 80.0).unwrap();
+        assert_eq!(s.document().parent_of(inside), Some(frame));
+        let outside = s.add_clone_layer_at("C", 10.0, 10.0).unwrap();
+        assert_eq!(s.document().parent_of(outside), Some(s.document().root()));
+        let red = AuthoredColor::Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        s.paint_begin(inside, 100.0, 80.0, 6.0, red, 0.0, false, false)
+            .unwrap();
+        s.paint_extend(120.0, 80.0, 6.0).unwrap();
+        assert!(s.commit_preview());
+        let page = chitrakar_render::render(s.document()).unwrap();
+        assert!(
+            page.get(110, 80).a > 0.9,
+            "the stroke lands where it was drawn"
+        );
+    }
+
     #[test]
     fn bad_json_is_rejected_not_panicked() {
         let mut session = Session::new(8, 8, ColorMode::Rgb);
@@ -18609,6 +18722,19 @@ mod tests {
             session.apply_json("{nope"),
             Err(EngineError::BadCommand(_))
         ));
+        // A number past single precision would come in as infinity, which
+        // a saved file cannot say: refused, and the file still opens.
+        let id = add_rect(&mut session, "r", 4.0, 4.0);
+        let wide = format!(
+            r#"{{"SetKind":{{"id":{},"kind":{{"Vector":{{"shape":{{"Rect":{{"width":1e39,"height":4,"radius":0}}}},"fill":null,"stroke":null,"gradient":null}}}}}}}}"#,
+            id.0
+        );
+        assert!(matches!(
+            session.apply_json(&wide),
+            Err(EngineError::BadCommand(_))
+        ));
+        assert!(session.feather_selection(f32::INFINITY).is_err());
+        assert!(Session::load(&session.save().unwrap()).is_ok());
     }
 
     #[test]
