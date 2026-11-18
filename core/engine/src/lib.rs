@@ -540,6 +540,11 @@ fn changed_bounds(
         && long.softness == short.softness
         && long.erase == short.erase
         && long.clip == short.clip
+        // Where a clone stroke lifts from, and whether it heals, change
+        // all of it: compared as the colour is, or a new source repainted
+        // only the stroke's tail.
+        && long.source == short.source
+        && long.heal == short.heal
         && long.points[..n] == short.points[..]
         && long.radii.len() >= short.radii.len()
         && long.radii[..short.radii.len()] == short.radii[..];
@@ -1012,7 +1017,29 @@ impl Session {
         // The box is written in the space the brush wrote it in, which
         // for a mask is the layer's parent's rather than the layer's own.
         let t = chitrakar_render::brush_space(&self.doc, id, on_mask).ok()?;
-        Some(chitrakar_render::transformed_box(t, box_))
+        // Grown by how far the effects worn by the layer and everything
+        // holding it reach past what they are worn on: a stroke on a
+        // layer with a drop shadow repainted the stroke and cut its new
+        // shadow off along the stroke's own box.
+        let mut pad = 0.0f32;
+        let mut at = Some(id);
+        while let Some(n) = at {
+            let node = self.doc.node(n).ok()?;
+            if !node.effects.is_empty() {
+                let space = chitrakar_render::ancestor_space(&self.doc, n);
+                pad += chitrakar_doc::Effect::reach_of(&node.effects) * space.max_scale();
+            }
+            at = self.doc.parent_of(n);
+        }
+        if !pad.is_finite() {
+            return None;
+        }
+        match chitrakar_render::transformed_box(t, box_) {
+            Bounds::Rect(x0, y0, x1, y1) if pad > 0.0 => {
+                Some(Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad))
+            }
+            other => Some(other),
+        }
     }
 
     /// The strokes of a paint layer, or of a node's painted mask.
@@ -3140,20 +3167,20 @@ impl Session {
         let stroke = stroke.map(|s| stroke_as_path(&bottom_shape, &s));
         // Said again in curves where the outline bends: combined, an
         // ellipse came back as fifty-six straight steps, faceted close to
-        // and fifty anchors to edit. Within a quarter of a unit, or a
-        // little more on a large outline — as far as the flattened curve
-        // it was worked from already lies from the true one — so the page
-        // does not move; corners stay corners and a polygon stays a
-        // polygon. Only a single outline: holes have no handles to hold
-        // curves.
+        // and fifty anchors to edit. Within a quarter of a pixel on the
+        // page, so the page does not move; corners stay corners and a
+        // polygon stays a polygon. Only a single outline: holes have no
+        // handles to hold curves.
         let (points, handles) = if subpaths.is_empty() && points.len() > 8 {
-            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
-            for p in &points {
-                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
-                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
-            }
-            let size = (hi[0] - lo[0]).max(hi[1] - lo[1]);
-            let tolerance = (size * 0.0015).max(0.25);
+            // A quarter of a pixel *on the page*: measured in the shape's
+            // own units, an ellipse drawn small and scaled up ten times
+            // came back two pixels off its outline, and a scaled star
+            // grew handles at its points.
+            let world = chitrakar_render::ancestor_space(&self.doc, ordered[0]).compose(bottom);
+            let magnified = (world.a.hypot(world.b))
+                .max(world.c.hypot(world.d))
+                .max(1e-6);
+            let tolerance = 0.25 / magnified;
             let (anchors, handles) = chitrakar_render::fit::fit_curves(&points, true, tolerance);
             if anchors.len() >= 3 && anchors.len() < points.len() {
                 (anchors, handles)
@@ -10504,21 +10531,28 @@ impl Session {
                 _ => page,
             };
         }
-        // Each layer kept as eight bits a channel, twice over (its pixels
-        // and the file's run-length copy of them), and the page drawn
-        // three times over at sixteen bytes a pixel while a layer is
-        // drawn alone. Counted as four bytes a pixel of layers and two
-        // pages, four layers of a 45-megapixel photograph passed and then
-        // stopped the engine, as did a single 140-megapixel one.
-        let need = kept * 8 + page * 48;
-        // Set under what was measured to stop the engine (six layers of
-        // 24 megapixels; four of 45), with room for the document itself.
-        const PSD_BUDGET: u64 = 2_200_000_000;
+        // Fitted to what was measured through the Export window, which
+        // holds the written file and its preview as well: three layers of
+        // a 45-megapixel photograph and seven of 24 went out, four of 45
+        // stopped the engine. Counted as eight bytes a pixel of layers and
+        // forty-eight of page, as round 43 had it, a single 40-megapixel
+        // photograph was refused that went out in seconds.
+        let need = kept * 12 + page * 24;
+        const PSD_BUDGET: u64 = 3_000_000_000;
         if need > PSD_BUDGET {
+            let what = if layers == 1 {
+                format!("a layer of {w} × {h} needs")
+            } else {
+                format!("{layers} layers over a {w} × {h} page need")
+            };
+            let way = if layers == 1 {
+                "Export a flat TIFF or PNG instead."
+            } else {
+                "Merge some layers first, or export a flat TIFF or PNG."
+            };
             return Err(EngineError::BadCommand(format!(
                 "a layered Photoshop file holds every layer's pixels at once: \
-                 {layers} layers over a {w} × {h} page need about {:.1} GB, more than the editor \
-                 can hold. Merge some layers first, or export a flat TIFF or PNG.",
+                 {what} about {:.1} GB, more than the editor can hold. {way}",
                 need as f64 / 1e9
             )));
         }
@@ -18812,6 +18846,60 @@ mod tests {
         );
         assert!(page.get(85, 85).a < 0.01, "and nothing past them");
         assert_eq!(handles.len(), points.len(), "with handles");
+    }
+
+    /// The fit is held to a quarter of a pixel on the page, not of the
+    /// shape's own units: an ellipse drawn small and scaled up came back
+    /// pixels off its outline.
+    #[test]
+    fn a_scaled_curve_combined_stays_on_its_outline() {
+        let mut s = Session::new(300, 300, ColorMode::Rgb);
+        let root = s.document().root();
+        let mut ellipse = Node::vector("e", VectorShape::Ellipse { rx: 6.0, ry: 5.0 });
+        ellipse.transform = Transform {
+            a: 20.0,
+            d: 20.0,
+            e: 140.0,
+            f: 140.0,
+            ..Default::default()
+        };
+        if let NodeKind::Vector { fill, .. } = &mut ellipse.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.4,
+                b: 0.9,
+                a: 1.0,
+            });
+        }
+        let e = s.document().peek_next_id();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(ellipse),
+        })
+        .unwrap();
+        let r = add_rect(&mut s, "r", 40.0, 30.0);
+        s.apply(Command::SetTransform {
+            id: r,
+            transform: Transform::translation(240.0, 120.0),
+        })
+        .unwrap();
+        let alpha = |s: &Session| {
+            let page = chitrakar_render::render(s.document()).unwrap();
+            (0..300u32)
+                .flat_map(|y| (0..300u32).map(move |x| (x, y)))
+                .map(|(x, y)| page.get(x, y).a)
+                .collect::<Vec<f32>>()
+        };
+        let before = alpha(&s);
+        s.boolean_nodes(&[e, r], "union").unwrap();
+        let after = alpha(&s);
+        let off = before
+            .iter()
+            .zip(&after)
+            .filter(|(a, b)| (*a - *b).abs() > 0.5)
+            .count();
+        assert!(off < 20, "{off} pixels moved across the outline");
     }
 
     #[test]
@@ -31294,6 +31382,59 @@ mod tests {
     /// pinned: the start edge is followed, the end edge is kept away
     /// from, the middle is held, and a stretched layer takes up the
     /// difference.
+    /// A live copy of a frame is exported as a frame: a picture the
+    /// frame's own, and a page of the PDF of the frames. It was drawn as a
+    /// frame and left out of both.
+    #[test]
+    fn a_live_copy_of_a_frame_exports_as_one() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        let board = session
+            .add_artboard("Artboard 1", 20.0, 20.0, 120.0, 80.0, None)
+            .unwrap();
+        session
+            .apply(Command::AddNode {
+                parent: board,
+                index: 0,
+                node: filled_rect("r", 40.0, 30.0),
+            })
+            .unwrap();
+        let copy = session.make_instance(board).unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: copy,
+                transform: Transform::translation(200.0, 150.0),
+            })
+            .unwrap();
+        let own = session.artboard_png(board, 1.0).unwrap();
+        let copied = session.artboard_png(copy, 1.0).unwrap();
+        assert_eq!(own, copied, "the copy's picture is the frame's");
+        let pdf = session.export_pdf_frames().unwrap();
+        let pages = String::from_utf8_lossy(&pdf)
+            .matches("/Type /Page ")
+            .count();
+        assert_eq!(pages, 2, "a page for the frame and one for its copy");
+        // And the copy's page holds the frame, not nothing: read back, it
+        // draws as the frame's does.
+        let first = chitrakar_pdf_in::render_pdf_page(&pdf, 0, 72.0).unwrap();
+        let second = chitrakar_pdf_in::render_pdf_page(&pdf, 1, 72.0).unwrap();
+        assert_eq!((second.width, second.height), (first.width, first.height));
+        let differs = first
+            .rgba8
+            .iter()
+            .zip(&second.rgba8)
+            .filter(|(a, b)| a.abs_diff(**b) > 8)
+            .count();
+        assert!(
+            differs < 40,
+            "the copy's page draws the frame ({differs} values apart)"
+        );
+        // Not two blank pages agreeing: the rectangle is on them.
+        assert!(first
+            .rgba8
+            .chunks(4)
+            .any(|p| p[0] < 128 || p[1] < 128 || p[2] < 128));
+    }
+
     #[test]
     fn what_a_frame_holds_moves_by_how_it_is_pinned() {
         use chitrakar_doc::{Pin, Pinning};

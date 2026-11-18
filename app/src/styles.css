@@ -990,7 +990,15 @@ body {
   overflow-y: auto;
 }
 
+/* The heading stays at the top of the box it heads: it scrolled away
+   with the steps, and a long history read as a list with no name that
+   started mid-entry. */
 .history h2 {
+  position: sticky;
+  top: -0.4rem;
+  z-index: 1;
+  background: var(--panel);
+  padding: 0.2rem 0;
   margin: 0 0 0.3rem;
   font-size: 0.8rem;
   text-transform: uppercase;
@@ -1863,6 +1871,14 @@ body {
   height: 100%;
   pointer-events: none;
   overflow: visible;
+}
+
+/* A brush paints wherever it is pressed: the handles drawn over the page
+   let its press through to the page under them. Refused by the handle
+   instead, a heal begun on a graduated mask's line or knob did nothing at
+   all, and the strip under it could not be healed. */
+.canvas-host.brushing :is([class*="handle"], .anchor, .warp-pin, .mask-move, .grad-mask-hit) {
+  pointer-events: none;
 }
 
 /* The line between a gradient mask's ends: wide enough to take hold of,
@@ -3234,9 +3250,12 @@ button.fold:hover {
 
 /* Where a layer inside a frame holds on: one picker per axis, side by
    side like the geometry fields above them. */
+/* Columns that may be narrower than their longest option: a 1fr column
+   is as wide as its select's longest name at least, and "Pinned down"
+   ran 8px past the panel under a scrollbar that takes room. */
 .pinning {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 6px;
 }
 .pinning label {
@@ -3245,6 +3264,11 @@ button.fold:hover {
   gap: 2px;
   font-size: 0.75rem;
   color: var(--muted);
+  min-width: 0;
+}
+.pinning select {
+  width: 100%;
+  min-width: 0;
 }
 
 /* The tones the graph is drawn over: filled shapes, faint enough that

@@ -1746,6 +1746,27 @@ const cropRatioOf = (name: string, page: [number, number]): number | null => {
   return r === 0 ? page[0] / Math.max(1, page[1]) : r;
 };
 
+/** The ratio a name asks for as whole terms, width to height, reduced:
+ * "16:9" is 16 and 9, "Original" the page's own sides over their common
+ * divisor. Nothing for a free crop. */
+const cropTermsOf = (name: string, page: [number, number]): [number, number] | null => {
+  const r = CROP_RATIOS[name];
+  if (r === null || r === undefined) return null;
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const [p, q] =
+    r === 0 ? [Math.max(1, page[0]), Math.max(1, page[1])] : name.split(":").map(Number);
+  const g = gcd(p, q) || 1;
+  return [p / g, q / g];
+};
+
+/** SVG markup pasted as words, as a file to place; nothing for any
+ * other words. */
+const svgFile = (words: string): File | null => {
+  const text = words.trim();
+  if (!/^(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*(<!DOCTYPE[^>]*>\s*)?<svg[\s>]/i.test(text)) return null;
+  return new File([text], "image.svg", { type: "image/svg+xml" });
+};
+
 /** The six bands of colour a picture is spoken to in, in the order a
  * colour wheel is read, each drawn in something like its own colour. */
 const COLOUR_BANDS: [string, string][] = [
@@ -2939,6 +2960,9 @@ export function App() {
   /** Which draft is being kept: one begun later makes an earlier one
    * stop rather than write an older skeleton over it. */
   const draftRun = useRef(0);
+  /** When the oldest change not yet in the draft was made: the draft waits
+   * a breath after each change, and at most ten seconds after this. */
+  const draftWaiting = useRef<number | null>(null);
   /** This tab's draft slot, once it holds one: nothing is written before. */
   const slotReady = useRef<Promise<number> | null>(null);
   /** Slots whose drafts were offered and answered this visit. */
@@ -3005,7 +3029,15 @@ export function App() {
       if (session.history_mark() === 0) return;
       untouchedStart.current = false;
     }
+    // A breath after the last change, but never more than ten seconds
+    // after the first one not yet kept: twenty nudges a second apart
+    // each put the draft off again, and a reload after twenty seconds of
+    // work brought none of it back.
+    const now = Date.now();
+    draftWaiting.current ??= now;
+    const wait = Math.max(0, Math.min(1500, draftWaiting.current + 10_000 - now));
     const t = setTimeout(() => {
+      draftWaiting.current = null;
       const mine = ++draftRun.current;
       (slotReady.current ?? Promise.resolve(0))
         .then(async () => {
@@ -3030,7 +3062,7 @@ export function App() {
         .catch(() => {
           // A draft that cannot be written is not worth an alert.
         });
-    }, 1500);
+    }, wait);
     return () => clearTimeout(t);
     // `unsaved` is declared further down, with the history it reads;
     // `savedAt` is what moves it when nothing else here does.
@@ -6670,11 +6702,23 @@ export function App() {
     // A ratio asked for is kept in whole pixels: each edge rounded on its
     // own, a square came out 446 by 445. The height follows the width,
     // or the width the height where the page has no more room down.
+    // Held exactly, where whole pixels can hold it: sides a whole number
+    // of times the ratio's own terms (16:9 as 320 by 180), so a 16:9 crop
+    // is 16:9 and not 324 by 182. Where the terms are too large for the
+    // frame (a page's own odd ratio), the nearest whole pixels.
     const ratio = cropRatioOf(cropRatio, docSize);
+    const terms = cropTermsOf(cropRatio, docSize);
     if (ratio !== null && cw >= 1 && ch >= 1) {
-      const down = Math.max(1, Math.round(cw / ratio));
-      if (cy + down <= dh) ch = down;
-      else cw = Math.max(1, Math.min(dw - cx, Math.round(ch * ratio)));
+      const room = terms ? Math.floor(Math.min((dw - cx) / terms[0], (dh - cy) / terms[1])) : 0;
+      const times = terms ? Math.min(room, Math.max(1, Math.round(cw / terms[0]))) : 0;
+      if (terms && times >= 1) {
+        cw = times * terms[0];
+        ch = times * terms[1];
+      } else {
+        const down = Math.max(1, Math.round(cw / ratio));
+        if (cy + down <= dh) ch = down;
+        else cw = Math.max(1, Math.min(dw - cx, Math.round(ch * ratio)));
+      }
     }
     setCropFrame(null);
     if (cw < 1 || ch < 1) return;
@@ -8296,12 +8340,14 @@ export function App() {
     }
     // Dodge and burn are a layer and a brush: an exposure layer whose
     // mask shows nothing yet, picked, with the brush in hand to paint
-    // the light (or the shade) in where it goes. Over everything below,
-    // which is where a photograph is dodged.
+    // the light (or the shade) in where it goes. Just above the picked
+    // layer, as every other adjustment goes: on top of the page it
+    // darkened the text over the photograph as well.
     if (key === "dodge" || key === "burn") {
       if (!session) return;
       try {
-        const id = session.add_dodge_burn(session.root_id, session.child_count(session.root_id), key === "dodge") as NodeId;
+        const [parent, index] = adjustmentPlace();
+        const id = session.add_dodge_burn(parent, index, key === "dodge") as NodeId;
         setSelected(id);
         setMultiSel([]);
         setTool("Paint");
@@ -8337,6 +8383,42 @@ export function App() {
 
   /** Put an adjustment on the page: over everything below, holding the
    * region picked out if there is one, or only on the picked layer. */
+  /** Where a layer goes "just above" `picked` in its parent: past the
+   * layers clipped to it (or clipped with it to the same base), not
+   * between a clipping base and what it clips. An adjustment put there
+   * became the base, and a layer clipped to a photograph showed over the
+   * whole page. */
+  const overClipped = (picked: LayerInfo): number => {
+    const above = layers
+      .filter((l) => l.parent === picked.parent && l.index > picked.index)
+      .sort((a, b) => a.index - b.index);
+    let at = picked.index + 1;
+    for (const l of above) {
+      if (l.index !== at || !l.clipped) break;
+      at += 1;
+    }
+    return at;
+  };
+
+  /** The parent and slot an adjustment goes in: just above the picked
+   * layer, in its group or frame, past what is clipped to it; nothing
+   * picked, or a copy's own layer picked, on top of the page — the
+   * page's own count, not the rows at the top of the panel, for a live
+   * copy's own layers are listed there too, and an adjustment asked for
+   * with one picked was put past the page's end. */
+  const adjustmentPlace = (): [number, number] => {
+    if (!session) return [0, 0];
+    const picked = selected === null ? undefined : layers.find((l) => l.id === selected);
+    const holder = picked ? layers.find((l) => l.id === picked.parent) : undefined;
+    if (
+      picked !== undefined &&
+      (picked.parent === session.root_id || holder?.kind === "group" || holder?.kind === "artboard")
+    ) {
+      return [picked.parent, overClipped(picked)];
+    }
+    return [session.root_id, session.child_count(session.root_id)];
+  };
+
   const putAdjustment = (only: boolean, name: string, kind: NodeKind) => {
     const preset = { name, kind };
     if (!session) return;
@@ -8368,18 +8450,9 @@ export function App() {
     // whole page it greyed the text and shapes above a photograph too.
     // In a group or a frame it goes in beside it; nothing picked, or a
     // copy's own layer picked, it goes on top of the page.
-    const picked = selected === null ? undefined : layers.find((l) => l.id === selected);
-    const holder = picked ? layers.find((l) => l.id === picked.parent) : undefined;
-    const beside =
-      picked !== undefined &&
-      (picked.parent === session.root_id || holder?.kind === "group" || holder?.kind === "artboard");
     try {
       const id = session.add_over_selection(
-        beside ? picked.parent : session.root_id,
-        // The page's own count, not the rows at the top of the panel: a
-        // live copy's own layers are listed there too, and an adjustment
-        // asked for with one picked was put past the page's end.
-        beside ? picked.index + 1 : session.child_count(session.root_id),
+        ...adjustmentPlace(),
         JSON.stringify(nodePayload(preset.name, preset.kind)),
       ) as number;
       setSelected(id as NodeId);
@@ -9158,6 +9231,14 @@ export function App() {
             placeImageFile(new File([blob], `image.${kind.slice(6).replace("+xml", "")}`, { type: kind }));
             return;
           }
+          // SVG markup as plain text, as Ctrl+V takes it.
+          if (item.types.includes("text/plain")) {
+            const svg = svgFile(await (await item.getType("text/plain")).text());
+            if (svg) {
+              placeImageFile(svg);
+              return;
+            }
+          }
         }
         pasteClipboard();
       })
@@ -9295,7 +9376,7 @@ export function App() {
         e.preventDefault();
         // With a modifier held it is somebody else's chord — Alt+Backspace
         // is Photoshop's fill — and it deleted the picked layer whole.
-        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
         // With a path half drawn, the key takes back its last anchor —
         // what it does in every pen tool — and never the picked layer.
         if (tool === "Pen" && penPoints.length > 0) {
@@ -11217,7 +11298,10 @@ export function App() {
     if (!box || !row) return;
     const top = row.offsetTop - box.offsetTop;
     const bottom = top + row.offsetHeight;
-    if (top < box.scrollTop) box.scrollTop = top;
+    // The heading stays over the top of the box (sticky), so a step
+    // scrolled up to stops below it rather than under it.
+    const head = box.querySelector("h2")?.getBoundingClientRect().height ?? 0;
+    if (top - head < box.scrollTop) box.scrollTop = Math.max(0, top - head);
     else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
   }, [history.past.length, history.future.length]);
 
@@ -11600,16 +11684,31 @@ export function App() {
   const frameScale = (id: NodeId): number => {
     if (!session) return 1;
     try {
-      const kind = JSON.parse(session.kind_json(id)) as NodeKind;
-      if (kind && typeof kind === "object" && "Artboard" in kind) {
-        const at = kind.Artboard.export_scale;
-        return Number.isFinite(at) && at > 0 ? at : 1;
+      // A live copy of a frame comes out at the frame's own multiple, as
+      // it draws the frame's own contents.
+      let at: NodeId = id;
+      for (let hop = 0; hop < 16; hop++) {
+        const kind = JSON.parse(session.kind_json(at)) as NodeKind;
+        if (kind && typeof kind === "object" && "Instance" in kind) {
+          at = kind.Instance.of as NodeId;
+          continue;
+        }
+        if (kind && typeof kind === "object" && "Artboard" in kind) {
+          const scale = kind.Artboard.export_scale;
+          return Number.isFinite(scale) && scale > 0 ? scale : 1;
+        }
+        break;
       }
     } catch {
       /* a frame that has gone exports at its own size */
     }
     return 1;
   };
+  /** A frame, or a live copy of one: drawn as a frame, so exported as
+   * one. A copy made with Duplicate linked was left out of "Each frame as
+   * a picture" and the PDF of the frames. */
+  const exportsAsFrame = (l: { id: number; kind: string }) =>
+    l.kind === "artboard" || (l.kind === "instance" && !!session?.is_frame(l.id));
   const frameFile = (name: string, at: number) =>
     `${exportName()} - ${name}${at !== 1 ? `@${at}x` : ""}.png`;
 
@@ -11624,7 +11723,7 @@ export function App() {
   const exportArtboard = () => {
     if (!session || selected === null) return;
     const board = layers.find((l) => l.id === selected);
-    if (!board || board.kind !== "artboard") return;
+    if (!board || !exportsAsFrame(board)) return;
     const at = frameScale(board.id as NodeId);
     saveAs("PNG export", frameFile(board.name, at), "image/png", () =>
       session.export_artboard_png(board.id, at),
@@ -11633,7 +11732,7 @@ export function App() {
 
   const exportArtboards = () => {
     if (!session) return;
-    const boards = layers.filter((l) => l.kind === "artboard");
+    const boards = layers.filter(exportsAsFrame);
     if (boards.length === 0) return;
     // One frame that will not come out stops the set: a page of
     // half-written files is worse than a page that says why.
@@ -12779,9 +12878,13 @@ export function App() {
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
       if (isTextEntry(e.target)) return;
-      const image = Array.from(e.clipboardData?.files ?? []).find((f) =>
-        f.type.startsWith("image/"),
-      );
+      // An SVG comes as words, not a file: as image/svg+xml, or as the
+      // plain text a drawing program's "Copy as SVG" puts there. Edit ›
+      // Paste placed it and Ctrl+V did nothing.
+      const words = e.clipboardData?.getData("image/svg+xml") || e.clipboardData?.getData("text/plain") || "";
+      const image =
+        Array.from(e.clipboardData?.files ?? []).find((f) => f.type.startsWith("image/")) ??
+        svgFile(words);
       if (!image) return;
       pasteSeen.current = true;
       e.preventDefault();
@@ -13088,10 +13191,10 @@ export function App() {
         // row on the menu, named with the word the panel and the tool
         // use for them — a frame — rather than three that said
         // "artboard" and "frame" for the same thing.
-        ...(layers.some((l) => l.kind === "artboard")
+        ...(layers.some(exportsAsFrame)
           ? [
               sub("export-frames", "frame", "Export frames", [
-                ...(selectedLayer?.kind === "artboard"
+                ...(selectedLayer && exportsAsFrame(selectedLayer)
                   ? [item("export-artboard", "frame", "This frame", exportArtboard)]
                   : []),
                 item("export-artboards", "frame", "Each frame as a picture", exportArtboards),
@@ -15215,7 +15318,7 @@ export function App() {
           )}
         </nav>
         <main
-          className={`canvas-host${
+          className={`canvas-host${BRUSH_TOOLS.has(tool) ? " brushing" : ""}${
             painting || cloning
               ? " painting"
               : tool === "Hand"

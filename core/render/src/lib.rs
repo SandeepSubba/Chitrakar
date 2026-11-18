@@ -2049,6 +2049,23 @@ pub fn stood_up(doc: &Document, copy: NodeId) -> Option<(Document, Vec<(NodeId, 
     Some((out, map))
 }
 
+/// The size of the frame a layer is, in its own units: a frame's own,
+/// or, for a live copy of a frame (a copy of a copy, a bounded way), the
+/// frame it copies — which it draws whole, background and all, in its own
+/// place. A copy of a frame was drawn as one and never exported as one:
+/// "Each frame as a picture" and the PDF of the frames left it out.
+pub fn frame_size(doc: &Document, id: NodeId) -> Option<(f32, f32)> {
+    let mut at = id;
+    for _ in 0..chitrakar_doc::MAX_DEPTH {
+        match &doc.node(at).ok()?.kind {
+            NodeKind::Artboard { width, height, .. } => return Some((*width, *height)),
+            NodeKind::Instance { of, .. } => at = *of,
+            _ => return None,
+        }
+    }
+    None
+}
+
 pub fn copies_a_clone(doc: &Document, id: NodeId) -> bool {
     let mut at = id;
     for _ in 0..chitrakar_doc::MAX_DEPTH {
@@ -10700,7 +10717,15 @@ fn radially_smeared(
     if w <= 0 || h <= 0 || reach <= 0.0 {
         return part(original);
     }
-    let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+    // Held to a thousand pages out: a centre a file put at 1e20 sent
+    // the sampling past every number and stopped the engine.
+    let at = |v: f32| {
+        if v.is_finite() {
+            v.clamp(-1000.0, 1000.0)
+        } else {
+            0.5
+        }
+    };
     let (cx, cy) = (at(center[0]) * page.0, at(center[1]) * page.1);
     let scale = max_scale(view);
     let sample = |fx: f32, fy: f32| {
@@ -10831,7 +10856,15 @@ fn radially_smeared_by_pixel(
     if w <= 0 || h <= 0 || reach <= 0.0 {
         return original.to_vec();
     }
-    let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+    // Held to a thousand pages out: a centre a file put at 1e20 sent
+    // the sampling past every number and stopped the engine.
+    let at = |v: f32| {
+        if v.is_finite() {
+            v.clamp(-1000.0, 1000.0)
+        } else {
+            0.5
+        }
+    };
     let (cx, cy) = (at(center[0]) * page.0, at(center[1]) * page.1);
     let scale = max_scale(view);
     let sample = |fx: f32, fy: f32| {
@@ -11409,7 +11442,15 @@ pub const WARP_REACH: f32 = 30_000.0;
 /// page cropped small keeps its twirl by a larger share of itself
 /// (`Filter::carried_on_page`); a hold of 4 cut it short.
 pub fn warp_circle(radius: f32, center: [f32; 2], page: (f32, f32)) -> ([f32; 2], f32) {
-    let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+    // Held to a thousand pages out: a centre a file put at 1e20 sent
+    // the sampling past every number and stopped the engine.
+    let at = |v: f32| {
+        if v.is_finite() {
+            v.clamp(-1000.0, 1000.0)
+        } else {
+            0.5
+        }
+    };
     let share = if radius.is_finite() {
         radius.clamp(0.0, WARP_REACH)
     } else {
@@ -12897,9 +12938,10 @@ pub fn artboard_pixels(
     scale: f32,
 ) -> Result<Option<Surface>, DocError> {
     let node = doc.node(id)?;
-    let NodeKind::Artboard { width, height, .. } = &node.kind else {
+    let Some((width, height)) = frame_size(doc, id) else {
         return Ok(None);
     };
+    let (width, height) = (&width, &height);
     let world = ancestor_space(doc, id).compose(node.transform);
     // How much the page enlarges the frame, on each of its own axes.
     let (sx, sy) = (

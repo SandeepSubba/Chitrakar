@@ -511,6 +511,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Whether a layer exports as a frame: a frame, or a live copy of
+    /// one (`chitrakar_render::frame_size`).
+    pub fn is_frame(&self, id: f64) -> bool {
+        chitrakar_render::frame_size(self.inner.document(), NodeId(id as u64)).is_some()
+    }
+
     /// A frame's contents as a PNG, at the size it shows on the page
     /// times `scale`.
     pub fn export_artboard_png(&self, id: f64, scale: f32) -> Result<Vec<u8>, JsError> {

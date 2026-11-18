@@ -21673,6 +21673,98 @@ assert(
   );
 }
 
+// 9du. The forty-fourth audit. A live copy of a frame was drawn as a
+// frame and never exported as one; an adjustment put above a clipping
+// base went between it and what it clips, and unclipped them; Shift+
+// Delete deleted the picked layer; the History heading scrolled away
+// with its steps.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [s.x + (x / 400) * s.width, s.y + (y / 300) * s.height];
+  const drag = async (tool, x0, y0, x1, y1) => {
+    await pickTool(tool);
+    await page.mouse.move(...at(x0, y0));
+    await page.mouse.down();
+    await page.mouse.move(...at(x1, y1), { steps: 4 });
+    await page.mouse.up();
+    await page.waitForTimeout(150);
+  };
+  const rows = page.locator(".panel ul.layer-list li[data-id]");
+  const names = () => rows.locator(".layer-name").allTextContents();
+
+  // A frame and a live copy of it: the copy picked is "This frame".
+  await drag("Frame", 30, 30, 150, 120);
+  await drag("Rect", 50, 50, 100, 100);
+  await rows.filter({ hasText: "Frame" }).first().click();
+  await page.waitForTimeout(150);
+  await page.click('button[aria-label="Duplicate linked"]');
+  await page.waitForTimeout(300);
+  const picked = await page.locator(".panel ul.layer-list li.selected .layer-name").first().textContent();
+  const [copyPng] = await Promise.all([
+    page.waitForEvent("download"),
+    (await menuItem("File", "This frame")).click(),
+  ]);
+  {
+    const bytes = await readFile(await copyPng.path());
+    assert(
+      bytes.readUInt32BE(16) > 50 && copyPng.suggestedFilename().includes("copy"),
+      `a live copy of a frame exports as a frame (${picked}: ${copyPng.suggestedFilename()}, ${bytes.readUInt32BE(16)} wide)`,
+    );
+  }
+  await page.waitForTimeout(200);
+
+  // An adjustment over a clipping base goes past what it clips.
+  await newDocument(400, 300, "rgb");
+  await drag("Rect", 40, 40, 200, 200);
+  await drag("Ellipse", 120, 80, 300, 260);
+  await page.click('button[aria-label="Clip to layer below"]');
+  await page.waitForTimeout(200);
+  await rows.filter({ hasText: "Rect" }).first().click();
+  await page.waitForTimeout(150);
+  await menuClick("Adjust", "Exposure");
+  await page.waitForTimeout(300);
+  const order = await names();
+  assert(
+    order.indexOf("Exposure") < order.findIndex((n) => /Ellipse/.test(n)),
+    `an adjustment over a clipping base goes above what it clips (${order})`,
+  );
+  const clipped = await rows
+    .filter({ hasText: "Ellipse" })
+    .first()
+    .locator('[aria-label="Clipped to the layer below"]')
+    .count();
+  assert(clipped === 1, "and the layer stays clipped");
+
+  // Shift+Delete is not Delete.
+  await rows.filter({ hasText: "Rect" }).first().click();
+  await page.waitForTimeout(150);
+  const count = await rows.count();
+  await page.locator("#engine-canvas").hover();
+  await page.keyboard.press("Shift+Delete");
+  await page.waitForTimeout(250);
+  assert((await rows.count()) === count, `Shift+Delete deletes nothing (${await names()})`);
+
+  // The History heading stays over its steps.
+  for (let i = 0; i < 16; i++) {
+    await page.keyboard.press("ArrowRight");
+  }
+  await page.waitForTimeout(300);
+  const heading = await page.evaluate(() => {
+    const box = document.querySelector(".history");
+    const h = box?.querySelector("h2");
+    if (!box || !h) return null;
+    box.scrollTop = box.scrollHeight;
+    const a = box.getBoundingClientRect();
+    const b = h.getBoundingClientRect();
+    return { scrolled: box.scrollTop, top: b.top - a.top, inside: b.bottom <= a.bottom };
+  });
+  assert(
+    heading && heading.scrolled > 0 && heading.top < 4 && heading.inside,
+    `the History heading stays in sight as its steps scroll (${JSON.stringify(heading)})`,
+  );
+}
+
 // 9dt. The forty-third audit's interface pass. Delete with a region
 // picked out deleted the whole picked layer; the arrows on a layer's row
 // moved the layer on the page; an adjustment from the menu went on top
@@ -21777,7 +21869,7 @@ assert(
   assert(
     (await box.evaluate((t) => t.selectionStart === t.selectionEnd)) &&
       (await bold.getAttribute("aria-pressed")) !== "true",
-    `a press on the page lets the word picked in the box go (${await bold.getAttribute("aria-pressed")})`,
+    `a press on the page lets the word picked in the box go (${await bold.getAttribute("aria-pressed")}, ${await box.evaluate((t) => `${t.selectionStart}-${t.selectionEnd} of ${t.value.length}, focus ${document.activeElement?.tagName}`)}, ${await p.locator(".panel ul li.selected .layer-name").allTextContents()})`,
   );
 
   // A guide drawn out of the ruler and let go of after Escape is none.

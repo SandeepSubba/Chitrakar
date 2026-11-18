@@ -139,7 +139,10 @@ without reading anything else.*
      with a region picked deleting the photograph, arrows on a row moving
      the layer, adjustments over the whole page, combined curves in
      straight steps, a mask's numbers carried to infinity, a brush
-     stroke caught by a mask's handles.
+     stroke caught by a mask's handles. The forty-fourth: a live copy
+     of a frame never exported, a PDF of an ordinary photograph stopping
+     the engine, a stroke cutting off its own layer's shadow, files of
+     copies that held the page for minutes.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12897,6 +12900,100 @@ without reading anything else.*
   "What is picked" exports what is on the page of a layer partly off
   it; Heal draws its conic falloff at 1x; pasting a lone copy into a
   frame places it on the page.
+  **A forty-fourth audit (November 2026).** Its check of round 43
+  found four of its fixes short and two that made things worse: a brush
+  begun on a mask's handle painted nothing, the handle refusing the
+  press and the canvas never hearing it (the handles let a brush's press
+  through to the page); the layered PSD's memory budget, a guess,
+  refused a single 40-megapixel photograph that went out in seconds
+  (measured through the Export window: three layers of 45 megapixels
+  and seven of 24 go out, four of 45 stop the engine, so the count is
+  twelve bytes a pixel of layers and twenty-four of page under three
+  gigabytes; one layer is not told to merge layers); an adjustment put
+  above a clipping base went between it and what it clips and unclipped
+  them (it goes past them), and Dodge and Burn still went on top of the
+  page (beside the picked layer, as the rest); a file opened just under
+  the last layer number saved one it refused to open (one limit,
+  2^53 less a million, for opening and for numbering, and a document
+  that reaches it is refused another layer in words); a combined curve
+  was fitted in the shape's own units, two to twelve pixels off for a
+  shape drawn small and scaled up (a quarter of a pixel on the page);
+  `rebeccapurple` was replaced wherever it was written, a class name and
+  the word in text among them (only as a colour's value); a mask past
+  reason still came in through AddNode, a paste and a file, and Resize
+  page carried one at 6e8 past what undo could put back (refused on
+  AddNode, let go of on open, and a page operation that would carry one
+  past is refused); Shift+Delete still deleted the picked layer; a crop
+  held to 16:9 was 324 by 182 (sides a whole number of the ratio's
+  terms, 320 by 180).
+  Its interface pass, a designer, a photographer and someone new to
+  editing: a live copy of a frame was drawn as a frame and left out of
+  "Each frame as a picture", "This frame" and the PDF of the frames (a
+  frame, or a copy of one, exports as one; its PDF page puts the rest
+  aside rather than hiding it, since a copy of a hidden frame draws
+  nothing); the Pinned down drop-down ran past the panel under a
+  scrollbar that takes room; the History heading scrolled away with its
+  steps (it stays at the top of its box).
+  Its files pass: a PDF of a 12-megapixel photograph at 72 dpi with an
+  adjustment over it stopped the engine, drawn four times over (held to
+  48 megapixels a picture); a 3 KB file of groups each holding two
+  copies of the one before took minutes a frame, and a chain of copies
+  each in a group went past the stack (a file whose drawing would take
+  more than 200,000 layers, or go past 256 deep following copies, is
+  refused in words); a radial blur's centre at 1e20 stopped the engine
+  (held to a thousand pages out); a number past single precision opened
+  as infinity and saved a file that would not open (refused in words);
+  an inside border round a rounded corner tighter than half the border
+  went to SVG with square corners outside the shape (cut to it); Ctrl+V
+  did nothing with SVG on the clipboard that Edit › Paste placed (both
+  take image/svg+xml and SVG markup as text); a draft waited for a
+  breath with no edit and none came while edits kept coming (at most
+  ten seconds behind).
+  Its editing pass: a brush stroke on a layer wearing a shadow, an
+  outline or a blur, or in a group or frame wearing one, repainted the
+  stroke's own box and cut its effect off along it (grown by the
+  effects' reach); a clone stroke given a new source repainted only its
+  tail; a transform given to the page itself was kept, drawn by nothing
+  but read by the dirty tracking and the brushes (refused, and let go
+  of on open); a mask stroke three billion wide stopped the engine on
+  an undo (a stroke's numbers are held to a billion, and its widths to
+  nought or more).
+  Limits written down: text with typographic punctuation or accents
+  still takes a second or two a keystroke on 9,000 letters (Latin
+  without them a tenth); usvg reads 40,000 style rules in about ten
+  seconds; on a slow machine a letter typed within 30 ms of placing a
+  text box goes to the tool keys; frames show no outline or name unless
+  picked; text Size is the height from ascent to descent, about 14%
+  smaller than the same number in points elsewhere, and its slider stops
+  at 200; Set and the frames' export give one multiple a frame, Set over
+  several picked frames one picture round them, and SVG goes out a page
+  at a time; Shift-click in the layers toggles a row rather than
+  picking a range; a double-click renames only on the name; layer
+  numbers count across kinds; the rail's Fill colour is the colour new
+  shapes take and leaves the picked one alone, and is spelled "colour"
+  where the panel's fields say "color"; Open and Place take one file
+  (a drop takes many); the crop ratio is a narrow drop-down at the foot
+  of the rail; History says "Develop" without the photograph; the batch
+  window writes JPEG with the plain development or a kept preset; at
+  1280 by 720 the rail scrolls with nothing to say so; the keys sheet
+  names no gestures; New document asks about unsaved work before its
+  window opens; Discard leaves the draft's pictures until a tab's next
+  edit; a PSD of thousands of layers takes time that grows with their
+  square; text in a very narrow box slows with its length; an opened
+  JPEG's Save as starts nowhere in particular and does not join Open
+  recent; an SVG's inside border on an ellipse is a smaller ellipse, a
+  dashed one starts its dashes elsewhere, and painted layers go out at
+  the document's resolution; a path of thousands of anchors on one
+  point (a hand-made file) can stop the engine; copies of copies built
+  by hand can still be made to double, which a file is refused for; a
+  clone or heal layer grouped alone reads only what is in its group, as
+  an adjustment does, where an upright frame reads the page; a brush on
+  a layer stretched one way paints an ellipse; the ellipse under a
+  filter differs at whole zooms too (up to 68 levels at 400% under a
+  twirl), and a Posterize above a panned ellipse makes its edge's level
+  of difference larger; a stroke on a hidden layer is kept without a
+  word; Halftone flips dots under the 1e-5 drift of an undone mirror;
+  a live copy of a frame is not a frame to paint into.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

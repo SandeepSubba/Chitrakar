@@ -83,15 +83,21 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
-/// The highest a layer's number may be. The page names layers by number
-/// and its numbers are exact only to 2^53; this is half that, so a
-/// document opened at the edge has room for every layer anybody adds.
-pub const LAST_SAFE_ID: u64 = 1 << 52;
+/// The highest a layer's number may be, opened or given. The page names
+/// layers by number and its numbers are exact only to 2^53; this is a
+/// million short of that. One limit for both: at half of 2^53 for files
+/// and nothing for new layers, a file opened just under it took two
+/// layers and saved one it then refused to open. Here a document that
+/// has numbered this many layers is refused another, in words, and every
+/// file it can save it can open.
+pub const LAST_SAFE_ID: u64 = (1 << 53) - (1 << 20);
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum DocError {
     #[error("unknown node id {0:?}")]
     UnknownNode(NodeId),
+    #[error("this document has numbered as many layers as the editor can count; save it, and copy its layers into a new one")]
+    OutOfNumbers,
     #[error("node {0:?} is not a group")]
     NotAGroup(NodeId),
     #[error("a layer that holds others and one that does not are not the same kind of layer: {0:?} cannot become the other")]
@@ -128,6 +134,10 @@ pub enum DocError {
     TooDeep { limit: usize },
     #[error("a layer cannot be placed that far out, or that large")]
     PlacedPastReason,
+    #[error("the page itself cannot be moved, turned or scaled; its layers can")]
+    PageHasNoPlace,
+    #[error("that file's live copies draw more layers than the editor can draw at once")]
+    TooMuchToDraw,
 }
 
 /// How large a page may be. The renderer's surface is sixteen bytes a
@@ -151,6 +161,22 @@ pub const MAX_CANVAS_SIDE: u32 = 30_000;
 /// stops at ten — and it makes every one of those walks provably bounded,
 /// which is worth more than a depth nobody will use.
 pub const MAX_DEPTH: usize = 256;
+
+/// The most layers drawing a document may take, a live copy counted as
+/// everything it copies: far past a page of copies of a detailed
+/// drawing, and short of what a few kilobytes of copies of copies made
+/// to double at every level would ask for.
+pub const MAX_DRAWN: u64 = 200_000;
+
+/// Whether a brush stroke's points and widths are numbers a page can
+/// carry: a mask stroke three billion wide was taken, and undoing a resize
+/// of the page after it stopped the engine.
+fn stroke_within_reason(stroke: &PaintStroke) -> bool {
+    let fine = |v: f32| v.is_finite() && v.abs() <= 1e9;
+    stroke.points.iter().flatten().all(|&v| fine(v))
+        && stroke.radii.iter().all(|&r| fine(r) && r >= 0.0)
+        && stroke.source.iter().all(|&v| fine(v))
+}
 
 /// Whether a page of this size is one the engine could draw.
 pub fn canvas_fits(width: u32, height: u32) -> bool {
@@ -867,7 +893,22 @@ impl Document {
     /// carried them to infinity and the file would not open again.
     pub fn hold_places_in_reason(&mut self) -> usize {
         let mut held = 0;
+        // The page has no place of its own (`PageHasNoPlace`): one a file
+        // gives it is let go of.
+        if let Some(root) = self.nodes.get_mut(&self.root) {
+            if root.transform != Transform::default() {
+                root.transform = Transform::default();
+                held += 1;
+            }
+        }
         for node in self.nodes.values_mut() {
+            // A mask whose points or softness are past reason is let go
+            // of: there is no nearer mask it could have meant, and kept,
+            // the next change of the page carried it to infinity too.
+            if node.mask.as_ref().is_some_and(|m| !m.within_reason()) {
+                node.mask = None;
+                held += 1;
+            }
             if node.transform.within_reason() {
                 continue;
             }
@@ -1004,6 +1045,15 @@ impl Document {
         for id in top {
             if let Some(node) = self.nodes.get(id) {
                 if !m.compose(node.transform).within_reason() {
+                    return Err(DocError::PlacedPastReason);
+                }
+                // A mask on the page goes with it, and one carried past
+                // reason could not be put back by undo afterwards.
+                if node
+                    .mask
+                    .as_ref()
+                    .is_some_and(|mask| !mask.carried_through(m).within_reason())
+                {
                     return Err(DocError::PlacedPastReason);
                 }
             }
@@ -1312,7 +1362,9 @@ impl Document {
                 // As for SetTransform: a layer arriving placed by infinity
                 // (Repeat at ten thousand percent twenty times) saved as
                 // null and the file would not open again.
-                if !node.transform.within_reason() {
+                if !node.transform.within_reason()
+                    || node.mask.as_ref().is_some_and(|m| !m.within_reason())
+                {
                     return Err(DocError::PlacedPastReason);
                 }
                 let siblings = &self.children[&parent];
@@ -1322,6 +1374,9 @@ impl Document {
                         index,
                         len: siblings.len(),
                     });
+                }
+                if self.next_id >= LAST_SAFE_ID {
+                    return Err(DocError::OutOfNumbers);
                 }
                 let id = NodeId(self.next_id);
                 self.next_id += 1;
@@ -1423,6 +1478,13 @@ impl Document {
                 if !transform.within_reason() {
                     return Err(DocError::PlacedPastReason);
                 }
+                // The page is where everything is placed, not something
+                // placed: the renderer draws it unmoved, while the dirty
+                // tracking and the brushes read a transform given to it,
+                // and the canvas and the strokes went somewhere else.
+                if id == self.root && transform != Transform::default() {
+                    return Err(DocError::PageHasNoPlace);
+                }
                 let node = self.nodes.get_mut(&id).ok_or(DocError::UnknownNode(id))?;
                 let prev = node.transform;
                 node.transform = transform;
@@ -1472,6 +1534,9 @@ impl Document {
                 stroke,
                 on_mask,
             } => {
+                if !stroke_within_reason(&stroke) {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let strokes = self.strokes_mut(id, on_mask)?;
                 if index > strokes.len() {
                     let len = strokes.len();
@@ -1500,6 +1565,9 @@ impl Document {
                 stroke,
                 on_mask,
             } => {
+                if !stroke_within_reason(&stroke) {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let strokes = self.strokes_mut(id, on_mask)?;
                 if index >= strokes.len() {
                     let len = strokes.len();
@@ -1968,7 +2036,49 @@ impl Document {
         if self.instance_cycle() {
             return Err(DocError::InstanceCycle);
         }
+        // And what drawing it would take, following copies to what they
+        // copy: a 3 KB file of groups each holding two copies of the one
+        // before doubled the work at every level and held the page for
+        // minutes, and a chain of copies each wrapped in a group drew
+        // deeper than the engine's stack goes.
+        let mut known = HashMap::new();
+        match self.drawn_reach(self.root, 0, &mut known) {
+            None => return Err(DocError::TooDeep { limit: MAX_DEPTH }),
+            Some((_, draws)) if draws > MAX_DRAWN => return Err(DocError::TooMuchToDraw),
+            Some(_) => {}
+        }
         Ok(())
+    }
+
+    /// How deep drawing `id` goes and how many layers it draws, a copy
+    /// counted as what it copies. `None` past [`MAX_DEPTH`].
+    fn drawn_reach(
+        &self,
+        id: NodeId,
+        level: usize,
+        known: &mut HashMap<NodeId, (usize, u64)>,
+    ) -> Option<(usize, u64)> {
+        if let Some(&reach) = known.get(&id) {
+            return (level + reach.0 <= MAX_DEPTH + 1).then_some(reach);
+        }
+        if level > MAX_DEPTH {
+            return None;
+        }
+        let mut depth = 0;
+        let mut draws: u64 = 1;
+        let copied = match self.nodes.get(&id).map(|n| &n.kind) {
+            Some(NodeKind::Instance { of, .. }) => Some(*of),
+            _ => None,
+        };
+        let kids = self.children.get(&id).cloned().unwrap_or_default();
+        for next in copied.into_iter().chain(kids) {
+            let (d, n) = self.drawn_reach(next, level + 1, known)?;
+            depth = depth.max(d);
+            draws = draws.saturating_add(n);
+        }
+        let reach = (depth + 1, draws);
+        known.insert(id, reach);
+        Some(reach)
     }
 
     /// Move the id counter past every id in the document, if it is behind.
@@ -4426,5 +4536,140 @@ mod tests {
             assert_eq!(c.swatch_name(), Some("ink"), "each still by name");
             assert_eq!(c.flat(), &ink, "and each says what the palette says");
         }
+    }
+
+    /// Copies of copies that double at every level, and a chain of copies
+    /// each in a group, are refused as a file's structure: drawing either
+    /// held the page for minutes or went deeper than the stack.
+    #[test]
+    fn copies_that_draw_too_much_are_refused() {
+        let doubled = |levels: usize| {
+            let mut doc = Document::new(20, 20, ColorMode::Rgb);
+            let root = doc.root();
+            let mut last = doc.peek_next_id();
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("level 0")),
+            })
+            .unwrap();
+            for k in 1..levels {
+                let group = doc.peek_next_id();
+                doc.apply(Command::AddNode {
+                    parent: root,
+                    index: k,
+                    node: Box::new(Node::group(&format!("level {k}"))),
+                })
+                .unwrap();
+                for at in 0..2 {
+                    doc.apply(Command::AddNode {
+                        parent: group,
+                        index: at,
+                        node: Box::new(Node::instance("copy", last)),
+                    })
+                    .unwrap();
+                }
+                last = group;
+            }
+            doc
+        };
+        assert!(
+            doubled(10).check_structure().is_ok(),
+            "a thousand draws is fine"
+        );
+        assert!(matches!(
+            doubled(20).check_structure(),
+            Err(DocError::TooMuchToDraw)
+        ));
+
+        let mut chain = Document::new(20, 20, ColorMode::Rgb);
+        let root = chain.root();
+        let mut last = chain.peek_next_id();
+        chain
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("start")),
+            })
+            .unwrap();
+        for k in 1..200 {
+            let group = chain.peek_next_id();
+            chain
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: k,
+                    node: Box::new(Node::group("wrap")),
+                })
+                .unwrap();
+            chain
+                .apply(Command::AddNode {
+                    parent: group,
+                    index: 0,
+                    node: Box::new(Node::instance("copy", last)),
+                })
+                .unwrap();
+            last = group;
+        }
+        assert!(matches!(
+            chain.check_structure(),
+            Err(DocError::TooDeep { .. })
+        ));
+    }
+
+    /// The page has no place of its own, and a stroke's numbers are held
+    /// to what a page can carry.
+    #[test]
+    fn the_page_is_not_moved_and_strokes_stay_in_reason() {
+        let mut doc = Document::new(40, 40, ColorMode::Rgb);
+        let root = doc.root();
+        assert!(matches!(
+            doc.apply(Command::SetTransform {
+                id: root,
+                transform: Transform::translation(5.0, 0.0),
+            }),
+            Err(DocError::PageHasNoPlace)
+        ));
+        let layer = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::paint("p")),
+        })
+        .unwrap();
+        let stroke = |radius: f32| {
+            Box::new(PaintStroke {
+                points: vec![[10.0, 10.0]],
+                radii: vec![radius],
+                color: chitrakar_color::AuthoredColor::Srgb {
+                    r: 1.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+                softness: 0.0,
+                erase: false,
+                source: [0.0, 0.0],
+                heal: false,
+                clip: None,
+            })
+        };
+        for bad in [3e9, -2.0, f32::NAN] {
+            assert!(matches!(
+                doc.apply(Command::AddStroke {
+                    id: layer,
+                    index: 0,
+                    stroke: stroke(bad),
+                    on_mask: false,
+                }),
+                Err(DocError::PlacedPastReason)
+            ));
+        }
+        doc.apply(Command::AddStroke {
+            id: layer,
+            index: 0,
+            stroke: stroke(4.0),
+            on_mask: false,
+        })
+        .unwrap();
     }
 }

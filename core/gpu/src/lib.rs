@@ -7110,7 +7110,14 @@ fn filter_of(filter: &chitrakar_doc::Filter, view: Transform, page: [f32; 2]) ->
             if reach <= 0.0 {
                 return Some(Filtering::Nothing);
             }
-            let at = |v: f32| if v.is_finite() { v } else { 0.5 };
+            // Held as the CPU renderer holds it (`radially_smeared`).
+            let at = |v: f32| {
+                if v.is_finite() {
+                    v.clamp(-1000.0, 1000.0)
+                } else {
+                    0.5
+                }
+            };
             let (cx, cy) = (at(center[0]) * page[0], at(center[1]) * page[1]);
             let (sx, sy) = (
                 view.a * cx + view.c * cy + view.e,

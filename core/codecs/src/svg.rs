@@ -784,9 +784,26 @@ fn write_node(
                                     round(r)
                                 );
                                 if iw > 0.0 && ih > 0.0 {
+                                    // A corner rounded tighter than half
+                                    // the band: the band moved in has a
+                                    // square corner, whose outer edge
+                                    // stood past the shape's round one.
+                                    // Cut to the shape, as the engine's
+                                    // band lies inside it.
+                                    let cut = if offset > 0.0 && r > 0.0 && r < offset {
+                                        let name =
+                                            fresh_def_id(defs, &format!("inside{}", child.0));
+                                        let _ = writeln!(
+                                            defs,
+                                            r#"<clipPath id="{name}"><rect width="{width}" height="{height}" rx="{r}"/></clipPath>"#
+                                        );
+                                        format!(r#" clip-path="url(#{name})""#)
+                                    } else {
+                                        String::new()
+                                    };
                                     let _ = writeln!(
                                         out,
-                                        r#"{pad}  <rect x="{offset}" y="{offset}" width="{iw}" height="{ih}"{}{line}/>"#,
+                                        r#"{pad}  <rect x="{offset}" y="{offset}" width="{iw}" height="{ih}"{}{line}{cut}/>"#,
                                         round(clamp(r - offset, iw, ih))
                                     );
                                 }
@@ -3124,6 +3141,53 @@ mod tests {
                 "{marker:?}: {apart} pixels a reader covers otherwise"
             );
         }
+    }
+
+    /// A rounded rectangle whose corners are tighter than half its inside
+    /// border: the band, moved in half its width, is cut to the shape, or
+    /// its square corners stood past the round ones.
+    #[test]
+    fn an_inside_border_round_a_tight_corner_stays_inside() {
+        let mut doc = Document::new(80, 80, ColorMode::Rgb);
+        let id = filled(&mut doc, "card", 60.0, 40.0);
+        let card = |radius: f32| chitrakar_doc::NodeKind::Vector {
+            shape: VectorShape::Rect {
+                width: 60.0,
+                height: 40.0,
+                radius,
+            },
+            fill: Some(RED),
+            stroke: Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                cap: chitrakar_doc::StrokeCap::Butt,
+                join: chitrakar_doc::StrokeJoin::Miter,
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: None,
+            }),
+            gradient: None,
+        };
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(card(2.0)),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(svg.contains(r#"clip-path="url(#inside"#), "{svg}");
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(card(10.0)),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            !svg.contains("#inside"),
+            "a wide corner needs no cut: {svg}"
+        );
     }
 
     #[test]

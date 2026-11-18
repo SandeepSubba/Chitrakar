@@ -36,8 +36,30 @@ pub enum ContainerError {
     /// editor makes ever does.
     #[error("that file's layers do not make sense together: {0}")]
     BadStructure(chitrakar_doc::DocError),
+    #[error("that file holds a number past what the editor can hold, so it is damaged")]
+    PastSinglePrecision,
     #[error("that file numbers its layers past what the editor can count")]
     IdsTooLarge,
+}
+
+/// Whether any number in a manifest is past what single precision holds.
+/// Every number a document keeps as a fraction is single precision, and
+/// no count or size it keeps comes near.
+fn past_f32(value: &serde_json::Value) -> bool {
+    let mut stack = vec![value];
+    while let Some(v) = stack.pop() {
+        match v {
+            serde_json::Value::Number(n) => {
+                if n.as_f64().is_some_and(|f| f.abs() > f32::MAX as f64) {
+                    return true;
+                }
+            }
+            serde_json::Value::Array(items) => stack.extend(items),
+            serde_json::Value::Object(map) => stack.extend(map.values()),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// What is wrong with a page a file says it has: none at all, or more
@@ -366,7 +388,15 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         .read_to_string(&mut manifest_json)?;
     // A manifest saved by a text editor that begins it with a byte-order
     // mark was refused as damaged.
-    let manifest: Manifest = serde_json::from_str(manifest_json.trim_start_matches('\u{feff}'))?;
+    let value: serde_json::Value =
+        serde_json::from_str(manifest_json.trim_start_matches('\u{feff}'))?;
+    drop(manifest_json);
+    // A number past single precision came in as infinity, which a file
+    // cannot say: the document opened, and saved as one that would not.
+    if past_f32(&value) {
+        return Err(ContainerError::PastSinglePrecision);
+    }
+    let manifest: Manifest = serde_json::from_value(value)?;
     if manifest.format_version > FORMAT_VERSION {
         return Err(ContainerError::UnsupportedVersion {
             found: manifest.format_version,
@@ -1365,6 +1395,48 @@ mod tests {
             })
             .unwrap();
         assert!(reopened.highest_id().unwrap() < 1 << 53);
+
+        // A counter just under the last number: one more layer is given
+        // it, the next is refused in words, and what is saved opens.
+        let edge = rezip(
+            &|m| {
+                let mut v: serde_json::Value = serde_json::from_str(&m).unwrap();
+                v["document"]["next_id"] = serde_json::json!(chitrakar_doc::LAST_SAFE_ID - 1);
+                v.to_string()
+            },
+            &|n| n.to_string(),
+        );
+        let mut near = load_chitra(&edge).expect("a counter under the last number opens");
+        let root = near.root();
+        let add = |doc: &mut Document| {
+            doc.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("one more")),
+            })
+        };
+        add(&mut near).expect("the last number is given");
+        assert!(matches!(
+            add(&mut near),
+            Err(chitrakar_doc::DocError::OutOfNumbers)
+        ));
+        let saved = save_chitra(&near).unwrap();
+        load_chitra(&saved).expect("what it saves, it opens");
+
+        // A number past single precision is refused in words, not opened
+        // as infinity to be saved as a file that will not open.
+        let past = rezip(
+            &|m| {
+                let mut v: serde_json::Value = serde_json::from_str(&m).unwrap();
+                v["document"]["meta"]["dpi"] = serde_json::json!(1e308);
+                v.to_string()
+            },
+            &|n| n.to_string(),
+        );
+        assert!(matches!(
+            load_chitra(&past),
+            Err(ContainerError::PastSinglePrecision)
+        ));
     }
 
     #[test]

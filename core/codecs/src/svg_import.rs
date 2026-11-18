@@ -175,6 +175,12 @@ impl Gathered {
                        open: &mut Vec<(usize, chitrakar_doc::NodeId, usize)>,
                        mut node: Node| {
             pooled(&mut node.mask);
+            // A mask a drawing scaled past reason carries past what a
+            // layer can hold is let go of, as a file's is on opening:
+            // kept, the whole drawing was refused.
+            if node.mask.as_ref().is_some_and(|m| !m.within_reason()) {
+                node.mask = None;
+            }
             let (under, at) = match open.last_mut() {
                 Some((_, id, n)) => {
                     *n += 1;
@@ -436,11 +442,47 @@ fn contains_ignoring_case(hay: &[u8], needle: &[u8]) -> bool {
         .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
+/// Whether the word at `hay[at..end]` stands as a colour: the value of a
+/// `fill`, `stroke` or `…color` attribute or style property, and a whole
+/// word. Replaced everywhere, a class called "rebeccapurple" lost its
+/// rule and the word written as text came in as "#663399".
+fn stands_as_colour(hay: &[u8], at: usize, end: usize) -> bool {
+    let name_char = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
+    if hay.get(end).is_some_and(|&c| name_char(c)) {
+        return false;
+    }
+    let mut i = at;
+    let skip_space = |i: &mut usize| {
+        while *i > 0 && hay[*i - 1].is_ascii_whitespace() {
+            *i -= 1;
+        }
+    };
+    skip_space(&mut i);
+    if i > 0 && (hay[i - 1] == b'"' || hay[i - 1] == b'\'') {
+        i -= 1;
+        skip_space(&mut i);
+    }
+    if i == 0 || !(hay[i - 1] == b'=' || hay[i - 1] == b':') {
+        return false;
+    }
+    i -= 1;
+    skip_space(&mut i);
+    let stop = i;
+    while i > 0 && name_char(hay[i - 1]) {
+        i -= 1;
+    }
+    let name = hay[i..stop].to_ascii_lowercase();
+    name == b"fill" || name == b"stroke" || name.ends_with(b"color")
+}
+
 fn replace_ignoring_case(hay: &[u8], needle: &[u8], with: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(hay.len());
     let mut i = 0;
     while i < hay.len() {
-        if hay.len() - i >= needle.len() && hay[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+        if hay.len() - i >= needle.len()
+            && hay[i..i + needle.len()].eq_ignore_ascii_case(needle)
+            && stands_as_colour(hay, i, i + needle.len())
+        {
             out.extend_from_slice(with);
             i += needle.len();
         } else {
@@ -3736,6 +3778,35 @@ fn shape_of(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn rebeccapurple_is_read_only_where_it_is_a_colour() {
+        let read = |svg: &str| {
+            String::from_utf8(replace_ignoring_case(
+                svg.as_bytes(),
+                b"rebeccapurple",
+                b"#663399",
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            read(r#"<rect fill="RebeccaPurple"/>"#),
+            r##"<rect fill="#663399"/>"##
+        );
+        assert_eq!(
+            read("<rect style='stroke: rebeccapurple;stop-color:rebeccapurple'/>"),
+            "<rect style='stroke: #663399;stop-color:#663399'/>"
+        );
+        for kept in [
+            r#"<style>.rebeccapurple{fill:#0f0}</style><rect class="rebeccapurple"/>"#,
+            "<style>#rebeccapurple{fill:red}</style>",
+            "<text>rebeccapurple</text>",
+            r#"<rect fill="rebeccapurplish"/>"#,
+        ] {
+            assert_eq!(read(kept), kept);
+        }
+    }
+
     use super::*;
     use chitrakar_color::ColorMode;
     use chitrakar_doc::{Command, Document};

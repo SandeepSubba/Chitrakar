@@ -66,6 +66,10 @@ fn flatten_to_srgb(pixels: &[LinearRgba]) -> Vec<f32> {
     out
 }
 
+/// The most pixels a picture is drawn at for print: at sixteen bytes a
+/// pixel while it is drawn, under a gigabyte.
+const PRINT_PIXELS_MOST: f32 = 48_000_000.0;
+
 fn deflate(data: &[u8]) -> Result<Vec<u8>, PdfError> {
     let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
     enc.write_all(data)?;
@@ -373,8 +377,8 @@ pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec
             kids.iter()
                 .copied()
                 .filter(|id| {
-                    doc.node(*id)
-                        .is_ok_and(|n| n.visible && matches!(n.kind, NodeKind::Artboard { .. }))
+                    doc.node(*id).is_ok_and(|n| n.visible)
+                        && chitrakar_render::frame_size(doc, *id).is_some()
                 })
                 .collect()
         })
@@ -418,10 +422,33 @@ pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec
         // One frame at a time, with the rest of the page hidden: the
         // drawing is the drawing it always was, and the page's own box
         // is what says which part of it is this page.
+        // Put aside into a hidden group rather than hidden themselves, as
+        // `place_rendered` does: a live copy of a frame draws the frame
+        // only while that is visible, and its page came out blank.
         let mut alone = doc.clone();
-        for id in alone.children_of(root)?.to_vec() {
-            if id != frame {
-                alone.apply(Command::SetVisible { id, visible: false })?;
+        let aside: Vec<NodeId> = alone
+            .children_of(root)?
+            .iter()
+            .copied()
+            .filter(|&id| id != frame)
+            .collect();
+        if !aside.is_empty() {
+            let holder = alone.peek_next_id();
+            alone.apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(chitrakar_doc::Node::group("aside")),
+            })?;
+            alone.apply(Command::SetVisible {
+                id: holder,
+                visible: false,
+            })?;
+            for (k, id) in aside.into_iter().enumerate() {
+                alone.apply(Command::MoveNode {
+                    id,
+                    parent: holder,
+                    index: k,
+                })?;
             }
         }
         // The frame's own box, not what it can touch: a frame cuts what
@@ -431,7 +458,9 @@ pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec
         // the upright box *around* it, the frame standing at its angle in
         // the middle of it with corners of nothing round it.
         let node = doc.node(frame)?;
-        let NodeKind::Artboard { width, height, .. } = node.kind else {
+        // A live copy of a frame is a page too, the frame it copies drawn
+        // in its place (`frame_size`).
+        let Some((width, height)) = chitrakar_render::frame_size(doc, frame) else {
             continue;
         };
         let world = chitrakar_render::ancestor_space(doc, frame).compose(node.transform);
@@ -467,8 +496,10 @@ pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec
         // on by the same, everything stays where it was on the page. A
         // frame with a mask keeps its box: the mask is in the frame's own
         // space and says where the frame shows, bleed or none.
+        // A live copy keeps its box: growing it would mean growing the
+        // frame it copies, which is another page of its own.
         let bleed = marks.bleed();
-        if bleed > 0.0 && node.mask.is_none() {
+        if bleed > 0.0 && node.mask.is_none() && matches!(node.kind, NodeKind::Artboard { .. }) {
             let (bx, by) = (bleed / sx, bleed / sy);
             let mut grown = node.kind.clone();
             if let NodeKind::Artboard { width, height, .. } = &mut grown {
@@ -944,7 +975,16 @@ impl Page {
         // Pixels for print: a screen-resolution document would put
         // screen-resolution text on the page, so the render is oversampled
         // towards 300 dpi (up to four times).
-        let over = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0);
+        // And held to a budget of pixels: a 12-megapixel photograph at
+        // 72 dpi with an adjustment over it was drawn four times over,
+        // three gigabytes at sixteen bytes a pixel, and stopped the
+        // engine. Past the budget the page is drawn as fine as it holds,
+        // and a page larger than the budget itself coarser than its own
+        // pixels rather than not at all.
+        let area = (self.size[0].max(1.0) * self.size[1].max(1.0)).max(1.0);
+        let over = (300.0 / self.doc.meta.dpi.max(1.0))
+            .clamp(1.0, 4.0)
+            .min((PRINT_PIXELS_MOST / area).sqrt());
         // Over what the page shows, from its corner: the samples line up
         // with the page's own pixels, which for a frame start where the
         // frame does.
@@ -2180,11 +2220,23 @@ impl Page {
     /// space the layer sits in, laid down with the layer's blend as the
     /// engine lays each effect down (`effect_pixels`). As fine as the
     /// other pictures drawn for print.
+    /// How many times finer than the document's own pixels a picture is
+    /// drawn for print: towards 300 dpi, up to four times, in whole steps,
+    /// and no finer than the budget of pixels holds over the page.
+    fn print_scale(&self) -> f32 {
+        let page = (self.doc.meta.width.max(1) as f32) * (self.doc.meta.height.max(1) as f32);
+        (300.0 / self.doc.meta.dpi.max(1.0))
+            .clamp(1.0, 4.0)
+            .min((PRINT_PIXELS_MOST / page).sqrt())
+            .floor()
+            .max(1.0)
+    }
+
     fn effect_image(&mut self, id: NodeId, over: bool, blend: BlendMode) -> Result<(), PdfError> {
         if self.plain == Some(id) {
             return Ok(());
         }
-        let scale = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0).round();
+        let scale = self.print_scale();
         let Some(px) = chitrakar_render::effect_pixels(&self.doc, id, over, scale)? else {
             return Ok(());
         };
@@ -2294,7 +2346,7 @@ impl Page {
     fn soft_mask(&mut self, id: NodeId, t: Transform) -> Result<usize, PdfError> {
         let mut content = String::new();
         // As fine as the pictures placed for print (`place_rendered`).
-        let over = (300.0 / self.doc.meta.dpi.max(1.0)).clamp(1.0, 4.0).round();
+        let over = self.print_scale();
         if let (Some(m), Some(back)) = (
             chitrakar_render::mask_pixels_at(&self.doc, id, over)?,
             chitrakar_render::invert(t),
