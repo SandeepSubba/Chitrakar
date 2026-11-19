@@ -1,0 +1,8 @@
+{
+  "name": "chitrakar-shell",
+  "private": true,
+  "description": "Runs the Tauri CLI that app/ installs, so the mobile builds can call it back as `npm run tauri`.",
+  "scripts": {
+    "tauri": "node ../../app/node_modules/@tauri-apps/cli/tauri.js"
+  }
+}
