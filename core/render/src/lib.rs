@@ -5925,6 +5925,33 @@ fn max_scale(t: Transform) -> f32 {
 /// can be resampled to match the polyline exactly.
 pub const FLATTEN_STEPS: usize = 12;
 
+/// How many straight steps a curve segment is drawn in: at least
+/// [`FLATTEN_STEPS`], and one for about every sixteen units of its
+/// control polygon past that, so a large curve is not a polygon of
+/// visible facets (a circle of a thousand pixels was two pixels off its
+/// outline in twelve). Finer still made the dashes and joins of small
+/// stroked curves differ more from what other readers draw, so a curve
+/// of under two hundred units keeps its twelve. The count
+/// is the segment's own, from its own points, so the outline, its widths
+/// and an SVG brought in all divide it alike.
+pub fn curve_steps(a: [f32; 2], c1: [f32; 2], c2: [f32; 2], b: [f32; 2]) -> usize {
+    let d = |p: [f32; 2], q: [f32; 2]| (q[0] - p[0]).hypot(q[1] - p[1]);
+    let length = d(a, c1) + d(c1, c2) + d(c2, b);
+    if !length.is_finite() {
+        return FLATTEN_STEPS;
+    }
+    ((length / 16.0).ceil() as usize).clamp(FLATTEN_STEPS, 256)
+}
+
+/// A Catmull-Rom segment from `p1` to `p2` as the Bezier it is, for its
+/// control points.
+fn spline_controls(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+    (
+        [p1[0] + (p2[0] - p0[0]) / 6.0, p1[1] + (p2[1] - p0[1]) / 6.0],
+        [p2[0] - (p3[0] - p1[0]) / 6.0, p2[1] - (p3[1] - p1[1]) / 6.0],
+    )
+}
+
 /// The Bezier handles a `smooth` path's curve is made of.
 ///
 /// A smooth path has no authored handles: its curve is a Catmull-Rom
@@ -5998,8 +6025,9 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
             // handle of this anchor and the incoming one of the next.
             let c1 = [a[0] + handles[i][2], a[1] + handles[i][3]];
             let c2 = [b[0] + handles[j][0], b[1] + handles[j][1]];
-            for s in 0..STEPS {
-                let t = s as f32 / STEPS as f32;
+            let steps = curve_steps(a, c1, c2, b);
+            for s in 0..steps {
+                let t = s as f32 / steps as f32;
                 let u = 1.0 - t;
                 let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
                 out.push([
@@ -6040,8 +6068,10 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
             get(i as isize + 1),
             get(i as isize + 2),
         );
-        for s in 0..STEPS {
-            let t = s as f32 / STEPS as f32;
+        let (c1, c2) = spline_controls(p0, p1, p2, p3);
+        let steps = curve_steps(p1, c1, c2, p2);
+        for s in 0..steps {
+            let t = s as f32 / steps as f32;
             let (t2, t3) = (t * t, t * t * t);
             let f = |a: f32, b: f32, c: f32, d: f32| {
                 0.5 * (2.0 * b
@@ -6491,11 +6521,36 @@ fn flatten_widths(shape: &VectorShape, widths: &[f32]) -> Vec<f32> {
         return widths.to_vec();
     }
     let segments = if *closed { n } else { n - 1 };
+    // Each segment in as many steps as its outline is flattened in
+    // (`curve_steps`), so a width still sits at its point.
+    let bezier = handles.len() == n && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
+    let get = |i: isize| -> [f32; 2] {
+        if *closed {
+            points[i.rem_euclid(n as isize) as usize]
+        } else {
+            points[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
     let mut out = Vec::with_capacity(segments * FLATTEN_STEPS + 1);
     for i in 0..segments {
-        let (a, b) = (widths[i], widths[(i + 1) % n]);
-        for s in 0..FLATTEN_STEPS {
-            let t = s as f32 / FLATTEN_STEPS as f32;
+        let j = (i + 1) % n;
+        let steps = if bezier {
+            let (p, q) = (points[i], points[j]);
+            curve_steps(
+                p,
+                [p[0] + handles[i][2], p[1] + handles[i][3]],
+                [q[0] + handles[j][0], q[1] + handles[j][1]],
+                q,
+            )
+        } else {
+            let k = i as isize;
+            let (p0, p1, p2, p3) = (get(k - 1), get(k), get(k + 1), get(k + 2));
+            let (c1, c2) = spline_controls(p0, p1, p2, p3);
+            curve_steps(p1, c1, c2, p2)
+        };
+        let (a, b) = (widths[i], widths[j]);
+        for s in 0..steps {
+            let t = s as f32 / steps as f32;
             out.push(a + (b - a) * t);
         }
     }
@@ -37298,5 +37353,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A large curve is flattened finely enough to stay on its outline:
+    /// in twelve steps a segment, a circle of a thousand drawn as a path
+    /// was two pixels inside it between its steps.
+    #[test]
+    fn a_large_curve_is_drawn_close_to_its_outline() {
+        // The four anchors and handles a circle is drawn with.
+        let k = 1000.0 * 0.552_284_8;
+        let circle = VectorShape::Path {
+            points: vec![
+                [2000.0, 1000.0],
+                [1000.0, 2000.0],
+                [0.0, 1000.0],
+                [1000.0, 0.0],
+            ],
+            closed: true,
+            smooth: false,
+            handles: vec![
+                [0.0, -k, 0.0, k],
+                [k, 0.0, -k, 0.0],
+                [0.0, k, 0.0, -k],
+                [-k, 0.0, k, 0.0],
+            ],
+            subpaths: Vec::new(),
+        };
+        let rings = shape_rings(&circle);
+        let ring = &rings[0];
+        let centre = [1000.0f32, 1000.0];
+        let worst = (0..ring.len())
+            .map(|i| {
+                let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+                let mid = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                (1000.0 - (mid[0] - centre[0]).hypot(mid[1] - centre[1])).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.6, "{worst} off the outline between steps");
     }
 }

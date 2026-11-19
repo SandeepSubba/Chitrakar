@@ -474,6 +474,11 @@ fn stands_as_colour(hay: &[u8], at: usize, end: usize) -> bool {
         if hay[j..open].eq_ignore_ascii_case(b"url") {
             i = j;
             skip_space(&mut i);
+            // The value's own opening quote, now in front of the url.
+            if i > 0 && (hay[i - 1] == b'"' || hay[i - 1] == b'\'') {
+                i -= 1;
+                skip_space(&mut i);
+            }
         } else {
             return false;
         }
@@ -3163,8 +3168,9 @@ impl Ring {
             let (a, b) = (self.points[i], self.points[j]);
             let c1 = [a[0] + self.handles[i][2], a[1] + self.handles[i][3]];
             let c2 = [b[0] + self.handles[j][0], b[1] + self.handles[j][1]];
-            for s in 0..STEPS {
-                let t = s as f32 / STEPS as f32;
+            let steps = chitrakar_render::curve_steps(a, c1, c2, b);
+            for s in 0..steps {
+                let t = s as f32 / steps as f32;
                 let u = 1.0 - t;
                 let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
                 out.push([
@@ -3808,6 +3814,16 @@ mod tests {
         assert_eq!(
             read(r#"<rect fill="RebeccaPurple"/>"#),
             r##"<rect fill="#663399"/>"##
+        );
+        // The colour a paint falls back on after a url, in an attribute
+        // and in a style.
+        assert_eq!(
+            read(r#"<rect fill="url(#g) rebeccapurple"/>"#),
+            r##"<rect fill="url(#g) #663399"/>"##
+        );
+        assert_eq!(
+            read(r#"<rect style="stroke: url(#g) RebeccaPurple"/>"#),
+            r##"<rect style="stroke: url(#g) #663399"/>"##
         );
         assert_eq!(
             read("<rect style='stroke: rebeccapurple;stop-color:rebeccapurple'/>"),

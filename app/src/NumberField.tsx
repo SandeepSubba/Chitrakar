@@ -17,6 +17,29 @@
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 
+// In every number box on the page: a decimal comma is a decimal point,
+// and Arabic-Indic or Persian digits are digits. The page is English to
+// the browser, so "12,5" typed into W came out 125 (the comma read as a
+// thousands mark), and ١٠٠ was dropped without a word.
+if (typeof document !== "undefined") {
+  document.addEventListener(
+    "beforeinput",
+    (e) => {
+      const at = e.target;
+      if (!(at instanceof HTMLInputElement) || at.type !== "number" || !e.data) return;
+      const plain = e.data
+        .replace(/,/g, ".")
+        .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+        .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
+      if (plain !== e.data) {
+        e.preventDefault();
+        document.execCommand("insertText", false, plain);
+      }
+    },
+    true,
+  );
+}
+
 type Props = {
   value: number;
   onValue: (v: number) => void;

@@ -2836,7 +2836,9 @@ export function App() {
     // thumb unseen and a ticked box a bare tick.
     if (prefs.sliderColor) {
       const light = prefs.theme === "light" || (prefs.theme === "system" && systemLight);
-      root.setProperty("--slider", accentAsText(prefs.sliderColor, light ? "#ffffff" : "#2a2a30", 3));
+      // Against the light theme's page grey, darker than its panel white,
+      // so it is three to one on both.
+      root.setProperty("--slider", accentAsText(prefs.sliderColor, light ? "#f2f2f5" : "#2a2a30", 3));
     } else root.removeProperty("--slider");
     root.fontSize = prefs.uiScale === 1 ? "" : `${16 * prefs.uiScale}px`;
     // Said on the root too, for the bar: what it gives up and when is
@@ -3113,10 +3115,10 @@ export function App() {
     if (!session || fontsLoaded.current) return;
     fontsLoaded.current = true;
     const faces: [string, string][] = [
-      ["DejaVu Sans Bold", "/fonts/DejaVuSans-Bold.ttf"],
-      ["DejaVu Serif", "/fonts/DejaVuSerif.ttf"],
-      ["DejaVu Sans Mono", "/fonts/DejaVuSansMono.ttf"],
-      ["DejaVu Sans Mono Oblique", "/fonts/DejaVuSansMono-Oblique.ttf"],
+      ["DejaVu Sans Bold", "fonts/DejaVuSans-Bold.ttf"],
+      ["DejaVu Serif", "fonts/DejaVuSerif.ttf"],
+      ["DejaVu Sans Mono", "fonts/DejaVuSansMono.ttf"],
+      ["DejaVu Sans Mono Oblique", "fonts/DejaVuSansMono-Oblique.ttf"],
     ];
     Promise.all(
       faces.map(async ([name, url]) => {
@@ -8604,6 +8606,13 @@ export function App() {
     }
   };
 
+  // Snap lines belong to the gesture that found them: a tool put down,
+  // or a path finished or let go of with Escape, takes them away. The
+  // Pen's stayed across the page through Escape and a change of tool.
+  useEffect(() => {
+    setGuides({ x: [], y: [] });
+  }, [tool, penPoints.length === 0]);
+
   /** The text style buttons show what the selection says, and moving a
    * selection is not a state change — so nothing would re-render them
    * and a button would go on showing, and applying, what the last
@@ -12589,6 +12598,13 @@ export function App() {
       // Named after the file and, for a file of more than one page, the page.
       const label = ask.sizes.length > 1 ? `${ask.name} — page ${page + 1}` : ask.name;
       placed(session.place_rgba(drawn.width, drawn.height, drawn.rgba, label), was);
+      // Opened, the page is the PDF's page at the resolution asked for:
+      // left at 72, an A4 opened at 300 dpi went back out as a PDF a page
+      // four times too large, and every printed size read wrong.
+      if (ask.opening) {
+        session.set_dpi(dpi);
+        setDocDpi(dpi);
+      }
       pdfUndoOpen.current = null;
     } catch (err) {
       alert(`Could not ${pdfUndoOpen.current ? "open" : "place"} ${ask.name}: ${said(err)}`);
@@ -13841,6 +13857,7 @@ export function App() {
             where an application's title sits. */}
         <input
           className="doc-name"
+          dir="auto"
           value={docName}
           onChange={(e) => setDocName(e.target.value)}
           // What it was called when the box was come to: Escape puts it
@@ -15321,6 +15338,7 @@ export function App() {
                       : ""
                   }; shift-click to keep the picked layer's look under this name, alt-click (or Delete) to forget it`}
                   aria-label={`Style ${st.name}`}
+                  dir="auto"
                   aria-pressed={selectedLayer?.style === st.name}
                   onKeyDown={chipKeys(() => forgetStyle(st.name))}
                   onClick={(e) => {
@@ -15707,6 +15725,19 @@ export function App() {
               height: docSize[1] * view.zoom,
             }}
           />
+          {/* On a phone the bar's Crop and Cancel are past its end (upright)
+              or below the window's foot (on its side), with nothing to say
+              they are there: the frame's own pair goes over the canvas. */}
+          {compact && tool === "Crop" && cropFrame && (
+            <div className="crop-commit-float" role="group" aria-label="Crop frame">
+              <button type="button" className="tool-commit" onClick={() => setCropFrame(null)}>
+                Cancel
+              </button>
+              <button type="button" className="tool-commit primary" onClick={applyCrop}>
+                Crop
+              </button>
+            </div>
+          )}
           <canvas
             id="engine-canvas"
             ref={canvasRef}
@@ -16852,6 +16883,9 @@ export function App() {
               <button
                 key={c.name}
                 className={`comp-chip${c.showing ? " active" : ""}`}
+                // Read in the name's own direction: a Hebrew or Arabic
+                // name was cut from its start, its first word unseen.
+                dir="auto"
                 aria-pressed={c.showing}
                 aria-label={`Comp ${c.name}`}
                 title={`${c.name} — shift-click keeps the page as it is now under this name, double-click (or F2) renames, ctrl-click (or Delete) forgets`}
@@ -17140,6 +17174,7 @@ export function App() {
                       );
                     }}
                     aria-label="Layer name"
+                    dir="auto"
                   />
                 ) : (
                   <span

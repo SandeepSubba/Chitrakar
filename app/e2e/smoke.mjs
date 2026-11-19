@@ -21678,6 +21678,67 @@ assert(
   );
 }
 
+// 9dw. The forty-sixth audit's interface pass. A decimal comma typed
+// into W was read as a thousands mark (12,5 became 125); the
+// Preferences rail ran off a short window's foot; on a phone the crop
+// frame's Crop and Cancel were past the bar's end.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(s.x + 40, s.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(s.x + 140, s.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const w = page.locator(".geometry .geo-w input");
+  await w.click();
+  await w.press("Control+a");
+  await page.keyboard.type("12,5");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(250);
+  const typed = Number(await w.inputValue());
+  assert(Math.abs(typed - 12.5) < 0.6, `a decimal comma is a decimal point (${typed})`);
+
+  // A short window: the rail of pages scrolls to its last.
+  const ctx = await browser.newContext({ viewport: { width: 844, height: 390 }, hasTouch: true });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  await p.keyboard.press("Control+Comma");
+  await p.waitForSelector('[role=dialog][aria-label="Preferences"]');
+  const last = p.locator(".prefs-tab").last();
+  await last.scrollIntoViewIfNeeded();
+  await last.click();
+  await p.waitForTimeout(150);
+  assert(
+    (await last.getAttribute("class"))?.includes("active"),
+    `the last page of Preferences is reached in a short window (${await last.textContent()})`,
+  );
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(150);
+
+  // The crop frame's own Crop and Cancel, over the canvas on a phone.
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("c");
+  await p.waitForTimeout(150);
+  await p.mouse.move(r.x + r.width * 0.2, r.y + r.height * 0.2);
+  await p.mouse.down();
+  await p.mouse.move(r.x + r.width * 0.6, r.y + r.height * 0.7, { steps: 5 });
+  await p.mouse.up();
+  await p.waitForTimeout(250);
+  const float = p.locator(".crop-commit-float button", { hasText: "Crop" });
+  const box = await float.boundingBox();
+  assert(
+    box && box.x >= 0 && box.y >= 0 && box.x + box.width <= 844 && box.y + box.height <= 390,
+    `the crop frame's Crop is on the screen (${JSON.stringify(box)})`,
+  );
+  await ctx.close();
+}
+
 // 9dv. The forty-fifth audit's interface pass. On a touch screen each
 // submenu tapped stayed open under the next; Enter held on the bar's
 // Undo went on to redo once there was nothing left to undo.

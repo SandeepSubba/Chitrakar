@@ -145,7 +145,10 @@ without reading anything else.*
      copies that held the page for minutes. The forty-fifth: copies made
      and saved that would not open, submenus stacking on a tablet, a
      PSD's merged picture without its white, a shoot's development
-     thrown away by a cancelled folder panel.
+     thrown away by a cancelled folder panel. The forty-sixth: an undone
+     delete refused and lost, a painted mask doubling the file every
+     round, a decimal comma read as a thousands mark, curves drawn in
+     twelve steps whatever their size.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13074,6 +13077,76 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A forty-sixth audit (November 2026).** A curve is no longer drawn
+  in twelve steps a segment whatever its size: as many as its control
+  polygon needs at one a sixteen units (twelve to 256), so a circle of a
+  thousand pixels is within a twentieth of a pixel where it was two
+  inside; the widths along a swelling line and an SVG brought in divide
+  it alike (`curve_steps`). Finer still, a step to every four units, made
+  the dashes and joins of small stroked curves differ more from what
+  other readers draw, so a curve of under two hundred units keeps its
+  twelve, and one seen sixteen times over is still faceted.
+  Its check of round 45: every subtree put back was asked the copies'
+  count, so undoing a delete in a document past it lost the step and the
+  layer (undo and redo are never refused for it); layers added to an
+  original after it was copied, or groups wrapped round a chain of
+  copies, still made documents that would not open (a move or a group
+  added is held to the depth as a copy is, and a file is refused for
+  what its copies draw only where they multiply its layers a
+  thousandfold); the Knife's second try cut a sliver off a shape a line
+  only touched (it cuts only where a whisker either side both cut);
+  `fill="url(#g) rebeccapurple"` in an attribute was still black; the
+  boolean fit was held coarse from the start and a thousand-pixel circle
+  came back a pixel and a half off (a quarter of a pixel first, coarser
+  only where that cannot fit); the Pen left its snap lines through
+  Escape and a change of tool; a subtree put back naming layers it did
+  not carry was kept; Batch's "nothing was written" hid what had failed;
+  the slider colour was held against the panel and not the light page.
+  Its files pass: painting into a layer's mask picked out as a region,
+  round after round, put every earlier stroke inside each new one's
+  region, doubling the document until the engine stopped (a region of
+  strokes that carry regions of their own is taken as a picture of what
+  it covers); a PDF opened at 300 dpi came in at 72 and went out a page
+  four times too large (opened at the resolution asked for); the fonts
+  were fetched from the site's root and missing when the app is served
+  under a path (fetched beside the page).
+  Its interface pass, a phone user, an impatient user on a slow machine
+  and someone reading another language at 200% zoom: on a phone the crop
+  frame's Crop and Cancel were past the bar's end or below the window
+  (a pair of its own over the canvas); the Preferences rail ran off a
+  short window's foot (it scrolls); a decimal comma in a number box was
+  a thousands mark, 12,5 becoming 125, and Arabic-Indic digits were
+  dropped (a comma is a point and those digits digits, in every number
+  box); comp chips, the document's name and a layer being renamed cut
+  right-to-left names from their start (each reads in its own
+  direction); a style's long name ran out of its chip (cut with a mark).
+  Limits written down: a clone or heal stroke reads nothing past the
+  page, so a crop or resize that leaves its source outside wipes its
+  patch out; a filter inside a frame turned a quarter fades at the
+  frame's edges; Merge with a filter in it draws the filter over the
+  layers' own reach, and the page's edges go see-through; a crop moves
+  the picture under Ripple, Halftone, Pixelate and Noise, whose grid
+  stays at the page's corner, and a turn or mirror of the page leaves
+  every filter's own direction where it was; merging a subset with a
+  clone layer loses what it read outside the merge; Find edges after
+  Image size differs a little from the export at that size; undo drifts
+  by 1e-4 on a 3000-pixel page; a .cube with a "nan" row says it is a
+  row short; the PDF reader draws an alpha soft mask from a hand-made
+  form over the whole page and blends Multiply in a non-isolated group
+  as isolated; SVG's `var()`, `:not()`, `:nth-child()`, `@media`,
+  several filter primitives and a one-way blur are read without a note;
+  translucency is mixed in linear light on the page and in sRGB by every
+  reader of an exported PDF or SVG; the service worker asks again for
+  thirteen megabytes each visit on a host that gives no ETag; an SVG
+  radial gradient focused outside its circle draws a moiré; a flipped
+  frame's PDF page and picture are not mirrored; Select › Subject's
+  colour pick holds the page for its second or five; a held arrow key is
+  a step in the history a press; Ctrl+S on a saved document downloads it
+  again; a blur's preview is slow on a slow machine; on a phone an
+  adjustment's slider is in the closed Layers sheet, the handles cover a
+  new text box, the long-press menu lists keyboard chords, and the bar
+  is left scrolled after a crop; swatches, styles, brushes and setups
+  cannot be named by hand.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

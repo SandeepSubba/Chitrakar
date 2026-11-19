@@ -174,8 +174,10 @@ export function BatchDialog({
     // shoot developed was thrown away without a word.
     if (!written) {
       unwritten.current = { key, done, failed };
+      // With what would not develop, said now rather than on the next try.
       setFailures([
         `Nothing was written. ${done.length} developed ${done.length === 1 ? "photograph waits" : "photographs wait"}: export again to choose where.`,
+        ...failed,
       ]);
       return;
     }

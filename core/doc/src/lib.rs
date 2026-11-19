@@ -136,7 +136,7 @@ pub enum DocError {
     PlacedPastReason,
     #[error("the page itself cannot be moved, turned or scaled; its layers can")]
     PageHasNoPlace,
-    #[error("that file's live copies draw more layers than the editor can draw at once")]
+    #[error("the live copies would draw more layers than the editor can draw at once")]
     TooMuchToDraw,
 }
 
@@ -1223,12 +1223,21 @@ impl Document {
         let was_palette = matches!(cmd, Command::SetSwatches { .. });
         // A copy made, by a layer arriving as one, a layer told to be one,
         // or a subtree put back that may hold some.
+        // Not a subtree put back: that is undo and redo, which must always
+        // be able to put back what was there — an undo of a delete was
+        // refused, and the step and the layer were lost.
         let makes_copy = match &cmd {
             Command::AddNode { node, .. } => matches!(node.kind, NodeKind::Instance { .. }),
             Command::SetKind { kind, .. } => matches!(**kind, NodeKind::Instance { .. }),
-            Command::RestoreSubtree { .. } => true,
             _ => false,
         };
+        // And what can deepen the drawing without making a copy: a layer
+        // moved (a group made round it) or a group added, in a document
+        // that has copies to follow down into it. Wrapped round a chain
+        // of copies sixty-five times, a document saved one it could not
+        // open.
+        let deepens = matches!(&cmd, Command::MoveNode { .. })
+            || matches!(&cmd, Command::AddNode { node, .. } if node.kind.holds_children());
         let mut inverse = self.apply_inner(cmd)?;
         // Depth first, and iteratively: the check below recurses, so a
         // command that nested the layers past what a stack can walk would
@@ -1267,11 +1276,18 @@ impl Document {
         // 401 copies of a 500-layer group was made and saved, and then
         // refused when opened; a chain of copies each in a group went on
         // until the stack ran out.
-        if makes_copy {
+        let copies_here = || {
+            self.nodes
+                .values()
+                .any(|n| matches!(n.kind, NodeKind::Instance { .. }))
+        };
+        if makes_copy || (deepens && copies_here()) {
             let mut known = HashMap::new();
             let refusal = match self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known) {
                 None => Some(DocError::TooDeep { limit: MAX_DEPTH }),
-                Some((_, draws)) if draws > MAX_DRAWN => Some(DocError::TooMuchToDraw),
+                Some((_, draws)) if makes_copy && draws > MAX_DRAWN => {
+                    Some(DocError::TooMuchToDraw)
+                }
                 Some(_) => None,
             };
             if let Some(refusal) = refusal {
@@ -1465,12 +1481,32 @@ impl Document {
                 // Numbers the page can count, and none taken: put back
                 // at 2^60 a layer was kept, and the file saved after it
                 // was refused when opened.
-                if subtree
+                if subtree.nodes.iter().any(|(n, _)| n.0 >= LAST_SAFE_ID) {
+                    return Err(DocError::OutOfNumbers);
+                }
+                if let Some((n, _)) = subtree
                     .nodes
                     .iter()
-                    .any(|(n, _)| n.0 >= LAST_SAFE_ID || self.nodes.contains_key(n))
+                    .find(|(n, _)| self.nodes.contains_key(n))
                 {
-                    return Err(DocError::OutOfNumbers);
+                    return Err(DocError::NotATree(*n));
+                }
+                // And a subtree of its own layers: its root among them, and
+                // every layer its groups hold one of them, each once. One
+                // naming a layer already on the page, or a root it did not
+                // carry, was kept and saved a file that would not open.
+                let ours: std::collections::HashSet<NodeId> =
+                    subtree.nodes.iter().map(|(n, _)| *n).collect();
+                if !ours.contains(&id) {
+                    return Err(DocError::UnknownNode(id));
+                }
+                let mut held = std::collections::HashSet::new();
+                for (_, kids) in &subtree.children {
+                    for k in kids {
+                        if !ours.contains(k) || *k == id || !held.insert(*k) {
+                            return Err(DocError::NotATree(*k));
+                        }
+                    }
                 }
                 self.settle_parents();
                 for (nid, node) in subtree.nodes {
@@ -2118,7 +2154,14 @@ impl Document {
                     limit: OPEN_DRAWN_DEPTH,
                 })
             }
-            Some((_, draws)) if draws > OPEN_DRAWN => return Err(DocError::TooMuchToDraw),
+            // Only where the copies multiply the layers past all measure:
+            // layers added to a group after it was copied four hundred
+            // times took a document past the count, which then would not
+            // open, where a file made to double at every level draws
+            // thousands of times its own size.
+            Some((_, draws)) if draws > OPEN_DRAWN && draws > 1000 * self.nodes.len() as u64 => {
+                return Err(DocError::TooMuchToDraw)
+            }
             Some(_) => {}
         }
         Ok(())
@@ -4752,5 +4795,64 @@ mod tests {
             on_mask: false,
         })
         .unwrap();
+    }
+
+    /// Undo puts back what was there whatever the copies draw: past the
+    /// count by layers added to what they copy, the undo of a delete was
+    /// refused and the layer lost.
+    #[test]
+    fn a_delete_undone_past_the_count_comes_back() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let group = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("G")),
+        })
+        .unwrap();
+        let rect = || {
+            Box::new(Node::vector(
+                "r",
+                VectorShape::Rect {
+                    width: 2.0,
+                    height: 2.0,
+                    radius: 0.0,
+                },
+            ))
+        };
+        for k in 0..100 {
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: k,
+                node: rect(),
+            })
+            .unwrap();
+        }
+        let mut made = 0;
+        while doc
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::instance("copy", group)),
+            })
+            .is_ok()
+        {
+            made += 1;
+        }
+        assert!(made > 1000, "{made} copies before the count");
+        for k in 0..10 {
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: k,
+                node: rect(),
+            })
+            .unwrap();
+        }
+        let gone = doc.children_of(group).unwrap()[0];
+        let back = doc.apply(Command::RemoveNode { id: gone }).unwrap();
+        doc.apply(back).expect("the delete undone");
+        assert!(doc.node(gone).is_ok());
+        assert!(doc.check_structure().is_ok(), "and it opens");
     }
 }

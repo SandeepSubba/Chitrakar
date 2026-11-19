@@ -3195,13 +3195,20 @@ impl Session {
                 hi = [hi[0].max(p[0]), hi[1].max(p[1])];
             }
             let size = (hi[0] - lo[0]).max(hi[1] - lo[1]);
-            let tolerance = (0.25 / magnified).max(size * 0.0015);
-            let (anchors, handles) = chitrakar_render::fit::fit_curves(&points, true, tolerance);
-            if anchors.len() >= 3 && anchors.len() < points.len() {
-                (anchors, handles)
-            } else {
-                (points, Vec::new())
-            }
+            // A quarter of a pixel first; only where that cannot be fitted
+            // (an outline worked from coarser steps), as fine as it was.
+            // Taken coarser from the start, a thousand-pixel circle came
+            // back a pixel and a half off.
+            let fitted = |tolerance: f32| {
+                let (anchors, handles) =
+                    chitrakar_render::fit::fit_curves(&points, true, tolerance);
+                (anchors.len() >= 3 && anchors.len() < points.len() / 2)
+                    .then_some((anchors, handles))
+            };
+            let fine = 0.25 / magnified;
+            fitted(fine)
+                .or_else(|| fitted(fine.max(size * 0.0015)))
+                .unwrap_or_else(|| (points.clone(), Vec::new()))
         } else {
             (points, Vec::new())
         };
@@ -3291,30 +3298,44 @@ impl Session {
         a: [f32; 2],
         b: [f32; 2],
     ) -> Result<Vec<NodeId>, EngineError> {
-        let made = self.knife_once(ids, a, b)?;
+        let made = self.knife_once(ids, a, b, true)?;
         if !made.is_empty() {
             return Ok(made);
         }
         // A line through an anchor exactly — a diamond cut level through
         // its side corners, a circle through its middle — met the outline
         // at its points rather than across its sides, and cut nothing. The
-        // same line a hundredth of a pixel to one side cuts it.
+        // same line a whisker to either side cuts it; a line that only
+        // touches the outline (along an edge, at a corner) cuts it on one
+        // side only, and is left cutting nothing, or it cut off a sliver.
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         // Not nought: a cut shorter than a thousandth was refused above.
         let length = dx.hypot(dy);
-        let side = [-dy / length * 0.01, dx / length * 0.01];
-        self.knife_once(
-            ids,
-            [a[0] + side[0], a[1] + side[1]],
-            [b[0] + side[0], b[1] + side[1]],
-        )
+        let whisker = 0.002;
+        let side = [-dy / length * whisker, dx / length * whisker];
+        let moved = |k: f32| {
+            (
+                [a[0] + side[0] * k, a[1] + side[1] * k],
+                [b[0] + side[0] * k, b[1] + side[1] * k],
+            )
+        };
+        let ((a1, b1), (a2, b2)) = (moved(1.0), moved(-1.0));
+        if self.knife_once(ids, a1, b1, false)?.is_empty()
+            || self.knife_once(ids, a2, b2, false)?.is_empty()
+        {
+            return Ok(made);
+        }
+        self.knife_once(ids, a1, b1, true)
     }
 
+    /// One cut along `a`–`b`, made only when `apply`: otherwise what it
+    /// would make, worked out on a copy of the document.
     fn knife_once(
         &mut self,
         ids: &[NodeId],
         a: [f32; 2],
         b: [f32; 2],
+        apply: bool,
     ) -> Result<Vec<NodeId>, EngineError> {
         use chitrakar_render::boolean::{combine_or_nudge, BoolOp};
         type Ring = Vec<[f32; 2]>;
@@ -3620,7 +3641,7 @@ impl Session {
             work.apply(remove.clone())?;
             cmds.push(remove);
         }
-        if !cmds.is_empty() {
+        if apply && !cmds.is_empty() {
             self.apply_labeled(Command::Batch(cmds), Some("Cut with the knife".into()))?;
         }
         Ok(made)
@@ -8621,8 +8642,64 @@ impl Session {
 
     /// What is picked out of the page, carried into `space`, ready to
     /// ride on a stroke laid down there.
-    fn region_in(&self, space: Transform) -> Option<Box<chitrakar_doc::Mask>> {
-        Self::carried_into(self.doc.selection()?, space).map(Box::new)
+    fn region_in(&mut self, space: Transform) -> Option<Box<chitrakar_doc::Mask>> {
+        let picked = self.doc.selection()?.clone();
+        // A region painted with strokes that each carry a region of their
+        // own — a layer's mask picked out and painted into again — is
+        // taken as the picture of what it covers. Carried whole, each
+        // stroke held every stroke before it with its own region inside,
+        // and the document doubled every time it was done, until the
+        // engine stopped and the file would not open.
+        let nested = matches!(
+            &picked.kind,
+            chitrakar_doc::MaskKind::Painted { strokes } if strokes.iter().any(|s| s.clip.is_some())
+        );
+        let region = if nested {
+            self.region_as_picture(&picked).unwrap_or(picked)
+        } else {
+            picked
+        };
+        Self::carried_into(&region, space).map(Box::new)
+    }
+
+    /// A region as a picture of its coverage over the page, kept as a
+    /// resource (two the same are one), for a stroke to be confined by.
+    fn region_as_picture(&mut self, region: &chitrakar_doc::Mask) -> Option<chitrakar_doc::Mask> {
+        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: w,
+            y1: h,
+        };
+        let plane = chitrakar_render::mask_plane_over(
+            &self.doc,
+            region,
+            Transform::default(),
+            clip,
+            (w, h),
+        );
+        if plane.len() != (w as usize) * (h as usize) {
+            return None;
+        }
+        let rgba: Vec<u8> = plane
+            .iter()
+            .flat_map(|c| {
+                let v = (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+                [v, v, v, 255]
+            })
+            .collect();
+        let resource_id = self.doc.add_resource(w, h, rgba);
+        Some(chitrakar_doc::Mask {
+            kind: chitrakar_doc::MaskKind::Raster {
+                resource_id,
+                width: w,
+                height: h,
+                transform: Transform::default(),
+            },
+            invert: false,
+            feather: 0.0,
+        })
     }
 
     /// Whether the page point `(x, y)` is inside what is picked out.
@@ -18899,6 +18976,48 @@ mod tests {
         assert_eq!(handles.len(), points.len(), "with handles");
     }
 
+    /// A layer's mask picked out and painted into again, round after
+    /// round, grows the document by a stroke a round: each stroke held
+    /// every stroke before it in its region, and it doubled each time.
+    #[test]
+    fn painting_into_a_picked_mask_does_not_double() {
+        let mut s = Session::new(200, 200, ColorMode::Rgb);
+        let r = add_rect(&mut s, "r", 200.0, 200.0);
+        s.ensure_painted_mask(r).unwrap();
+        s.pick_region(
+            VectorShape::Rect {
+                width: 120.0,
+                height: 120.0,
+                radius: 0.0,
+            },
+            Transform::translation(40.0, 40.0),
+            "replace",
+        )
+        .unwrap();
+        let ink = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let size = |s: &Session| serde_json::to_string(s.document()).unwrap().len();
+        let mut sizes = Vec::new();
+        for k in 0..18 {
+            let y = 30.0 + k as f32 * 8.0;
+            s.paint_begin(r, 20.0, y, 6.0, ink.clone(), 0.0, false, true)
+                .unwrap();
+            s.paint_extend(180.0, y, 6.0).unwrap();
+            s.commit_preview();
+            s.pick_layer_mask(r, "replace").unwrap();
+            sizes.push(size(&s));
+        }
+        let (first, last) = (sizes[2], sizes[17]);
+        assert!(
+            last < first * 20,
+            "grew from {first} to {last} bytes: {sizes:?}"
+        );
+    }
+
     /// A cut through an outline's anchors exactly cuts it: a diamond cut
     /// level through its side corners was left whole.
     #[test]
@@ -18933,6 +19052,10 @@ mod tests {
         .unwrap();
         let made = s.knife(&[d], [20.0, 90.0], [160.0, 90.0]).unwrap();
         assert_eq!(made.len(), 2, "cut in two");
+        s.undo().unwrap();
+        // A line along the diamond's top corner only touches it: nothing.
+        let touched = s.knife(&[d], [20.0, 40.0], [160.0, 40.0]).unwrap();
+        assert!(touched.is_empty(), "a touch cuts nothing: {touched:?}");
     }
 
     /// A large curve combined stays a curve: held to a quarter of a pixel
