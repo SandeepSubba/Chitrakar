@@ -628,14 +628,33 @@ export function PreferencesDialog({
                   The tools' own keys are on the Tools page.
                 </p>
                 {refused && <p className="modal-note">{refused}</p>}
-                {COMMAND_GROUPS.map((section) => (
-                  <div className="prefs-tools prefs-chords" key={section} role="group">
-                    <span className="prefs-chord-group">{section}</span>
-                    {COMMANDS.filter((c) => c.group === section).map((c) =>
-                      chordRow(`cmd:${c.id}`, c.label, chords.of[c.id]),
-                    )}
-                  </div>
-                ))}
+                {/* At the top, and finding the commands as well as the
+                    menus' rows: it stood halfway down the page, where
+                    Edit › Keyboard shortcuts… gave it the focus out of
+                    sight. */}
+                <input
+                  type="search"
+                  className="prefs-find"
+                  placeholder="Find a command"
+                  aria-label="Find a command"
+                  value={rowQuery}
+                  onChange={(e) => setRowQuery(e.target.value)}
+                  // Its letters are its own; Escape still closes the window.
+                  onKeyDown={(e) => e.key !== "Escape" && e.stopPropagation()}
+                />
+                {COMMAND_GROUPS.map((section) => {
+                  const q = rowQuery.trim().toLowerCase();
+                  const found = COMMANDS.filter(
+                    (c) => c.group === section && (!q || `${section} ${c.label}`.toLowerCase().includes(q)),
+                  );
+                  if (found.length === 0) return null;
+                  return (
+                    <div className="prefs-tools prefs-chords" key={section} role="group">
+                      <span className="prefs-chord-group">{section}</span>
+                      {found.map((c) => chordRow(`cmd:${c.id}`, c.label, chords.of[c.id]))}
+                    </div>
+                  );
+                })}
                 {menuRows.length > 0 && (
                   <div
                     className="prefs-tools prefs-chords"
@@ -643,16 +662,6 @@ export function PreferencesDialog({
                     aria-label="Everything else in the menus"
                   >
                     <span className="prefs-chord-group">Everything else in the menus</span>
-                    <input
-                      type="search"
-                      className="prefs-find"
-                      placeholder="Find a command"
-                      aria-label="Find a command"
-                      value={rowQuery}
-                      onChange={(e) => setRowQuery(e.target.value)}
-                      // Its letters are its own; Escape still closes the window.
-                      onKeyDown={(e) => e.key !== "Escape" && e.stopPropagation()}
-                    />
                     {menuRows
                       .filter((r) => {
                         const q = rowQuery.trim().toLowerCase();

@@ -168,6 +168,13 @@ pub const MAX_DEPTH: usize = 256;
 /// to double at every level would ask for.
 pub const MAX_DRAWN: u64 = 200_000;
 
+/// What a file is opened with: five times what an edit is held to, and
+/// a quarter as deep again, so a document the editor let be made — copies
+/// made, then layers added to what they copy — opens, while one made to
+/// double at every level is still refused.
+pub const OPEN_DRAWN: u64 = 1_000_000;
+pub const OPEN_DRAWN_DEPTH: usize = 320;
+
 /// Whether a brush stroke's points and widths are numbers a page can
 /// carry: a mask stroke three billion wide was taken, and undoing a resize
 /// of the page after it stopped the engine.
@@ -176,6 +183,7 @@ fn stroke_within_reason(stroke: &PaintStroke) -> bool {
     stroke.points.iter().flatten().all(|&v| fine(v))
         && stroke.radii.iter().all(|&r| fine(r) && r >= 0.0)
         && stroke.source.iter().all(|&v| fine(v))
+        && stroke.clip.as_ref().is_none_or(|c| c.within_reason())
 }
 
 /// Whether a page of this size is one the engine could draw.
@@ -893,6 +901,15 @@ impl Document {
     /// carried them to infinity and the file would not open again.
     pub fn hold_places_in_reason(&mut self) -> usize {
         let mut held = 0;
+        // The selection and the regions kept by name are masks of the
+        // page's, and are held the same way.
+        if self.selection.as_ref().is_some_and(|m| !m.within_reason()) {
+            self.selection = None;
+            held += 1;
+        }
+        let before = self.regions.len();
+        self.regions.retain(|r| r.mask.within_reason());
+        held += before - self.regions.len();
         // The page has no place of its own (`PageHasNoPlace`): one a file
         // gives it is let go of.
         if let Some(root) = self.nodes.get_mut(&self.root) {
@@ -1041,6 +1058,12 @@ impl Document {
     /// opened from a file at a scale of 1e38 and the page resized by
     /// four came to infinity, which saved as null and would not open.
     fn page_map_fits(&self, m: Transform) -> Result<(), DocError> {
+        let carried = |mask: &Mask| mask.carried_through(m).within_reason();
+        if self.selection.as_ref().is_some_and(|s| !carried(s))
+            || self.regions.iter().any(|r| !carried(&r.mask))
+        {
+            return Err(DocError::PlacedPastReason);
+        }
         let top = self.children.get(&self.root).into_iter().flatten();
         for id in top {
             if let Some(node) = self.nodes.get(id) {
@@ -1198,6 +1221,14 @@ impl Document {
             _ => None,
         };
         let was_palette = matches!(cmd, Command::SetSwatches { .. });
+        // A copy made, by a layer arriving as one, a layer told to be one,
+        // or a subtree put back that may hold some.
+        let makes_copy = match &cmd {
+            Command::AddNode { node, .. } => matches!(node.kind, NodeKind::Instance { .. }),
+            Command::SetKind { kind, .. } => matches!(**kind, NodeKind::Instance { .. }),
+            Command::RestoreSubtree { .. } => true,
+            _ => false,
+        };
         let mut inverse = self.apply_inner(cmd)?;
         // Depth first, and iteratively: the check below recurses, so a
         // command that nested the layers past what a stack can walk would
@@ -1231,6 +1262,22 @@ impl Document {
             // nothing could draw.
             let _ = self.apply_inner(inverse);
             return Err(DocError::InstanceCycle);
+        }
+        // Held to what a file is opened with, and short of it: a page of
+        // 401 copies of a 500-layer group was made and saved, and then
+        // refused when opened; a chain of copies each in a group went on
+        // until the stack ran out.
+        if makes_copy {
+            let mut known = HashMap::new();
+            let refusal = match self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known) {
+                None => Some(DocError::TooDeep { limit: MAX_DEPTH }),
+                Some((_, draws)) if draws > MAX_DRAWN => Some(DocError::TooMuchToDraw),
+                Some(_) => None,
+            };
+            if let Some(refusal) = refusal {
+                let _ = self.apply_inner(inverse);
+                return Err(refusal);
+            }
         }
         match unsettled {
             Unsettled::Nothing => {}
@@ -1415,6 +1462,16 @@ impl Document {
                     .get(&parent)
                     .ok_or(DocError::UnknownNode(parent))?;
                 let id = subtree.root_id;
+                // Numbers the page can count, and none taken: put back
+                // at 2^60 a layer was kept, and the file saved after it
+                // was refused when opened.
+                if subtree
+                    .nodes
+                    .iter()
+                    .any(|(n, _)| n.0 >= LAST_SAFE_ID || self.nodes.contains_key(n))
+                {
+                    return Err(DocError::OutOfNumbers);
+                }
                 self.settle_parents();
                 for (nid, node) in subtree.nodes {
                     self.nodes.insert(nid, node);
@@ -1884,6 +1941,9 @@ impl Document {
                 Ok(Command::SetGuides { guides: prev })
             }
             Command::SetRegions { regions } => {
+                if regions.iter().any(|r| !r.mask.within_reason()) {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let prev = std::mem::replace(&mut self.regions, regions);
                 Ok(Command::SetRegions { regions: prev })
             }
@@ -1904,6 +1964,13 @@ impl Document {
                 Ok(Command::SetSwatches { swatches: prev })
             }
             Command::SetSelection { selection } => {
+                // Held as a layer's mask is: the selection is carried by
+                // every change of the page, and one at 3e38 went to
+                // infinity with the first turn and saved a file that
+                // would not open.
+                if selection.as_ref().is_some_and(|m| !m.within_reason()) {
+                    return Err(DocError::PlacedPastReason);
+                }
                 let prev = std::mem::replace(&mut self.selection, selection);
                 Ok(Command::SetSelection { selection: prev })
             }
@@ -2041,10 +2108,17 @@ impl Document {
         // before doubled the work at every level and held the page for
         // minutes, and a chain of copies each wrapped in a group drew
         // deeper than the engine's stack goes.
+        // Wider than an edit is held to, so whatever the editor let be
+        // made, with layers added to an original after it was copied, a
+        // group or two wrapped round it, still opens.
         let mut known = HashMap::new();
-        match self.drawn_reach(self.root, 0, &mut known) {
-            None => return Err(DocError::TooDeep { limit: MAX_DEPTH }),
-            Some((_, draws)) if draws > MAX_DRAWN => return Err(DocError::TooMuchToDraw),
+        match self.drawn_reach(self.root, 0, OPEN_DRAWN_DEPTH, &mut known) {
+            None => {
+                return Err(DocError::TooDeep {
+                    limit: OPEN_DRAWN_DEPTH,
+                })
+            }
+            Some((_, draws)) if draws > OPEN_DRAWN => return Err(DocError::TooMuchToDraw),
             Some(_) => {}
         }
         Ok(())
@@ -2056,12 +2130,13 @@ impl Document {
         &self,
         id: NodeId,
         level: usize,
+        most: usize,
         known: &mut HashMap<NodeId, (usize, u64)>,
     ) -> Option<(usize, u64)> {
         if let Some(&reach) = known.get(&id) {
-            return (level + reach.0 <= MAX_DEPTH + 1).then_some(reach);
+            return (level + reach.0 <= most + 1).then_some(reach);
         }
-        if level > MAX_DEPTH {
+        if level > most {
             return None;
         }
         let mut depth = 0;
@@ -2072,7 +2147,7 @@ impl Document {
         };
         let kids = self.children.get(&id).cloned().unwrap_or_default();
         for next in copied.into_iter().chain(kids) {
-            let (d, n) = self.drawn_reach(next, level + 1, known)?;
+            let (d, n) = self.drawn_reach(next, level + 1, most, known)?;
             depth = depth.max(d);
             draws = draws.saturating_add(n);
         }
@@ -4543,45 +4618,48 @@ mod tests {
     /// held the page for minutes or went deeper than the stack.
     #[test]
     fn copies_that_draw_too_much_are_refused() {
-        let doubled = |levels: usize| {
-            let mut doc = Document::new(20, 20, ColorMode::Rgb);
-            let root = doc.root();
-            let mut last = doc.peek_next_id();
+        // Doubling at every level: refused as it is made, and what was
+        // made before the refusal still opens.
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let mut last = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("level 0")),
+        })
+        .unwrap();
+        let mut refused = None;
+        'build: for k in 1..30 {
+            let group = doc.peek_next_id();
             doc.apply(Command::AddNode {
                 parent: root,
-                index: 0,
-                node: Box::new(Node::group("level 0")),
+                index: k,
+                node: Box::new(Node::group(&format!("level {k}"))),
             })
             .unwrap();
-            for k in 1..levels {
-                let group = doc.peek_next_id();
-                doc.apply(Command::AddNode {
-                    parent: root,
-                    index: k,
-                    node: Box::new(Node::group(&format!("level {k}"))),
-                })
-                .unwrap();
-                for at in 0..2 {
-                    doc.apply(Command::AddNode {
-                        parent: group,
-                        index: at,
-                        node: Box::new(Node::instance("copy", last)),
-                    })
-                    .unwrap();
+            for at in 0..2 {
+                if let Err(e) = doc.apply(Command::AddNode {
+                    parent: group,
+                    index: at,
+                    node: Box::new(Node::instance("copy", last)),
+                }) {
+                    refused = Some(e);
+                    break 'build;
                 }
-                last = group;
             }
-            doc
-        };
+            last = group;
+        }
         assert!(
-            doubled(10).check_structure().is_ok(),
-            "a thousand draws is fine"
+            matches!(refused, Some(DocError::TooMuchToDraw)),
+            "{refused:?}"
         );
-        assert!(matches!(
-            doubled(20).check_structure(),
-            Err(DocError::TooMuchToDraw)
-        ));
+        assert!(
+            doc.check_structure().is_ok(),
+            "what the editor let be made opens"
+        );
 
+        // A chain of copies each in a group: refused as it is made too.
         let mut chain = Document::new(20, 20, ColorMode::Rgb);
         let root = chain.root();
         let mut last = chain.peek_next_id();
@@ -4592,7 +4670,8 @@ mod tests {
                 node: Box::new(Node::group("start")),
             })
             .unwrap();
-        for k in 1..200 {
+        let mut refused = None;
+        for k in 1..400 {
             let group = chain.peek_next_id();
             chain
                 .apply(Command::AddNode {
@@ -4601,19 +4680,21 @@ mod tests {
                     node: Box::new(Node::group("wrap")),
                 })
                 .unwrap();
-            chain
-                .apply(Command::AddNode {
-                    parent: group,
-                    index: 0,
-                    node: Box::new(Node::instance("copy", last)),
-                })
-                .unwrap();
+            if let Err(e) = chain.apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::instance("copy", last)),
+            }) {
+                refused = Some(e);
+                break;
+            }
             last = group;
         }
-        assert!(matches!(
-            chain.check_structure(),
-            Err(DocError::TooDeep { .. })
-        ));
+        assert!(
+            matches!(refused, Some(DocError::TooDeep { .. })),
+            "{refused:?}"
+        );
+        assert!(chain.check_structure().is_ok(), "and that one opens");
     }
 
     /// The page has no place of its own, and a stroke's numbers are held

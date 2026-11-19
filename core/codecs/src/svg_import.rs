@@ -462,6 +462,22 @@ fn stands_as_colour(hay: &[u8], at: usize, end: usize) -> bool {
         i -= 1;
         skip_space(&mut i);
     }
+    // The colour a paint falls back on after a `url(...)` that is not
+    // there, or cannot be drawn: `fill="url(#g) rebeccapurple"`. Left as
+    // the word, usvg dropped the whole fill and the shape came in black.
+    if i > 0 && hay[i - 1] == b')' {
+        let open = hay[..i].iter().rposition(|&c| c == b'(').unwrap_or(0);
+        let mut j = open;
+        while j > 0 && name_char(hay[j - 1]) {
+            j -= 1;
+        }
+        if hay[j..open].eq_ignore_ascii_case(b"url") {
+            i = j;
+            skip_space(&mut i);
+        } else {
+            return false;
+        }
+    }
     if i == 0 || !(hay[i - 1] == b'=' || hay[i - 1] == b':') {
         return false;
     }

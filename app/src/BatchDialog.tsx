@@ -111,6 +111,7 @@ export function BatchDialog({
     return () => document.removeEventListener("keydown", key);
   }, [onClose]);
 
+  const unwritten = useRef<{ key: string; done: Outgoing[]; failed: string[] } | null>(null);
   const run = async () => {
     const kept = presets.find((p) => p.name === preset);
     const settings = JSON.stringify(withDefaults(kept?.settings ?? {}));
@@ -122,9 +123,14 @@ export function BatchDialog({
       watermark: watermarkJson(prefs.exportWatermark),
     };
     stop.current = false;
-    const done: Outgoing[] = [];
-    const failed: string[] = [];
-    for (const [i, f] of files.entries()) {
+    // What was developed and not written — a folder panel put away, a
+    // Replace answered No — is kept, so asking again writes it rather
+    // than developing the whole shoot again.
+    const key = JSON.stringify([settings, opts, files.map((f) => f.name)]);
+    const waiting = unwritten.current?.key === key ? unwritten.current : null;
+    const done: Outgoing[] = waiting ? [...waiting.done] : [];
+    const failed: string[] = waiting ? [...waiting.failed] : [];
+    for (const [i, f] of (waiting ? [] : files).entries()) {
       if (stop.current) {
         // Stopped is said, with what was left: the window closed on one
         // of two written and nothing said of the other.
@@ -155,12 +161,25 @@ export function BatchDialog({
       }
     }
     setRunning(done.length > 0 ? "Writing…" : null);
+    let written = true;
     try {
-      if (done.length > 0) await write(done);
+      if (done.length > 0) written = await write(done);
     } catch (err) {
       failed.push(`Writing: ${err}`);
     }
     setRunning(null);
+    // Nothing written, and nothing gone wrong: the person put the folder
+    // panel away or would not replace a file. The window stays, with
+    // what it developed, as the Export window does — it closed, and the
+    // shoot developed was thrown away without a word.
+    if (!written) {
+      unwritten.current = { key, done, failed };
+      setFailures([
+        `Nothing was written. ${done.length} developed ${done.length === 1 ? "photograph waits" : "photographs wait"}: export again to choose where.`,
+      ]);
+      return;
+    }
+    unwritten.current = null;
     if (failed.length > 0) setFailures(failed);
     else onClose();
   };
@@ -274,7 +293,7 @@ export function BatchDialog({
           ) : (
             <>
               <button onClick={onClose}>{failures.length > 0 ? "Close" : "Cancel"}</button>
-              {failures.length === 0 && (
+              {(failures.length === 0 || unwritten.current !== null) && (
                 <button className="primary" onClick={() => void run()}>
                   Export {files.length}
                 </button>

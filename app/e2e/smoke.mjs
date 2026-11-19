@@ -19624,8 +19624,13 @@ assert(
   await chordOf("Hide").click();
   await page.keyboard.press("Backspace");
   await page.waitForTimeout(150);
+  const hideBack = await chordOf("Hide").textContent();
+  // The search finds the commands as well as the rows, so it is let go
+  // of to see zoom in again.
+  await page.fill('input[aria-label="Find a command"]', "");
+  await page.waitForTimeout(100);
   assert(
-    (await chordOf("Hide").textContent()) === "none" && (await chordOf("Zoom in").textContent()) === "Ctrl+=",
+    hideBack === "none" && (await chordOf("Zoom in").textContent()) === "Ctrl+=",
     "Backspace puts each back: the row to none, zoom in to its own",
   );
   await page.click('.modal-actions .primary:text-is("Done")');
@@ -21673,6 +21678,54 @@ assert(
   );
 }
 
+// 9dv. The forty-fifth audit's interface pass. On a touch screen each
+// submenu tapped stayed open under the next; Enter held on the bar's
+// Undo went on to redo once there was nothing left to undo.
+{
+  const ctx = await browser.newContext({ viewport: { width: 1024, height: 768 }, hasTouch: true });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  for (const x of [40, 160]) {
+    await p.keyboard.press("r");
+    await p.mouse.move(r.x + x, r.y + 40);
+    await p.mouse.down();
+    await p.mouse.move(r.x + x + 80, r.y + 120, { steps: 4 });
+    await p.mouse.up();
+    await p.waitForTimeout(200);
+  }
+  await p.tap('.menu-label:text-is("Layer")');
+  await p.waitForTimeout(200);
+  for (const row of ["Arrange", "Align"]) {
+    await p.locator(".menu-pop:not(.sub) .menu-item.has-sub", { hasText: row }).first().tap();
+    await p.waitForTimeout(300);
+  }
+  const open = await p.locator(".menu-pop.sub").count();
+  assert(open === 1, `one submenu open at a time on a touch screen (${open})`);
+  await p.keyboard.press("Escape");
+  await p.keyboard.press("Escape");
+  await p.waitForTimeout(200);
+
+  // Enter on Undo past the last step does nothing more.
+  const rows = () => p.locator(".panel ul.layer-list li[data-id]").count();
+  const undo = p.locator('.chrome-group[aria-label="History"] button').first();
+  await undo.focus();
+  for (let i = 0; i < 5; i++) {
+    await p.keyboard.press("Enter");
+    await p.waitForTimeout(150);
+  }
+  assert((await rows()) === 0, `Enter on Undo undoes everything and redoes nothing (${await rows()} layers)`);
+  assert(
+    (await p.evaluate(() => document.activeElement?.getAttribute("title") ?? "")).startsWith("Undo"),
+    "and keeps the focus on Undo",
+  );
+  await ctx.close();
+}
+
 // 9du. The forty-fourth audit. A live copy of a frame was drawn as a
 // frame and never exported as one; an adjustment put above a clipping
 // base went between it and what it clips, and unclipped them; Shift+
@@ -22369,7 +22422,7 @@ assert(
   await p.waitForSelector("#engine-canvas");
   await p.waitForTimeout(1200);
   const undoButton = p.locator('.chrome-group[aria-label="History"] button').first();
-  assert(await undoButton.isDisabled(), "Undo is greyed out with nothing done");
+  assert((await undoButton.getAttribute("aria-disabled")) === "true", "Undo is greyed out with nothing done");
   const r = await p.locator("#engine-page").boundingBox();
   await p.locator("#engine-canvas").hover();
   await p.keyboard.press("r");
@@ -22378,7 +22431,7 @@ assert(
   await p.mouse.move(r.x + 140, r.y + 120, { steps: 4 });
   await p.mouse.up();
   await p.waitForTimeout(300);
-  assert(!(await undoButton.isDisabled()), "and not once something is");
+  assert((await undoButton.getAttribute("aria-disabled")) === "false", "and not once something is");
   await p.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
   const rows = () => p.locator(".panel ul li .layer-name").count();
   const before = await rows();

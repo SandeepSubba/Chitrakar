@@ -1795,6 +1795,9 @@ const svgFile = (words: string): File | null => {
   return new File([text], "image.svg", { type: "image/svg+xml" });
 };
 
+/** The submenu open in each menu, by the menu it opens from. */
+const openSubs = new WeakMap<Element, () => void>();
+
 /** The six bands of colour a picture is spoken to in, in the order a
  * colour wheel is read, each drawn in something like its own colour. */
 const COLOUR_BANDS: [string, string][] = [
@@ -2828,8 +2831,13 @@ export function App() {
     } else {
       for (const name of ["--accent", "--on-accent", "--accent-on-dark", "--accent-on-light"]) root.removeProperty(name);
     }
-    if (prefs.sliderColor) root.setProperty("--slider", prefs.sliderColor);
-    else root.removeProperty("--slider");
+    // Held to three to one against the panel as the accent is: Amber
+    // read at two to one on the light theme, and white left the opacity
+    // thumb unseen and a ticked box a bare tick.
+    if (prefs.sliderColor) {
+      const light = prefs.theme === "light" || (prefs.theme === "system" && systemLight);
+      root.setProperty("--slider", accentAsText(prefs.sliderColor, light ? "#ffffff" : "#2a2a30", 3));
+    } else root.removeProperty("--slider");
     root.fontSize = prefs.uiScale === 1 ? "" : `${16 * prefs.uiScale}px`;
     // Said on the root too, for the bar: what it gives up and when is
     // decided by the window's width, which a larger interface fills
@@ -5523,6 +5531,10 @@ export function App() {
     // never reached the tool, so there is nothing to take back.
     dropHeldPress();
     cancelGesture(true);
+    // And the snap lines it was showing: a long press with the Rect tool
+    // over a shape's middle left its snap line across the page, through
+    // Escape and a change of tool, until the shape was tapped.
+    setGuides({ x: [], y: [] });
     // One that had reached it and dropped a text block, with nothing
     // done since, takes the block back: a pinch is not a wish for text.
     const dropped = justDropped.current;
@@ -9243,6 +9255,7 @@ export function App() {
    * older copy. A row has no paste event to read the clipboard from, so
    * it asks for it — which a browser may ask the person about, and a
    * refusal, or no answer in a moment, pastes the layers as before. */
+  const pasteFromMenuRef = useRef<() => void>(() => {});
   const pasteFromMenu = () => {
     const read = navigator.clipboard?.read?.bind(navigator.clipboard);
     if (!read) {
@@ -9272,6 +9285,8 @@ export function App() {
       })
       .catch(() => pasteClipboard());
   };
+  pasteFromMenuRef.current = pasteFromMenu;
+
 
   // Layer shortcuts get their own listener, declared after the actions it
   // calls: a closure over a `const` declared further down still throws
@@ -12381,8 +12396,14 @@ export function App() {
         const was: [number, number] = [session.width, session.height];
         const packed = await readRaw(next.bytes);
         await giveLensProfiles(session);
-        session.raw_open(packed, next.bytes, next.name);
-        const got = await developedElsewhere(packed, next.name, json);
+        const info = JSON.parse(session.raw_open(packed, next.bytes, next.name)) as RawInfo;
+        // Each with the lens profile its own opening found, as "Develop
+        // the others like this" gives it: the first's was written on all
+        // of them, and a raw that never used it later said it was missing.
+        const own = JSON.stringify(
+          info.lensProfile && !unprofiled.uncorrected ? { ...unprofiled, lens_profile: info.lensProfile } : unprofiled,
+        );
+        const got = await developedElsewhere(packed, next.name, own);
         // The document went while this one was developed (File › New, an
         // Open): what is left is not placed into a page nobody can see,
         // whose layers then came back over the new one.
@@ -12393,8 +12414,8 @@ export function App() {
         }
         placed(
           got
-            ? session.place_raw_pixels(got.rgba, got.width, got.height, json)
-            : session.place_raw(json),
+            ? session.place_raw_pixels(got.rgba, got.width, got.height, own)
+            : session.place_raw(own),
           was,
         );
       } catch (err) {
@@ -12913,6 +12934,15 @@ export function App() {
       const image =
         Array.from(e.clipboardData?.files ?? []).find((f) => f.type.startsWith("image/")) ??
         svgFile(words);
+      // Said to be there and handed over empty, as Chromium hands an
+      // image/svg+xml item to the event: asked for the way the menu's
+      // Paste asks, which reads it.
+      if (!image && e.clipboardData?.types.includes("image/svg+xml")) {
+        pasteSeen.current = true;
+        e.preventDefault();
+        pasteFromMenuRef.current();
+        return;
+      }
       if (!image) return;
       pasteSeen.current = true;
       e.preventDefault();
@@ -13642,24 +13672,6 @@ export function App() {
       "pick-subject": selected === null && !layers.some((l) => l.kind === "raster" && l.visible),
     });
   }
-  /** Which of the bar's Undo and Redo was pressed last, until the history
-   * it changed has been drawn: one that greys itself out under the focus
-   * — the last step undone — hands the focus to the other, which the
-   * same press made live. Left alone, the focus fell to the page and
-   * the next Tab began again from the top. */
-  const historyPressed = useRef<"undo" | "redo" | null>(null);
-  useEffect(() => {
-    const which = historyPressed.current;
-    historyPressed.current = null;
-    if (!which) return;
-    const buttons = [
-      ...document.querySelectorAll<HTMLButtonElement>('.chrome-group[aria-label="History"] button'),
-    ];
-    const [pressed, other] = which === "undo" ? buttons : [...buttons].reverse();
-    if (!pressed?.disabled || !other || other.disabled) return;
-    const at = document.activeElement;
-    if (at === null || at === document.body || at === pressed) other.focus({ preventScroll: true });
-  }, [history.past.length, history.future.length]);
   const menusRef = useRef(menus);
   menusRef.current = menus;
   // A chord a person gave a menu row runs that row, from wherever the
@@ -14117,25 +14129,26 @@ export function App() {
         )}
 
         <div className="chrome-group" role="group" aria-label="History">
+          {/* Out of steps, each says so and keeps the focus, rather than
+              being disabled: disabled under the focus it handed it to the
+              other, and Enter held on Undo went on to redo. */}
           <button
             className="chrome-button icon-only"
             onClick={() => {
-              historyPressed.current = "undo";
-              undo();
+              if (history.past.length > 0) undo();
             }}
             title={tip("Undo", "undo")}
-            disabled={history.past.length === 0}
+            aria-disabled={history.past.length === 0}
           >
             <Icon name="undo" />
           </button>
           <button
             className="chrome-button icon-only"
             onClick={() => {
-              historyPressed.current = "redo";
-              redo();
+              if (history.future.length > 0) redo();
             }}
             title={tip("Redo", "redo")}
-            disabled={history.future.length === 0}
+            aria-disabled={history.future.length === 0}
           >
             <Icon name="redo" />
           </button>
@@ -16038,7 +16051,12 @@ export function App() {
               // line out from the letters drawn under it. Such a block is
               // typed as plain text in a box of its own, where caret and
               // letters agree, and set properly when the typing ends.
+              // Text set along a path is not where a straight box would
+              // put it: its caret and picked letters showed in a band
+              // nowhere near the letters on the curve, so it is typed in
+              // a box of its own that shows its words.
               const mirrored =
+                spec.along == null &&
                 !((spec.paragraph_spacing ?? 0) > 0) &&
                 (spec.list ?? "None") === "None" &&
                 !(spec.runs ?? []).some((r) => r.size != null || r.baseline != null);
@@ -20781,9 +20799,24 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
     const top = Math.max(8, Math.min(row.top - 5, window.innerHeight - height - 8));
     setAt([left, top]);
   };
+  /** Closes this one at once, for a row beside it opening its own. */
+  const closeNow = useRef(() => {
+    clear(closing);
+    clear(opening);
+    setOpen(false);
+  });
   const show = () => {
     clear(closing);
     clear(opening);
+    // One open at a time in a menu: a touch leaves a row before its tap
+    // lands, and the tap cancelled the close, so tapping Arrange, Align
+    // and Mask in turn left all three open over one another.
+    const pop = rowRef.current?.closest(".menu-pop") ?? null;
+    if (pop) {
+      const before = openSubs.get(pop);
+      if (before && before !== closeNow.current) before();
+      openSubs.set(pop, closeNow.current);
+    }
     place();
     setOpen(true);
   };

@@ -590,6 +590,16 @@ body {
   padding: 0.3rem;
 }
 
+/* Undo and Redo with no step to take: greyed as disabled is, but still
+   holding the focus they had, so another Enter does nothing. */
+.chrome-button[aria-disabled="true"] {
+  opacity: 0.4;
+  cursor: default;
+}
+.chrome-button[aria-disabled="true"]:hover {
+  background: none;
+}
+
 .chrome-button.toggled {
   background: color-mix(in srgb, var(--accent) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
@@ -1151,6 +1161,10 @@ body {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0.2rem;
+  /* In the root's units as the fields beside it are: left the browser's
+     own 13.33px, Blend and Font stayed small at a larger interface. */
+  font: inherit;
+  font-size: 0.8rem;
 }
 
 /* The typed fields dressed as the choices beside them: they were the
@@ -3932,12 +3946,20 @@ button.fold:hover {
      the rail was walked and the rail moved under the pointer. A longer
      page scrolls inside. */
   height: min(38rem, calc(100vh - 2rem));
+  /* The page scrolls in the pane and nowhere else: the window itself
+     scrolled too, past its fixed height, and took the title and the
+     rail with it; the Tools page's last rows stood under Done, reached
+     only by scrolling the window, with nothing on a touch screen to say
+     there was more. */
+  overflow: hidden;
 }
 
 .prefs-body {
   display: flex;
   gap: 0.75rem;
   align-items: stretch;
+  flex: 1;
+  min-height: 0;
 }
 
 /* The rail of categories. Six groups is where a flat list stops being
@@ -3996,7 +4018,7 @@ button.fold:hover {
   min-height: 11rem;
   /* A long page — the keys, every row of every menu — scrolls in its
      own room, so the rail and the window's buttons stay put. */
-  max-height: calc(100vh - 10rem);
+  min-height: 0;
   overflow-y: auto;
   padding-right: 0.25rem;
 }
@@ -4870,4 +4892,12 @@ button.fold:hover {
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
   }
+}
+
+/* Dragged by a finger as by a mouse: with the browser free to pan, a
+   finger on the panel's edge or the toolbar's grip had its press taken
+   back (pointercancel) and the drag stopped a few pixels in. */
+.panel-edge,
+.tool.grip {
+  touch-action: none;
 }

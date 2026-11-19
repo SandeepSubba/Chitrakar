@@ -2729,6 +2729,11 @@ impl Session {
         } else {
             0.5
         };
+        // Asked in pixels on the page, as Offset path is: read in the
+        // path's own units, a path enlarged seven times strayed three and
+        // a half pixels at a tolerance of half of one.
+        let world = chitrakar_render::ancestor_space(&self.doc, id).compose(node.transform);
+        let tolerance = tolerance / world.max_scale().max(1e-6);
         let rings = chitrakar_render::shape_rings(shape);
         let Some(main) = rings.first() else {
             return Err(EngineError::BadCommand("this path has no outline".into()));
@@ -3180,7 +3185,17 @@ impl Session {
             let magnified = (world.a.hypot(world.b))
                 .max(world.c.hypot(world.d))
                 .max(1e-6);
-            let tolerance = 0.25 / magnified;
+            // And no finer than the outline it was worked from, which is
+            // flattened in steps that grow with its size: held to a quarter
+            // of a pixel alone, a 600-pixel ellipse could not be fitted at
+            // all and came back sixty-five straight steps.
+            let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+            for p in &points {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            let size = (hi[0] - lo[0]).max(hi[1] - lo[1]);
+            let tolerance = (0.25 / magnified).max(size * 0.0015);
             let (anchors, handles) = chitrakar_render::fit::fit_curves(&points, true, tolerance);
             if anchors.len() >= 3 && anchors.len() < points.len() {
                 (anchors, handles)
@@ -3271,6 +3286,31 @@ impl Session {
     }
 
     pub fn knife(
+        &mut self,
+        ids: &[NodeId],
+        a: [f32; 2],
+        b: [f32; 2],
+    ) -> Result<Vec<NodeId>, EngineError> {
+        let made = self.knife_once(ids, a, b)?;
+        if !made.is_empty() {
+            return Ok(made);
+        }
+        // A line through an anchor exactly — a diamond cut level through
+        // its side corners, a circle through its middle — met the outline
+        // at its points rather than across its sides, and cut nothing. The
+        // same line a hundredth of a pixel to one side cuts it.
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        // Not nought: a cut shorter than a thousandth was refused above.
+        let length = dx.hypot(dy);
+        let side = [-dy / length * 0.01, dx / length * 0.01];
+        self.knife_once(
+            ids,
+            [a[0] + side[0], a[1] + side[1]],
+            [b[0] + side[0], b[1] + side[1]],
+        )
+    }
+
+    fn knife_once(
         &mut self,
         ids: &[NodeId],
         a: [f32; 2],
@@ -5590,6 +5630,7 @@ impl Session {
             return Err(EngineError::BadCommand("a radius is a length".into()));
         }
         let mut cmds = Vec::new();
+        let asked = radius;
         for &id in ids {
             if self.unlocked(id).is_err() {
                 continue;
@@ -5603,6 +5644,16 @@ impl Session {
             } = &node.kind
             else {
                 continue;
+            };
+            // A radius in pixels on the page, as everything else asked in
+            // pixels is: in the shape's own units, ten on a shape enlarged
+            // four times rounded its corners forty.
+            let world = chitrakar_render::ancestor_space(&self.doc, id).compose(node.transform);
+            let det = (world.a * world.d - world.b * world.c).abs().sqrt();
+            let radius = if det.is_finite() && det > 1e-6 {
+                asked / det
+            } else {
+                asked
             };
             let live = |shape: chitrakar_doc::VectorShape| NodeKind::Vector {
                 shape,
@@ -18846,6 +18897,87 @@ mod tests {
         );
         assert!(page.get(85, 85).a < 0.01, "and nothing past them");
         assert_eq!(handles.len(), points.len(), "with handles");
+    }
+
+    /// A cut through an outline's anchors exactly cuts it: a diamond cut
+    /// level through its side corners was left whole.
+    #[test]
+    fn the_knife_cuts_through_an_anchor() {
+        let mut s = Session::new(200, 200, ColorMode::Rgb);
+        let root = s.document().root();
+        let mut diamond = Node::vector(
+            "d",
+            VectorShape::Path {
+                points: vec![[50.0, 0.0], [100.0, 50.0], [50.0, 100.0], [0.0, 50.0]],
+                closed: true,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        diamond.transform = Transform::translation(40.0, 40.0);
+        if let NodeKind::Vector { fill, .. } = &mut diamond.kind {
+            *fill = Some(AuthoredColor::Srgb {
+                r: 0.2,
+                g: 0.4,
+                b: 0.9,
+                a: 1.0,
+            });
+        }
+        let d = s.document().peek_next_id();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(diamond),
+        })
+        .unwrap();
+        let made = s.knife(&[d], [20.0, 90.0], [160.0, 90.0]).unwrap();
+        assert_eq!(made.len(), 2, "cut in two");
+    }
+
+    /// A large curve combined stays a curve: held to a quarter of a pixel
+    /// alone, the outline it was worked from could not be fitted and a
+    /// 600-pixel ellipse came back as sixty-five straight steps.
+    #[test]
+    fn a_large_curve_combined_stays_a_curve() {
+        let mut s = Session::new(800, 600, ColorMode::Rgb);
+        let root = s.document().root();
+        let mut ellipse = Node::vector(
+            "e",
+            VectorShape::Ellipse {
+                rx: 300.0,
+                ry: 225.0,
+            },
+        );
+        ellipse.transform = Transform::translation(100.0, 75.0);
+        let e = s.document().peek_next_id();
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(ellipse),
+        })
+        .unwrap();
+        let r = add_rect(&mut s, "r", 60.0, 60.0);
+        s.apply(Command::SetTransform {
+            id: r,
+            transform: Transform::translation(670.0, 270.0),
+        })
+        .unwrap();
+        let united = s.boolean_nodes(&[e, r], "union").unwrap();
+        let NodeKind::Vector {
+            shape: VectorShape::Path {
+                points, handles, ..
+            },
+            ..
+        } = &s.document().node(united).unwrap().kind
+        else {
+            panic!("a path")
+        };
+        assert!(
+            points.len() < 24 && !handles.is_empty(),
+            "{} anchors",
+            points.len()
+        );
     }
 
     /// The fit is held to a quarter of a pixel on the page, not of the

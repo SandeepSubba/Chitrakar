@@ -500,8 +500,20 @@ pub fn write_psd(
     // channel's rows.
     let (w, h) = (width as usize, height as usize);
     f.extend_from_slice(&1u16.to_be_bytes());
+    // Over white, as Photoshop keeps its merged picture: every reader
+    // takes the white back out where the picture is see-through, so a
+    // half-covered red written as it is came out dark red in ImageMagick
+    // and psd-tools, and in every thumbnail drawn from the file.
+    let matted: Vec<u8> = composite
+        .chunks_exact(4)
+        .flat_map(|p| {
+            let a = u32::from(p[3]);
+            let over = |c: u8| ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+            [over(p[0]), over(p[1]), over(p[2]), p[3]]
+        })
+        .collect();
     let planes: Vec<(Vec<u16>, Vec<u8>)> = (0..4)
-        .map(|c| compressed_plane(&plane_of(composite, c), w, h))
+        .map(|c| compressed_plane(&plane_of(&matted, c), w, h))
         .collect();
     for (counts, _) in &planes {
         for n in counts {
@@ -532,6 +544,23 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The merged picture is kept over white, as Photoshop keeps it and
+    /// every reader expects, and read back as it was.
+    #[test]
+    fn the_merged_picture_is_kept_over_white() {
+        let half = solid(2, 2, [200, 20, 20, 128]);
+        let layer = PsdOutLayer::trimmed("Half", 2, 2, &half);
+        let bytes = write_psd(2, 2, 72.0, &[PsdOutItem::Layer(layer)], &half).unwrap();
+        // Each plane's rows are two bytes written as they are (a run
+        // header of 1): the red stored is the red laid over white.
+        let tail = &bytes[bytes.len() - 4 * 2 * 3..];
+        assert_eq!(&tail[..3], &[1, 227, 227], "red over white: {tail:?}");
+        let back = read_psd(&bytes).unwrap().composite.unwrap();
+        for (got, want) in back[..4].iter().zip([200u8, 20, 20, 128]) {
+            assert!(got.abs_diff(want) <= 2, "{:?}", &back[..4]);
+        }
     }
 
     #[test]

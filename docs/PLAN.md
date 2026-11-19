@@ -142,7 +142,10 @@ without reading anything else.*
      stroke caught by a mask's handles. The forty-fourth: a live copy
      of a frame never exported, a PDF of an ordinary photograph stopping
      the engine, a stroke cutting off its own layer's shadow, files of
-     copies that held the page for minutes.
+     copies that held the page for minutes. The forty-fifth: copies made
+     and saved that would not open, submenus stacking on a tablet, a
+     PSD's merged picture without its white, a shoot's development
+     thrown away by a cancelled folder panel.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -12994,6 +12997,83 @@ without reading anything else.*
   of difference larger; a stroke on a hidden layer is kept without a
   word; Halftone flips dots under the 1e-5 drift of an undone mirror;
   a live copy of a frame is not a frame to paint into.
+  **A forty-fifth audit (November 2026).** Its check of round 44: the
+  limits on what copies draw were asked only of a file being opened, so
+  a page of 401 copies of a 500-layer group was made, saved, and then
+  refused (held as each copy is made, at 200,000 draws and 256 deep, and
+  a file opened with five times the draws and a quarter more depth, so
+  whatever the editor let be made opens); a large ellipse combined came
+  back sixty-five straight steps, the fit held finer than the outline it
+  was worked from (no finer than that outline); the selection, the
+  regions kept by name and a brush stroke's clip could still be carried
+  past reason by a turn of the page (held as a layer's mask is, let go
+  of on open); `fill="url(#g) rebeccapurple"` came in black (the colour
+  after a `url()` is read); an inside border at exactly half a rounded
+  corner was not cut to the shape; Ctrl+V did nothing with an SVG the
+  clipboard holds as image/svg+xml, which Chromium hands the paste
+  event empty (read as Edit › Paste reads it); a subtree put back at
+  layer number 2^60 was kept (refused, as one whose numbers are taken).
+  Its interface pass, a keyboard-only user, a tablet user and someone
+  who changes every preference: on a touch screen each submenu tapped
+  stayed open under the next (one at a time); Edit › Keyboard shortcuts…
+  put the focus in a search field four hundred pixels below the window,
+  and the Preferences window scrolled as a whole past its fixed height
+  (the search is at the top of the Keys page and finds the commands as
+  well, and a page scrolls in its pane alone); Enter held on the bar's
+  Undo went on to redo (out of steps, each keeps the focus and does
+  nothing); the panel's edge and the toolbar's grip did not drag by
+  finger; six of the panel's drop-downs stayed small at a larger
+  interface; the colour for sliders was used as chosen, white unseen on
+  the light theme (held to three to one, as the accent is); a long press
+  with a drawing tool left a snap line across the page.
+  Its editing pass: Simplify path and Round corners read their pixels in
+  the layer's own units, three and a half pixels astray on a path
+  enlarged seven times (on the page); the Knife cut nothing along a line
+  through an anchor exactly (the same line a hundredth of a pixel aside);
+  text set along a path was edited in a straight box nowhere near its
+  letters (a box of its own that shows the words).
+  Its files pass: the layered PSD's merged picture was written as it is,
+  where Photoshop and every reader keep it over white, so soft edges
+  came out darkened in ImageMagick, psd-tools and thumbnails (laid over
+  white, and our reader takes the white back out of Photoshop's own);
+  in the shell, Develop and export raws… developed a whole shoot and
+  threw it away when the folder panel was put away or Replace answered
+  No (the window stays with what it developed); Place all wrote the
+  first raw's lensfun profile on every other (each its own); a
+  multi-file export still writing closed the Export window opened after
+  it (only its own window).
+  Limits written down: a curve is drawn in twelve straight steps a
+  segment whatever its size, so a large one, or one zoomed sixteen
+  times or exported at 8x, shows facets of one to three pixels, and the
+  Node tool turns an ellipse into such a path on a click; pasting from a
+  CMYK document with a press profile into an RGB one draws its inks
+  without the profile; panning redraws a turned ellipse wrongly at its
+  edge when it wears an effect reaching past 1,600 pixels; the Node tool
+  cannot move a hole's anchors; Pinned Stretch squashed below its
+  margins does not come back; a right-to-left list keeps its markers on
+  the left; text longer than its path overprints its start; Simplify
+  keeps most anchors of a jagged ring; a copy of a frame cannot have
+  layers of its own, and a copy cannot be let go of; a style given to
+  text leaves its runs' own colours; at the very last layer number the
+  drawing tools fail without a word; the word "rebeccapurple" written as
+  text after "fill:" is read as a colour; a PSD refused for its size
+  says "Could not be made" with Export still live; Pinned down shows
+  "Top and bot…"; there are no Ctrl+B, I and U, no text commands on
+  the Keys page, and Bold comes before Font in the Tab order; Group and
+  Ungroup's tooltips show no chord, and a chord given to Delete shows
+  only in the Edit menu; the toolbar's grip is a Tab stop that does
+  nothing; the Tools page waits silently on a key it refuses and keeps
+  Tab; after F10 a letter does not jump to its menu, and the arrows do
+  not walk the rail's flyouts; on a tablet the icon buttons are named
+  only in tooltips, and a few targets are 18 to 23 pixels; New document
+  asks in pixels whatever the units; Escape does not stop a multi-file
+  export already writing; Auto white goes cool on a coloured textured
+  wall; raws dropped together are all held in memory until their turn;
+  Clarity on a 40-megapixel raw takes seconds more; the batch takes
+  files by name; an ICC curve of a malformed kind comes in black; raws
+  of a few pixels develop unlike their preview; a long edge far smaller
+  than the picture writes a resolution of a few dpi; kept export setups
+  are named without their area.
   **The watermark at its edges** (item 3). An export at the smallest
   scale (5%: twenty pixels across), words eighty times wider than the
   picture, two lines, every place it can stand and a place it cannot

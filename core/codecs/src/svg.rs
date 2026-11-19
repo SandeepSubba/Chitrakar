@@ -784,13 +784,13 @@ fn write_node(
                                     round(r)
                                 );
                                 if iw > 0.0 && ih > 0.0 {
-                                    // A corner rounded tighter than half
+                                    // A corner rounded no wider than half
                                     // the band: the band moved in has a
                                     // square corner, whose outer edge
                                     // stood past the shape's round one.
                                     // Cut to the shape, as the engine's
                                     // band lies inside it.
-                                    let cut = if offset > 0.0 && r > 0.0 && r < offset {
+                                    let cut = if offset > 0.0 && r > 0.0 && r <= offset {
                                         let name =
                                             fresh_def_id(defs, &format!("inside{}", child.0));
                                         let _ = writeln!(
@@ -3178,6 +3178,17 @@ mod tests {
         .unwrap();
         let svg = export_svg(&doc).unwrap();
         assert!(svg.contains(r#"clip-path="url(#inside"#), "{svg}");
+        // Exactly half the band: its moved-in corner is square too.
+        doc.apply(Command::SetKind {
+            id,
+            kind: Box::new(card(3.0)),
+        })
+        .unwrap();
+        let svg = export_svg(&doc).unwrap();
+        assert!(
+            svg.contains(r#"clip-path="url(#inside"#),
+            "at half the band: {svg}"
+        );
         doc.apply(Command::SetKind {
             id,
             kind: Box::new(card(10.0)),

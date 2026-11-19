@@ -201,6 +201,9 @@ export function ExportDialog({
   share?: (files: Outgoing[]) => Promise<boolean>;
   onClose: () => void;
 }) {
+  /** Whether this window is still up: a write it began can end after it
+   * was put away and another opened. */
+  const open = useRef(true);
   const format = prefs.exportFormat;
   const spec = FORMATS[format];
   const asked: ExportArea = spec.area ? prefs.exportArea : "page";
@@ -640,9 +643,12 @@ export function ExportDialog({
     try {
       // A panel put away leaves the window up, with what was in it:
       // nobody who cancels a save panel meant to start again.
-      if (await (via === "share" && share ? share : write)(files)) onClose();
+      // Only this window's own closing: one put away while its files were
+      // still being written, and the window opened again after it, was
+      // closed under the person when the first one's writing ended.
+      if ((await (via === "share" && share ? share : write)(files)) && open.current) onClose();
     } catch (err) {
-      setFailed(said(err));
+      if (open.current) setFailed(said(err));
     }
     // `scales` and `nameAt` are made afresh each render from what the
     // dependencies below say.
@@ -650,6 +656,12 @@ export function ExportDialog({
 
   const runRef = useRef(run);
   runRef.current = run;
+  useEffect(() => {
+    open.current = true;
+    return () => {
+      open.current = false;
+    };
+  }, []);
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();

@@ -2404,9 +2404,17 @@ impl Mask {
                 MaskKind::Vector { transform, .. } | MaskKind::Raster { transform, .. } => {
                     transform.within_reason()
                 }
-                MaskKind::Painted { strokes } => strokes
-                    .iter()
-                    .all(|s| s.points.iter().flatten().chain(&s.radii).all(|v| fine(*v))),
+                // A stroke's clip is a mask of its own, and carried with
+                // it through every change of the page.
+                MaskKind::Painted { strokes } => strokes.iter().all(|s| {
+                    s.points
+                        .iter()
+                        .flatten()
+                        .chain(&s.radii)
+                        .chain(&s.source)
+                        .all(|v| fine(*v))
+                        && s.clip.as_ref().is_none_or(|c| c.within_reason())
+                }),
             }
     }
 

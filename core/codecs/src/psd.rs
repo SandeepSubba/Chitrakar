@@ -1430,6 +1430,22 @@ fn read_merged(r: &mut R, h: &Header, colour: &Colour, alpha: bool) -> Result<Ve
     if let Some(alpha) = planes.get_mut(alpha_index) {
         *alpha = coverage_plane(true, h.depth, std::mem::take(alpha));
     }
+    // Photoshop keeps the merged picture of a see-through document over
+    // white; the white is taken back out where it shows, or soft edges
+    // came in pale (for RGB and grey, whose white is all of each channel).
+    if alpha_index != usize::MAX && h.depth <= 16 && matches!(h.mode, Mode::Rgb | Mode::Grey) {
+        let coverage = planes[alpha_index].clone();
+        for (c, plane) in planes.iter_mut().enumerate() {
+            if c == alpha_index {
+                continue;
+            }
+            for (v, &a) in plane.iter_mut().zip(&coverage) {
+                if a > 0.0 && a < 1.0 {
+                    *v = ((*v - (1.0 - a)) / a).clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
     let get = |id: i16| -> Option<&[f32]> {
         let i = if id == -1 { alpha_index } else { id as usize };
         planes.get(i).map(|p| p.as_slice())
