@@ -20685,7 +20685,7 @@ assert(
   await page.locator('select[aria-label="Crop ratio"]').selectOption("Free");
   await dragDoc(100, 100, 400, 300);
   assert((await page.locator(".crop-handle").count()) === 8, "a kept frame has eight handles");
-  assert(await page.locator('button.tool-commit:text-is("Crop")').isVisible(), "and the bar offers to take it");
+  assert(await page.locator('button.tool-commit[title^="Crop to the frame"]').isVisible(), "and the bar offers to take it");
   // Moved by its inside.
   const f0 = await frameBox();
   await dragDoc(250, 200, 350, 250);
@@ -20727,7 +20727,7 @@ assert(
   await dragDoc(300, 300, 420, 340);
   const sq = await frameBox();
   assert(Math.abs(sq.width - sq.height) < 3, `held to 1:1, a corner keeps it square (${sq.width}x${sq.height})`);
-  await page.click('button.tool-commit:text-is("Crop")');
+  await page.click('button.tool-commit[title^="Crop to the frame"]');
   await page.waitForTimeout(400);
   const [w, h] = (await facts()).match(/(\d+)×(\d+)/).slice(1).map(Number);
   assert(w === h && w > 200, `the bar's Crop takes it, square (${w}×${h})`);
@@ -21676,6 +21676,74 @@ assert(
     (await page.locator(".panel ul li .layer-name").count()) === rowsBefore,
     `and the document it was opened over is still there (${await page.locator(".panel ul li .layer-name").count()} of ${rowsBefore} rows)`,
   );
+}
+
+// 9dx. The forty-seventh audit's interface pass. "1,920" typed into a
+// number box became 1.92 (a thousands mark read as a decimal); in a
+// window shorter than the rail, the Crop tool's Crop and Cancel were
+// below its foot; a submenu opened by the pointer resting on its row
+// closed again when the row was clicked.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  await pickTool("Rect");
+  await page.mouse.move(s.x + 40, s.y + 40);
+  await page.mouse.down();
+  await page.mouse.move(s.x + 140, s.y + 120, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  const w = page.locator(".geometry .geo-w input");
+  await w.click();
+  await w.press("Control+a");
+  await page.keyboard.type("1,920");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(250);
+  const typed = Number(await w.inputValue());
+  assert(Math.abs(typed - 1920) < 1, `a thousands comma is a thousands comma (${typed})`);
+  await w.click();
+  await w.press("Control+a");
+  await page.keyboard.type("12,5");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(250);
+  const decimal = Number(await w.inputValue());
+  assert(Math.abs(decimal - 12.5) < 0.6, `and a decimal comma still a decimal (${decimal})`);
+
+  // Resting on a submenu's row opens it; clicking the row then keeps it.
+  await page.click('.menu-label:text-is("View")');
+  await page.waitForTimeout(120);
+  const row = page.locator(".menu-pop:not(.sub) .menu-item.has-sub").first();
+  await row.hover();
+  await page.waitForTimeout(500);
+  await row.click();
+  await page.waitForTimeout(200);
+  assert(await page.locator(".menu-pop.sub").isVisible(), "a submenu opened by resting stays open when its row is clicked");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+
+  // A window shorter than the rail: a Crop button is on screen all the same.
+  const ctx = await browser.newContext({ viewport: { width: 1440, height: 640 } });
+  const p = await ctx.newPage();
+  p.on("dialog", (d) => d.accept());
+  await p.goto("http://localhost:8123/");
+  await p.waitForSelector("#engine-canvas");
+  await p.waitForTimeout(1000);
+  const r = await p.locator("#engine-page").boundingBox();
+  await p.locator("#engine-canvas").hover();
+  await p.keyboard.press("c");
+  await p.waitForTimeout(150);
+  await p.mouse.move(r.x + r.width * 0.2, r.y + r.height * 0.2);
+  await p.mouse.down();
+  await p.mouse.move(r.x + r.width * 0.6, r.y + r.height * 0.6, { steps: 5 });
+  await p.mouse.up();
+  await p.waitForTimeout(400);
+  let seen = false;
+  for (const b of await p.locator("button.tool-commit", { hasText: /^Crop$/ }).all()) {
+    const box = await b.boundingBox();
+    if (box && box.y >= 0 && box.y + box.height <= 640 && box.x >= 0 && box.x + box.width <= 1440) seen = true;
+  }
+  assert(seen, "a Crop button is on screen in a window shorter than the rail");
+  await ctx.close();
 }
 
 // 9dw. The forty-sixth audit's interface pass. A decimal comma typed

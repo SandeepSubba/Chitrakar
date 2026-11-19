@@ -272,6 +272,14 @@ pub struct Document {
     /// skip a check that matters, so absence has to mean walk.
     #[serde(skip)]
     nesting: Option<usize>,
+    /// Whether any layer is a live copy, so that the count of what the
+    /// copies draw is only asked of a document that has some. `None` is
+    /// "not known" (a document read from a file, a subtree put back);
+    /// `Some(true)` is kept through a removal, which only ever costs a
+    /// walk nobody needed. Asking by scanning every layer on every add
+    /// made drawing a page's layers cost the square of them.
+    #[serde(skip)]
+    copies: Option<bool>,
     /// Which group each layer is in — the child lists read the other
     /// way, kept so that asking a layer's parent is a lookup rather than
     /// a scan of every group's list. The session asks it twice per
@@ -610,6 +618,7 @@ impl Document {
             next_id: 1,
             resources: BTreeMap::new(),
             nesting: Some(0),
+            copies: Some(false),
             parents: HashMap::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
@@ -1238,6 +1247,25 @@ impl Document {
         // open.
         let deepens = matches!(&cmd, Command::MoveNode { .. })
             || matches!(&cmd, Command::AddNode { node, .. } if node.kind.holds_children());
+        // And what can add to what the copies draw without making one: a
+        // layer added or moved into something copied, or a layer's kind
+        // changed. Drawn into a group copied ten thousand times, eighty
+        // small layers made a document of a million draws that saved and
+        // then would not open. Those are held to the count only where
+        // they raise it, so a document opened past it can still be
+        // worked on everywhere else.
+        let grows = matches!(
+            &cmd,
+            Command::AddNode { .. } | Command::MoveNode { .. } | Command::SetKind { .. }
+        );
+        let restores = matches!(&cmd, Command::RestoreSubtree { .. });
+        let drawn_before = if grows && !makes_copy && self.has_copies() {
+            let mut known = HashMap::new();
+            self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known)
+                .map(|(_, draws)| draws)
+        } else {
+            None
+        };
         let mut inverse = self.apply_inner(cmd)?;
         // Depth first, and iteratively: the check below recurses, so a
         // command that nested the layers past what a stack can walk would
@@ -1276,16 +1304,21 @@ impl Document {
         // 401 copies of a 500-layer group was made and saved, and then
         // refused when opened; a chain of copies each in a group went on
         // until the stack ran out.
-        let copies_here = || {
-            self.nodes
-                .values()
-                .any(|n| matches!(n.kind, NodeKind::Instance { .. }))
-        };
-        if makes_copy || (deepens && copies_here()) {
+        if makes_copy {
+            self.copies = Some(true);
+        } else if restores && self.copies != Some(true) {
+            self.copies = None;
+        }
+        if makes_copy || drawn_before.is_some() || (deepens && self.has_copies()) {
             let mut known = HashMap::new();
             let refusal = match self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known) {
                 None => Some(DocError::TooDeep { limit: MAX_DEPTH }),
                 Some((_, draws)) if makes_copy && draws > MAX_DRAWN => {
+                    Some(DocError::TooMuchToDraw)
+                }
+                Some((_, draws))
+                    if draws > MAX_DRAWN && drawn_before.is_some_and(|before| draws > before) =>
+                {
                     Some(DocError::TooMuchToDraw)
                 }
                 Some(_) => None,
@@ -1307,6 +1340,19 @@ impl Document {
             }
         }
         Ok(inverse)
+    }
+
+    /// Whether any layer is a live copy; see the field.
+    fn has_copies(&mut self) -> bool {
+        if let Some(known) = self.copies {
+            return known;
+        }
+        let any = self
+            .nodes
+            .values()
+            .any(|n| matches!(n.kind, NodeKind::Instance { .. }));
+        self.copies = Some(any);
+        any
     }
 
     /// Which colours a command can have left disagreeing with the
@@ -1500,16 +1546,66 @@ impl Document {
                 if !ours.contains(&id) {
                     return Err(DocError::UnknownNode(id));
                 }
+                if ours.len() != subtree.nodes.len() {
+                    // A layer listed twice.
+                    let mut seen = std::collections::HashSet::new();
+                    let twice = subtree.nodes.iter().find(|(n, _)| !seen.insert(*n));
+                    return Err(DocError::NotATree(twice.map_or(id, |(n, _)| *n)));
+                }
                 let mut held = std::collections::HashSet::new();
-                for (_, kids) in &subtree.children {
+                let mut holders = std::collections::HashSet::new();
+                for (holder, kids) in &subtree.children {
+                    // Only a group or a frame of its own holds layers, and
+                    // holds one list.
+                    let holds = subtree
+                        .nodes
+                        .iter()
+                        .find(|(n, _)| n == holder)
+                        .is_some_and(|(_, node)| node.kind.holds_children());
+                    if !holds || !holders.insert(*holder) {
+                        return Err(DocError::NotATree(*holder));
+                    }
                     for k in kids {
                         if !ours.contains(k) || *k == id || !held.insert(*k) {
                             return Err(DocError::NotATree(*k));
                         }
                     }
                 }
+                // Every layer but its root held by one of its groups: one
+                // held by none was kept where nothing could reach it.
+                if let Some((orphan, _)) = subtree
+                    .nodes
+                    .iter()
+                    .find(|(n, _)| *n != id && !held.contains(n))
+                {
+                    return Err(DocError::NotATree(*orphan));
+                }
+                // A copy of something there.
+                for (_, node) in &subtree.nodes {
+                    if let NodeKind::Instance { of, .. } = node.kind {
+                        if !ours.contains(&of) && !self.nodes.contains_key(&of) {
+                            return Err(DocError::UnknownNode(of));
+                        }
+                    }
+                }
+                let siblings = self.children[&parent].len();
+                if index > siblings {
+                    return Err(DocError::IndexOutOfBounds {
+                        group: parent,
+                        index,
+                        len: siblings,
+                    });
+                }
+                // And its numbers counted from: put back above the count,
+                // the next layer added was given one of them and wrote
+                // over it.
+                let highest = ours.iter().map(|n| n.0).max().unwrap_or(0);
+                self.next_id = self.next_id.max(highest + 1);
                 self.settle_parents();
                 for (nid, node) in subtree.nodes {
+                    if node.kind.holds_children() {
+                        self.children.entry(nid).or_default();
+                    }
                     self.nodes.insert(nid, node);
                 }
                 for (nid, kids) in subtree.children {
@@ -3523,6 +3619,100 @@ mod tests {
     }
 
     #[test]
+    fn a_subtree_put_back_is_held_to_being_one() {
+        let mut doc = Document::new(100, 100, ColorMode::Rgb);
+        let root = doc.root();
+        let group = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("g")),
+        })
+        .unwrap();
+        let child = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: rect("child"),
+        })
+        .unwrap();
+        let Ok(Command::RestoreSubtree { subtree, .. }) =
+            doc.apply(Command::RemoveNode { id: group })
+        else {
+            panic!("a removal is put back as a subtree")
+        };
+        let put = |doc: &mut Document, index: usize, subtree: Subtree| {
+            doc.apply(Command::RestoreSubtree {
+                parent: root,
+                index,
+                subtree,
+            })
+        };
+        // Past the end of its group: refused, where it stopped the engine.
+        assert!(matches!(
+            put(&mut doc, 5, subtree.clone()),
+            Err(DocError::IndexOutOfBounds { .. })
+        ));
+        // A layer held by nobody, a shape holding layers, a layer listed
+        // twice, a copy of nothing.
+        let mut orphan = subtree.clone();
+        orphan.nodes.push((NodeId(40), *rect("lost")));
+        assert!(matches!(
+            put(&mut doc, 0, orphan),
+            Err(DocError::NotATree(NodeId(40)))
+        ));
+        let mut holding = subtree.clone();
+        holding.nodes.push((NodeId(41), *rect("inner")));
+        holding.children.push((child, vec![NodeId(41)]));
+        assert!(matches!(
+            put(&mut doc, 0, holding),
+            Err(DocError::NotATree(_))
+        ));
+        let mut twice = subtree.clone();
+        twice.nodes.push(twice.nodes[1].clone());
+        assert!(matches!(
+            put(&mut doc, 0, twice),
+            Err(DocError::NotATree(_))
+        ));
+        let mut copy = subtree.clone();
+        copy.nodes
+            .push((NodeId(42), Node::instance("copy", NodeId(90))));
+        copy.children[0].1.push(NodeId(42));
+        assert!(matches!(
+            put(&mut doc, 0, copy),
+            Err(DocError::UnknownNode(NodeId(90)))
+        ));
+        assert_eq!(doc.node_count(), 1, "nothing refused was kept");
+        // Numbered above the count: kept, and the count moves past it, so
+        // the next layer added does not write over it.
+        let shift = |n: NodeId| NodeId(n.0 + 100);
+        let high = Subtree {
+            root_id: shift(subtree.root_id),
+            nodes: subtree
+                .nodes
+                .iter()
+                .map(|(n, node)| (shift(*n), node.clone()))
+                .collect(),
+            children: subtree
+                .children
+                .iter()
+                .map(|(n, kids)| (shift(*n), kids.iter().map(|k| shift(*k)).collect()))
+                .collect(),
+        };
+        put(&mut doc, 0, high).unwrap();
+        let next = doc.peek_next_id();
+        assert!(next.0 > shift(child).0, "{next:?}");
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: rect("after"),
+        })
+        .unwrap();
+        assert_eq!(doc.node_count(), 4);
+        assert!(doc.check_structure().is_ok());
+    }
+
+    #[test]
     fn removing_group_restores_whole_subtree_on_undo() {
         let mut doc = Document::new(100, 100, ColorMode::Cmyk);
         let mut history = History::default();
@@ -4738,6 +4928,65 @@ mod tests {
             "{refused:?}"
         );
         assert!(chain.check_structure().is_ok(), "and that one opens");
+
+        // Layers drawn one at a time into a group copied ten thousand
+        // times: no copy is made, and the count is still held, where it
+        // used to grow until the file would not open.
+        let mut tiles = Document::new(20, 20, ColorMode::Rgb);
+        let root = tiles.root();
+        let tile = tiles.peek_next_id();
+        tiles
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::group("tile")),
+            })
+            .unwrap();
+        let mut last = tile;
+        for level in 1..=4 {
+            let group = tiles.peek_next_id();
+            tiles
+                .apply(Command::AddNode {
+                    parent: root,
+                    index: level,
+                    node: Box::new(Node::group("level")),
+                })
+                .unwrap();
+            for at in 0..10 {
+                tiles
+                    .apply(Command::AddNode {
+                        parent: group,
+                        index: at,
+                        node: Box::new(Node::instance("copy", last)),
+                    })
+                    .unwrap();
+            }
+            last = group;
+        }
+        let mut refused = None;
+        for at in 0..200 {
+            if let Err(e) = tiles.apply(Command::AddNode {
+                parent: tile,
+                index: at,
+                node: Box::new(Node::paint("dab")),
+            }) {
+                refused = Some(e);
+                break;
+            }
+        }
+        assert!(
+            matches!(refused, Some(DocError::TooMuchToDraw)),
+            "{refused:?}"
+        );
+        assert!(tiles.check_structure().is_ok(), "and what was drawn opens");
+        // Elsewhere on the page a layer still goes in.
+        tiles
+            .apply(Command::AddNode {
+                parent: root,
+                index: 0,
+                node: Box::new(Node::paint("beside")),
+            })
+            .unwrap();
     }
 
     /// The page has no place of its own, and a stroke's numbers are held
@@ -4841,8 +5090,18 @@ mod tests {
             made += 1;
         }
         assert!(made > 1000, "{made} copies before the count");
-        for k in 0..10 {
+        // Drawing into the copied group is held to the count too…
+        assert!(matches!(
             doc.apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: rect(),
+            }),
+            Err(DocError::TooMuchToDraw)
+        ));
+        // …so past it is a document opened that way.
+        for k in 0..10 {
+            doc.apply_inner(Command::AddNode {
                 parent: group,
                 index: k,
                 node: rect(),

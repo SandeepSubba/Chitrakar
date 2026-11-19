@@ -713,6 +713,44 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
         NodeKind::Paint { strokes } | NodeKind::Clone { strokes } => {
             painted_bounds(strokes).map_or(Bounds::None, boxed)
         }
+        // A copy of a group: the group's own layers' boxes, as the
+        // group's are read above. Read through
+        // `local_bounds_of`, which keeps a text's room for what its
+        // letters reach past their line, a copy of a group holding words
+        // was 24 pixels bigger on every side than its original, and
+        // aligned and placed by that.
+        // Where it stands in for some of them, its parts as they are.
+        NodeKind::Instance { of, .. }
+            if doc
+                .node(*of)
+                .is_ok_and(|m| matches!(m.kind, NodeKind::Group)) =>
+        {
+            let stand_ins = if takes_stand_ins(doc, *of) {
+                copy_children(doc, id)?
+            } else {
+                Vec::new()
+            };
+            let parts = if stand_ins.is_empty() {
+                doc.children_of(*of)?.to_vec()
+            } else {
+                stand_ins
+            };
+            let mut acc = Bounds::None;
+            for child in parts {
+                if rewrites_what_is_under_it(doc, child) {
+                    continue;
+                }
+                acc = acc.union(visual_box(doc, child, t)?);
+                if acc == Bounds::Everything {
+                    break;
+                }
+            }
+            if acc == Bounds::None {
+                Bounds::Everything
+            } else {
+                acc
+            }
+        }
         // As `bounds_in_parent_space_inner` reads a copy: its own box, and
         // where it has none, everything if its original is still here.
         NodeKind::Instance { of, .. } => match local_bounds_of(doc, id) {
@@ -5952,6 +5990,60 @@ fn spline_controls(p0: [f32; 2], p1: [f32; 2], p2: [f32; 2], p3: [f32; 2]) -> ([
     )
 }
 
+/// How many steps each segment of a curved path is drawn in: its own
+/// [`curve_steps`], unless the whole path would come to more than
+/// [`FLATTEN_BUDGET`], when each is cut in the same proportion (never
+/// below [`FLATTEN_STEPS`]). A tangle of five thousand long curves came
+/// to a million points, and a boolean on it took fourteen seconds where
+/// it had taken half of one. `bezier` reads the handles; otherwise the
+/// curve is the smooth spline through the anchors. The outline and the
+/// widths along it both count with this, so a width sits at its point.
+fn path_steps(points: &[[f32; 2]], handles: &[[f32; 4]], closed: bool, bezier: bool) -> Vec<usize> {
+    let n = points.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let get = |i: isize| -> [f32; 2] {
+        if closed {
+            points[i.rem_euclid(n as isize) as usize]
+        } else {
+            points[i.clamp(0, n as isize - 1) as usize]
+        }
+    };
+    let segments = if closed { n } else { n - 1 };
+    let mut steps: Vec<usize> = (0..segments)
+        .map(|i| {
+            let j = (i + 1) % n;
+            if bezier {
+                let (a, b) = (points[i], points[j]);
+                curve_steps(
+                    a,
+                    [a[0] + handles[i][2], a[1] + handles[i][3]],
+                    [b[0] + handles[j][0], b[1] + handles[j][1]],
+                    b,
+                )
+            } else {
+                let k = i as isize;
+                let (p0, p1, p2, p3) = (get(k - 1), get(k), get(k + 1), get(k + 2));
+                let (c1, c2) = spline_controls(p0, p1, p2, p3);
+                curve_steps(p1, c1, c2, p2)
+            }
+        })
+        .collect();
+    let total: usize = steps.iter().sum();
+    if total > FLATTEN_BUDGET {
+        let share = FLATTEN_BUDGET as f64 / total as f64;
+        for s in &mut steps {
+            *s = ((*s as f64 * share) as usize).max(FLATTEN_STEPS);
+        }
+    }
+    steps
+}
+
+/// The most points a curved path is flattened into before its segments
+/// share them out; see [`path_steps`].
+pub const FLATTEN_BUDGET: usize = 1 << 15;
+
 /// The Bezier handles a `smooth` path's curve is made of.
 ///
 /// A smooth path has no authored handles: its curve is a Catmull-Rom
@@ -5993,7 +6085,6 @@ pub fn smooth_handles(points: &[[f32; 2]], closed: bool) -> Vec<[f32; 4]> {
 /// per operation, not per pixel.
 fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     use std::borrow::Cow;
-    const STEPS: usize = FLATTEN_STEPS;
     // A polygon flattens to the path through its corners — and, when
     // its corners are rounded, through the arcs that round them, which
     // that path draws with handles and so is flattened in its turn. Taken
@@ -6016,16 +6107,15 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
     let n = points.len();
     let curved = handles.len() == n && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
     if curved && n >= 2 {
-        let segments = if *closed { n } else { n - 1 };
-        let mut out = Vec::with_capacity(segments * STEPS + 1);
-        for i in 0..segments {
+        let all = path_steps(points, handles, *closed, true);
+        let mut out = Vec::with_capacity(all.iter().sum::<usize>() + 1);
+        for (i, &steps) in all.iter().enumerate() {
             let j = (i + 1) % n;
             let (a, b) = (points[i], points[j]);
             // Control points are offsets from their anchors: the outgoing
             // handle of this anchor and the incoming one of the next.
             let c1 = [a[0] + handles[i][2], a[1] + handles[i][3]];
             let c2 = [b[0] + handles[j][0], b[1] + handles[j][1]];
-            let steps = curve_steps(a, c1, c2, b);
             for s in 0..steps {
                 let t = s as f32 / steps as f32;
                 let u = 1.0 - t;
@@ -6059,17 +6149,11 @@ fn flatten_shape(shape: &VectorShape) -> std::borrow::Cow<'_, VectorShape> {
             points[i.clamp(0, n as isize - 1) as usize]
         }
     };
-    let segments = if *closed { n } else { n - 1 };
-    let mut out = Vec::with_capacity(segments * STEPS + 1);
-    for i in 0..segments {
-        let (p0, p1, p2, p3) = (
-            get(i as isize - 1),
-            get(i as isize),
-            get(i as isize + 1),
-            get(i as isize + 2),
-        );
-        let (c1, c2) = spline_controls(p0, p1, p2, p3);
-        let steps = curve_steps(p1, c1, c2, p2);
+    let all = path_steps(points, &[], *closed, false);
+    let mut out = Vec::with_capacity(all.iter().sum::<usize>() + 1);
+    for (i, &steps) in all.iter().enumerate() {
+        let (p0, p1, p2) = (get(i as isize - 1), get(i as isize), get(i as isize + 1));
+        let p3 = get(i as isize + 2);
         for s in 0..steps {
             let t = s as f32 / steps as f32;
             let (t2, t3) = (t * t, t * t * t);
@@ -6412,15 +6496,12 @@ pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2
 /// rectangle's corners become arcs of segments. An open path is treated as
 /// closed, since only its filled area means anything here.
 pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
-    /// Segments per quarter turn. At 16 the chord of a 1000px circle
-    /// strays under a fifth of a pixel from the true arc.
-    const PER_QUARTER: usize = 16;
     match shape {
         VectorShape::Polygon { .. } => {
             shape_rings(&shape.as_path().unwrap_or_else(|| shape.clone()))
         }
         VectorShape::Ellipse { rx, ry } => {
-            let n = PER_QUARTER * 4;
+            let n = per_quarter(rx.max(*ry)) * 4;
             vec![(0..n)
                 .map(|i| {
                     let a = i as f32 / n as f32 * std::f32::consts::TAU;
@@ -6442,6 +6523,7 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
                     [0.0, *height],
                 ]];
             }
+            let quarter = per_quarter(r);
             // Each corner is a quarter arc about its own centre, walked in
             // the same direction the square-cornered ring goes.
             let corners = [
@@ -6460,10 +6542,10 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
                     std::f32::consts::PI,
                 ),
             ];
-            let mut ring = Vec::with_capacity(4 * (PER_QUARTER + 1));
+            let mut ring = Vec::with_capacity(4 * (quarter + 1));
             for (cx, cy, from, to) in corners {
-                for i in 0..=PER_QUARTER {
-                    let a = from + (to - from) * (i as f32 / PER_QUARTER as f32);
+                for i in 0..=quarter {
+                    let a = from + (to - from) * (i as f32 / quarter as f32);
                     ring.push([cx + r * a.cos(), cy + r * a.sin()]);
                 }
             }
@@ -6477,7 +6559,7 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
             // dash where the reader left a gap, along the whole top edge
             // and round from there. The square-cornered ring already
             // starts at the corner both agree on.
-            ring.rotate_left(PER_QUARTER);
+            ring.rotate_left(quarter);
             vec![ring]
         }
         VectorShape::Path { .. } => {
@@ -6494,6 +6576,20 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
                 .collect()
         }
     }
+}
+
+/// Segments a quarter turn of an arc of radius `r` is walked in: sixteen,
+/// or as many as keep each chord within a fifth of a pixel of the arc.
+/// Sixteen alone was half a pixel off at a radius of 500 and two and a
+/// half at 1000, and every boolean, dash and knife on a large circle
+/// drawn with the Ellipse tool followed the polygon.
+fn per_quarter(r: f32) -> usize {
+    const ERROR: f32 = 0.2;
+    if r.is_nan() || r <= ERROR || !r.is_finite() {
+        return 16;
+    }
+    let half_turn = (1.0 - ERROR / r).acos();
+    ((std::f32::consts::FRAC_PI_4 / half_turn).ceil() as usize).clamp(16, 256)
 }
 
 /// Per-anchor widths resampled onto the flattened polyline, so index i of
@@ -6520,34 +6616,13 @@ fn flatten_widths(shape: &VectorShape, widths: &[f32]) -> Vec<f32> {
     if !curved {
         return widths.to_vec();
     }
-    let segments = if *closed { n } else { n - 1 };
     // Each segment in as many steps as its outline is flattened in
-    // (`curve_steps`), so a width still sits at its point.
+    // (`path_steps`), so a width still sits at its point.
     let bezier = handles.len() == n && handles.iter().any(|h| h.iter().any(|v| v.abs() > 1e-6));
-    let get = |i: isize| -> [f32; 2] {
-        if *closed {
-            points[i.rem_euclid(n as isize) as usize]
-        } else {
-            points[i.clamp(0, n as isize - 1) as usize]
-        }
-    };
-    let mut out = Vec::with_capacity(segments * FLATTEN_STEPS + 1);
-    for i in 0..segments {
+    let all = path_steps(points, handles, *closed, bezier);
+    let mut out = Vec::with_capacity(all.iter().sum::<usize>() + 1);
+    for (i, &steps) in all.iter().enumerate() {
         let j = (i + 1) % n;
-        let steps = if bezier {
-            let (p, q) = (points[i], points[j]);
-            curve_steps(
-                p,
-                [p[0] + handles[i][2], p[1] + handles[i][3]],
-                [q[0] + handles[j][0], q[1] + handles[j][1]],
-                q,
-            )
-        } else {
-            let k = i as isize;
-            let (p0, p1, p2, p3) = (get(k - 1), get(k), get(k + 1), get(k + 2));
-            let (c1, c2) = spline_controls(p0, p1, p2, p3);
-            curve_steps(p1, c1, c2, p2)
-        };
         let (a, b) = (widths[i], widths[j]);
         for s in 0..steps {
             let t = s as f32 / steps as f32;
@@ -37390,5 +37465,26 @@ mod tests {
             })
             .fold(0.0f32, f32::max);
         assert!(worst < 0.6, "{worst} off the outline between steps");
+
+        // And one drawn with the Ellipse tool, which booleans, dashes and
+        // the knife take as a polygon: within a fifth of a pixel, where
+        // sixty-four sides were two and a half off.
+        let ring = &shape_rings(&VectorShape::Ellipse {
+            rx: 1000.0,
+            ry: 1000.0,
+        })[0];
+        let worst = (0..ring.len())
+            .map(|i| {
+                let (p, q) = (ring[i], ring[(i + 1) % ring.len()]);
+                let mid = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                (1000.0 - (mid[0] - centre[0]).hypot(mid[1] - centre[1])).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.25, "{worst} off the ellipse between steps");
+        // A small one keeps its sixty-four.
+        assert_eq!(
+            shape_rings(&VectorShape::Ellipse { rx: 50.0, ry: 30.0 })[0].len(),
+            64
+        );
     }
 }

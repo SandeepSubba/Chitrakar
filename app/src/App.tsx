@@ -3167,6 +3167,25 @@ export function App() {
   const [cropFrame, setCropFrame] = useState<
     [number, number, number, number] | null
   >(null);
+  /** The rail's own Crop button, and whether all of it is in sight: in a
+   * window shorter than the rail it sat below the window's foot, and
+   * nothing on screen said how to take the frame. Out of sight, the
+   * frame's own pair goes over the canvas as it does on a phone. */
+  const railCrop = useRef<HTMLButtonElement>(null);
+  const [railCropSeen, setRailCropSeen] = useState(true);
+  const cropFramed = cropFrame !== null;
+  useEffect(() => {
+    const el = railCrop.current;
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setRailCropSeen(true);
+      return;
+    }
+    const watch = new IntersectionObserver(([seen]) => setRailCropSeen(seen.intersectionRatio > 0.98), {
+      threshold: [0, 0.5, 0.98, 1],
+    });
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [tool, cropFramed]);
   /** A kept frame being moved or resized: which edges follow the pointer
    * (all four for a move), where the press was and the frame it began. */
   const cropEditRef = useRef<{
@@ -5972,7 +5991,19 @@ export function App() {
   const paintTarget = (s: WasmSession, clone: boolean, at: [number, number]): NodeId | null => {
     const want = clone ? "clone" : "paint";
     const picked = layers.find((l) => l.id === selected);
-    if (picked && picked.kind === want && !picked.locked) return picked.id;
+    // Asked of the engine as well as the list: a palm's stroke let go of
+    // when the pen landed took its new paint layer with it, before the
+    // list had heard, and the pen's stroke went to a layer that was gone
+    // ("not a paint layer") and was lost.
+    const still = (id: NodeId) => {
+      try {
+        const k = JSON.parse(s.kind_json(id)) as unknown;
+        return typeof k === "object" && k !== null && (clone ? "Clone" in k : "Paint" in k);
+      } catch {
+        return false;
+      }
+    };
+    if (picked && picked.kind === want && !picked.locked && still(picked.id)) return picked.id;
     paintCount.current += 1;
     try {
       // Into the frame the stroke begins in, as a shape drawn there goes.
@@ -6018,6 +6049,58 @@ export function App() {
       console.warn("held press:", err);
     } finally {
       replaying.current = false;
+    }
+  };
+  /** A layer of a frame dragged wholly out of it goes where it was put
+   * down: into the frame under its middle, or onto the page where no
+   * frame is.
+   * Left in the frame it came from, which hides what is past its edge,
+   * it vanished, the box of nothing left where it had been dropped. In
+   * the move's own step in the history. */
+  const settleIntoFrames = (s: WasmSession) => {
+    const all = JSON.parse(s.layers_json()) as LayerInfo[];
+    const byId = new Map(all.map((l) => [l.id as NodeId, l]));
+    const moved = selectionSet.length > 0 ? selectionSet : selected !== null ? [selected] : [];
+    for (const id of moved) {
+      const parent = byId.get(id)?.parent as NodeId | undefined;
+      if (parent === undefined || byId.get(parent)?.kind !== "artboard") continue;
+      const box = s.bounds_of(id);
+      if (!box || box.length < 4) continue;
+      // Only once none of it is over its frame: dragged part way out, it
+      // is cut at the frame's edge, as a frame is for.
+      const own = s.bounds_of(parent);
+      if (
+        own &&
+        own.length >= 4 &&
+        box[0] < own[0] + own[2] &&
+        own[0] < box[0] + box[2] &&
+        box[1] < own[1] + own[3] &&
+        own[1] < box[1] + box[3]
+      ) {
+        continue;
+      }
+      const under = s.frame_at(box[0] + box[2] / 2, box[1] + box[3] / 2);
+      if (under === parent) continue;
+      // Not into itself, nor into a frame of its own.
+      let up: NodeId | undefined = under >= 0 ? (under as NodeId) : undefined;
+      let inside = false;
+      for (let hops = 0; up !== undefined && hops <= all.length; hops++) {
+        if (up === id) inside = true;
+        const next = byId.get(up)?.parent as NodeId | undefined;
+        up = next === up ? undefined : next;
+      }
+      if (inside) continue;
+      try {
+        if (under >= 0) {
+          s.reparent(id, under, s.child_count(under));
+        } else {
+          // Onto the page, over everything on it.
+          s.reparent(id, s.root_id, s.child_count(s.root_id));
+        }
+        s.merge_last();
+      } catch (err) {
+        console.warn("into the frame:", err);
+      }
     }
   };
   const onCanvasPointerDown = (e: React.PointerEvent) => {
@@ -7537,6 +7620,7 @@ export function App() {
       // The document already holds the previewed position; seal the gesture.
       if (drag.moved && session.commit_preview()) {
         if (drag.duplicated) session.merge_last();
+        settleIntoFrames(session);
         refresh(session);
       } else if (drag.duplicated) {
         // Alt and a click, or a drag that came back where it began: no
@@ -12601,9 +12685,15 @@ export function App() {
       // Opened, the page is the PDF's page at the resolution asked for:
       // left at 72, an A4 opened at 300 dpi went back out as a PDF a page
       // four times too large, and every printed size read wrong.
+      // And at the resolution it was really drawn at: a page past what
+      // the reader draws is taken down, and an A0 asked for at 600 came
+      // in at 254 and called 600, a page two and a third times too small.
       if (ask.opening) {
-        session.set_dpi(dpi);
-        setDocDpi(dpi);
+        const pageWide = ask.sizes[page]?.[0] ?? 0;
+        const real = pageWide > 0 ? (drawn.width * 72) / pageWide : dpi;
+        const used = Math.abs(real - dpi) > 0.5 ? Math.round(real * 100) / 100 : dpi;
+        session.set_dpi(used);
+        setDocDpi(used);
       }
       pdfUndoOpen.current = null;
     } catch (err) {
@@ -15187,7 +15277,7 @@ export function App() {
               and Escape — for a hand without a keyboard. */}
           {tool === "Crop" && cropFrame && (
             <>
-              <button type="button" className="tool-commit primary" onClick={applyCrop} title="Crop to the frame (Enter)">
+              <button ref={railCrop} type="button" className="tool-commit primary" onClick={applyCrop} title="Crop to the frame (Enter)">
                 Crop
               </button>
               <button type="button" className="tool-commit" onClick={() => setCropFrame(null)} title="Let the frame go (Escape)">
@@ -15728,8 +15818,30 @@ export function App() {
           {/* On a phone the bar's Crop and Cancel are past its end (upright)
               or below the window's foot (on its side), with nothing to say
               they are there: the frame's own pair goes over the canvas. */}
-          {compact && tool === "Crop" && cropFrame && (
-            <div className="crop-commit-float" role="group" aria-label="Crop frame">
+          {(compact || !railCropSeen) && tool === "Crop" && cropFrame && (
+            <div
+              className="crop-commit-float"
+              role="group"
+              aria-label="Crop frame"
+              style={(() => {
+                // Beside the frame and off its handles: below it where
+                // there is room, else above, else across its middle, where
+                // no handle is. Pinned to the window's top, it covered the
+                // top edge's handle of a frame reaching the page's top.
+                const [fx, fy] = [view.x + cropFrame[0] * view.zoom, view.y + cropFrame[1] * view.zoom];
+                const [fw, fh] = [cropFrame[2] * view.zoom, cropFrame[3] * view.zoom];
+                const tall = 56;
+                const gap = 14;
+                const top =
+                  fy + fh + gap + tall <= viewport[1]
+                    ? fy + fh + gap
+                    : fy - gap - tall >= 0
+                      ? fy - gap - tall
+                      : fy + fh / 2 - tall / 2;
+                const left = Math.min(Math.max(fx + fw / 2, 100), Math.max(100, viewport[0] - 100));
+                return { top, left };
+              })()}
+            >
               <button type="button" className="tool-commit" onClick={() => setCropFrame(null)}>
                 Cancel
               </button>
@@ -17216,11 +17328,12 @@ export function App() {
             ))}
             {layers.length === 0 && (
               <li className="muted empty">
-                {/* The three ways in, for a first look at an empty page:
-                    it said only the first. */}
+                {/* The ways in, for a first look at an empty page: it
+                    never said Open, and called the tools "the rail". */}
                 <span>
-                  No layers yet. Pick a shape on the rail and drag on the
-                  page, type with the text tool, or drop a picture onto it.
+                  No layers yet. Open a photo (File › Open), drop a
+                  picture onto the page, pick a shape from the tools on the
+                  left and drag on the page, or type with the text tool.
                 </span>
               </li>
             )}
@@ -20840,6 +20953,8 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
     clear(opening);
     setOpen(false);
   });
+  /** When the pointer resting on the row last opened it. */
+  const hovered = useRef(0);
   const show = () => {
     clear(closing);
     clear(opening);
@@ -20870,7 +20985,10 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
         clear(closing);
         if (open || dead) return;
         clear(opening);
-        opening.current = window.setTimeout(show, 120);
+        opening.current = window.setTimeout(() => {
+          hovered.current = performance.now();
+          show();
+        }, 120);
       }}
       onPointerLeave={hide}
     >
@@ -20886,7 +21004,13 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
           // in: the menu closes on any click inside it, and this one
           // has not chosen anything yet.
           e.stopPropagation();
-          if (open) setOpen(false);
+          // Opened a moment ago by the pointer resting on it, the click
+          // that followed is the same wish, not a second thought: it
+          // closed what the rest had just opened, and a pen, which
+          // hovers before it lands, took two taps for every submenu.
+          const justHovered = performance.now() - hovered.current < 1500;
+          hovered.current = 0;
+          if (open && !justHovered) setOpen(false);
           else show();
         }}
       >

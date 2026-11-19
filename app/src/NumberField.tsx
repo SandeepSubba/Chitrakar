@@ -16,25 +16,69 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { commaIsDecimal, plainDigits, readWritten, settleTyped } from "./numberText";
 
-// In every number box on the page: a decimal comma is a decimal point,
-// and Arabic-Indic or Persian digits are digits. The page is English to
-// the browser, so "12,5" typed into W came out 125 (the comma read as a
-// thousands mark), and ١٠٠ was dropped without a word.
+// In every number box on the page: Arabic-Indic or Persian digits are
+// digits, and a comma is a decimal or a thousands mark as `numberText`
+// reads it. The page is English to the browser, so "12,5" typed into W
+// came out 125 and ١٠٠ was dropped without a word; then, read always as
+// a decimal, "1,920" typed into New document's width made a page two
+// pixels wide. A box of numbers cannot hold a comma, so a typed one goes
+// in as a point and is counted, and what it was is settled when the
+// caret leaves the box or Enter is pressed: before three digits, or one
+// of several, it was a thousands mark.
+const typed = new WeakMap<HTMLInputElement, { commas: number; point: boolean }>();
+const numberBox = (at: EventTarget | null): at is HTMLInputElement =>
+  at instanceof HTMLInputElement && at.type === "number";
 if (typeof document !== "undefined") {
+  const commaDecimal = commaIsDecimal(typeof navigator !== "undefined" ? navigator.language : undefined);
   document.addEventListener(
     "beforeinput",
     (e) => {
       const at = e.target;
-      if (!(at instanceof HTMLInputElement) || at.type !== "number" || !e.data) return;
-      const plain = e.data
-        .replace(/,/g, ".")
-        .replace(/[\u0660-\u0669]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-        .replace(/[\u06f0-\u06f9]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
-      if (plain !== e.data) {
-        e.preventDefault();
-        document.execCommand("insertText", false, plain);
+      if (!numberBox(at)) return;
+      const data = e.data ?? e.dataTransfer?.getData("text/plain") ?? null;
+      if (!data) return;
+      let plain: string;
+      if (data.length > 1) {
+        plain = readWritten(data, commaDecimal);
+      } else {
+        const marks = typed.get(at) ?? { commas: 0, point: false };
+        if (data === ".") marks.point = true;
+        if (data === ",") {
+          marks.commas += 1;
+          typed.set(at, marks);
+          // A second comma says the first was a thousands mark; the
+          // point it went in as is taken out when the box is settled.
+          plain = marks.commas > 1 ? "" : ".";
+        } else {
+          typed.set(at, marks);
+          plain = plainDigits(data);
+        }
       }
+      if (plain !== data) {
+        e.preventDefault();
+        if (plain) document.execCommand("insertText", false, plain);
+      }
+    },
+    true,
+  );
+  const settle = (at: HTMLInputElement) => {
+    const marks = typed.get(at);
+    typed.delete(at);
+    if (!marks) return;
+    const value = settleTyped(at.value, marks.commas, marks.point, commaDecimal);
+    if (value === at.value) return;
+    // As though typed, so a box that keeps what was typed hears it.
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(at, value);
+    at.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  document.addEventListener("focusin", (e) => numberBox(e.target) && typed.delete(e.target), true);
+  document.addEventListener("focusout", (e) => numberBox(e.target) && settle(e.target), true);
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "Enter" && numberBox(e.target)) settle(e.target);
     },
     true,
   );

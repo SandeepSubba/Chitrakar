@@ -148,7 +148,10 @@ without reading anything else.*
      thrown away by a cancelled folder panel. The forty-sixth: an undone
      delete refused and lost, a painted mask doubling the file every
      round, a decimal comma read as a thousands mark, curves drawn in
-     twelve steps whatever their size.
+     twelve steps whatever their size. The forty-seventh: layers drawn
+     into a copied group making a file that would not open, a second
+     Delete bringing the first back, a pen's stroke lost to a palm,
+     pictures placed on half a pixel, "1,920" read as 1.92.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13077,6 +13080,84 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A forty-seventh audit (November 2026).** Its check of round 46:
+  the draw count was asked only of a copy being made, so layers drawn
+  one at a time into a group copied ten thousand times, or moved into
+  it, made a document of a million draws that saved and then would not
+  open (an add, a move or a change of kind that raises the count past
+  it is refused, and only where it raises it; whether a document has
+  copies at all is kept rather than asked of every layer, which made
+  drawing a page's layers cost the square of them); a subtree put back
+  numbered above the count was written over by the next layer added,
+  and one put past its group's end stopped the engine (refused, and the
+  count moved past what is put back; a layer held by none of its groups,
+  a shape holding layers, a layer listed twice and a copy of nothing are
+  refused too); a circle drawn with the Ellipse tool was a 64-sided
+  polygon to every boolean, dash, knife and selection combine, two and a
+  half pixels off at a radius of 1000 (each quarter in as many steps as
+  keep it within a fifth of a pixel, `per_quarter`); booleans that
+  cannot be fitted with curves came back in the new fine steps, eleven
+  hundred anchors where there had been seventy, and a tangle of five
+  thousand curves took fourteen seconds (said in as few straight steps
+  as keep a quarter of a pixel, and a path's steps share a budget of
+  32,768, `path_steps`); painting into a picked painted mask drew the
+  whole page for each stroke, a second or more on a large page (only as
+  much as the strokes reach); a PDF opened past the hundred-megapixel
+  cap was called the dpi asked for, not the one it was drawn at; "1,920"
+  typed into a number box was 1.92 (a comma before three digits, or one
+  of several, is a thousands mark unless the browser's language writes
+  decimals with a comma, `numberText.ts`); on a phone the crop's Crop
+  and Cancel covered the frame's top handle (beside the frame).
+  Its files pass: a picture placed or pasted on a page of the other
+  parity landed on half a pixel and every pixel was averaged with its
+  neighbour (placed on whole pixels); twenty-six photographs placed left
+  no room to export and the engine stopped (the room is asked for first
+  and refused in words). Its editing pass: a second Delete with a region
+  picked replaced the layer's mask and the first region came back, and
+  a brushed mask was thrown away (taken from the mask there is; a
+  gradient mask is still replaced). Its interface pass, a designer, a
+  tablet artist and a first-time user: a palm on the glass before the
+  first pen stroke took the pen's stroke with it ("not a paint layer";
+  the layer is asked of the engine); in a window shorter than the rail
+  the Crop tool's Crop and Cancel were below its foot (the frame's own
+  pair comes over the canvas whenever the rail's are out of sight); a
+  copy of a group holding words was 24 pixels larger than its original
+  on every side, and aligned and placed by that; a layer dragged from
+  one frame onto another stayed in the first and vanished (wholly out
+  of its frame, it goes into the frame under its middle, or onto the
+  page, in the move's step); a
+  submenu opened by the pointer resting on its row closed when the row
+  was clicked; the empty Layers panel never said Open.
+  Limits written down: a path enlarged through its layer's transform is
+  flattened for its own size, so a small circle made a path and typed
+  2000 wide is faceted; past 256 steps a segment is not divided further,
+  so a curve of radius 100,000 strays a third of a unit; selections
+  combined, grown, shrunk or filled are traced at half covered and lose
+  a soft edge, Select from layer's shape is hard-edged, and Delete into
+  a brushed mask takes its softness; the CMYK TIFF export separates the
+  composite again through the press profile, so a cyan of 100 or a K of
+  100 typed in comes out as the profile's mix of inks (the PDF keeps
+  them), an untagged CMYK TIFF is read without the press profile, and a
+  CMYK TIFF with a fifth channel or planar is refused; PNG's cICP, gAMA
+  and cHRM are not read, and colour through an ICC profile can land a
+  level low; part of a frame past the page's edge is not shown on the
+  canvas but is exported with the frame; `URL(` in capitals in an SVG
+  paint is not read; Stretch on a text block in a resized frame scales
+  its letters; a page turned a quarter changes a fractional edge's
+  anti-aliasing by up to a tenth; the wand on a 16000 × 6000 page takes
+  seven seconds; zoom stops at 800%; there is no polygon lasso, Colour
+  range, Border or Smooth; a wand tolerance of NaN picks one pixel; a
+  copy migrated from a format-1 file whose stand-in was past the end is
+  numbered past what a page's script can carry exactly; "Set" into a
+  folder that fails half way does not say which files were written; an
+  Android Downloads address is listed under its number in Open recent;
+  names that differ only in Unicode normalisation export as two files;
+  there is no export of each frame as a Set, no snapping to whole pixels,
+  no opacity or flow for the paint tools, and a pen's eraser end does
+  nothing; opening a photo counts as a change; style names read "Style
+  Style 1"; Combine is offered with frames picked and refuses; Larger
+  interface size leaves the icons their size; Blur's "sigma", fractions
+  beside percentages and cut band names are jargon.
   **A forty-sixth audit (November 2026).** A curve is no longer drawn
   in twelve steps a segment whatever its size: as many as its control
   polygon needs at one a sixteen units (twelve to 256), so a circle of a

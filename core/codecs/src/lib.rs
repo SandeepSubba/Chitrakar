@@ -282,7 +282,7 @@ fn eight_bit<D: image::ImageDecoder>(
     let mut out = Vec::new();
     out.try_reserve_exact(pixels * 4).map_err(|_| {
         CodecError::Format(format!(
-            "there is not enough memory left for a picture of {width} × {height}; close another document or place a smaller one"
+            "there is not enough memory left for a picture of {width} × {height}; remove a layer or place a smaller one"
         ))
     })?;
     out.resize(pixels * 4, 0);

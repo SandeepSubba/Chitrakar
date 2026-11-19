@@ -3176,15 +3176,28 @@ impl Session {
         // page, so the page does not move; corners stay corners and a
         // polygon stays a polygon. Only a single outline: holes have no
         // handles to hold curves.
+        // A quarter of a pixel *on the page*: measured in the shape's
+        // own units, an ellipse drawn small and scaled up ten times came
+        // back two pixels off its outline, and a scaled star grew handles
+        // at its points.
+        let world = chitrakar_render::ancestor_space(&self.doc, ordered[0]).compose(bottom);
+        let magnified = (world.a.hypot(world.b))
+            .max(world.c.hypot(world.d))
+            .max(1e-6);
+        let fine = 0.25 / magnified;
+        // An outline with holes, or one no curve fits, is said in as few
+        // straight steps as keep it within that quarter: taken as it was
+        // worked out, a curved shape cut in two came back in eleven
+        // hundred anchors where it had been seventy.
+        let straight = |ring: &[[f32; 2]]| {
+            if ring.len() > 8 {
+                chitrakar_render::straightened(ring, fine)
+            } else {
+                ring.to_vec()
+            }
+        };
+        let subpaths: Vec<Vec<[f32; 2]>> = subpaths.iter().map(|r| straight(r)).collect();
         let (points, handles) = if subpaths.is_empty() && points.len() > 8 {
-            // A quarter of a pixel *on the page*: measured in the shape's
-            // own units, an ellipse drawn small and scaled up ten times
-            // came back two pixels off its outline, and a scaled star
-            // grew handles at its points.
-            let world = chitrakar_render::ancestor_space(&self.doc, ordered[0]).compose(bottom);
-            let magnified = (world.a.hypot(world.b))
-                .max(world.c.hypot(world.d))
-                .max(1e-6);
             // And no finer than the outline it was worked from, which is
             // flattened in steps that grow with its size: held to a quarter
             // of a pixel alone, a 600-pixel ellipse could not be fitted at
@@ -3205,12 +3218,11 @@ impl Session {
                 (anchors.len() >= 3 && anchors.len() < points.len() / 2)
                     .then_some((anchors, handles))
             };
-            let fine = 0.25 / magnified;
             fitted(fine)
                 .or_else(|| fitted(fine.max(size * 0.0015)))
-                .unwrap_or_else(|| (points.clone(), Vec::new()))
+                .unwrap_or_else(|| (straight(&points), Vec::new()))
         } else {
-            (points, Vec::new())
+            (straight(&points), Vec::new())
         };
         node.kind = NodeKind::Vector {
             shape: chitrakar_doc::VectorShape::Path {
@@ -7743,15 +7755,55 @@ impl Session {
         let Some(mut selection) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
-        // The other way round: hold the layer to everything *but* what
-        // is picked, which is what deleting a selection means in an
-        // editor that cuts pixels out — done here by hiding them, so
-        // the layer is whole underneath and the region can be changed
-        // its mind about.
-        if hide {
+        let parent = chitrakar_render::ancestor_space(&self.doc, id);
+        // Hiding more of a layer that already hides some: what it hid
+        // stays hidden, as a second Delete in any editor leaves the
+        // first. Handed the region alone, the first part deleted came
+        // back, and a mask brushed by hand was thrown away. Combined as
+        // regions are, so a shape stays a shape; a gradient has no edge
+        // to take a region from and is replaced as before.
+        let kept = self
+            .doc
+            .node(id)?
+            .mask
+            .clone()
+            .filter(|m| hide && !matches!(m.kind, chitrakar_doc::MaskKind::Gradient { .. }));
+        if let Some(existing) = kept {
+            let Some(was) =
+                Self::seen_from(parent).and_then(|back| Self::carried_into(&existing, back))
+            else {
+                return Err(EngineError::BadCommand(
+                    "this layer sits in a space with no thickness".into(),
+                ));
+            };
+            let op = chitrakar_render::boolean::BoolOp::Subtract;
+            let (want, have) = (self.region_rings(&was)?, self.region_rings(&selection)?);
+            let rings = chitrakar_render::boolean::combine_or_nudge(&want, &have, op)
+                .filter(|rings| chitrakar_render::boolean::agrees(&want, &have, rings, op))
+                .unwrap_or_else(|| self.combined_by_pixels(&was, &selection, op));
+            selection = match self.region_on_page(rings, was.feather) {
+                Some(left) => left,
+                // Nothing left showing: everything hidden, which is the
+                // page itself turned inside out.
+                None => {
+                    let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+                    let mut all =
+                        Self::region_of(vec![vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]]], 0.0)
+                            .ok_or_else(|| {
+                                EngineError::BadCommand("the page has no size".into())
+                            })?;
+                    all.invert = true;
+                    all
+                }
+            };
+        } else if hide {
+            // The other way round: hold the layer to everything *but*
+            // what is picked, which is what deleting a selection means in
+            // an editor that cuts pixels out — done here by hiding them,
+            // so the layer is whole underneath and the region can be
+            // changed its mind about.
             selection.invert = !selection.invert;
         }
-        let parent = chitrakar_render::ancestor_space(&self.doc, id);
         let Some(mask) = Self::carried_into(&selection, parent) else {
             return Err(EngineError::BadCommand(
                 "this layer sits in a space with no thickness".into(),
@@ -8665,19 +8717,48 @@ impl Session {
     /// A region as a picture of its coverage over the page, kept as a
     /// resource (two the same are one), for a stroke to be confined by.
     fn region_as_picture(&mut self, region: &chitrakar_doc::Mask) -> Option<chitrakar_doc::Mask> {
-        let (w, h) = (self.doc.meta.width, self.doc.meta.height);
-        let clip = chitrakar_render::ClipRect {
-            x0: 0,
-            y0: 0,
-            x1: w,
-            y1: h,
-        };
+        let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
+        // Only as much of the page as the strokes reach (and their
+        // softening past them): drawn over the whole of a 24-megapixel
+        // page, each stroke began a second or more late, and later
+        // the more strokes the region held.
+        let mut reach = [0.0, 0.0, pw as f32, ph as f32];
+        if let chitrakar_doc::MaskKind::Painted { strokes } = &region.kind {
+            if !region.invert {
+                let pad = region.feather.max(0.0) * 3.0 + 2.0;
+                let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for s in strokes.iter().filter(|s| !s.erase) {
+                    if let Some([x0, y0, x1, y1]) = s.bounds() {
+                        b = [b[0].min(x0), b[1].min(y0), b[2].max(x1), b[3].max(y1)];
+                    }
+                }
+                if b[0] > b[2] {
+                    return None;
+                }
+                reach = [
+                    (b[0] - pad).max(0.0),
+                    (b[1] - pad).max(0.0),
+                    (b[2] + pad).min(pw as f32),
+                    (b[3] + pad).min(ph as f32),
+                ];
+            }
+        }
+        let (x0, y0) = (reach[0].floor() as u32, reach[1].floor() as u32);
+        let (x1, y1) = (
+            (reach[2].ceil().max(0.0) as u32).min(pw),
+            (reach[3].ceil().max(0.0) as u32).min(ph),
+        );
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        let (w, h) = (x1 - x0, y1 - y0);
+        let clip = chitrakar_render::ClipRect { x0, y0, x1, y1 };
         let plane = chitrakar_render::mask_plane_over(
             &self.doc,
             region,
             Transform::default(),
             clip,
-            (w, h),
+            (pw, ph),
         );
         if plane.len() != (w as usize) * (h as usize) {
             return None;
@@ -8695,7 +8776,7 @@ impl Session {
                 resource_id,
                 width: w,
                 height: h,
-                transform: Transform::default(),
+                transform: Transform::translation(x0 as f32, y0 as f32),
             },
             invert: false,
             feather: 0.0,
@@ -11145,6 +11226,21 @@ impl Session {
         } else {
             0
         };
+        // And room asked for before any of it is drawn: with the page
+        // already holding twenty-six photographs, the export's surfaces
+        // could not be had and the engine stopped. Asked for and let go,
+        // the room is the allocator's to hand straight back.
+        let surface_bytes = (pw + 2 * past) as usize * (ph + 2 * past) as usize * 16;
+        let mut room: Vec<u8> = Vec::new();
+        if room
+            .try_reserve_exact(surface_bytes.saturating_mul(2) + pw as usize * ph as usize * 4)
+            .is_err()
+        {
+            return Err(EngineError::BadCommand(format!(
+                "there is not enough memory left to make a picture of {pw} × {ph}; remove some layers, or make it smaller"
+            )));
+        }
+        drop(room);
         let mut surface = Surface::new(pw + 2 * past, ph + 2 * past);
         chitrakar_render::render_region_at(
             &self.doc,
@@ -12058,8 +12154,8 @@ impl Session {
         node.transform = Transform {
             a: fit,
             d: fit,
-            e: (pw as f32 - width as f32 * fit) / 2.0,
-            f: (ph as f32 - height as f32 * fit) / 2.0,
+            e: ((pw as f32 - width as f32 * fit) / 2.0).round(),
+            f: ((ph as f32 - height as f32 * fit) / 2.0).round(),
             ..Default::default()
         };
         self.apply(Command::AddNode {
@@ -12219,8 +12315,8 @@ impl Session {
             group.transform = Transform {
                 a: fit,
                 d: fit,
-                e: (pw as f32 - width as f32 * fit) / 2.0,
-                f: (ph as f32 - height as f32 * fit) / 2.0,
+                e: ((pw as f32 - width as f32 * fit) / 2.0).round(),
+                f: ((ph as f32 - height as f32 * fit) / 2.0).round(),
                 ..Default::default()
             };
             cmds.push(Command::AddNode {
@@ -13903,6 +13999,18 @@ mod tests {
         let plain = t.place_image(&png, "dot.png").unwrap();
         assert!(t.raw_open_layer(plain).is_err());
         assert!(!t.layers().iter().any(|l| l.id == plain.0 && l.developed));
+    }
+
+    #[test]
+    fn a_picture_placed_lands_on_whole_pixels() {
+        // Odd on an even page: centred to the half pixel, every pixel of
+        // it was averaged with its neighbour.
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let png = chitrakar_codecs::encode_png(101, 61, &vec![200; 101 * 61 * 4]).unwrap();
+        let id = s.place_image(&png, "odd.png").unwrap();
+        let t = s.doc.node(id).unwrap().transform;
+        assert_eq!((t.a, t.d), (1.0, 1.0));
+        assert_eq!((t.e.fract(), t.f.fract()), (0.0, 0.0), "{t:?}");
     }
 
     #[test]
@@ -18979,6 +19087,85 @@ mod tests {
     /// A layer's mask picked out and painted into again, round after
     /// round, grows the document by a stroke a round: each stroke held
     /// every stroke before it in its region, and it doubled each time.
+    #[test]
+    fn a_copy_of_a_group_of_words_is_its_size() {
+        let mut s = Session::new(400, 300, ColorMode::Rgb);
+        let root = s.document().root();
+        let words = s.doc.peek_next_id();
+        let ink = AuthoredColor::Srgb {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(chitrakar_doc::Node::text(
+                "t",
+                chitrakar_doc::TextSpec::new("Title", 48.0, ink),
+            )),
+        })
+        .unwrap();
+        let group = s.group_nodes(&[words], "g").unwrap();
+        let copy = s.make_instance(group).unwrap();
+        let (a, b) = (s.bounds_of(group).unwrap(), s.bounds_of(copy).unwrap());
+        assert!(
+            (a[2] - b[2]).abs() < 1e-3 && (a[3] - b[3]).abs() < 1e-3,
+            "{a:?} against the copy's {b:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_delete_keeps_the_first() {
+        let mut s = Session::new(200, 100, ColorMode::Rgb);
+        let r = add_rect(&mut s, "r", 200.0, 100.0);
+        let hide = |s: &mut Session, x: f32| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: 40.0,
+                    height: 40.0,
+                    radius: 0.0,
+                },
+                Transform::translation(x, 30.0),
+                "replace",
+            )
+            .unwrap();
+            s.mask_from_selection(r, true).unwrap();
+        };
+        hide(&mut s, 20.0);
+        hide(&mut s, 120.0);
+        let mask = s.doc.node(r).unwrap().mask.clone().unwrap();
+        let clip = chitrakar_render::ClipRect {
+            x0: 0,
+            y0: 0,
+            x1: 200,
+            y1: 100,
+        };
+        let plane = chitrakar_render::mask_plane_over(
+            &s.doc,
+            &mask,
+            Transform::default(),
+            clip,
+            (200, 100),
+        );
+        let at = |x: usize, y: usize| plane[y * 200 + x];
+        assert!(at(40, 50) < 0.01, "the first part deleted stays hidden");
+        assert!(at(140, 50) < 0.01, "and the second");
+        assert!(at(90, 50) > 0.99 && at(5, 5) > 0.99, "and the rest shows");
+        // Undone, the first delete is as it was.
+        s.undo().unwrap();
+        let mask = s.doc.node(r).unwrap().mask.clone().unwrap();
+        let plane = chitrakar_render::mask_plane_over(
+            &s.doc,
+            &mask,
+            Transform::default(),
+            clip,
+            (200, 100),
+        );
+        assert!(plane[50 * 200 + 40] < 0.01 && plane[50 * 200 + 140] > 0.99);
+    }
+
     #[test]
     fn painting_into_a_picked_mask_does_not_double() {
         let mut s = Session::new(200, 200, ColorMode::Rgb);
