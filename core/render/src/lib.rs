@@ -7019,15 +7019,22 @@ pub fn stroke_outline(
 /// and a band `by` either side of its outline, sampled and traced the
 /// way [`stroke_outline`] traces a stroke, within a quarter of a pixel.
 pub fn offset_outline(shape: &VectorShape, by: f32) -> Option<Vec<Vec<[f32; 2]>>> {
+    offset_outline_at(shape, by, 1.0)
+}
+
+/// [`offset_outline`] for a shape seen `scale` times its own size: a
+/// circle sized up thirty times by its layer was walked at its own size,
+/// a pixel and a half off at a radius of 750.
+pub fn offset_outline_at(shape: &VectorShape, by: f32, scale: f32) -> Option<Vec<Vec<[f32; 2]>>> {
     if !by.is_finite() || by == 0.0 {
         return None;
     }
     // A polygon's outline is its path's.
     if let Some(path) = shape.as_path() {
-        return offset_outline(&path, by);
+        return offset_outline_at(&path, by, scale);
     }
     if !matches!(shape, VectorShape::Path { .. }) {
-        return rim_ring(shape, by).map(|r| vec![r]);
+        return rim_ring_at(shape, by, scale).map(|r| vec![r]);
     }
     let d = by.abs();
     // Within `d` of the outline is under a line `2d` wide along it, round
@@ -7093,6 +7100,17 @@ pub fn offset_outline(shape: &VectorShape, by: f32) -> Option<Vec<Vec<[f32; 2]>>
 /// inward, below zero): the level set of its distance that its stroke is
 /// drawn between. `None` for a path, or when nothing is left.
 fn rim_ring(shape: &VectorShape, t: f32) -> Option<Vec<[f32; 2]>> {
+    rim_ring_at(shape, t, 1.0)
+}
+
+/// [`rim_ring`] for a shape seen `scale` times its size, walked in as
+/// many steps as hold it to the outline there.
+fn rim_ring_at(shape: &VectorShape, t: f32, scale: f32) -> Option<Vec<[f32; 2]>> {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale.min(1e4)
+    } else {
+        1.0
+    };
     match *shape {
         VectorShape::Rect {
             width,
@@ -7110,14 +7128,14 @@ fn rim_ring(shape: &VectorShape, t: f32) -> Option<Vec<[f32; 2]>> {
                 .max(0.0)
                 .min(w / 2.0)
                 .min(h / 2.0);
-            Some(rounded_rect_ring(-t, -t, w, h, r))
+            Some(rounded_rect_ring_at(-t, -t, w, h, r, scale))
         }
         VectorShape::Ellipse { rx, ry } => {
             let (a, b) = (rx + t, ry + t);
             if a <= 0.0 || b <= 0.0 {
                 return None;
             }
-            let n = arc_steps(a.max(b), std::f32::consts::TAU);
+            let n = arc_steps(a.max(b) * scale, std::f32::consts::TAU);
             Some(
                 (0..n)
                     .map(|i| {
@@ -7505,11 +7523,12 @@ fn arc_steps(r: f32, sweep: f32) -> usize {
 
 /// A rounded rectangle's outline from (`x`, `y`), `w` by `h`, corners of
 /// radius `r`, clockwise in a y-down space.
-fn rounded_rect_ring(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<[f32; 2]> {
+/// Seen `scale` times its size, walked in as many steps as that needs.
+fn rounded_rect_ring_at(x: f32, y: f32, w: f32, h: f32, r: f32, scale: f32) -> Vec<[f32; 2]> {
     if r <= 0.0 {
         return vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
     }
-    let n = arc_steps(r, std::f32::consts::FRAC_PI_2);
+    let n = arc_steps(r * scale, std::f32::consts::FRAC_PI_2);
     let mut out = Vec::with_capacity(4 * (n + 1));
     // Each corner's centre, and the angle its quarter starts at.
     let corners = [
@@ -10598,9 +10617,16 @@ fn edged(s: f32, push: f32) -> f32 {
         } else {
             s * s / (s - push)
         }
-    } else if s < 1.0 {
+    } else if s <= 1.0 {
+        // White itself among what is eased: taken as past white, a
+        // channel at exactly 255 was pushed on beyond it where 254 stopped
+        // at it, and Colour balance moved one level of input by 58.
         let room = 1.0 - s;
-        1.0 - room * room / (room + push)
+        if room <= 0.0 {
+            1.0
+        } else {
+            1.0 - room * room / (room + push)
+        }
     } else {
         s + push
     }
@@ -37498,5 +37524,18 @@ mod tests {
             shape_rings(&VectorShape::Ellipse { rx: 50.0, ry: 30.0 })[0].len(),
             64
         );
+    }
+
+    #[test]
+    fn white_is_eased_as_the_level_below_it_is() {
+        // Pushed up, 254 stopped at white and 255 went on past it: one
+        // level of input moved a channel by 58 once something darkened it.
+        for push in [0.0, 0.1, 0.5, 2.0] {
+            assert_eq!(edged(1.0, push), 1.0, "white pushed by {push}");
+            let below = edged(254.0 / 255.0, push);
+            assert!((254.0 / 255.0 - 1e-6..=1.0).contains(&below), "{below}");
+        }
+        // Past white still carries on, where light may go.
+        assert!(edged(1.2, 0.3) > 1.2);
     }
 }

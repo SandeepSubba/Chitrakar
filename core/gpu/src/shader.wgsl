@@ -2730,8 +2730,12 @@ fn edged(s: f32, push: f32) -> f32 {
         }
         return s * s / (s - push);
     }
-    if s < 1.0 {
+    // White itself among what is eased (as `edged` in core/render).
+    if s <= 1.0 {
         let room = 1.0 - s;
+        if room <= 0.0 {
+            return 1.0;
+        }
         return 1.0 - room * room / (room + push);
     }
     return s + push;

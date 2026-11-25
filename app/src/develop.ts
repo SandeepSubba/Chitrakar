@@ -311,14 +311,13 @@ function near(a: unknown, b: unknown): boolean {
 /** Whether settings are a preset's: every one the same. */
 export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
   const keys = Object.keys(RANGES) as (keyof typeof RANGES)[];
-  const white = (a?: [number, number], b?: [number, number]) =>
-    (!a && !b) || (!!a && !!b && a[0] === b[0] && a[1] === b[1]);
+  const white = (a?: [number, number], b?: [number, number]) => (!a && !b) || (!!a && !!b && near(a, b));
   return (
-    keys.every((k) => p.settings[k] === s[k]) &&
+    keys.every((k) => near(p.settings[k], s[k])) &&
     white(p.settings.white, s.white) &&
     !!p.settings.uncorrected === !!s.uncorrected &&
     !!p.settings.fringe === !!s.fringe &&
-    (p.settings.color_noise ?? p.settings.noise) === (s.color_noise ?? s.noise) &&
+    near(p.settings.color_noise ?? p.settings.noise, s.color_noise ?? s.noise) &&
     JSON.stringify(p.settings.defringe ?? [0, 0]) === JSON.stringify(s.defringe ?? [0, 0]) &&
     !!p.settings.curve === !!s.curve &&
     CURVE_KEYS.every((k) => near(p.settings[k] ?? null, s[k] ?? null)) &&

@@ -248,6 +248,7 @@ pub fn export_pdf_document_marked(doc: &Document, marks: PrintMarks) -> Result<V
         objects: Vec::new(),
         pages: Vec::new(),
         xobjects: Vec::new(),
+        pictures: std::collections::HashMap::new(),
         forms: Vec::new(),
         plain: None,
         shadings: Vec::new(),
@@ -396,6 +397,7 @@ pub fn export_pdf_frames_marked(doc: &Document, marks: PrintMarks) -> Result<Vec
         objects: Vec::new(),
         pages: Vec::new(),
         xobjects: Vec::new(),
+        pictures: std::collections::HashMap::new(),
         forms: Vec::new(),
         plain: None,
         shadings: Vec::new(),
@@ -560,6 +562,10 @@ struct Page {
     /// the whole document, or one per frame.
     pages: Vec<(String, Transform, [f32; 2])>,
     xobjects: Vec<(String, usize)>,
+    /// Pictures written, by their size and a hash of their pixels: one
+    /// photograph placed sixty times was written sixty times, a gigabyte
+    /// of PDF for thirty, and the engine ran out of memory writing it.
+    pictures: std::collections::HashMap<(u32, u32, u64), String>,
     /// Transparency groups: the object number reserved for each and what
     /// it draws. Written at the end, once the resources every content
     /// stream shares are known.
@@ -1090,6 +1096,21 @@ impl Page {
     /// becomes a soft mask when any of it is short of opaque. Returns the
     /// resource name the content stream draws it by.
     fn image(&mut self, width: u32, height: u32, rgba8: &[u8]) -> Result<String, PdfError> {
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            rgba8.hash(&mut h);
+            (width, height, h.finish())
+        };
+        if let Some(name) = self.pictures.get(&key) {
+            return Ok(name.clone());
+        }
+        let name = self.image_once(width, height, rgba8)?;
+        self.pictures.insert(key, name.clone());
+        Ok(name)
+    }
+
+    fn image_once(&mut self, width: u32, height: u32, rgba8: &[u8]) -> Result<String, PdfError> {
         let n = (width * height) as usize;
         let bled = bleed(width as usize, height as usize, rgba8);
         let rgba8 = bled.as_deref().unwrap_or(rgba8);
@@ -1111,11 +1132,14 @@ impl Page {
             ),
         };
         let alpha: Vec<u8> = rgba8.chunks(4).map(|p| p[3]).collect();
+        // Smoothed where it is enlarged, as the page draws it
+        // (`/Interpolate`): left to the reader, a picture placed at ten
+        // times came out of a PDF in blocks ten pixels across.
         let smask = if alpha.iter().any(|&a| a < 255) {
             let mask = self.push(&stream_object(
                 &format!(
                     "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
-                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode"
+                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Interpolate true /Filter /FlateDecode"
                 ),
                 &deflate(&alpha)?,
             ));
@@ -1127,7 +1151,7 @@ impl Page {
         let obj = self.push(&stream_object(
             &format!(
                 "<< /Type /XObject /Subtype /Image /Width {width} /Height {height} \
-                 /ColorSpace {space} /BitsPerComponent 8 /Filter /FlateDecode{smask}"
+                 /ColorSpace {space} /BitsPerComponent 8 /Interpolate true /Filter /FlateDecode{smask}"
             ),
             &deflate(&samples)?,
         ));
@@ -2355,7 +2379,7 @@ impl Page {
             let img = self.push(&stream_object(
                 &format!(
                     "<< /Type /XObject /Subtype /Image /Width {} /Height {} \
-                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode",
+                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Interpolate true /Filter /FlateDecode",
                     m.width, m.height
                 ),
                 &deflate(&grey)?,
@@ -2448,15 +2472,28 @@ impl Page {
         let used: std::collections::BTreeSet<u16> = unicode.keys().copied().collect();
         let subset = crate::subset::subset_ttf(bytes, &used);
         let bytes = subset.as_deref().unwrap_or(bytes);
+        // An OpenType face whose outlines are CFF (an .otf) goes in as
+        // what it is: put where a TrueType face goes, readers said the
+        // font did not match its file, and some refuse it.
+        let cff = bytes.starts_with(b"OTTO");
         let file = self.push(&stream_object(
-            &format!("<< /Length1 {} /Filter /FlateDecode", bytes.len()),
+            &if cff {
+                "<< /Subtype /OpenType /Filter /FlateDecode".to_string()
+            } else {
+                format!("<< /Length1 {} /Filter /FlateDecode", bytes.len())
+            },
             &deflate(bytes)?,
         ));
+        let (file_key, cid_kind, gid_map) = if cff {
+            ("FontFile3", "CIDFontType0", "")
+        } else {
+            ("FontFile2", "CIDFontType2", " /CIDToGIDMap /Identity")
+        };
         let descriptor = self.push(
             format!(
                 "<< /Type /FontDescriptor /FontName /{name} /Flags 4 \
                  /FontBBox [-1000 {} 2000 {}] /ItalicAngle 0 /Ascent {} /Descent {} \
-                 /CapHeight {} /StemV 80 /FontFile2 {file} 0 R >>",
+                 /CapHeight {} /StemV 80 /{file_key} {file} 0 R >>",
                 num(descent),
                 num(ascent),
                 num(ascent),
@@ -2475,9 +2512,9 @@ impl Page {
         }
         let cid = self.push(
             format!(
-                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{name} \
+                "<< /Type /Font /Subtype /{cid_kind} /BaseFont /{name} \
                  /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
-                 /FontDescriptor {descriptor} 0 R /DW 1000 /W [{}] /CIDToGIDMap /Identity >>",
+                 /FontDescriptor {descriptor} 0 R /DW 1000 /W [{}]{gid_map} >>",
                 widths.trim_end()
             )
             .as_bytes(),

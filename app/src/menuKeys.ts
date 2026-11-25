@@ -7,6 +7,15 @@
  * bar's, a menu inside one, the canvas's own — so they cannot drift.
  */
 
+/** A row given the focus, and scrolled into sight within its menu: a
+ * menu taller than the window scrolls, and the arrows walked the focus
+ * onto rows below its foot that nobody could see, which Enter then ran. */
+function shown(row: HTMLElement | null | undefined): void {
+  if (!row) return;
+  row.focus({ preventScroll: true });
+  row.scrollIntoView?.({ block: "nearest" });
+}
+
 /** The rows of `pop` itself, not those of a menu open inside it. */
 export function rowsOf(pop: Element): HTMLElement[] {
   return [...pop.querySelectorAll<HTMLElement>("[role=menuitem], [role=menuitemcheckbox]")].filter(
@@ -19,7 +28,7 @@ export function rowsOf(pop: Element): HTMLElement[] {
 export function focusFirstRow(find: () => Element | null | undefined): void {
   requestAnimationFrame(() => {
     const pop = find();
-    if (pop) rowsOf(pop)[0]?.focus({ preventScroll: true });
+    if (pop) shown(rowsOf(pop)[0]);
   });
 }
 
@@ -39,7 +48,7 @@ export function menuKeyDown(
   if (here && here !== pop) return false;
   const rows = rowsOf(pop);
   const at = rows.indexOf(document.activeElement as HTMLElement);
-  const go = (i: number) => rows[(i + rows.length) % rows.length]?.focus({ preventScroll: true });
+  const go = (i: number) => shown(rows[(i + rows.length) % rows.length]);
   const sub = pop.classList.contains("sub");
   const parentRow = () =>
     pop.parentElement?.querySelector<HTMLElement>(":scope > [aria-haspopup=menu]") ?? null;
@@ -72,7 +81,7 @@ export function menuKeyDown(
       if (sub) {
         const row = parentRow();
         row?.click();
-        row?.focus({ preventScroll: true });
+        shown(row);
       } else if (across) {
         across(-1);
       } else {
@@ -83,7 +92,7 @@ export function menuKeyDown(
       if (sub) {
         const row = parentRow();
         row?.click();
-        row?.focus({ preventScroll: true });
+        shown(row);
       } else {
         close();
       }
@@ -100,7 +109,7 @@ export function menuKeyDown(
         const row = rows[(at + k + rows.length) % rows.length];
         const label = row.querySelector(".menu-item-label")?.textContent ?? row.textContent ?? "";
         if (label.trim().toLowerCase().startsWith(letter)) {
-          row.focus({ preventScroll: true });
+          shown(row);
           break;
         }
       }

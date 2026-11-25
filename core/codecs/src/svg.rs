@@ -65,10 +65,39 @@ fn carried_faces(doc: &Document) -> String {
         Key,
         (&'static [u8], std::collections::BTreeSet<u16>),
     > = std::collections::BTreeMap::new();
-    for (_, node) in doc.nodes() {
+    // Not a hidden layer's (nor one inside a hidden group), which the
+    // file does not draw: its face went in all the same, cut to the very
+    // letters of the hidden words. One a live copy draws is drawn.
+    let copied: std::collections::HashSet<chitrakar_doc::NodeId> = doc
+        .nodes()
+        .filter_map(|(_, n)| match n.kind {
+            NodeKind::Instance { of, .. } => Some(of),
+            _ => None,
+        })
+        .collect();
+    let drawn = |mut id: chitrakar_doc::NodeId| {
+        let mut shown = true;
+        for _ in 0..chitrakar_doc::MAX_DEPTH + 2 {
+            if copied.contains(&id) {
+                return true;
+            }
+            if doc.node(id).is_ok_and(|n| !n.visible) {
+                shown = false;
+            }
+            match doc.parent_of(id) {
+                Some(up) if up != id => id = up,
+                _ => break,
+            }
+        }
+        shown
+    };
+    for (id, node) in doc.nodes() {
         let NodeKind::Text(spec) = &node.kind else {
             continue;
         };
+        if !drawn(*id) {
+            continue;
+        }
         for run in chitrakar_render::text::placed(spec).runs {
             let key = (
                 run.family.clone(),

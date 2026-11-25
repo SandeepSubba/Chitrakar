@@ -173,8 +173,15 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
     }
     let mut data = dec.read_image().map_err(bad)?;
     if reversed {
-        if let DecodingResult::U8(v) = &mut data {
-            v.iter_mut().for_each(|b| *b = b.reverse_bits());
+        match &mut data {
+            DecodingResult::U8(v) => v.iter_mut().for_each(|b| *b = b.reverse_bits()),
+            // Wider samples stored that way are read as stored no longer:
+            // a sixteen-bit file came in scrambled without a word.
+            _ => {
+                return Err(bad(
+                    "its bits are stored last first in each byte (FillOrder 2) in samples wider than a byte, which is not read; save it again in the usual order",
+                ))
+            }
         }
     }
     // Each row's samples are differences from the one two before (grey

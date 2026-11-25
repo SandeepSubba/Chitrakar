@@ -1502,6 +1502,12 @@ function engineOrigin(
 }
 const MIN_SIZE = 2; // doc pixels, resize clamp
 
+/** A place on the canvas moved to the nearest whole pixel of the screen. */
+function onDevicePixel(v: number): number {
+  const dpr = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
+  return Math.round(v * dpr) / dpr;
+}
+
 interface View {
   zoom: number;
   x: number;
@@ -3517,7 +3523,7 @@ export function App() {
       const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
       const k = zoom / v.zoom;
       const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
-      return { zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k };
+      return { zoom, x: onDevicePixel(cx - (cx - v.x) * k), y: onDevicePixel(cy - (cy - v.y) * k) };
     });
   }, []);
 
@@ -3538,10 +3544,13 @@ export function App() {
     setView((v) => {
       const k = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)) / v.zoom;
       const [cx, cy] = [host.clientWidth / 2, host.clientHeight / 2];
+      // On whole pixels of the screen: an odd page centred at Actual size
+      // sat on half of one, and every pixel of it was drawn as the mean
+      // of two — a checker of black and white came out flat grey.
       return {
         zoom: v.zoom * k,
-        x: cx - (cx - v.x) * k,
-        y: cy - (cy - v.y) * k,
+        x: onDevicePixel(cx - (cx - v.x) * k),
+        y: onDevicePixel(cy - (cy - v.y) * k),
       };
     });
   }, []);
@@ -4952,10 +4961,17 @@ export function App() {
       const rect = host.getBoundingClientRect();
       const cx = e.clientX - rect.left;
       const cy = e.clientY - rect.top;
+      // A trackpad's pinch comes as the wheel with Ctrl held, in small
+      // steps that add up to a hundred for every e-fold of the fingers'
+      // spread: read at a mouse notch's rate it zoomed a seventh as far
+      // as the fingers did. A notch with Ctrl held is a hundred or more,
+      // and keeps the notch's rate.
+      const pinch = e.ctrlKey && e.deltaMode === 0 && Math.abs(e.deltaY) < 50;
+      const rate = pinch ? 0.01 : 0.0015;
       setView((v) => {
         const zoom = Math.min(
           MAX_ZOOM,
-          Math.max(MIN_ZOOM, v.zoom * Math.exp(-e.deltaY * 0.0015)),
+          Math.max(MIN_ZOOM, v.zoom * Math.exp(-e.deltaY * rate)),
         );
         // Keep the document point under the cursor fixed.
         return {
@@ -6079,7 +6095,7 @@ export function App() {
   };
   /** A layer of a frame dragged wholly out of it goes where it was put
    * down: into the frame under its middle, or onto the page where no
-   * frame is.
+   * frame is; and one on the page dragged wholly onto a frame goes in.
    * Left in the frame it came from, which hides what is past its edge,
    * it vanished, the box of nothing left where it had been dropped. In
    * the move's own step in the history. */
@@ -6089,9 +6105,36 @@ export function App() {
     const moved = selectionSet.length > 0 ? selectionSet : selected !== null ? [selected] : [];
     for (const id of moved) {
       const parent = byId.get(id)?.parent as NodeId | undefined;
-      if (parent === undefined || byId.get(parent)?.kind !== "artboard") continue;
+      if (parent === undefined) continue;
       const box = s.bounds_of(id);
       if (!box || box.length < 4) continue;
+      // A layer on the page put down wholly over a frame goes into it, as
+      // a shape drawn there does: left on the page it covered the frame,
+      // and each frame's export left it out.
+      if (parent === s.root_id) {
+        if (byId.get(id)?.kind === "artboard") continue;
+        const into = s.frame_at(box[0] + box[2] / 2, box[1] + box[3] / 2);
+        if (into < 0) continue;
+        const room = s.bounds_of(into);
+        if (
+          !room ||
+          room.length < 4 ||
+          box[0] < room[0] ||
+          box[1] < room[1] ||
+          box[0] + box[2] > room[0] + room[2] ||
+          box[1] + box[3] > room[1] + room[3]
+        ) {
+          continue;
+        }
+        try {
+          s.reparent(id, into, s.child_count(into));
+          s.merge_last();
+        } catch (err) {
+          console.warn("into the frame:", err);
+        }
+        continue;
+      }
+      if (byId.get(parent)?.kind !== "artboard") continue;
       // Only once none of it is over its frame: dragged part way out, it
       // is cut at the frame's edge, as a frame is for.
       const own = s.bounds_of(parent);
@@ -6147,6 +6190,12 @@ export function App() {
     // its blur, so the edit stayed an open preview and no other block
     // could be opened for editing.
     if (inlineText) closeInlineText(true);
+    // A handle's drag still open from before — its button came up where
+    // the page never heard it — ends here, as the one step it was: a
+    // press elsewhere left it a preview, and undo threw it away.
+    else if (session.previewing() && !toolDragRef.current && pointersDown.current.size <= 1) {
+      if (session.commit_preview()) refresh(session);
+    }
     // A finger alone on the page, held still, is asking for the menu a
     // mouse's right button opens. Not while painting, where a finger held
     // in one place is putting down paint, and is meant to.
@@ -12801,6 +12850,20 @@ export function App() {
         await nextPaint();
         takeFilesRef.current(files);
         return;
+      }
+      // A lens profile (lensfun's XML) is kept as Preferences › Camera
+      // raw keeps one: dropped over that page, it was turned away as
+      // "not a picture" once the window had closed.
+      const lens = files.filter((f) => /\.xml$/i.test(f.name));
+      if (lens.length > 0 && session) {
+        files = files.filter((f) => !lens.includes(f));
+        const { added, refused, why } = await addLensFiles(session, lens);
+        if (refused.length > 0) {
+          alert(`${refused.join(", ")} ${refused.length > 1 ? "are" : "is"} not a lens profile the editor can read: ${why.join("; ")}`);
+        } else if (added > 0 && files.length === 0) {
+          alert(`${added === 1 ? `${lens[0].name} is` : `${added} lens profiles are`} kept, in Preferences › Camera raw.`);
+        }
+        if (files.length === 0) return;
       }
       const kinds: (string | null)[] = [];
       // By its bytes always, as File › Open goes: a document named .png
@@ -21383,6 +21446,11 @@ function CurveEditor({
       }
       case "Delete":
       case "Backspace":
+        // Kept from the editor whatever happens: with only the two ends
+        // left, the press went on to the editor's Delete, and took the
+        // whole Curves layer away.
+        e.preventDefault();
+        e.stopPropagation();
         if (pts.length <= 2) return;
         onEdit(
           pts.filter((_, j) => j !== at),
@@ -22689,7 +22757,9 @@ function KindProps({
           const shown = range
             ? (rangeSays(t.text, t.runs ?? [], range[0], range[1], "size", t.size) ?? t.size)
             : t.size;
-          return slider("Size", shown, 8, 200, 1, (v) =>
+          // To a thousand: on a page at 300 dpi, 200 was 48 points, short
+          // of a poster's heading.
+          return slider("Size", shown, 8, 1000, 1, (v) =>
             selection() ? styled({ size: v }) : { Text: { ...t, size: v } },
           );
         })()}
@@ -22935,7 +23005,9 @@ function KindProps({
             Text: { ...t, along_offset: v },
           }))}
         {/* Zero is a block that fits its text; anything else wraps to it. */}
-        {slider("Wrap width", t.width ?? 0, 0, 2000, 10, (v) => ({
+        {/* To ten thousand: 2000 was 169 mm on an A4 page at 300 dpi,
+            short of a column of 180. */}
+        {slider("Wrap width", t.width ?? 0, 0, 10000, 10, (v) => ({
           Text: { ...t, width: v },
         }))}
         <label className="row">

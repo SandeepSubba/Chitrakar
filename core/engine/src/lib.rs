@@ -1828,9 +1828,11 @@ impl Session {
         self.preview(parse_command(json)?)
     }
 
-    /// Whether a gesture is being previewed and not yet ended.
+    /// Whether a drag's gesture is being previewed and not yet ended —
+    /// not one a window holds open (Straighten, Feather), which ends with
+    /// the window.
     pub fn previewing(&self) -> bool {
-        self.preview_gesture.is_some()
+        self.preview_gesture.is_some() && !self.held_gesture
     }
 
     /// End the gesture, recording it as one undo step. Returns false if no
@@ -2858,7 +2860,7 @@ impl Session {
             } else {
                 by
             };
-            chitrakar_render::offset_outline(shape, by).ok_or_else(refused)?
+            chitrakar_render::offset_outline_at(shape, by, scale).ok_or_else(refused)?
         };
         let (mut x0, mut y0) = (f32::MAX, f32::MAX);
         for p in rings.iter().flatten() {
@@ -10709,6 +10711,22 @@ impl Session {
             return Err(EngineError::BadCommand(format!(
                 "a Photoshop file holds pages up to {} pixels a side",
                 chitrakar_codecs::psd_export::PSD_SIDE_MOST
+            )));
+        }
+        // A Photoshop file counts its layers (and the ends of its groups)
+        // in sixteen bits: past that it is refused here, before a layer
+        // is drawn — asked of the writer, it was said after nineteen
+        // minutes of drawing them.
+        let records: usize = self
+            .doc
+            .nodes()
+            .map(|(_, n)| if n.kind.holds_children() { 2 } else { 1 })
+            .sum::<usize>()
+            .saturating_sub(1);
+        if records > i16::MAX as usize {
+            return Err(EngineError::BadCommand(format!(
+                "it has about {records} layers and group ends to write, and a Photoshop file holds at most {}",
+                i16::MAX
             )));
         }
         // Every layer is drawn at the page's size and all are held at once

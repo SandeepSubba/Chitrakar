@@ -154,7 +154,11 @@ without reading anything else.*
      pictures placed on half a pixel, "1,920" read as 1.92. The
      forty-eighth: an original deleted with its copy lost on undo, a
      PSD of ten pixels stopping the engine, a file's resolution never
-     read, a reload losing ten seconds of work.
+     read, a reload losing ten seconds of work. The forty-ninth: a PSD
+     shown in centimetres opening at 2.54 times its resolution, white
+     pushed past white by Colour balance, Actual size drawn on half a
+     pixel, a pinch zooming a seventh as far as the fingers, a document
+     of three million draws stopping the engine.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13083,6 +13087,81 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A forty-ninth audit (November 2026).** Its check of round 48: four
+  million draws opened, but a document of three million took the engine
+  to its memory's end on the first frame (a file opens, and an edit is
+  taken, up to one million, `OPEN_DRAWN`), and an add past it was not
+  refused, since only copies were counted (the count is kept, `drawn`,
+  and an add raises it by one, counted afresh near the end); Delete in
+  the curve editor took the layer as well as the point; a handle dragged
+  with the pointer let go off the page stayed a preview until the next
+  gesture's (the next press on the canvas ends it as a step); offset was
+  walked at the shape's own size, not its layer's scale; a develop
+  preset changed by a slider's rounding no longer showed as in use; a
+  PSD of more than 32,767 layers was worked out whole before it was
+  refused; a lensfun XML dropped on the page was thrown away (it is
+  added); a number box lost its "typed it all" on Shift and its comma
+  reading on a delete; a 16-bit TIFF with FillOrder 2 was read as noise
+  (refused in words); and one photograph placed thirty times made a PDF
+  of a gigabyte, written once a placement (once, by its pixels).
+  Its limits: a document a browser decoded, merged, saved or drew with
+  memory full can still stop the engine; a third large PDF in a session
+  can be refused for memory; deleting a group whose child is copied
+  redraws more than it needs; redoing a thousand adds, and a group of a
+  thousand with copies, take seconds; Ctrl+Z after Open keeps the
+  document's dpi, and a first Place is recorded as Open; a JPEG's
+  resolution in EXIF alone is not read; a small copy is refused anywhere
+  once the count is past; the develop window's curve keys are undone
+  together; Dehaze and Clarity together still take a second; a finger's
+  tap mid crop-drag cancels the crop; a number box reads German's
+  thousands points as typed only from the keyboard, and a selection made
+  by mouse then typed over is not followed; X boxes put back a billion
+  without a word; and a PSD export's time grows with the square of its
+  layers.
+  Its files pass: a PSD whose
+  resolution is shown in centimetres opened at 2.54 times it, Photoshop
+  keeping it per inch whatever it shows (read as it is kept); text in a
+  face loaded under a name other than its family came back from our own
+  SVG in the bundled face, with no word (each face a file carries is
+  known by the name its `@font-face` gives it too); an .otf's CFF
+  outlines went into a PDF where TrueType goes (`/FontFile3 /OpenType`
+  and `CIDFontType0`); a picture enlarged came out of a PDF in blocks
+  (`/Interpolate true`); an SVG carried the face, and so the letters, of
+  hidden text; a .cube row with a comment after it was refused.
+  Its editing pass: `edged` took white itself as past white, so a
+  channel at exactly 255 was pushed on where 254 stopped, and Colour
+  balance with Keep brightness moved one level of input by 58 (`s <= 1`,
+  in the renderer and the shader); Actual size, the View menu's zooms
+  put an odd page on half a device pixel, and a checker of black
+  and white showed flat grey (`onDevicePixel`).
+  Its interface pass, a teacher on a trackpad, a social-media manager
+  and someone with low vision: the menus' arrows walked the focus onto
+  rows below the menu's fold without scrolling them into sight; a
+  trackpad's pinch zoomed a seventh as far as the fingers (read at its
+  own rate); a shape dragged wholly onto a frame stayed on the page and
+  out of the frame's export (it goes in); text was held to 200 pixels
+  and a wrap of 2000, 48 points and 169 mm on an A4 page at 300 dpi
+  (1000 and 10,000); the rulers' numbers, the distance labels and the
+  palette's captions stayed their size at the largest interface size.
+  Limits written down: a CMYK document's gamut warning and soft proof
+  read the screen's colour, not the inks typed, so a C of 100 typed in
+  is flagged and moves under the proof; an outline on a fill under half
+  opaque sits on its edge, where the SVG export's threshold leaves it
+  out, and a layer's opacity does not fade its outline; a shadow blurred
+  under a pixel spreads about one; Chromium rounds the SVG outline's
+  radii; adjustment layers take no blend mode; a strong cast is past
+  what the tint reaches; a text block's side handle stretches its
+  letters rather than its wrap; the canvas's handles do not grow with
+  the interface size; Ctrl+Z in the text being typed takes a letter, in
+  the panel's field the whole edit; the Export window's PDF is the page
+  only; sizes in the frame presets and the stroke and wrap are pixels
+  whatever the units; shapes share one number; numbered lists number
+  every paragraph; a photo dropped lands at the middle, not where it
+  was dropped; a CMYK document's PSD is RGB without a word; DNG opcodes
+  past the three read are passed over even where they say they are
+  needed; lensfun's vignetting terms are not held to reason; WebP and
+  SVG carry no resolution, and a PDF opened comes in at the window's
+  dpi; .cube files with a shaper are refused.
   **A forty-eighth audit (November 2026).** Its check of round 47 found
   three things that round broke. A subtree put back was refused as "a
   copy of nothing" when undo put a copy back before its original, so

@@ -140,13 +140,11 @@ fn psd(b: &[u8]) -> Option<f32> {
         let size_at = p + 6 + named;
         let size = be32(b, size_at)? as usize;
         let data = size_at + 4;
+        // Kept per inch whatever unit it is shown in: the unit only says
+        // how Photoshop shows it. Read as centimetres, a file shown in
+        // them opened at 762 dpi for 300.
         if id == 1005 && size >= 16 {
-            let h = be32(b, data)? as f32 / 65536.0;
-            return match be16(b, data + 4)? {
-                1 => Some(h),
-                2 => Some(h * 2.54),
-                _ => None,
-            };
+            return Some(be32(b, data)? as f32 / 65536.0);
         }
         p = data.checked_add((size + 1) & !1)?;
     }
@@ -181,6 +179,32 @@ mod tests {
         // Units of nothing: only the shape of a pixel.
         j[13] = 0;
         assert_eq!(picture_dpi(&j), None);
+    }
+
+    #[test]
+    fn a_psd_keeps_its_resolution_per_inch_whatever_it_is_shown_in() {
+        let psd = |unit: u16| {
+            let mut b = b"8BPS".to_vec();
+            b.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0, 0, 3]);
+            b.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 0, 8, 0, 3]);
+            b.extend_from_slice(&0u32.to_be_bytes());
+            let mut res = b"8BIM".to_vec();
+            res.extend_from_slice(&1005u16.to_be_bytes());
+            res.extend_from_slice(&[0, 0]);
+            res.extend_from_slice(&16u32.to_be_bytes());
+            res.extend_from_slice(&(300u32 << 16).to_be_bytes());
+            res.extend_from_slice(&unit.to_be_bytes());
+            res.extend_from_slice(&[0, 1]);
+            res.extend_from_slice(&(300u32 << 16).to_be_bytes());
+            res.extend_from_slice(&unit.to_be_bytes());
+            res.extend_from_slice(&[0, 1]);
+            b.extend_from_slice(&(res.len() as u32).to_be_bytes());
+            b.extend(res);
+            b
+        };
+        assert_eq!(picture_dpi(&psd(1)), Some(300.0));
+        // Shown in centimetres, kept per inch all the same.
+        assert_eq!(picture_dpi(&psd(2)), Some(300.0));
     }
 
     #[test]

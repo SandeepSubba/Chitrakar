@@ -365,8 +365,28 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
         // reader passes over (it reads no `@font-face`): this editor's own
         // SVGs carry their bold face that way, and bold text came back in
         // the regular weight.
-        for face in carried_faces(data) {
+        for (family, face) in carried_faces(data) {
+            let before: std::collections::HashSet<_> = fonts.faces().map(|f| f.id).collect();
             fonts.load_font_data(face);
+            // Known by the name its rule gives it as well as its own: by
+            // its own alone, text in "Caladea-BoldItalic" came back in the
+            // bundled face, with no word.
+            let Some(family) = family else { continue };
+            let added: Vec<usvg::fontdb::FaceInfo> = fonts
+                .faces()
+                .filter(|f| !before.contains(&f.id))
+                .filter(|f| {
+                    !f.families
+                        .iter()
+                        .any(|(n, _)| n.eq_ignore_ascii_case(&family))
+                })
+                .cloned()
+                .collect();
+            for mut info in added {
+                info.families =
+                    vec![(family.clone(), usvg::fontdb::Language::English_UnitedStates)];
+                fonts.push_face_info(info);
+            }
         }
         // Text in a face the file cannot supply is set in the bundled one
         // — whatever it asks for. Only text naming no face was: a family
@@ -628,14 +648,15 @@ fn without_urls(text: &str) -> String {
 /// bytes was handed to the font list, which asked for room for them all
 /// and stopped the engine. Held to a total, as everything a file asks
 /// for is.
-fn carried_faces(data: &[u8]) -> Vec<Vec<u8>> {
+fn carried_faces(data: &[u8]) -> Vec<(Option<String>, Vec<u8>)> {
     const MOST: usize = 32 << 20;
     let Ok(text) = std::str::from_utf8(data) else {
         return Vec::new();
     };
+    let lower = text.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut total = 0usize;
-    for (_, head, payload) in data_urls(text) {
+    for (range, head, payload) in data_urls(text) {
         if !head.ends_with(";base64") || !(head.contains("font") || head.contains("opentype")) {
             continue;
         }
@@ -652,10 +673,33 @@ fn carried_faces(data: &[u8]) -> Vec<Vec<u8>> {
         let fits = tables.is_some_and(|n| n > 0 && 12 + 16 * n <= bytes.len());
         if single && fits && total + bytes.len() <= MOST {
             total += bytes.len();
-            out.push(bytes);
+            out.push((face_family(text, &lower, range), bytes));
         }
     }
     out
+}
+
+/// The family the `@font-face` rule round `at` names its face — the name
+/// the file's text asks for it by, which need not be the family written
+/// inside the face (this editor writes a face by the name it was loaded
+/// under, "Caladea-BoldItalic" for a face of the family "Caladea").
+fn face_family(text: &str, lower: &str, at: std::ops::Range<usize>) -> Option<String> {
+    let start = lower[..at.start].rfind("@font-face")?;
+    if lower[start..at.start].contains('}') {
+        return None;
+    }
+    let end = at.end + lower[at.end..].find('}').unwrap_or(lower.len() - at.end);
+    let block = &lower[start..end];
+    let named = block.find("font-family")? + start + "font-family".len();
+    let rest = text[named..end].trim_start().strip_prefix(':')?;
+    let value = rest.split([';', '}']).next()?.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
+        .unwrap_or(value)
+        .trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// Base64 read back, ignoring the white space a long line is broken

@@ -22,6 +22,10 @@
 use chitrakar_doc::{Command, Document, Node, NodeKind, Transform, VectorShape};
 use std::time::{Duration, Instant};
 
+/// The two timings take turns: the test harness runs a file's tests side
+/// by side, and each was reading the other's work as its own.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn build(n: usize) -> Duration {
     build_beside(n, false)
 }
@@ -91,6 +95,7 @@ fn build_beside(n: usize, a_copy: bool) -> Duration {
 
 #[test]
 fn adding_a_layer_costs_one_layer() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // Warm: the first run of anything pays for pages the allocator has
     // not asked the system for yet.
     // Sizes large enough that the timer is measuring the work rather
@@ -128,6 +133,7 @@ fn adding_a_layer_costs_one_layer() {
 
 #[test]
 fn adding_a_layer_beside_a_copy_costs_one_layer() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let _ = build_beside(400, true);
     let (mut small, mut large) = (Duration::MAX, Duration::MAX);
     for _ in 0..5 {

@@ -1430,7 +1430,9 @@ body {
 
 .ruler text {
   fill: currentColor;
-  font-size: 9px;
+  /* With the interface size, as far as the ruler's breadth has room:
+     it stayed nine pixels at the largest. */
+  font-size: max(9px, 0.56rem);
 }
 
 /* The little square where the two rulers meet, so neither shows through
@@ -2030,7 +2032,7 @@ body {
 
 .measures text {
   fill: #fff;
-  font: 11px/1 system-ui, sans-serif;
+  font: max(11px, 0.69rem) / 1 system-ui, sans-serif;
   text-anchor: middle;
 }
 
@@ -3172,7 +3174,9 @@ body {
 .palette-caption {
   flex-basis: 100%;
   margin-top: 0.25rem;
-  font-size: 0.5rem;
+  /* Twelve pixels and more at the larger sizes; half a rem was ten at
+     the largest, too small to read for whom that size is. */
+  font-size: max(9px, 0.6rem);
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;

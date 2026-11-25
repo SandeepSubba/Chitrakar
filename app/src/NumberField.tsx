@@ -105,7 +105,10 @@ if (typeof document !== "undefined") {
       if (!numberBox(e.target)) return;
       if (e.key === "Enter") settle(e.target);
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") wholly.add(e.target);
-      else if (e.key.length > 1 && e.key !== "Shift") wholly.delete(e.target);
+      // Moving the caret lets go of the whole; a modifier, or Ctrl+C
+      // after Ctrl+A, does not ("7,5" typed then was 75).
+      else if (e.key.length > 1 && !["Shift", "Control", "Meta", "Alt"].includes(e.key) && !e.ctrlKey && !e.metaKey)
+        wholly.delete(e.target);
     },
     true,
   );
@@ -114,7 +117,14 @@ if (typeof document !== "undefined") {
     "input",
     (e) => {
       const at = e.target;
-      if (numberBox(at) && at.value === "" && !at.validity.badInput) typed.delete(at);
+      if (!numberBox(at)) return;
+      if (at.value === "" && !at.validity.badInput) typed.delete(at);
+      // The comma's point taken back out: what was counted of it goes
+      // with it ("1," Backspace ",5" was 15).
+      else if ((e as InputEvent).inputType?.startsWith("delete") && !at.value.includes(".") && !at.validity.badInput) {
+        const marks = typed.get(at);
+        if (marks && !marks.point) typed.delete(at);
+      }
     },
     true,
   );

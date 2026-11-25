@@ -168,14 +168,15 @@ pub const MAX_DEPTH: usize = 256;
 /// to double at every level would ask for.
 pub const MAX_DRAWN: u64 = 200_000;
 
-/// What a file is opened with: twenty times what an edit is held to, and
-/// a quarter as deep again, so a document the editor let be made opens,
-/// while one made to double at every level is still refused. It is a
-/// count of draws alone, so that nothing an edit can do — deleting
-/// layers least of all — takes a document that opened past it: held to
-/// a thousand draws a layer as well, a file with fewer layers after a
-/// delete would not open again.
-pub const OPEN_DRAWN: u64 = 4_000_000;
+/// What a file is opened with: five times what an edit inside copies is
+/// held to, and a quarter as deep again, so a document the editor let be
+/// made opens, while one made to double at every level is still refused.
+/// It is a count of draws alone, so that deleting layers cannot take a
+/// document that opened past it (held to a thousand draws a layer as
+/// well, a file with fewer layers after a delete would not open again);
+/// and every add is held short of it. At four million a file of 89
+/// layers was let in and its first frame never finished.
+pub const OPEN_DRAWN: u64 = 1_000_000;
 pub const OPEN_DRAWN_DEPTH: usize = 320;
 
 /// Whether a brush stroke's points and widths are numbers a page can
@@ -284,6 +285,12 @@ pub struct Document {
     /// pasting two thousand layers took seconds.
     #[serde(skip)]
     copied: Option<std::collections::HashSet<NodeId>>,
+    /// About how many layers drawing the document takes (copies counted
+    /// as all they copy): exact when last counted, a layer more for each
+    /// one added since, and left high by a removal, which only ever asks
+    /// for a count nobody needed. `None` is not known.
+    #[serde(skip)]
+    drawn: Option<u64>,
     /// Which group each layer is in — the child lists read the other
     /// way, kept so that asking a layer's parent is a lookup rather than
     /// a scan of every group's list. The session asks it twice per
@@ -623,6 +630,7 @@ impl Document {
             resources: BTreeMap::new(),
             nesting: Some(0),
             copied: Some(std::collections::HashSet::new()),
+            drawn: None,
             parents: HashMap::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
@@ -1292,6 +1300,7 @@ impl Document {
             _ => Vec::new(),
         };
         let removing = matches!(&cmd, Command::RemoveNode { .. });
+        let restores = matches!(&cmd, Command::RestoreSubtree { .. });
         let counted = makes_copy || (grows && lands.is_some_and(|at| self.inside_copied(at)));
         let drawn_before = if counted {
             let mut known = HashMap::new();
@@ -1354,19 +1363,44 @@ impl Document {
             // Refused only where it raises the count past the most: a
             // document opened past it takes layers anywhere else, and a
             // copy pointed at something smaller.
-            let refusal = match self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known) {
+            let reach = self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known);
+            let refusal = match reach {
                 None => Some(DocError::TooDeep { limit: MAX_DEPTH }),
                 Some((_, draws))
                     if draws > MAX_DRAWN && drawn_before.is_some_and(|before| draws > before) =>
                 {
                     Some(DocError::TooMuchToDraw)
                 }
+                Some((_, draws)) if draws > OPEN_DRAWN => Some(DocError::TooMuchToDraw),
                 Some(_) => None,
             };
             if let Some(refusal) = refusal {
                 let _ = self.apply_inner(inverse);
                 return Err(refusal);
             }
+            self.drawn = reach.map(|(_, draws)| draws);
+        } else if cmd_was_add {
+            // Anywhere else a layer adds itself, and the document is held
+            // short of what a file opens with: a document opened just short
+            // of it took ten rectangles on the page, and saved a file that
+            // would not open. Counted outright only near it, or when the
+            // count is not known.
+            let guess = self.drawn.map(|d| d + 1);
+            if guess.is_none_or(|d| d + 1000 > OPEN_DRAWN) {
+                let mut known = HashMap::new();
+                let reach = self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known);
+                if reach.is_some_and(|(_, draws)| draws > OPEN_DRAWN) {
+                    let _ = self.apply_inner(inverse);
+                    return Err(DocError::TooMuchToDraw);
+                }
+                self.drawn = reach.map(|(_, draws)| draws);
+            } else {
+                self.drawn = guess;
+            }
+        } else if restores {
+            // Put back, it draws what it drew; counted again when it is
+            // next asked.
+            self.drawn = None;
         }
         match unsettled {
             Unsettled::Nothing => {}

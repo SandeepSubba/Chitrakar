@@ -40,7 +40,15 @@ pub fn parse_cube(text: &str) -> Result<Cube, String> {
     let mut rows: Vec<[f32; 3]> = Vec::new();
     for (n, line) in text.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        // A comment after the numbers on a row, as some tools write one:
+        // the row was refused as wanting three numbers. Not in a title,
+        // which may hold a # of its own.
+        let line = if line.starts_with("TITLE") {
+            line
+        } else {
+            line.split('#').next().unwrap_or("").trim()
+        };
+        if line.is_empty() {
             continue;
         }
         let mut words = line.split_whitespace();
