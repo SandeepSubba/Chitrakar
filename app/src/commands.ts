@@ -44,6 +44,9 @@ export const COMMANDS = [
   { id: "clip", label: "Clip to layer below", group: "Layer", chord: "mod+alt+g" },
   { id: "to-front", label: "Bring to front", group: "Layer", chord: "mod+shift+]" },
   { id: "to-back", label: "Send to back", group: "Layer", chord: "mod+shift+[" },
+  // One step at a time, as Photoshop, Illustrator and Figma all have it.
+  { id: "forward", label: "Bring forward", group: "Layer", chord: "mod+]" },
+  { id: "backward", label: "Send backward", group: "Layer", chord: "mod+[" },
   { id: "zoom-in", label: "Zoom in", group: "View", chord: "mod+=" },
   { id: "zoom-out", label: "Zoom out", group: "View", chord: "mod+-" },
   { id: "zoom-fit", label: "Fit on screen", group: "View", chord: "mod+0" },

@@ -1019,6 +1019,8 @@ function StretchRange({
     );
   }, [min, max, value]);
   const { onPointerDown, onPointerUp, onPointerCancel, ...others } = rest;
+  /** The value when a finger came down on it. */
+  const before = useRef<number | null>(null);
   return (
     <input
       type="range"
@@ -1028,15 +1030,25 @@ function StretchRange({
       onChange={(e) => onValue(Number(e.target.value))}
       onPointerDown={(e) => {
         dragging.current = true;
+        before.current = e.pointerType === "mouse" ? null : value;
         onPointerDown?.(e);
       }}
       onPointerUp={(e) => {
         dragging.current = false;
+        before.current = null;
         onPointerUp?.(e);
       }}
       onPointerCancel={(e) => {
         dragging.current = false;
-        onPointerCancel?.(e);
+        // A finger that came down on the slider and went on to scroll the
+        // panel: the browser moved the thumb to where it landed, and that
+        // went to the picture with no step for it. Put back, and the
+        // gesture ended with nothing to keep.
+        const was = before.current;
+        before.current = null;
+        if (was !== null && was !== value) onValue(was);
+        if (onPointerCancel) onPointerCancel(e);
+        else onPointerUp?.(e as unknown as React.PointerEvent<HTMLInputElement>);
       }}
       {...others}
     />
@@ -1867,7 +1879,10 @@ function snapAxis(
   for (const m of moving) {
     for (const t of targets) {
       const gap = Math.abs(t - m);
-      if (gap < bestGap) {
+      // The tolerance itself catches too: an edge halfway between two
+      // grid lines as far apart as twice the snap distance caught on
+      // neither.
+      if (gap < bestGap || (best.guide === null && gap <= tol)) {
         bestGap = gap;
         best = { delta: t - m, guide: t };
       }
@@ -4300,6 +4315,7 @@ export function App() {
     shapeCount.current += 1;
     const place = placeAt(x, y);
     const before = new Set(layers.map((l) => l.id));
+    try {
     run({
       AddNode: {
         parent: place.parent,
@@ -4310,7 +4326,10 @@ export function App() {
           {
             Text: {
               text: "Text",
-              size: 48,
+              // Big enough to be seen where it is dropped: 48 on a
+              // phone's photograph shown at a tenth was four pixels
+              // tall, under its own handles. At least 36 on the screen.
+              size: Math.min(1000, Math.max(48, Math.round(36 / Math.max(view.zoom, 0.01)))),
               fill: currentInk(),
               align: "Left",
               line_height: 1,
@@ -4332,6 +4351,12 @@ export function App() {
         },
       },
     });
+    } catch (err) {
+      // Refused (a document at its count of layers): said, where it was
+      // thrown from the press with nothing on the page.
+      alert(`Could not add the text: ${said(err)}`);
+      return;
+    }
     setTool("Move");
     // And typing begins: the block is picked and opens for editing with
     // its word picked, so what is typed next replaces it — rather than
@@ -4505,6 +4530,16 @@ export function App() {
         // Picked once made, as a shape drawn is: the layer picked before
         // stayed picked, and Delete next took it instead of the path.
         const before = new Set((JSON.parse(session.layers_json()) as LayerInfo[]).map((l) => l.id));
+        // Refused (a document at its count of layers), it is said, and the
+        // anchors go: thrown from here — Enter, a double click, a change of
+        // tool — the refusal took the whole editor down with it.
+        const refused = (err: unknown) => {
+          setPenPoints([]);
+          setPenHandles([]);
+          penDragRef.current = null;
+          alert(`Could not make the path: ${said(err)}`);
+        };
+        try {
         run({
           AddNode: {
             parent: place.parent,
@@ -4549,6 +4584,10 @@ export function App() {
             },
           },
         });
+        } catch (err) {
+          refused(err);
+          return;
+        }
         const made = (JSON.parse(session.layers_json()) as LayerInfo[]).find((l) => !before.has(l.id));
         if (made) {
           setSelected(made.id as NodeId);
@@ -4977,14 +5016,21 @@ export function App() {
       // and keeps the notch's rate.
       //
       // In pixels whatever it came in: Firefox counts a mouse's notch in
-      // lines (3 a notch), which read as pixels barely zoomed at all.
-      const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 800 : 1);
-      // With Ctrl, a step goes at the fingers' rate up to the most a
-      // notch zooms, and a notch keeps its own: no edge between the two
-      // (a threshold at 50 zoomed 49 a step half again as far as 50).
-      const amount = e.ctrlKey
-        ? Math.min(Math.abs(dy) * 0.01, Math.max(0.15, Math.abs(dy) * 0.0015))
-        : Math.abs(dy) * 0.0015;
+      // lines (3 a notch), which read as pixels barely zoomed at all; a
+      // page is a notch.
+      const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 100 : 1);
+      // A notch is a whole number of a third of a hundred or more, or
+      // came in lines or pages; a pinch comes in fractions, and goes at
+      // the fingers' own rate however fast they move (capped at e a
+      // step). A threshold on the size alone either zoomed a quick pinch
+      // short of the fingers or a slow notch past them.
+      // (Windows at one line a notch sends 33⅓, a third of a whole.)
+      const thirds = e.deltaY * 3;
+      const notch =
+        e.deltaMode !== 0 ||
+        (Math.abs(e.deltaY) >= 33 && Math.abs(thirds - Math.round(thirds)) < 0.01);
+      const amount =
+        e.ctrlKey && !notch ? Math.min(Math.abs(dy) * 0.01, 1) : Math.abs(dy) * 0.0015;
       setView((v) => {
         const zoom = Math.min(
           MAX_ZOOM,
@@ -6076,7 +6122,10 @@ export function App() {
       setSelected(id);
       setMultiSel([]);
       return id;
-    } catch {
+    } catch (err) {
+      // Said, not swallowed: at the document's count of layers the drag
+      // did nothing and nobody knew why.
+      alert(`Could not make a ${clone ? "clone" : "paint"} layer: ${said(err)}`);
       return null;
     }
   };
@@ -7543,6 +7592,7 @@ export function App() {
     if (!session || styleClip.current === null) return;
     const ids = selectionSet;
     if (ids.length === 0) return;
+    const mark = session.history_mark();
     try {
       session.paste_style(styleClip.current, new Float64Array(ids));
     } catch (err) {
@@ -7553,7 +7603,9 @@ export function App() {
     const develop = styleDevelop.current;
     if (develop !== null) {
       const raws = layers.filter((l) => l.developed && ids.includes(l.id));
-      if (raws.length > 0) void developLike(develop, raws);
+      // One step with the paste, when the paste was one: two, the first
+      // Ctrl+Z left the pasted look on the old development.
+      if (raws.length > 0) void developLike(develop, raws, session.history_mark() !== mark);
     }
   };
 
@@ -8644,6 +8696,11 @@ export function App() {
       }
     }
     putAdjustment(only, preset.name, kind);
+    // Its sliders are in the panel: on a phone, with the panel put away,
+    // the layer came and nothing showed where to set it. (Beside the
+    // canvas it is always there, and left opened it would come over the
+    // canvas the moment the window was narrowed.)
+    if (narrow) setPanelOpen(true);
   };
 
   /** Put an adjustment on the page: over everything below, holding the
@@ -9627,6 +9684,12 @@ export function App() {
           case "to-back":
             orderSelected(false);
             return;
+          case "forward":
+            reorderSelected(1);
+            return;
+          case "backward":
+            reorderSelected(-1);
+            return;
           default:
             break;
         }
@@ -10260,6 +10323,24 @@ export function App() {
     t0: Transform;
   } | null>(null);
 
+  /** The anchor nearest a finger's press, of those whose enlarged
+   * targets it landed in: they overlap, and the one later in the page
+   * took the press, so a finger 8 pixels from one anchor and 16 from
+   * the next dragged the next. A mouse's targets do not overlap. */
+  const nearestAnchor = (e: React.PointerEvent, hit: number): number => {
+    if (e.pointerType === "mouse") return hit;
+    let best = hit;
+    let near = Infinity;
+    for (const el of document.querySelectorAll<HTMLElement>(".anchor[data-anchor]")) {
+      const r = el.getBoundingClientRect();
+      const d = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+      if (d < near) {
+        near = d;
+        best = Number(el.dataset.anchor);
+      }
+    }
+    return Number.isFinite(best) ? best : hit;
+  };
   const onAnchorPointerDown = (e: React.PointerEvent, idx: number) => {
     if (handleRefuses(e)) return;
     if (!session || selected === null || !selectedKind) return;
@@ -12134,7 +12215,9 @@ export function App() {
       bytes = await readPath(path);
     } catch (err) {
       alert(`Could not open ${baseName(path)}: ${said(err)}`);
-      forget(path);
+      // Only a file that is not there any more: one refused for now (a
+      // permission, a disk asleep) is still the person's to open later.
+      if (/not found|no such file|cannot find|os error 2\b|os error 3\b/i.test(String(err))) forget(path);
       return false;
     }
     if (importKind(path, bytes.subarray(0, 1024)) !== "document") {
@@ -12781,7 +12864,7 @@ export function App() {
     await developLike(session.developed_settings(source.id), developedOthers);
   };
   /** Develop each of `others` (raw layers) with `settings`, one step. */
-  const developLike = async (settings: string, others: LayerInfo[]) => {
+  const developLike = async (settings: string, others: LayerInfo[], joinLast = false) => {
     if (!session || others.length === 0) return;
     // Busy as a development is, so a file that arrives meanwhile waits:
     // opened at once, it took the editor, and the panel then showed this
@@ -12818,7 +12901,7 @@ export function App() {
     } finally {
       // What was developed before anything failed still goes in, as one step.
       try {
-        if (!gone()) session.commit_staged_develop();
+        if (!gone() && session.commit_staged_develop() && joinLast) session.merge_last();
       } finally {
         session.raw_close();
         setImporting(null);
@@ -12928,17 +13011,14 @@ export function App() {
       const lens: File[] = [];
       for (const f of files) {
         if (!/\.xml$/i.test(f.name)) continue;
-        const head = new TextDecoder().decode(await f.slice(0, 4096).arrayBuffer());
-        if (!/<svg[\s>]/i.test(head)) lens.push(f);
+        // Far enough in for a long comment first, and with a prefix
+        // (<svg:svg>) as well as without.
+        const head = new TextDecoder().decode(await f.slice(0, 65536).arrayBuffer());
+        if (!/<(?:[\w-]+:)?svg[\s>]/i.test(head)) lens.push(f);
       }
       if (lens.length > 0 && session) {
         files = files.filter((f) => !lens.includes(f));
-        const { added, refused, why } = await addLensFiles(session, lens);
-        if (refused.length > 0) {
-          alert(`${refused.join(", ")} ${refused.length > 1 ? "are" : "is"} not a lens profile the editor can read: ${why.join("; ")}`);
-        } else if (added > 0 && files.length === 0) {
-          alert(`${added === 1 ? `${lens[0].name} is` : `${added} lens profiles are`} kept, in Preferences › Camera raw.`);
-        }
+        await keepLens(lens, files.length === 0);
         if (files.length === 0) return;
       }
       const kinds: (string | null)[] = [];
@@ -13022,6 +13102,17 @@ export function App() {
    * otherwise never see it at all — and says where they are, so a
    * document dropped on the window has its file the way one opened from
    * the panel does, and Save writes back to it. */
+  /** Lens profiles (lensfun's XML) kept as Preferences › Camera raw
+   * keeps them, and said so when nothing else came with them. */
+  const keepLens = async (lens: File[], alone: boolean) => {
+    if (!session) return;
+    const { added, refused, why } = await addLensFiles(session, lens);
+    if (refused.length > 0) {
+      alert(`${refused.join(", ")} ${refused.length > 1 ? "are" : "is"} not a lens profile the editor can read: ${why.join("; ")}`);
+    } else if (added > 0 && alone) {
+      alert(`${added === 1 ? `${lens[0].name} is` : `${added} lens profiles are`} kept, in Preferences › Camera raw.`);
+    }
+  };
   const onShellDrop = async (paths: string[]): Promise<void> => {
     if (mustWait(() => rawBusy.current || againBusy.current)) {
       await windowsClosed(() => rawBusy.current || againBusy.current);
@@ -13049,6 +13140,22 @@ export function App() {
     const kinds: (string | null)[] = [];
     for (const path of paths) kinds.push(await kindOf(path));
     let rest = paths.map((p, i) => [p, kinds[i]] as const);
+    // A lens profile is kept, as one dropped on the page is: dropped on
+    // the shell's window or opened with it, it was "not a picture".
+    const lensPaths = rest.filter(([p, k]) => /\.xml$/i.test(p) && k !== "svg");
+    if (lensPaths.length > 0 && session) {
+      rest = rest.filter((r) => !lensPaths.includes(r));
+      const lens: File[] = [];
+      for (const [p] of lensPaths) {
+        try {
+          lens.push(new File([(await readPath(p)) as BlobPart], baseName(p)));
+        } catch (err) {
+          alert(`Could not read ${baseName(p)}: ${said(err)}`);
+        }
+      }
+      await keepLens(lens, rest.length === 0);
+      if (rest.length === 0) return;
+    }
     if (kinds.includes("document")) {
       if (!mayDiscard()) return;
       // Each document in turn until one opens: one that would not has
@@ -13697,8 +13804,8 @@ export function App() {
         item("ungroup", "ungroup", "Ungroup", ungroupSelection, hint("ungroup")),
         sub("arrange", "raise", "Arrange", [
           item("bring-front", "raise", "Bring to front", () => orderSelected(true), hint("to-front")),
-          item("bring-forward", "raise", "Bring forward", () => reorderSelected(1)),
-          item("send-backward", "lower", "Send backward", () => reorderSelected(-1)),
+          item("bring-forward", "raise", "Bring forward", () => reorderSelected(1), hint("forward")),
+          item("send-backward", "lower", "Send backward", () => reorderSelected(-1), hint("backward")),
           item("send-back", "lower", "Send to back", () => orderSelected(false), hint("to-back")),
         ]),
         sub(
@@ -14009,6 +14116,8 @@ export function App() {
       "fill-picked": noRegion,
       "stroke-picked": noRegion,
       "crop-to-picked": noRegion,
+      // Nothing picked out leaves nothing to turn inside out.
+      "pick-inverse": noRegion,
       "zoom-selection": noRegion && selectionSet.length === 0,
       "clear-guides": docGuides.length === 0,
       "paste-style": styleClip.current === null,
@@ -14336,7 +14445,12 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={pickInverse}
-            title={tip("Inverse — select what the selection leaves out", "pick-inverse")}
+            title={
+              antRings.length === 0
+                ? "Inverse — nothing is picked out to turn inside out"
+                : tip("Inverse — select what the selection leaves out", "pick-inverse")
+            }
+            aria-disabled={antRings.length === 0}
             aria-label="Inverse"
           >
             <Icon name="selectInverse" />
@@ -16380,7 +16494,7 @@ export function App() {
                     className="anchor"
                     data-anchor={i}
                     style={{ left: at.left, top: at.top, pointerEvents: reach }}
-                    onPointerDown={(e) => onAnchorPointerDown(e, i)}
+                    onPointerDown={(e) => onAnchorPointerDown(e, nearestAnchor(e, i))}
                     onPointerMove={onAnchorPointerMove}
                     onPointerUp={onAnchorPointerUp}
                   />,
@@ -18508,6 +18622,7 @@ const keyHelp = (
       [cs("copy-style", "paste-style"), "Copy, paste a layer's look"],
       [c("clip"), "Clip to layer below"],
       [cs("to-front", "to-back"), "Bring to the front, send to the back"],
+      [cs("forward", "backward"), "Bring forward, send backward, a step at a time"],
       ["Double-click a path", "Put an anchor on its outline"],
       ["Alt-click an anchor", "Take it off"],
       [c("select-all"), "Select all — the page with a marquee in hand, else every layer"],

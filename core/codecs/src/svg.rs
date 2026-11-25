@@ -849,8 +849,11 @@ fn write_node(
                                         r#"<clipPath id="{name}"><rect width="{width}" height="{height}"{}/></clipPath>"#,
                                         round(r)
                                     );
+                                    // Solid, as the engine draws a band
+                                    // with nothing left inside it.
                                     let doubled = chitrakar_doc::Stroke {
                                         width: band.width * 2.0,
+                                        dash: Vec::new(),
                                         ..band.clone()
                                     };
                                     let whole = paint_attrs(
@@ -904,6 +907,7 @@ fn write_node(
                                 );
                                 let doubled = chitrakar_doc::Stroke {
                                     width: band.width * 2.0,
+                                    dash: Vec::new(),
                                     ..band.clone()
                                 };
                                 let whole = paint_attrs(
@@ -2648,7 +2652,10 @@ fn layer_id(layer: NodeId, name: &str) -> String {
 fn css_family(name: &str) -> String {
     if name
         .chars()
-        .all(|c| c.is_alphanumeric() || c == ' ' || c == '-' || c == '_')
+        // Bare only in plain ASCII: an accented name left bare ("Café-Bold")
+        // was not read back by the SVG reader, and the text came back in
+        // the bundled face. Quoted, every name is a name.
+        .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '_')
         && !name.starts_with(|c: char| c.is_ascii_digit())
     {
         name.to_string()

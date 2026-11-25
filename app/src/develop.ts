@@ -277,6 +277,11 @@ export function autoChannels(h: Histogram): Partial<Record<CurveKey, [number, nu
 
 /** Kept presets as they are read back: a name each, once, and settings
  * that are settings. */
+/** How many settings, brushes or setups are kept by name, and how long a
+ * name may be. */
+export const KEPT_MOST = 200;
+export const NAME_MOST = 120;
+
 export function cleanPresets(x: unknown): DevelopPreset[] {
   if (!Array.isArray(x)) return [];
   const seen = new Set<string>();
@@ -286,7 +291,9 @@ export function cleanPresets(x: unknown): DevelopPreset[] {
     const { name, settings } = p as { name?: unknown; settings?: unknown };
     if (typeof name !== "string" || name.trim() === "" || seen.has(name)) continue;
     seen.add(name);
-    out.push({ name, settings: cleanSettings(settings) });
+    out.push({ name: name.slice(0, NAME_MOST), settings: cleanSettings(settings) });
+    // As many as anybody keeps: thousands made every start wait.
+    if (out.length >= KEPT_MOST) break;
   }
   return out;
 }

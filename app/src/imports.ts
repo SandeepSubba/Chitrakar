@@ -60,6 +60,36 @@ export function heifBrand(b: Uint8Array): "heic" | "avif" | null {
   return null;
 }
 
+/** Whether the first bytes are a camera's raw file: a DNG (a TIFF whose
+ * first directory has the DNG version tag), a Canon CR2 ("CR" after the
+ * TIFF header), an Olympus ORF, a Panasonic RW2, a Fuji RAF or a Canon
+ * CR3 (an ISO box of brand "crx "). */
+export function rawByBytes(bytes: Uint8Array): boolean {
+  if (starts(bytes, ascii("FUJIFILMCCD-RAW"))) return true;
+  if (starts(bytes, ascii("ftypcrx "), 4)) return true;
+  if (starts(bytes, ascii("IIRO")) || starts(bytes, ascii("IIRS")) || starts(bytes, ascii("MMOR"))) return true;
+  if (starts(bytes, [0x49, 0x49, 0x55, 0x00])) return true;
+  const little = starts(bytes, ascii("II*\0"));
+  if (!little && !starts(bytes, ascii("MM\0*"))) return false;
+  if (starts(bytes, ascii("CR"), 8)) return true;
+  const u16 = (at: number) =>
+    at + 2 > bytes.length ? -1 : little ? bytes[at] | (bytes[at + 1] << 8) : (bytes[at] << 8) | bytes[at + 1];
+  const u32 = (at: number) =>
+    at + 4 > bytes.length
+      ? -1
+      : little
+        ? (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)) + bytes[at + 3] * 2 ** 24
+        : bytes[at] * 2 ** 24 + ((bytes[at + 1] << 16) | (bytes[at + 2] << 8) | bytes[at + 3]);
+  const ifd = u32(4);
+  const n = ifd < 0 ? -1 : u16(ifd);
+  for (let i = 0; i < n; i++) {
+    const tag = u16(ifd + 2 + i * 12);
+    if (tag < 0) return false;
+    if (tag === 0xc612) return true;
+  }
+  return false;
+}
+
 /** What a file is, from its name and, when they are to hand, its first
  * bytes (a few dozen are enough). `null` for nothing the editor takes. */
 export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportKind | null {
@@ -81,6 +111,10 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
     // its JPEG), and is a picture.
     const jpegOrPng = starts(bytes, [0xff, 0xd8, 0xff]) || starts(bytes, [0x89, 0x50, 0x4e, 0x47]);
     if (RAW_EXTENSIONS.includes(ext) && !jpegOrPng) return "raw";
+    // And by its bytes, under a name that says nothing — an Android
+    // pick ("1234"), a share, a download: a DNG went to the TIFF reader,
+    // which refused it in its own words.
+    if (rawByBytes(bytes)) return "raw";
     if (
       starts(bytes, [0x89, 0x50, 0x4e, 0x47]) ||
       starts(bytes, [0xff, 0xd8, 0xff]) ||

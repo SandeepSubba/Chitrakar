@@ -2128,14 +2128,40 @@ impl Session {
             .position(|s| *s == *ordered.last().unwrap())
             .unwrap();
 
+        // Clipped layers grouped: the group is what is clipped, and they
+        // are whole inside it, as they were each clipped to the same
+        // layer before. Left clipped inside it, the lowest was clipped to
+        // nothing and spilled over the page. A clipped lowest layer with
+        // others not clipped above it cannot be one group's.
+        let clipped: Vec<bool> = ordered
+            .iter()
+            .map(|id| self.doc.node(*id).is_ok_and(|n| n.clipped))
+            .collect();
+        let all_clipped = clipped.iter().all(|c| *c);
+        if clipped[0] && !all_clipped {
+            return Err(EngineError::BadCommand(
+                "the lowest of those layers is clipped to the one under it and the others are not: group them with the layer it is clipped to, or unclip it first".into(),
+            ));
+        }
         let group_id = self.doc.peek_next_id();
         let carried = self.comps_with_group(group_id, &ordered);
+        let mut group = Node::group(name);
+        group.clipped = all_clipped;
+        // The group answers a frame's resize as its layers did, when they
+        // answered it alike: they are not pinned to anything inside it.
+        group.pinned = self.shared_pinning(&ordered);
         let mut cmds = vec![Command::AddNode {
             parent,
             index: top_index + 1,
-            node: Box::new(Node::group(name)),
+            node: Box::new(group),
         }];
         cmds.extend(carried);
+        if all_clipped {
+            cmds.extend(ordered.iter().map(|id| Command::SetClipped {
+                id: *id,
+                clipped: false,
+            }));
+        }
         cmds.extend(
             ordered
                 .drain(..)
@@ -2258,6 +2284,14 @@ impl Session {
                     "those layers are clipped to different layers, and one picture can be clipped to only one: merge each with the layer it is clipped to".into(),
                 ));
             }
+        }
+        // The lowest clipped and some above it not: gathered, the lowest
+        // was clipped to nothing and drawn whole, and the picture spilled
+        // over the page. One picture cannot be clipped in part.
+        if showing.len() > 1 && !all_clipped && scratch.node(showing[0]).is_ok_and(|n| n.clipped) {
+            return Err(EngineError::BadCommand(
+                "the lowest of those layers is clipped to the one under it and the others are not, and one picture cannot be clipped in part: merge it with the layer it is clipped to, or unclip it first".into(),
+            ));
         }
         let carried = match showing.as_slice() {
             _ if all_clipped => {
@@ -2387,6 +2421,10 @@ impl Session {
             picture.blend = blend;
             picture.clipped = clipped;
         }
+        // Pinned in a frame as the layers it is made from were, when they
+        // were pinned alike: made Start/Start, a picture of layers pinned
+        // to a frame's far corner stayed put when the frame grew.
+        picture.pinned = self.shared_pinning(&showing);
         let new_id = self.doc.peek_next_id();
         let mut cmds = vec![Command::AddNode {
             parent,
@@ -4452,12 +4490,51 @@ impl Session {
         // written in too, so it is carried with it: otherwise showing a
         // comp kept before the move would put the layer's old numbers in
         // its new parent's space, somewhere else on the page.
-        cmds.extend(self.comps_carried(|_, kept| {
+        //
+        // Carried as that comp would place both spaces: its own kept
+        // transforms for the groups it keeps. Carried by where the groups
+        // stand now, a layer dragged into a group the comp holds
+        // somewhere else came back off the page when the comp was shown.
+        let old_parent = self.doc.parent_of(id);
+        cmds.extend(self.comps_carried(|comp, kept| {
             if kept.id == id {
-                kept.transform = carry.compose(kept.transform);
+                let was = old_parent.map_or(Transform::default(), |p| self.comp_space(comp, p));
+                let now = self.comp_space(comp, parent);
+                let by = chitrakar_render::invert(now).map_or(carry, |back| back.compose(was));
+                kept.transform = by.compose(kept.transform);
             }
         }));
         self.apply_labeled(Command::Batch(cmds), Some(label))
+    }
+
+    /// The pinning every one of `ids` shares, or none (Start/Start).
+    fn shared_pinning(&self, ids: &[NodeId]) -> chitrakar_doc::Pinning {
+        let mut pins = ids
+            .iter()
+            .filter_map(|id| self.doc.node(*id).ok().map(|n| n.pinned));
+        match pins.next() {
+            Some(first) if pins.all(|p| p == first) => first,
+            _ => chitrakar_doc::Pinning::default(),
+        }
+    }
+
+    /// The space a layer inside `of` is written in, as `comp` would show
+    /// it: each group up to the page by the transform the comp keeps for
+    /// it, or its own where the comp keeps none.
+    fn comp_space(&self, comp: &chitrakar_doc::LayerComp, of: NodeId) -> Transform {
+        let mut chain = Vec::new();
+        let mut cur = Some(of);
+        while let Some(n) = cur {
+            if let Ok(node) = self.doc.node(n) {
+                let kept = comp.layers.iter().find(|k| k.id == n);
+                chain.push(kept.map_or(node.transform, |k| k.transform));
+            }
+            cur = self.doc.parent_of(n);
+        }
+        chain
+            .iter()
+            .rev()
+            .fold(Transform::default(), |acc, t| acc.compose(*t))
     }
 
     /// The comps, with every layer each one keeps passed through `f`
@@ -9875,7 +9952,7 @@ impl Session {
         comp.name = to.to_string();
         self.apply_labeled(
             Command::SetComps { comps },
-            Some(format!("Call the comp {from} {to}")),
+            Some(format!("Call the comp “{from}” “{to}”")),
         )
     }
 
@@ -10233,7 +10310,14 @@ impl Session {
             // nothing. Above the bottom it is real: the children would
             // each end up clipped to the layer under the group rather
             // than to whatever they were clipped to inside it.
-            if g.clipped && position > 0 {
+            // Unless nothing inside is clipped to anything of its own:
+            // then each child is clipped to that layer, and their union
+            // clipped is what the group's clip showed.
+            let inner_clips = children
+                .iter()
+                .skip(1)
+                .any(|c| self.doc.node(*c).is_ok_and(|n| n.clipped));
+            if g.clipped && position > 0 && inner_clips {
                 whole.push("a clip to the layer below");
             }
             if !whole.is_empty() {
@@ -10262,8 +10346,34 @@ impl Session {
         // picture changing behind the user's back.
         let hidden = !self.doc.node(id)?.visible;
         let locked = self.doc.node(id)?.locked;
+        // The group's clip goes to every child; and a lowest child marked
+        // clipped, which inside the group had nothing to be clipped to
+        // and was drawn whole, comes out unclipped — left marked, it was
+        // clipped to the layer under the group, and vanished.
+        let clip_all = self.doc.node(id)?.clipped && position > 0;
+        // And its pin goes to the children that have none of their own:
+        // inside a group a layer's pin answers nothing, and out of it a
+        // child answered a frame's resize Start/Start.
+        let pinned = self.doc.node(id)?.pinned;
         let mut cmds: Vec<Command> = Vec::new();
         for (i, child) in children.iter().enumerate() {
+            let marked = self.doc.node(*child)?.clipped;
+            if pinned != chitrakar_doc::Pinning::default()
+                && self.doc.node(*child)?.pinned == chitrakar_doc::Pinning::default()
+            {
+                cmds.push(Command::SetPinning { id: *child, pinned });
+            }
+            if clip_all && !marked {
+                cmds.push(Command::SetClipped {
+                    id: *child,
+                    clipped: true,
+                });
+            } else if !clip_all && i == 0 && marked {
+                cmds.push(Command::SetClipped {
+                    id: *child,
+                    clipped: false,
+                });
+            }
             if group_t != Transform::default() {
                 let kid = self.doc.node(*child)?;
                 cmds.push(Command::SetTransform {
@@ -10324,9 +10434,16 @@ impl Session {
             if !children.contains(&kept.id) {
                 return;
             }
-            if let Some(group) = comp.layers.iter().find(|g| g.id == id) {
-                kept.transform = group.transform.compose(kept.transform);
-                kept.visible &= group.visible;
+            // A comp that does not keep the group shows it where it
+            // stands, so its children are carried by that: left in the
+            // group's space, a layer dragged into a group made after the
+            // comp came back somewhere else once the group was let go.
+            match comp.layers.iter().find(|g| g.id == id) {
+                Some(group) => {
+                    kept.transform = group.transform.compose(kept.transform);
+                    kept.visible &= group.visible;
+                }
+                None => kept.transform = group_t.compose(kept.transform),
             }
         }));
         cmds.push(Command::RemoveNode { id });
@@ -11248,7 +11365,13 @@ impl Session {
     fn export_room(pw: u32, ph: u32, past: u32, sharpening: bool) -> bool {
         let drawn = (pw as usize + 2 * past as usize) * (ph as usize + 2 * past as usize) * 16;
         let out = pw as usize * ph as usize;
+        // The surface twice over: once to draw on, and once more for what
+        // drawing it asks along the way — a layer's shadow, a group drawn
+        // apart, a filter's copy. Counted once, a page with a shadow was
+        // let through at a size whose drawing then ran the engine out of
+        // memory, which stops it rather than the export.
         let bytes = drawn
+            .saturating_mul(2)
             .saturating_add(if sharpening { out * 16 } else { 0 })
             .saturating_add(out * 4);
         let mut room: Vec<u8> = Vec::new();
@@ -11260,7 +11383,24 @@ impl Session {
     /// engine's memory is the browser's 4 GB less what the document
     /// holds, far under the 100 megapixels a page may be.
     pub fn export_fits(&self, width: u32, height: u32, sharpening: bool) -> bool {
-        chitrakar_doc::canvas_fits(width, height) && Self::export_room(width, height, 2, sharpening)
+        let scale = (width as f32 / self.doc.meta.width.max(1) as f32)
+            .max(height as f32 / self.doc.meta.height.max(1) as f32);
+        chitrakar_doc::canvas_fits(width, height)
+            && Self::export_room(width, height, self.export_past(scale), sharpening)
+    }
+
+    /// How far past its edge an export at `scale` is drawn: as far as a
+    /// filter, an effect or a softened edge reads across it.
+    fn export_past(&self, scale: f32) -> u32 {
+        let filters = chitrakar_render::filter_reach(&self.doc) as f32 * scale;
+        let effects = chitrakar_render::effects_reach(&self.doc) * scale * 2.0;
+        let softening = chitrakar_render::softening_reach(&self.doc) * scale;
+        let most = filters.max(effects).max(softening);
+        if most.is_finite() && most > 0.0 {
+            ((most.ceil() as u32).saturating_add(2)).min(1024)
+        } else {
+            0
+        }
     }
 
     /// Render and encode as PNG — used by export and tests.
@@ -11363,17 +11503,7 @@ impl Session {
         // a softened mask the border crossed came out hard all along it,
         // the file unlike the screen — a part of the page along its
         // border, and the whole page along the page's edge.
-        let past = {
-            let filters = chitrakar_render::filter_reach(&self.doc) as f32 * scale;
-            let effects = chitrakar_render::effects_reach(&self.doc) * scale * 2.0;
-            let softening = chitrakar_render::softening_reach(&self.doc) * scale;
-            let most = filters.max(effects).max(softening);
-            if most.is_finite() && most > 0.0 {
-                ((most.ceil() as u32).saturating_add(2)).min(1024)
-            } else {
-                0
-            }
-        };
+        let past = self.export_past(scale);
         let (sw, sh) = (pw.saturating_add(2 * past), ph.saturating_add(2 * past));
         let past = if chitrakar_doc::canvas_fits(sw, sh) {
             past
@@ -16850,6 +16980,107 @@ mod tests {
         assert!((x - 50.0).abs() < 0.5, "the wrapper is put back too: {x}");
     }
 
+    /// A layer's pin goes with it into a group, out of one and into a
+    /// merged picture.
+    #[test]
+    fn pins_go_through_group_ungroup_and_merge() {
+        let end = chitrakar_doc::Pinning {
+            x: chitrakar_doc::Pin::End,
+            y: chitrakar_doc::Pin::End,
+        };
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let a = add_rect(&mut session, "a", 10.0, 10.0);
+        session
+            .apply(Command::SetPinning { id: a, pinned: end })
+            .unwrap();
+        let g = session.group_nodes(&[a], "g").unwrap();
+        assert_eq!(session.document().node(g).unwrap().pinned, end);
+        session
+            .apply(Command::SetPinning {
+                id: a,
+                pinned: chitrakar_doc::Pinning::default(),
+            })
+            .unwrap();
+        session.ungroup_node(g).unwrap();
+        assert_eq!(session.document().node(a).unwrap().pinned, end);
+        let picture = session.merge_layers(&[a]).unwrap();
+        assert_eq!(session.document().node(picture).unwrap().pinned, end);
+    }
+
+    /// A clipped layer grouped keeps its clip, through the group: left
+    /// clipped inside it, it was clipped to nothing and spilled over the
+    /// page. Ungrouped, it is clipped again; and a mixed run with a
+    /// clipped lowest is refused.
+    #[test]
+    fn grouping_a_clipped_layer_keeps_it_clipped() {
+        let mut session = Session::new(80, 80, ColorMode::Rgb);
+        let base = add_rect(&mut session, "base", 40.0, 40.0);
+        let top = add_rect(&mut session, "top", 40.0, 40.0);
+        session
+            .apply(Command::SetTransform {
+                id: top,
+                transform: Transform::translation(20.0, 20.0),
+            })
+            .unwrap();
+        session
+            .apply(Command::SetClipped {
+                id: top,
+                clipped: true,
+            })
+            .unwrap();
+        let before = session.render().unwrap();
+        let g = session.group_nodes(&[top], "g").unwrap();
+        assert!(session.document().node(g).unwrap().clipped);
+        assert_eq!(session.render().unwrap().pixels, before.pixels, "grouped");
+        session.ungroup_node(g).unwrap();
+        assert!(session.document().node(top).unwrap().clipped);
+        assert_eq!(session.render().unwrap().pixels, before.pixels, "ungrouped");
+        // A layer above it not clipped: grouped with it, refused.
+        let free = add_rect(&mut session, "free", 10.0, 10.0);
+        assert!(session.group_nodes(&[top, free], "g").is_err());
+        assert!(session.merge_layers(&[top, free]).is_err());
+        let _ = base;
+    }
+
+    /// A layer dragged into a group the comp keeps somewhere else comes
+    /// back where the comp had it on the page: carried by the group as
+    /// the comp places it, not as it stands now.
+    #[test]
+    fn a_comp_carries_a_layer_by_its_own_place_for_the_group() {
+        let mut session = Session::new(300, 200, ColorMode::Rgb);
+        let x = add_rect(&mut session, "x", 10.0, 10.0);
+        session
+            .apply(Command::SetTransform {
+                id: x,
+                transform: Transform::translation(30.0, 30.0),
+            })
+            .unwrap();
+        let root = session.document().root();
+        session
+            .apply(Command::AddNode {
+                parent: root,
+                index: 1,
+                node: Box::new(Node::group("g")),
+            })
+            .unwrap();
+        let g = session.document().children_of(root).unwrap()[1];
+        session.keep_comp("k").unwrap();
+        session
+            .apply(Command::SetTransform {
+                id: g,
+                transform: Transform::translation(100.0, 50.0),
+            })
+            .unwrap();
+        session.reparent(x, g, 0).unwrap();
+        assert!(session.apply_comp("k").unwrap());
+        let on_page = chitrakar_render::ancestor_space(session.document(), x)
+            .compose(session.document().node(x).unwrap().transform);
+        assert!(
+            (on_page.e - 30.0).abs() < 1e-3 && (on_page.f - 30.0).abs() < 1e-3,
+            "back where the comp had it: {on_page:?}"
+        );
+    }
+
     #[test]
     fn a_comp_follows_a_layer_into_another_group_and_out_of_one() {
         let mut session = Session::new(100, 80, ColorMode::Rgb);
@@ -20981,7 +21212,6 @@ mod tests {
             ("blend", "a blend mode"),
             ("mask", "a mask"),
             ("effects", "effects"),
-            ("clip", "a clip to the layer below"),
         ] {
             let mut s = Session::from_document(f.doc.clone());
             let g = s.group_nodes(&[f.over], "wrap").unwrap();
@@ -21047,6 +21277,23 @@ mod tests {
             .unwrap();
             s.ungroup_node(g)
                 .unwrap_or_else(|e| panic!("cleared, a {what} group dissolves: {e}"));
+        }
+
+        // A clip with nothing inside clipped to anything of its own goes
+        // to the children, and the page is as it was.
+        {
+            let mut s = Session::from_document(f.doc.clone());
+            let g = s.group_nodes(&[f.over], "wrap").unwrap();
+            s.apply(Command::SetClipped {
+                id: g,
+                clipped: true,
+            })
+            .unwrap();
+            s.ungroup_node(g).unwrap();
+            assert!(
+                s.document().node(f.over).unwrap().clipped,
+                "the child is clipped now"
+            );
         }
 
         // More than one thing at once is said as a list.

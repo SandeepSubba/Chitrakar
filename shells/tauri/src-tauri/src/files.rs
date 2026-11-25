@@ -24,16 +24,57 @@ pub struct Filter {
 /// a crash — so the bytes go to a file beside it first and take its
 /// place only once they are all down.
 pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
-    let mut beside = name.to_os_string();
-    beside.push(format!(".{}.part", std::process::id()));
-    let part = path.with_file_name(beside);
+    // A link is written through to what it names: renamed over, the
+    // link became a file of its own and the document it named kept the
+    // old contents.
+    let path = match fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let path = path.as_path();
+    let was = fs::metadata(path).ok();
+    if let Some(m) = &was {
+        // A file made read-only is not saved over without a word: it was
+        // replaced, and came out writable.
+        if m.permissions().readonly() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the file is read-only; use Save as to keep it under another name",
+            ));
+        }
+        // A file with other names (a hard link) is written where it lies,
+        // or its other names keep the old contents.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if m.is_file() && m.nlink() > 1 {
+                let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path)?;
+                file.write_all(bytes)?;
+                return file.sync_all();
+            }
+        }
+    }
+    // Named short and hidden beside it, whatever the document is called:
+    // named after it, a long name (96 Japanese characters is 247 bytes)
+    // went past the 255 a name may be, and no save could be made.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let part = path.with_file_name(format!(".chitrakar-{}-{stamp}.part", std::process::id()));
+    if path.file_name().is_none() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no file name"));
+    }
     let written = (|| {
         let mut file = fs::File::create(&part)?;
         file.write_all(bytes)?;
-        file.sync_all()
+        file.sync_all()?;
+        // It takes the old one's permissions: a private file came out
+        // readable by everyone.
+        if let Some(m) = &was {
+            fs::set_permissions(&part, m.permissions())?;
+        }
+        Ok(())
     })();
     let placed = written.and_then(|()| fs::rename(&part, path));
     if placed.is_err() {
@@ -323,6 +364,46 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"what is there now");
         let left: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert_eq!(left.len(), 1, "a part file was left behind: {left:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_save_keeps_what_the_file_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("chitrakar-files-keep-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        // Private stays private.
+        let private = dir.join("private.chitra");
+        fs::write(&private, b"old").unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).unwrap();
+        write_whole(&private, b"new").unwrap();
+        assert_eq!(fs::read(&private).unwrap(), b"new");
+        assert_eq!(fs::metadata(&private).unwrap().permissions().mode() & 0o777, 0o600);
+        // Read-only is refused, and left as it was.
+        let fixed = dir.join("fixed.chitra");
+        fs::write(&fixed, b"old").unwrap();
+        fs::set_permissions(&fixed, fs::Permissions::from_mode(0o444)).unwrap();
+        assert!(write_whole(&fixed, b"new").is_err());
+        assert_eq!(fs::read(&fixed).unwrap(), b"old");
+        // A link is written through to what it names.
+        let real = dir.join("real.chitra");
+        fs::write(&real, b"old").unwrap();
+        let link = dir.join("link.chitra");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_whole(&link, b"new").unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+        // A hard link's other name sees the new contents too.
+        let other = dir.join("other.chitra");
+        fs::hard_link(&private, &other).unwrap();
+        write_whole(&private, b"newer").unwrap();
+        assert_eq!(fs::read(&other).unwrap(), b"newer");
+        // And a name as long as a name may be can be saved under.
+        let long = dir.join(format!("{}.chitra", "書".repeat(80)));
+        write_whole(&long, b"long").unwrap();
+        assert_eq!(fs::read(&long).unwrap(), b"long");
+        fs::set_permissions(&fixed, fs::Permissions::from_mode(0o644)).unwrap();
         fs::remove_dir_all(&dir).unwrap();
     }
 

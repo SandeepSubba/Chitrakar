@@ -161,7 +161,10 @@ without reading anything else.*
      of three million draws stopping the engine. The fiftieth: shapes
      dragged onto a frame never going in, a 48-megapixel photograph that
      would not export with a watermark, undo mid-path taking the step
-     before it, a pinch zooming the whole interface.
+     before it, a pinch zooming the whole interface. The fifty-first: a large
+     export with a shadow stopping the engine, a path at the count
+     blanking the editor, Save making a private file public, a comp
+     putting a layer off the page.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13090,6 +13093,77 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-first audit (November 2026).** Its check of round 50: the
+  export's room, halved, no longer covered what drawing a shadow asks
+  along the way, and a large export with one stopped the engine (the
+  surface is counted twice again, the watermark's patch and the cut in
+  place still saved, and the Export window asks with the reach the
+  export will be drawn with); a path finished at the draw count threw
+  from Enter, a double click or a change of tool and blanked the editor,
+  and Text, Paint and Clone at it said nothing (each says why); a dashed
+  inside border as wide as the shape was written dashed to SVG and PDF
+  where the page draws it solid; a finger between two anchors took the
+  later one, not the nearer; an accented face name went into an SVG
+  bare and came back in the bundled face; Paste style on raw layers was
+  two steps; the Tools page called the lasso one shift from the marquee;
+  a pinch's quick steps fell short of the fingers, and a page of wheel
+  zoomed three times over (a notch is told from a pinch by its whole
+  thirds); an SVG named .xml with a long comment first was taken for a
+  lens database. Limits: our own PDF reader draws a shape scaled below
+  a part in two thousand as its box; a rounded rectangle's inside band
+  wider than its corners comes out of a PDF square-cornered, and an
+  ellipse's pointed.
+  Its files pass: with the site's storage full, the service worker made
+  every file it could not keep fail, and the editor would not start even
+  online (what cannot be kept is still served); the shell's Save
+  replaced a read-only file, made a private one readable by everyone,
+  replaced a link with a file and left a hard link's other name behind
+  (it keeps permissions, refuses read-only, writes through links and in
+  place where there are other names), and could not save under a long
+  name at all, its temporary file's name too long; a lens profile
+  dropped on the shell was "not a picture"; a raw file under a name
+  that says nothing (an Android pick's "1234") went to the TIFF reader
+  (known by its bytes, `rawByBytes`); Open recent forgot a file refused
+  for a moment; twenty thousand brushes kept made every start take four
+  seconds (two hundred are kept, names to 120). Limits: an old tab after
+  an update can find the raw reader it kept pruned by the new one; a
+  file changed on disk is saved over without a word; a document shared
+  with pictures opens and asks for the pictures to be dropped again.
+  Its editing pass: a layer dragged into a group that a comp keeps
+  somewhere else came back off the page when the comp was shown (carried
+  by the comp's own place for each group, `comp_space`, and by the
+  group's place where the comp keeps none); a clipped layer grouped,
+  ungrouped or merged at the bottom of a run lost its clip and spilled
+  over the page (the group is what is clipped and they are whole inside
+  it; a clipped lowest with others not is refused in words); a pin went
+  nowhere through Group, Ungroup and Merge (`shared_pinning`); a comp's
+  rename read "Call the comp K K2". Limits: merging a frame with no
+  ground that holds blended layers draws them over nothing; ungrouping
+  a group holding an adjustment or a blend changes the page without a
+  word; grouping what an upper layer is clipped to clips it to all of
+  them; Ctrl+J on a clip's base puts the copy between it and what is
+  clipped; painted and radial masks carried through a stretched, skewed
+  or turned group are approximate; Cut is recorded as Delete; ungroup
+  picks nothing.
+  Its interface pass, a phone user posting a photograph, a Figma user
+  making icons and someone pressing everything: a thumb that came down
+  on an adjustment's slider to scroll the Layers sheet set the slider
+  to where it landed, unrecorded (a slider a finger leaves by scrolling
+  is put back, `StretchRange`); text dropped on a photograph was 48
+  pixels whatever the zoom, four on a phone's screen and under its own
+  handles (at least 36 on the screen); Ctrl+] and Ctrl+[ did nothing
+  (Bring forward, Send backward); Inverse with nothing picked out was
+  offered and did nothing; an edge halfway between two grid lines
+  caught on neither; an adjustment added on a phone showed nowhere to
+  set it (the panel opens). Limits: SVG exports the whole page, not a
+  frame at a time; Set writes the picked frames as one strip, and a
+  frame's own export scale is set one frame at a time; the Layers sheet
+  covers half a photograph on a phone; the crop's ratio box is narrow;
+  a phone's return key exports before the size is read; a drag on a
+  frame's empty ground moves the frame; undo picks nothing; Stroke to
+  shape makes straight steps of curves; the menu says Unite and the
+  history Union; filters stacked on a page zoomed far in redraw slowly;
+  shapes drawn off the grid write fractions into SVG.
   **A fiftieth audit (November 2026).** Its check of round 49: a shape
   dragged wholly onto a frame never went in, since the frame was looked
   for under its middle and found the shape itself there (looked for
@@ -13111,8 +13185,7 @@ without reading anything else.*
   offered and then refused for memory — a watermarked 48-megapixel
   photograph, a 45-megapixel raw in the batch, a Set's @3x after two
   files, a long edge "as large as it goes" (the picture is cut back
-  where it lies and the watermark drawn on a patch its own size, which
-  halves what an export holds, and the Export window asks the engine,
+  where it lies and the watermark drawn on a patch its own size, and the Export window asks the engine,
   `export_fits`, before it offers a size); an EXIF pointer typed as a
   directory (13) was not followed. Limits: WebP, GIF, BMP and AVIF come
   in through the browser's canvas, premultiplied, so a nearly clear

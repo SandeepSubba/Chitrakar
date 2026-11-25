@@ -45,6 +45,20 @@ check(importKind("photo.dng") === "raw", "by name alone");
 check(importKind("DSCF0001.RAF", bytes("FUJIFILMCCD-RAW")) === "raw", "a RAF, which is not a TIFF");
 check(importKind("20190401_120000.dng", bytes([0xff, 0xd8, 0xff, 0xe1])) === "picture", "a phone's .dng that is its JPEG is a picture");
 check(importKind("odd.cr2", bytes([0x89], "PNG")) === "picture", "and a .cr2 that is a PNG");
+// And by its bytes alone, under a name that says nothing (an Android
+// pick names a file "1234").
+{
+  // A little-endian TIFF whose first directory, at 8, has two entries:
+  // its width, and the DNG version.
+  const dng = bytes("II*", [0], [8, 0, 0, 0], [2, 0], [0, 1, 3, 0, 1, 0, 0, 0, 16, 0, 0, 0], [0x12, 0xc6, 1, 0, 4, 0, 0, 0, 1, 4, 0, 0], [0, 0, 0, 0]);
+  check(importKind("1234", dng) === "raw", "a DNG named nothing is a raw file");
+  const tiff = bytes("II*", [0], [8, 0, 0, 0], [1, 0], [0, 1, 3, 0, 1, 0, 0, 0, 16, 0, 0, 0], [0, 0, 0, 0]);
+  check(importKind("1235", tiff) === "picture", "and a plain TIFF named nothing a picture still");
+  check(importKind("1236", bytes("II*", [0], [16, 0, 0, 0], "CR", [2, 0])) === "raw", "a CR2 by its CR");
+  check(importKind("1237", bytes("FUJIFILMCCD-RAW")) === "raw", "a RAF by its bytes");
+  check(importKind("1238", bytes([0, 0, 0, 24], "ftypcrx ")) === "raw", "a CR3 by its brand");
+  check(importKind("1239", bytes("IIU", [0])) === "raw", "an RW2 by its bytes");
+}
 
 // By name, when the bytes are not to hand (a dialog's filter, a path).
 check(importKind("a.psd") === "psd" && importKind("big.psb") === "psd", "PSD and PSB by name");

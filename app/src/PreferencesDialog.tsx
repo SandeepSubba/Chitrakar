@@ -44,6 +44,7 @@ import { UI_SCALES, withSettingsReset, type ExportFormat, type FingerDoes, type 
 import {
   ALWAYS_SHOWN,
   KEYED_TOOLS,
+  KEY_FAMILIES,
   RAIL,
   SELECT_TOOLS,
   SHAPE_TOOLS,
@@ -740,7 +741,14 @@ export function PreferencesDialog({
                             </button>
                           ) : (
                             <span className="hint" title="Its family's key, then Shift+ that key (once for each step along the family)">
-                              {keys.hint[t] ? `${keys.hint[t]}, then shift+${keys.hint[t]}` : "—"}
+                              {keys.hint[t]
+                                ? (() => {
+                                    // As many shifts as it is along its family:
+                                    // the lasso is two from the marquee.
+                                    const at = KEY_FAMILIES.find((f) => f.includes(t))?.indexOf(t) ?? 1;
+                                    return `${keys.hint[t]}, then shift+${keys.hint[t]}${at > 1 ? ` ×${at}` : ""}`;
+                                  })()
+                                : "—"}
                             </span>
                           )}
                         </label>

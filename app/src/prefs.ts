@@ -21,7 +21,7 @@
 
 import { COMMANDS, claimable, isChord, type CommandKeys, type MenuKeys } from "./commands";
 import { useCallback, useEffect, useState } from "react";
-import { cleanPresets, type DevelopPreset } from "./develop";
+import { cleanPresets, KEPT_MOST, NAME_MOST, type DevelopPreset } from "./develop";
 import { ALWAYS_SHOWN, KEYED_TOOLS, TOOL_KEYS, type Tool, type ToolKeys, isTool } from "./tools";
 
 export type Units = "px" | "mm" | "in";
@@ -490,9 +490,10 @@ export function clamp(p: Prefs): Prefs {
               typeof e.scale === "number" &&
               typeof e.jpegQuality === "number",
           )
-          .filter((e, i, all) => all.findIndex((o) => o.name === e.name) === i)
+          .filter(once())
+          .slice(0, KEPT_MOST)
           .map((e) => ({
-            name: e.name,
+            name: e.name.slice(0, NAME_MOST),
             format: e.format,
             area:
               e.area === "selection" || e.area === "regions" || e.area === "comps"
@@ -539,14 +540,23 @@ export function clamp(p: Prefs): Prefs {
               typeof b.size === "number" &&
               typeof b.softness === "number",
           )
-          .filter((b, i, all) => all.findIndex((o) => o.name === b.name) === i)
+          .filter(once())
+          .slice(0, KEPT_MOST)
           .map((b) => ({
-            name: b.name,
+            name: b.name.slice(0, NAME_MOST),
             size: n(Math.round(b.size), 1, 1000, 24),
             softness: n(b.softness, 0, 1, 0.5),
           }))
       : [],
   };
+}
+
+/** A filter keeping each name's first: by a set, since asked of every
+ * other one (findIndex), twenty thousand brushes took four seconds a
+ * start. */
+function once<T extends { name: string }>() {
+  const seen = new Set<string>();
+  return (x: T) => (seen.has(x.name) ? false : (seen.add(x.name), true));
 }
 
 export function writePrefs(p: Prefs) {

@@ -1785,7 +1785,7 @@ impl Page {
                                     // showed the fill alone.
                                     let _ = writeln!(
                                         self.content,
-                                        "q\n{path}W n\n{} w\n{path}S\nQ",
+                                        "q\n{path}W n\n[] 0 d\n{} w\n{path}S\nQ",
                                         num(stroke.width * 2.0)
                                     );
                                 }
@@ -3129,7 +3129,7 @@ mod tests {
         add(&mut doc, bar, [10.0, 10.0]);
         let pdf = export_pdf_document(&doc).unwrap();
         let content = page_content(&pdf, 0);
-        assert!(content.contains("W n\n60 w\n"), "{content}");
+        assert!(content.contains("W n\n[] 0 d\n60 w\n"), "{content}");
     }
 
     #[test]

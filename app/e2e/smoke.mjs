@@ -17742,8 +17742,12 @@ assert(
   await longBox.fill("16384");
   await page.waitForTimeout(200);
   const capHint = await page.textContent('[aria-label="Scale"] .hint');
+  // Sixteen times, or less where the engine's memory will not draw that
+  // much at once (the browser gives it 4 GB, less what the page holds):
+  // either way the size it will really write, in the page's proportions.
+  const [, capW, capH] = (capHint.match(/(\d+) \u00d7 (\d+)/) ?? []).map(Number);
   assert(
-    capHint.includes("10240 \u00d7 7680") && capHint.includes("as large as it goes"),
+    capW <= 10240 && capW >= 4000 && Math.abs(capW / capH - 4 / 3) < 0.01 && capHint.includes("as large as it goes"),
     `a long edge past sixteen times the page says what it comes to (${capHint})`,
   );
   await longBox.fill("320");
@@ -19201,7 +19205,7 @@ assert(
   const keyOf = (t) => page.locator(`button[aria-label^="${t} key:"]`);
   assert((await keyOf("Crop").textContent()) === "C", "the crop's key is shown beside it");
   assert(
-    (await page.locator('.prefs-tool:has-text("Lasso") .hint').textContent()) === "M, then shift+M",
+    (await page.locator('.prefs-tool:has-text("Lasso") .hint').textContent()) === "M, then shift+M ×2",
     "a family member's is its family's key, then a shift away (from another tool, Shift+M is not the lasso)",
   );
   // A key nobody holds is simply taken.

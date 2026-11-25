@@ -73,9 +73,16 @@ self.addEventListener("fetch", (e) => {
 // Kept with when it was kept: a page prunes only what was kept before it
 // was opened (see "message"), never what a newer build's page has kept.
 async function keepIt(cache, req, res) {
-  const headers = new Headers(res.headers);
-  headers.set("X-Kept-At", String(Date.now()));
-  await cache.put(req, new Response(await res.blob(), { status: res.status, statusText: res.statusText, headers }));
+  // What cannot be kept is still served: with the site's storage full
+  // (drafts of large photographs fill it), a put that threw made the
+  // answer itself fail, and the editor would not start even online.
+  try {
+    const headers = new Headers(res.headers);
+    headers.set("X-Kept-At", String(Date.now()));
+    await cache.put(req, new Response(await res.blob(), { status: res.status, statusText: res.statusText, headers }));
+  } catch (err) {
+    console.warn("not kept for offline use:", req.url ?? req, err);
+  }
 }
 
 async function answer(req) {
