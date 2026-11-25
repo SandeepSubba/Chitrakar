@@ -282,26 +282,32 @@ export function PreferencesDialog({
       }
       const pressed = e.key.toLowerCase();
       const next: ToolKeys = { ...prefs.toolKeys };
-      if (e.key === "Backspace" || e.key === "Delete") {
-        // Back to the default — which is what was asked for, so a
-        // rebinding of another tool that holds that key gives it up
-        // and falls back to its own default.
-        delete next[tool];
-        const shipped = Object.entries(TOOL_KEYS).find(([, t]) => t === tool)?.[0];
-        for (const t of Object.keys(next) as Tool[]) {
-          if (next[t] === shipped) delete next[t];
-        }
-      } else if (/^[a-z0-9]$/.test(pressed) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const restoring = e.key === "Backspace" || e.key === "Delete";
+      // Back to the default is the default key asked for, changing hands
+      // as any other key does: given back by dropping the rebindings
+      // that held it, a chain of swaps left a tool with no key at all
+      // (Brush given V, Pen given B, then Move restored: Brush's own B
+      // was Pen's, and P picked nothing).
+      const asked = restoring
+        ? (Object.entries(TOOL_KEYS).find(([, t]) => t === tool)?.[0] ?? "")
+        : pressed;
+      if (restoring || (/^[a-z0-9]$/.test(pressed) && !e.ctrlKey && !e.metaKey && !e.altKey)) {
         // A key another tool holds changes hands: that tool gets the
         // key this one had, so nothing is left unreachable by the
         // swap. A key nobody holds is simply taken.
-        const holder = keys.byKey[pressed];
+        const holder = keys.byKey[asked];
         const had = keys.hint[tool].toLowerCase();
         if (holder && holder !== tool) {
-          if (had) next[holder] = had;
+          // Restoring, the tool that held this default goes back to its
+          // own when that is free (or is this tool's, which is moving
+          // off it), and only otherwise takes the key this one had.
+          const own = Object.entries(TOOL_KEYS).find(([, t]) => t === holder)?.[0];
+          const ownFree = own !== undefined && (!keys.byKey[own] || keys.byKey[own] === tool);
+          if (restoring && ownFree) delete next[holder];
+          else if (had) next[holder] = had;
           else delete next[holder];
         }
-        next[tool] = pressed;
+        next[tool] = asked;
       } else {
         // A modifier or an arrow is not a tool key, and nor is a chord
         // (Ctrl+B was taken as a plain B); keep listening.
@@ -733,8 +739,8 @@ export function PreferencesDialog({
                               {listening === t ? "press…" : keys.hint[t] || "none"}
                             </button>
                           ) : (
-                            <span className="hint" title="A shift away from its family's key">
-                              {keys.hint[t] ? `shift+${keys.hint[t]}` : "—"}
+                            <span className="hint" title="Its family's key, then Shift+ that key (once for each step along the family)">
+                              {keys.hint[t] ? `${keys.hint[t]}, then shift+${keys.hint[t]}` : "—"}
                             </span>
                           )}
                         </label>

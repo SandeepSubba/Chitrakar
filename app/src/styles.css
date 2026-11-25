@@ -100,6 +100,12 @@ body {
      Chrome takes one for pull-to-refresh, which here throws away
      whatever has not been saved. */
   overscroll-behavior: none;
+  /* Two fingers spread anywhere but the canvas zoomed the whole
+     interface, five times over and off the glass (iOS reads no
+     user-scalable=no). Panels still scroll; the canvas and the develop
+     window's picture answer a pinch of their own. Interface size is
+     the way to make the app larger. */
+  touch-action: pan-x pan-y;
 }
 
 body {
@@ -3659,6 +3665,16 @@ button.fold:hover {
   .curve-handle {
     width: 18px;
     height: 18px;
+  }
+
+  /* Drawn at 18 and taken at 36: a fingertip landing a few pixels off
+     an anchor's middle put a new anchor on the outline beside it rather
+     than taking hold of the one it was reaching for. */
+  .anchor::before {
+    content: "";
+    position: absolute;
+    inset: -9px;
+    border-radius: 50%;
   }
 
   .guide-overlay .guide-hit {

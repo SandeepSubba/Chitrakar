@@ -669,6 +669,33 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
                     let hy = ((t.b * rx).powi(2) + (t.d * ry).powi(2)).sqrt();
                     Bounds::Rect(cx - hx, cy - hy, cx + hx, cy + hy)
                 }
+                // Turned, a rounded rectangle's box is round its corners'
+                // arcs, not round the square corners it no longer has:
+                // 120 by 70 with corners of 25, turned 30°, was said to be
+                // seventeen pixels wider than it drew.
+                (
+                    VectorShape::Rect {
+                        width,
+                        height,
+                        radius,
+                    },
+                    true,
+                ) if *radius > 0.0 => {
+                    let r = radius.min(width.abs().min(height.abs()) / 2.0);
+                    let hx = ((t.a * r).powi(2) + (t.c * r).powi(2)).sqrt();
+                    let hy = ((t.b * r).powi(2) + (t.d * r).powi(2)).sqrt();
+                    let (mut a, mut b, mut c, mut d) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+                    for (x, y) in [
+                        (x0 + r, y0 + r),
+                        (x1 - r, y0 + r),
+                        (x1 - r, y1 - r),
+                        (x0 + r, y1 - r),
+                    ] {
+                        let (px, py) = (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f);
+                        (a, b, c, d) = (a.min(px), b.min(py), c.max(px), d.max(py));
+                    }
+                    Bounds::Rect(a - hx, b - hy, c + hx, d + hy)
+                }
                 (
                     VectorShape::Path {
                         points, subpaths, ..
@@ -690,13 +717,17 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
                 // 80 by 60 rectangle with a border of 10 said it was 120
                 // by 100, and was aligned 30 off its ink.
                 let mitred = stroke.join == chitrakar_doc::StrokeJoin::Miter;
-                let pad = if mitred {
-                    let mut bevelled = stroke.clone();
-                    bevelled.join = chitrakar_doc::StrokeJoin::Bevel;
-                    stroke_pad(shape, &bevelled)
-                } else {
-                    stroke_pad(shape, stroke)
-                } * max_scale(t);
+                // And a head reaches where it is drawn, not three widths
+                // past every side: a line of 150 with an arrow was said to
+                // be 156 wide where it drew 132, the tail end and behind
+                // the tip padded as if a head were there.
+                let mut plain = stroke.clone();
+                if mitred {
+                    plain.join = chitrakar_doc::StrokeJoin::Bevel;
+                }
+                plain.start_marker = Marker::None;
+                plain.end_marker = Marker::None;
+                let pad = stroke_pad(shape, &plain) * max_scale(t);
                 if let Bounds::Rect(x0, y0, x1, y1) = bounds {
                     bounds = Bounds::Rect(x0 - pad, y0 - pad, x1 + pad, y1 + pad);
                 }
@@ -704,6 +735,28 @@ fn visual_box(doc: &Document, id: NodeId, outer: Transform) -> Result<Bounds, Do
                     for [x, y] in miter_tips(flat.as_ref(), shape, stroke) {
                         let (px, py) = (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f);
                         bounds = bounds.union(Bounds::Rect(px, py, px, py));
+                    }
+                }
+                let mut heads = Vec::new();
+                marker_pieces(shape, stroke, &mut heads);
+                let at = |x: f32, y: f32| (t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f);
+                for piece in heads {
+                    match piece {
+                        StrokePiece::Corner(pts, n) => {
+                            for p in &pts[..n] {
+                                let (px, py) = at(p[0], p[1]);
+                                bounds = bounds.union(Bounds::Rect(px, py, px, py));
+                            }
+                        }
+                        StrokePiece::Disc { at: c, r } => {
+                            let (px, py) = at(c[0], c[1]);
+                            let (hx, hy) = (
+                                ((t.a * r).powi(2) + (t.c * r).powi(2)).sqrt(),
+                                ((t.b * r).powi(2) + (t.d * r).powi(2)).sqrt(),
+                            );
+                            bounds = bounds.union(Bounds::Rect(px - hx, py - hy, px + hx, py + hy));
+                        }
+                        StrokePiece::Band { .. } => {}
                     }
                 }
             }
@@ -7560,6 +7613,7 @@ fn marker_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke, out: &mut 
     let VectorShape::Path {
         points,
         closed: false,
+        handles,
         ..
     } = shape
     else {
@@ -7573,18 +7627,34 @@ fn marker_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke, out: &mut 
         stroke.width * chitrakar_doc::MARKER_LENGTH,
         stroke.width * chitrakar_doc::MARKER_REACH,
     );
+    // Where the line comes from into an end: the nearest handle that is
+    // not on its anchor, as a curve's tangent there is, and the next
+    // anchor only when the segment is straight. Taken from the anchor
+    // alone, a head on a curve pointed along the chord, askew of the
+    // line, where the SVG export (orient="auto") followed the curve.
+    let handle = |i: usize, out: bool| -> Option<[f32; 2]> {
+        let h = handles.get(i)?;
+        let (dx, dy) = if out { (h[2], h[3]) } else { (h[0], h[1]) };
+        (dx * dx + dy * dy > 1e-12).then(|| [points[i][0] + dx, points[i][1] + dy])
+    };
+    let into_last = handle(n - 1, false)
+        .or_else(|| handle(n - 2, true))
+        .unwrap_or(points[n - 2]);
+    let out_of_first = handle(0, true)
+        .or_else(|| handle(1, false))
+        .unwrap_or(points[1]);
     // At each end, the way the line is travelling there: into the last
     // point, and out of the first.
     for (marker, at, along) in [
         (
             stroke.start_marker,
             points[0],
-            direction(points[1], points[0]),
+            direction(out_of_first, points[0]),
         ),
         (
             stroke.end_marker,
             points[n - 1],
-            direction(points[n - 2], points[n - 1]),
+            direction(into_last, points[n - 1]),
         ),
     ] {
         // `d` points away from the line at either end — out of the first
@@ -13002,8 +13072,20 @@ pub fn own_space(doc: &Document, id: NodeId) -> Result<Transform, DocError> {
 /// drawn under the photograph, where nobody could see it. `None` off
 /// every frame, or where something above one covers it.
 pub fn frame_at(doc: &Document, x: f32, y: f32) -> Result<Option<NodeId>, DocError> {
+    frame_under(doc, x, y, &[])
+}
+
+/// The frame under a point, looking through `passing` — the layers being
+/// put down there, which cover their own middle: asked with them in, a
+/// shape dropped on a frame found itself over the frame and never went in.
+pub fn frame_under(
+    doc: &Document,
+    x: f32,
+    y: f32,
+    passing: &[NodeId],
+) -> Result<Option<NodeId>, DocError> {
     Ok(
-        match frame_in(doc, doc.root(), x, y, Transform::default())? {
+        match frame_in(doc, doc.root(), x, y, Transform::default(), passing)? {
             Under::Frame(frame) => Some(frame),
             Under::Covered | Under::Open => None,
         },
@@ -13024,10 +13106,11 @@ fn frame_in(
     x: f32,
     y: f32,
     parent: Transform,
+    passing: &[NodeId],
 ) -> Result<Under, DocError> {
     for &child in doc.children_of(group)?.iter().rev() {
         let node = doc.node(child)?;
-        if !node.visible {
+        if !node.visible || passing.contains(&child) {
             continue;
         }
         let t = parent.compose(node.transform);
@@ -13044,14 +13127,14 @@ fn frame_in(
                         // A frame inside a frame is the one that counts,
                         // unless something of this one's covers it — then
                         // what is drawn goes on top, in this one.
-                        return Ok(match frame_in(doc, child, x, y, t)? {
+                        return Ok(match frame_in(doc, child, x, y, t, passing)? {
                             Under::Frame(inner) => Under::Frame(inner),
                             Under::Covered | Under::Open => Under::Frame(child),
                         });
                     }
                 }
             }
-            NodeKind::Group => match frame_in(doc, child, x, y, t)? {
+            NodeKind::Group => match frame_in(doc, child, x, y, t, passing)? {
                 Under::Open => {}
                 // A frame in a locked group: drawn into, it could not be
                 // picked or moved, so what is drawn goes over it instead.
@@ -27266,6 +27349,97 @@ mod tests {
         let half = (100.0f32 * 100.0 / 2.0 + 30.0 * 30.0 / 2.0).sqrt();
         assert!(((x1 - x0) - 2.0 * half).abs() < 0.01, "{}", x1 - x0);
         assert!(((y1 - y0) - 2.0 * half).abs() < 0.01, "{}", y1 - y0);
+    }
+
+    /// A turned rounded rectangle's box is round its corners' arcs: 120
+    /// × 70 with corners of 25, turned 30°, is its 70 × 20 middle turned
+    /// and 25 on every side.
+    #[test]
+    fn a_turned_rounded_rects_box_is_round_its_corners() {
+        let mut doc = Document::new(400, 400, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "Card",
+            VectorShape::Rect {
+                width: 120.0,
+                height: 70.0,
+                radius: 25.0,
+            },
+        );
+        let (sin, cos) = std::f32::consts::FRAC_PI_6.sin_cos();
+        node.transform = Transform {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            e: 200.0,
+            f: 100.0,
+        };
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let Bounds::Rect(x0, y0, x1, y1) = node_visual_bounds(&doc, id).unwrap() else {
+            panic!("a box")
+        };
+        let w = 70.0 * cos + 20.0 * sin + 50.0;
+        let h = 70.0 * sin + 20.0 * cos + 50.0;
+        assert!(((x1 - x0) - w).abs() < 0.01, "{} against {w}", x1 - x0);
+        assert!(((y1 - y0) - h).abs() < 0.01, "{} against {h}", y1 - y0);
+    }
+
+    /// A line's box with a head on it reaches where the head is drawn —
+    /// its tip on the last point, its wings either side — not three
+    /// widths past every side.
+    #[test]
+    fn an_arrows_box_is_round_its_ink() {
+        let mut doc = Document::new(400, 400, ColorMode::Rgb);
+        let root = doc.root();
+        let mut node = Node::vector(
+            "Arrow",
+            VectorShape::Path {
+                points: vec![[0.0, 0.0], [150.0, 0.0]],
+                closed: false,
+                smooth: false,
+                handles: Vec::new(),
+                subpaths: Vec::new(),
+            },
+        );
+        if let NodeKind::Vector { fill, stroke, .. } = &mut node.kind {
+            *fill = None;
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 6.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                cap: StrokeCap::Butt,
+                join: Default::default(),
+                start_marker: Marker::None,
+                end_marker: Marker::Arrow,
+                align: None,
+            });
+        }
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = doc.children_of(root).unwrap()[0];
+        let Bounds::Rect(x0, y0, x1, y1) = node_visual_bounds(&doc, id).unwrap() else {
+            panic!("a box")
+        };
+        let wing = 6.0 * chitrakar_doc::MARKER_REACH;
+        assert!(x1 <= 150.0 + 3.01, "the tip is on the last point: {x1}");
+        assert!(x0 >= -3.01, "and the tail has no head: {x0}");
+        assert!(
+            (y0 + wing).abs() < 0.01 && (y1 - wing).abs() < 0.01,
+            "{y0} {y1}"
+        );
     }
 
     /// A 20x20 red square at (20,20) on a 64x64 canvas, with `effects`.

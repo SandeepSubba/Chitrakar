@@ -410,6 +410,15 @@ impl WasmSession {
         self.inner.frame_at(x, y).map_or(-1.0, |id| id.0 as f64)
     }
 
+    /// The frame under a point looking through the layers `passing`
+    /// (those being put down there), or -1.
+    pub fn frame_under(&self, x: f32, y: f32, passing: &[f64]) -> f64 {
+        let passing: Vec<NodeId> = passing.iter().map(|&id| NodeId(id as u64)).collect();
+        self.inner
+            .frame_under(x, y, &passing)
+            .map_or(-1.0, |id| id.0 as f64)
+    }
+
     /// A document point in the coordinates layers inside `id` use.
     /// Empty when that space has collapsed.
     pub fn point_inside(&self, id: f64, x: f32, y: f32) -> Vec<f32> {
@@ -1054,6 +1063,13 @@ impl WasmSession {
     /// Add a layer from its JSON, held to what is picked out when
     /// something is — one entry in the history, since a region picked
     /// and a layer put over it are one wish. Returns the new id.
+    /// Whether an export of `width` × `height` can be made now, with
+    /// the memory the document leaves (sharpened or not): asked by the
+    /// export windows before the press rather than said after it.
+    pub fn export_fits(&self, width: u32, height: u32, sharpening: bool) -> bool {
+        self.inner.export_fits(width, height, sharpening)
+    }
+
     /// Sharpen what goes out for the screen (0 none, 0.3, 0.6, 1); the
     /// export window sets it around its own encodes.
     pub fn set_output_sharpen(&mut self, amount: f32) {

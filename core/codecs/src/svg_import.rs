@@ -692,7 +692,18 @@ fn face_family(text: &str, lower: &str, at: std::ops::Range<usize>) -> Option<St
     let block = &lower[start..end];
     let named = block.find("font-family")? + start + "font-family".len();
     let rest = text[named..end].trim_start().strip_prefix(':')?;
-    let value = rest.split([';', '}']).next()?.trim();
+    // In a <style> the quotes may be written as entities — our own SVG
+    // writes &quot; — and taken as they stood they were part of the name,
+    // which no text asked for: the face came back as the bundled one.
+    // (An entity's own ';' ends the value it is in, so read past those
+    // first.)
+    let decoded = rest
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&#34;", "\"")
+        .replace("&amp;", "&");
+    let value = decoded.split([';', '}']).next()?.trim();
     let value = value
         .strip_prefix('"')
         .and_then(|v| v.strip_suffix('"'))
@@ -3884,6 +3895,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_faces_family_is_read_through_its_entities() {
+        for css in [
+            r#"@font-face{font-family:&quot;Caladea-BoldItalic&quot;;src:url(data:font/ttf;base64,AAAA)}"#,
+            r#"@font-face{font-family:"Caladea-BoldItalic";src:url(data:font/ttf;base64,AAAA)}"#,
+            r#"@font-face{font-family:'Caladea-BoldItalic';src:url(data:font/ttf;base64,AAAA)}"#,
+        ] {
+            let lower = css.to_ascii_lowercase();
+            let at = lower.find("data:").unwrap();
+            assert_eq!(
+                face_family(css, &lower, at..at + 5).as_deref(),
+                Some("Caladea-BoldItalic"),
+                "{css}"
+            );
+        }
+    }
     use chitrakar_color::ColorMode;
     use chitrakar_doc::{Command, Document};
 

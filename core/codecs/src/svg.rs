@@ -835,6 +835,39 @@ fn write_node(
                                         r#"{pad}  <rect x="{offset}" y="{offset}" width="{iw}" height="{ih}"{}{line}{cut}/>"#,
                                         round(clamp(r - offset, iw, ih))
                                     );
+                                } else if offset > 0.0 {
+                                    // A band inside as wide as the shorter
+                                    // side covers the whole shape, as the
+                                    // engine draws it: written as the
+                                    // shape's own edge, stroked twice as
+                                    // wide and cut to the shape. Moved in,
+                                    // it had nothing left to stroke, and
+                                    // the file showed the fill alone.
+                                    let name = fresh_def_id(defs, &format!("inside{}", child.0));
+                                    let _ = writeln!(
+                                        defs,
+                                        r#"<clipPath id="{name}"><rect width="{width}" height="{height}"{}/></clipPath>"#,
+                                        round(r)
+                                    );
+                                    let doubled = chitrakar_doc::Stroke {
+                                        width: band.width * 2.0,
+                                        ..band.clone()
+                                    };
+                                    let whole = paint_attrs(
+                                        doc,
+                                        None,
+                                        Some(&doubled),
+                                        None,
+                                        child,
+                                        defs,
+                                        dashed,
+                                        fade,
+                                    );
+                                    let _ = writeln!(
+                                        out,
+                                        r#"{pad}  <rect width="{width}" height="{height}"{}{whole} clip-path="url(#{name})"/>"#,
+                                        round(r)
+                                    );
                                 }
                                 let _ = writeln!(out, "{pad}</g>");
                             }
@@ -860,6 +893,32 @@ fn write_node(
                                 let _ = writeln!(
                                     out,
                                     r#"{pad}  <ellipse cx="{rx}" cy="{ry}" rx="{ix}" ry="{iy}"{line}/>"#
+                                );
+                            } else if offset > 0.0 {
+                                // As a rect's: a band inside as wide as
+                                // the shorter radius covers it all.
+                                let name = fresh_def_id(defs, &format!("inside{}", child.0));
+                                let _ = writeln!(
+                                    defs,
+                                    r#"<clipPath id="{name}"><ellipse cx="{rx}" cy="{ry}" rx="{rx}" ry="{ry}"/></clipPath>"#
+                                );
+                                let doubled = chitrakar_doc::Stroke {
+                                    width: band.width * 2.0,
+                                    ..band.clone()
+                                };
+                                let whole = paint_attrs(
+                                    doc,
+                                    None,
+                                    Some(&doubled),
+                                    None,
+                                    child,
+                                    defs,
+                                    dashed,
+                                    fade,
+                                );
+                                let _ = writeln!(
+                                    out,
+                                    r#"{pad}  <ellipse cx="{rx}" cy="{ry}" rx="{rx}" ry="{ry}"{whole} clip-path="url(#{name})"/>"#
                                 );
                             }
                             let _ = writeln!(out, "{pad}</g>");
@@ -2965,6 +3024,50 @@ mod tests {
                 && svg.contains(r#"stroke-width="8""#),
             "and the band's own middle is half a width in: {svg}"
         );
+    }
+
+    /// A border inside as wide as the shape's shorter side covers the
+    /// whole shape, as the engine draws it: it is written, not dropped.
+    #[test]
+    fn an_inside_border_as_wide_as_the_shape_is_written() {
+        let mut doc = Document::new(200, 80, ColorMode::Rgb);
+        let id = filled(&mut doc, "bar", 40.0, 40.0);
+        let kind = |shape: VectorShape| chitrakar_doc::NodeKind::Vector {
+            shape,
+            fill: None,
+            stroke: Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 30.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: Some(chitrakar_doc::StrokeAlign::Inside),
+            }),
+            gradient: None,
+        };
+        for shape in [
+            VectorShape::Rect {
+                width: 100.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+            VectorShape::Ellipse { rx: 50.0, ry: 10.0 },
+        ] {
+            doc.apply(Command::SetKind {
+                id,
+                kind: Box::new(kind(shape)),
+            })
+            .unwrap();
+            let svg = export_svg(&doc).unwrap();
+            assert!(
+                svg.contains(r#"stroke-width="60""#) && svg.contains("clip-path"),
+                "{svg}"
+            );
+        }
     }
 
     /// A dash pattern travels as the same lengths SVG names, and a solid

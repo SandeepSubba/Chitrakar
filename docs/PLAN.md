@@ -158,7 +158,10 @@ without reading anything else.*
      shown in centimetres opening at 2.54 times its resolution, white
      pushed past white by Colour balance, Actual size drawn on half a
      pixel, a pinch zooming a seventh as far as the fingers, a document
-     of three million draws stopping the engine.
+     of three million draws stopping the engine. The fiftieth: shapes
+     dragged onto a frame never going in, a 48-megapixel photograph that
+     would not export with a watermark, undo mid-path taking the step
+     before it, a pinch zooming the whole interface.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13087,6 +13090,74 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fiftieth audit (November 2026).** Its check of round 49: a shape
+  dragged wholly onto a frame never went in, since the frame was looked
+  for under its middle and found the shape itself there (looked for
+  through what is being put down, `frame_under`); our own SVG wrote its
+  faces' names in `&quot;`, read back as part of the name; a shape, a
+  stroke or a path drawn at the count was refused with nothing said; a
+  file whose copies were drawn deeper than an edit counts took adds to
+  a file that would not open (counted as deep as opening counts); a
+  refused Alt-drag copy moved the original; the PSD export's count took
+  a frame as all its layers and the page as one more; Ctrl+End after
+  Ctrl+A kept "typed it all"; a pinch's rate had an edge at 50, and
+  Firefox's wheel, counted in lines, barely zoomed; an SVG named .xml
+  was taken for a lens database. Limits: Actual size is crisp only at
+  a whole device-pixel ratio of one (at 2 the frame is doubled
+  smoothly); a Curves layer with no points, made only by hand, is lost
+  to Delete in its editor; adds with a live copy on the page cost the
+  page's length each.
+  Its files pass: an export between about 41 and 100 megapixels was
+  offered and then refused for memory — a watermarked 48-megapixel
+  photograph, a 45-megapixel raw in the batch, a Set's @3x after two
+  files, a long edge "as large as it goes" (the picture is cut back
+  where it lies and the watermark drawn on a patch its own size, which
+  halves what an export holds, and the Export window asks the engine,
+  `export_fits`, before it offers a size); an EXIF pointer typed as a
+  directory (13) was not followed. Limits: WebP, GIF, BMP and AVIF come
+  in through the browser's canvas, premultiplied, so a nearly clear
+  pixel's colour is rounded; a WebP's EXIF orientation is not read; an
+  export's density follows its scale; a 65,500 × 2 JPEG opens a little
+  out of shape; a profile with a gamma of nought turns a picture white.
+  Its editing pass: wrapping ignored letter spacing, so a tracked line
+  ran past its width; an arrowhead on a curve pointed along the chord
+  (it follows the handles, as the SVG's `orient` does); a head padded
+  the layer's box three widths every side; a turned rounded rectangle's
+  box was its square corners'; an inside border as wide as the shape
+  was left out of SVG and PDF; a PDF wrote a small scale with four
+  places (0.0015 for 0.001477). Limits: offset and Stroke to shape of a
+  path lose a pixel or more past a few thousand pixels, and refuse past
+  thirty thousand; an ellipse's inside and outside borders and offset
+  are ellipses of the radii plus or minus the width, not bands of one
+  width, and its SVG and PDF draw a true band; a right-to-left list
+  puts its markers on the left; a flip reads as a turn of 180 in the
+  angle box; the Node tool's drags snap to nothing; Polygon and Star do
+  not fill the box dragged; text set along a path takes no alignment;
+  SVG text is the reader's own and differs by a few per cent; a blend
+  between a shape and its turned copy swells; a dashed outside border
+  on a star leaves a sliver at its start.
+  Its interface pass, an illustrator on a tablet, a Lightroom user and a
+  keyboard user who rebinds: undo by two fingers, the bar or the Edit
+  menu took the step before a path being drawn rather than its last
+  anchor; two fingers spread anywhere but the canvas zoomed the whole
+  interface (`touch-action: pan-x pan-y`); a preset or a setup could not
+  be forgotten by touch (a long press asks); Backspace on the Tools page
+  could leave a tool with no key; the keys sheet called the Knife
+  "Shift+A", which from any other tool is the Node tool; Paste style on
+  raw layers did nothing (it develops them like the one copied); a run
+  of developments could only be skipped one at a time (Skip all); Before
+  did not answer Space; a photo dropped on an empty page saved as
+  untitled; an anchor's drag was "Multiple edits"; a finger had to land
+  within nine pixels of an anchor. Limits: Auto white balance can be
+  thrown by a picture mostly of one colour; Batch develops with the
+  plain development or a kept preset only; no crop or straighten in the
+  develop window, no side-by-side before and after, no culling; the
+  develop window keeps a mouse's sizes on a tablet; the panel's buttons
+  are small to a finger; a long press on a tool slot does not open its
+  family; a finger cannot draw once a pen has touched the glass, and
+  nothing says so; the narrowest panel cuts the position boxes; the
+  Tools page turns away a key it will not take without a word; after a
+  menu's command by keyboard, Tab goes on to the next menu.
   **A forty-ninth audit (November 2026).** Its check of round 48: four
   million draws opened, but a document of three million took the engine
   to its memory's end on the first frame (a file opens, and an edit is

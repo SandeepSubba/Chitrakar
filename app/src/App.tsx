@@ -102,7 +102,7 @@ import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
 import { focusFirstRow, menuKeyDown } from "./menuKeys";
 import { ActionSelect } from "./ActionSelect";
-import { chipKeys } from "./chipKeys";
+import { chipHold, chipKeys } from "./chipKeys";
 import { guardSession } from "./engineGuard";
 import {
   addLensFiles,
@@ -3650,9 +3650,18 @@ export function App() {
     [refresh],
   );
 
+  /** Anchors of a path still being drawn: undo takes back the last of
+   * them before anything in the history, however undo is asked for —
+   * the chord, the bar's button, Edit › Undo or two fingers tapped. */
+  const penMidPath = tool === "Pen" && penPoints.length > 0;
   const undo = useCallback(() => {
+    if (penMidPath) {
+      setPenPoints((pts) => pts.slice(0, -1));
+      setPenHandles((hs) => hs.slice(0, -1));
+      return;
+    }
     if (session?.undo()) followHistory(session);
-  }, [session, followHistory]);
+  }, [session, followHistory, penMidPath]);
   const redo = useCallback(() => {
     if (session?.redo()) followHistory(session);
   }, [session, followHistory]);
@@ -4966,12 +4975,20 @@ export function App() {
       // spread: read at a mouse notch's rate it zoomed a seventh as far
       // as the fingers did. A notch with Ctrl held is a hundred or more,
       // and keeps the notch's rate.
-      const pinch = e.ctrlKey && e.deltaMode === 0 && Math.abs(e.deltaY) < 50;
-      const rate = pinch ? 0.01 : 0.0015;
+      //
+      // In pixels whatever it came in: Firefox counts a mouse's notch in
+      // lines (3 a notch), which read as pixels barely zoomed at all.
+      const dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 800 : 1);
+      // With Ctrl, a step goes at the fingers' rate up to the most a
+      // notch zooms, and a notch keeps its own: no edge between the two
+      // (a threshold at 50 zoomed 49 a step half again as far as 50).
+      const amount = e.ctrlKey
+        ? Math.min(Math.abs(dy) * 0.01, Math.max(0.15, Math.abs(dy) * 0.0015))
+        : Math.abs(dy) * 0.0015;
       setView((v) => {
         const zoom = Math.min(
           MAX_ZOOM,
-          Math.max(MIN_ZOOM, v.zoom * Math.exp(-e.deltaY * rate)),
+          Math.max(MIN_ZOOM, v.zoom * Math.exp(-Math.sign(dy) * amount)),
         );
         // Keep the document point under the cursor fixed.
         return {
@@ -6113,7 +6130,10 @@ export function App() {
       // and each frame's export left it out.
       if (parent === s.root_id) {
         if (byId.get(id)?.kind === "artboard") continue;
-        const into = s.frame_at(box[0] + box[2] / 2, box[1] + box[3] / 2);
+        // Looked for through what is being put down, which covers its
+        // own middle: asked of the page as it stands, every shape
+        // dropped on a frame found itself there and never went in.
+        const into = s.frame_under(box[0] + box[2] / 2, box[1] + box[3] / 2, new Float64Array(moved));
         if (into < 0) continue;
         const room = s.bounds_of(into);
         if (
@@ -6148,7 +6168,7 @@ export function App() {
       ) {
         continue;
       }
-      const under = s.frame_at(box[0] + box[2] / 2, box[1] + box[3] / 2);
+      const under = s.frame_under(box[0] + box[2] / 2, box[1] + box[3] / 2, new Float64Array(moved));
       if (under === parent) continue;
       // Not into itself, nor into a frame of its own.
       let up: NodeId | undefined = under >= 0 ? (under as NodeId) : undefined;
@@ -6827,7 +6847,10 @@ export function App() {
           setMultiSel(copies.length > 1 ? copies : []);
           refresh(session);
         } catch (err) {
+          // No copy, and so no drag: carried on, the original was moved
+          // under a refusal that said it had not been copied.
           alert(`Duplicate: ${said(err)}`);
+          return;
         }
       }
       drag.target = target;
@@ -7460,10 +7483,18 @@ export function App() {
    * Null until something has been copied. */
   const styleClip = useRef<string | null>(null);
 
+  /** The develop settings of the raw layer whose style was copied. */
+  const styleDevelop = useRef<string | null>(null);
   const copyStyle = () => {
     if (!session || selected === null) return;
     try {
       styleClip.current = session.copy_style(selected);
+      // A raw layer's look is its development as much as its opacity:
+      // Lightroom's copy and paste of settings is where a photographer's
+      // hands go, and pasted on raw layers the look alone did nothing.
+      styleDevelop.current = layers.find((l) => l.id === selected)?.developed
+        ? session.developed_settings(selected)
+        : null;
     } catch (err) {
       alert(`Copy style: ${said(err)}`);
     }
@@ -7519,11 +7550,35 @@ export function App() {
       return;
     }
     refresh(session);
+    const develop = styleDevelop.current;
+    if (develop !== null) {
+      const raws = layers.filter((l) => l.developed && ids.includes(l.id));
+      if (raws.length > 0) void developLike(develop, raws);
+    }
   };
 
   // The release carries the modifier keys, and a select drag reads them:
   // shift adds to what is picked out, alt takes from it.
+  /** The canvas's pointer coming up: where a drawn shape, a stroke or
+   * a path is made, so what the engine refuses then is said. A shape
+   * drawn in a document at its count of layers was refused there, with
+   * nothing on the page and nothing said. */
   const onCanvasPointerUp = (e?: React.PointerEvent) => {
+    try {
+      canvasPointerUp(e);
+    } catch (err) {
+      if (session?.previewing()) {
+        try {
+          session.cancel_preview();
+        } catch {
+          // Nothing more to take back.
+        }
+      }
+      if (session) refresh(session);
+      alert(`Could not draw that: ${said(err)}`);
+    }
+  };
+  const canvasPointerUp = (e?: React.PointerEvent) => {
     if (e && ignoredRef.current.has(e.pointerId)) return;
     // A tap: the press it began with reaches the tool first.
     if (e && heldPress.current?.e.pointerId === e.pointerId) releaseHeldPress();
@@ -12330,6 +12385,17 @@ export function App() {
             id = session.place_image(picture, name);
           }
           placed(id, was);
+          // Placed on an empty page, the engine opens it (the page takes
+          // its size and the step is "Open"): the document is then named
+          // after it too, as File › Open names it, rather than saving as
+          // untitled.chitra.
+          if (!undoOpen) {
+            const past = (JSON.parse(session.history_json()) as { past?: string[] }).past ?? [];
+            if (past.length === 1 && past[0] === `Open ${name}`) {
+              const named = name.replace(/\.[a-z0-9]+$/i, "");
+              if (named) setDocName((d) => (d === "untitled" ? named : d));
+            }
+          }
           // Opened, the page keeps the resolution the file says it was
           // made at: left at 72, the editor's own 300-dpi exports came
           // back four times too large to print.
@@ -12712,8 +12778,11 @@ export function App() {
   const developOthersLikeThis = async () => {
     const source = layers.find((l) => l.id === selected);
     if (!session || !source?.developed || developedOthers.length === 0) return;
-    const settings = session.developed_settings(source.id);
-    const others = developedOthers;
+    await developLike(session.developed_settings(source.id), developedOthers);
+  };
+  /** Develop each of `others` (raw layers) with `settings`, one step. */
+  const developLike = async (settings: string, others: LayerInfo[]) => {
+    if (!session || others.length === 0) return;
     // Busy as a development is, so a file that arrives meanwhile waits:
     // opened at once, it took the editor, and the panel then showed this
     // document's layers over it — one deleted there was some other layer.
@@ -12854,7 +12923,14 @@ export function App() {
       // A lens profile (lensfun's XML) is kept as Preferences › Camera
       // raw keeps one: dropped over that page, it was turned away as
       // "not a picture" once the window had closed.
-      const lens = files.filter((f) => /\.xml$/i.test(f.name));
+      // By what it says, not its name alone: an SVG saved as .xml is a
+      // picture still, and was refused as no lens database.
+      const lens: File[] = [];
+      for (const f of files) {
+        if (!/\.xml$/i.test(f.name)) continue;
+        const head = new TextDecoder().decode(await f.slice(0, 4096).arrayBuffer());
+        if (!/<svg[\s>]/i.test(head)) lens.push(f);
+      }
       if (lens.length > 0 && session) {
         files = files.filter((f) => !lens.includes(f));
         const { added, refused, why } = await addLensFiles(session, lens);
@@ -13928,7 +14004,7 @@ export function App() {
   {
     const noRegion = antRings.length === 0;
     markNothingToDo(menus.flatMap((m) => m.entries), {
-      undo: history.past.length === 0,
+      undo: history.past.length === 0 && !penMidPath,
       redo: history.future.length === 0,
       "fill-picked": noRegion,
       "stroke-picked": noRegion,
@@ -14404,10 +14480,10 @@ export function App() {
           <button
             className="chrome-button icon-only"
             onClick={() => {
-              if (history.past.length > 0) undo();
+              if (history.past.length > 0 || penMidPath) undo();
             }}
             title={tip("Undo", "undo")}
-            aria-disabled={history.past.length === 0}
+            aria-disabled={history.past.length === 0 && !penMidPath}
           >
             <Icon name="undo" />
           </button>
@@ -14863,6 +14939,13 @@ export function App() {
               : undefined
           }
           onCancel={cancelDevelop}
+          onStop={() => {
+            // The rest of the run let go of at once: Escape and Skip
+            // took one file each, twenty presses for a shoot.
+            rawQueue.current = rawQueue.current.filter((q) => q.into !== session);
+            setRawWaiting(rawQueue.current.length);
+            cancelDevelop();
+          }}
           onDone={finishDevelop}
         />
       )}
@@ -18330,7 +18413,10 @@ const keyHelp = (
     return chord === "shift+/" ? "?" : chordLabel(chord);
   };
   const cs = (...ids: CommandId[]) => ids.map(c).join(", ");
-  const shifted = (t: Tool) => (hint[t] ? `Shift+${hint[t]}` : "(no key)");
+  // A family's second member is its key and then Shift+the key: from
+  // any other tool, Shift+A is not the Knife (it is Node), so "Shift+A"
+  // alone sent a person to the wrong tool.
+  const shifted = (t: Tool) => (hint[t] ? `${hint[t]}, then Shift+${hint[t]}` : "(no key)");
   return [
     [
       "Tools",
@@ -18945,6 +19031,7 @@ function RawDevelopDialog({
   folded,
   onFolded,
   onCancel,
+  onStop,
   onDone,
 }: {
   session: WasmSession;
@@ -18963,6 +19050,8 @@ function RawDevelopDialog({
   folded: string[];
   onFolded: (f: string[]) => void;
   onCancel: () => void;
+  /** Leave this and every raw file still waiting out. */
+  onStop?: () => void;
   onDone: (s: RawSettings, all?: boolean) => void;
 }) {
   const [s, setS] = useState<RawSettings>(initial);
@@ -19344,7 +19433,8 @@ function RawDevelopDialog({
                     className={inHand ? "preset setup active" : "preset setup"}
                     aria-pressed={inHand}
                     aria-label={`Preset ${p.name}`}
-                    title={`${p.name} — alt-click or Delete to forget it`}
+                    title={`${p.name} — alt-click, Delete or a long press to forget it`}
+                    {...chipHold(p.name, () => onPresets(presets.filter((o) => o.name !== p.name)))}
                     onKeyDown={chipKeys(() => onPresets(presets.filter((o) => o.name !== p.name)))}
                     onClick={(e) => {
                       if (e.altKey) onPresets(presets.filter((o) => o.name !== p.name));
@@ -19771,9 +19861,26 @@ function RawDevelopDialog({
           <button
             type="button"
             className={before ? "on" : undefined}
+            aria-pressed={before}
             onPointerDown={() => setBefore(true)}
             onPointerUp={() => setBefore(false)}
             onPointerLeave={() => setBefore(false)}
+            // Held from the keyboard as from a pointer: Space down shows
+            // the before, up the after.
+            onKeyDown={(e) => {
+              if (e.key === " ") {
+                e.preventDefault();
+                e.stopPropagation();
+                setBefore(true);
+              }
+            }}
+            onKeyUp={(e) => {
+              if (e.key === " ") {
+                e.preventDefault();
+                setBefore(false);
+              }
+            }}
+            onBlur={() => setBefore(false)}
             title="Hold to see the plain development (or hold \)"
           >
             Before
@@ -19782,6 +19889,11 @@ function RawDevelopDialog({
           <button onClick={onCancel} title={count ? "Leave this one out and go on to the next" : undefined}>
             {count && count[0] < count[1] ? "Skip" : "Cancel"}
           </button>
+          {count && count[0] < count[1] && onStop && (
+            <button onClick={onStop} title="Leave this and every raw file still waiting out">
+              Skip all {count[1] - count[0] + 1}
+            </button>
+          )}
           {count && count[0] < count[1] && (
             <button
               onClick={() => onDone(s, true)}

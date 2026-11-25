@@ -4490,6 +4490,26 @@ assert(
     painted.slice(0, 3).join() !== "255,255,255",
     `the rect landed where it was drawn (${painted})`,
   );
+  // And one drawn on the page and then dragged wholly onto the frame
+  // goes into it too, in the move's own step — not found over itself.
+  await drag(420, 40, 480, 80);
+  await pickTool("Move");
+  await drag(450, 60, 200, 190);
+  const style = (i) => page.locator(".panel ul li").nth(i).getAttribute("style");
+  const into = await page.locator(".panel ul li").count();
+  assert(
+    into === 3 && (await style(0)) !== (await style(1)) && (await style(1)) === (await style(2)),
+    `a shape dragged wholly onto the frame goes into it (${into} rows)`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".panel ul li").count()) === 2,
+    "and the move with its going in is one step, the drawing another",
+  );
+  await pickTool("Rect");
 
   // The frame folds shut in the panel, taking what is in it with it,
   // and a folded frame is still a frame — it exports on its own.
@@ -19181,8 +19201,8 @@ assert(
   const keyOf = (t) => page.locator(`button[aria-label^="${t} key:"]`);
   assert((await keyOf("Crop").textContent()) === "C", "the crop's key is shown beside it");
   assert(
-    (await page.locator('.prefs-tool:has-text("Lasso") .hint').textContent()) === "shift+M",
-    "a family member's is a shift away from the family's",
+    (await page.locator('.prefs-tool:has-text("Lasso") .hint').textContent()) === "M, then shift+M",
+    "a family member's is its family's key, then a shift away (from another tool, Shift+M is not the lasso)",
   );
   // A key nobody holds is simply taken.
   await keyOf("Crop").click();
@@ -19260,9 +19280,72 @@ assert(
     JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).toolKeys)) === "{}",
     "with nothing rebound, nothing is written",
   );
+  // A chain of swaps, then one put back: every tool still has a key.
+  // (Brush given V, Pen given B, Move put back: Brush's own B is Pen's,
+  // so it takes the P that Move had, rather than nothing.)
+  await keyOf("Brush").click();
+  await page.keyboard.press("v");
+  await page.waitForTimeout(100);
+  await keyOf("Pen").click();
+  await page.keyboard.press("b");
+  await page.waitForTimeout(100);
+  await keyOf("Move").click();
+  await page.keyboard.press("Backspace");
+  await page.waitForTimeout(120);
+  const chain = [await keyOf("Move").textContent(), await keyOf("Pen").textContent(), await keyOf("Brush").textContent()];
+  assert(
+    JSON.stringify(chain) === JSON.stringify(["V", "B", "P"]),
+    `after a chain of swaps, putting one back leaves every tool a key (${chain})`,
+  );
+  for (const t of ["Brush", "Pen"]) {
+    await keyOf(t).click();
+    await page.keyboard.press("Backspace");
+    await page.waitForTimeout(100);
+  }
+  assert(
+    JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem("chitrakar:prefs")).toolKeys)) === "{}",
+    "and put back one by one, nothing is left rebound",
+  );
   await page.click('.modal-actions .primary:text-is("Done")');
   await page.waitForTimeout(200);
   await pickTool("Move");
+}
+
+// 9bu2. Halfway through a path, every way of asking for undo takes back
+// the last anchor — the bar's button, Edit › Undo, two fingers tapped —
+// as the chord does, not the step before the path began.
+{
+  const b = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [b.x + (x / 600) * b.width, b.y + (y / 400) * b.height];
+  await pickTool("Rect");
+  await page.mouse.move(...at(40, 40));
+  await page.mouse.down();
+  await page.mouse.move(...at(90, 90), { steps: 3 });
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const steps = () => page.locator(".history li:not(.history-start):not(.future) button").count();
+  const before = await steps();
+  await pickTool("Pen");
+  for (const [x, y] of [[150, 40], [220, 60], [200, 140]]) {
+    await page.mouse.click(...at(x, y));
+    await page.waitForTimeout(60);
+  }
+  const anchors = () => page.locator(".pen-preview circle, .pen-anchor").count();
+  const three = await anchors();
+  await page.click('[role=group][aria-label="History"] button[title^="Undo"]');
+  await page.waitForTimeout(120);
+  assert(
+    (await steps()) === before && (await anchors()) < three,
+    `the bar's Undo mid-path takes back an anchor, not the rectangle (${before} → ${await steps()}, ${three} → ${await anchors()})`,
+  );
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(100);
+  await pickTool("Move");
+  // The rectangle and anything the path made go again.
+  for (let i = 0; i < 4 && (await steps()) > before - 1; i++) {
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(80);
+  }
 }
 
 // 9bv. The chrome has a light set of colours as well as the dark one,

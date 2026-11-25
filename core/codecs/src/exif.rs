@@ -82,7 +82,7 @@ pub fn read_tiff(t: &[u8]) -> Option<Capture> {
                 let size = match kind {
                     1 | 2 | 6 | 7 => 1,
                     3 | 8 => 2,
-                    4 | 9 => 4,
+                    4 | 9 | 13 => 4,
                     5 | 10 => 8,
                     _ => return None,
                 } * count as usize;
@@ -116,7 +116,10 @@ pub fn read_tiff(t: &[u8]) -> Option<Capture> {
         match tag {
             0x010F => c.make = text(kind, count, at).unwrap_or_default(),
             0x0110 => c.model = text(kind, count, at).unwrap_or_default(),
-            0x8769 if kind == 4 => exif_ifd = u32_at(at).map(|v| v as usize),
+            // LONG, or IFD (13), which TIFF/EP and some cameras write
+            // for the same offset: read only as LONG, a camera's exposure,
+            // aperture, ISO and lens were all dropped.
+            0x8769 if kind == 4 || kind == 13 => exif_ifd = u32_at(at).map(|v| v as usize),
             _ => {}
         }
     }
@@ -390,6 +393,26 @@ mod tests {
         t.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 60]);
         let c = read_tiff(&t).unwrap();
         assert_eq!(c.make, "Sony");
+        assert_eq!(c.exposure, Some([1, 60]));
+        assert_eq!(c.iso, 3200);
+    }
+
+    #[test]
+    fn an_exif_pointer_typed_as_a_directory_is_followed() {
+        // The same file with its pointer to the EXIF directory written as
+        // type 13 (IFD) rather than LONG, as TIFF/EP allows.
+        let mut t = b"MM\0\x2a\0\0\0\x08".to_vec();
+        t.extend_from_slice(&[0, 2]);
+        t.extend_from_slice(&[0x01, 0x0F, 0, 2, 0, 0, 0, 4]);
+        t.extend_from_slice(b"Sony");
+        t.extend_from_slice(&[0x87, 0x69, 0, 13, 0, 0, 0, 1, 0, 0, 0, 38]);
+        t.extend_from_slice(&[0, 0, 0, 0]);
+        t.extend_from_slice(&[0, 2]);
+        t.extend_from_slice(&[0x82, 0x9A, 0, 5, 0, 0, 0, 1, 0, 0, 0, 68]);
+        t.extend_from_slice(&[0x88, 0x27, 0, 3, 0, 0, 0, 1, 0x0C, 0x80, 0, 0]);
+        t.extend_from_slice(&[0, 0, 0, 0]);
+        t.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 60]);
+        let c = read_tiff(&t).unwrap();
         assert_eq!(c.exposure, Some([1, 60]));
         assert_eq!(c.iso, 3200);
     }

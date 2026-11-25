@@ -1387,9 +1387,13 @@ impl Document {
             // count is not known.
             let guess = self.drawn.map(|d| d + 1);
             if guess.is_none_or(|d| d + 1000 > OPEN_DRAWN) {
+                // Walked as deep as a file is opened with, not as deep as
+                // an edit is: copies drawn deeper than an edit counts but
+                // within what opens went uncounted, and the add went
+                // through to a file that then would not open.
                 let mut known = HashMap::new();
-                let reach = self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known);
-                if reach.is_some_and(|(_, draws)| draws > OPEN_DRAWN) {
+                let reach = self.drawn_reach(self.root, 0, OPEN_DRAWN_DEPTH, &mut known);
+                if reach.is_none_or(|(_, draws)| draws > OPEN_DRAWN) {
                     let _ = self.apply_inner(inverse);
                     return Err(DocError::TooMuchToDraw);
                 }

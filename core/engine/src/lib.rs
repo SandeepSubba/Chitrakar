@@ -668,20 +668,49 @@ impl Watermark {
             index: 0,
             node: Box::new(node),
         })?;
-        let mut mark = Surface::new(w, h);
+        // Drawn on a patch the size of the line and its shadow, not on a
+        // second picture the size of the export: that one cost sixteen
+        // bytes a pixel, and with it a 45-megapixel photograph could
+        // not be exported with a watermark at all.
+        let reach = size * 0.04 + size * 0.12 * 3.0 + 2.0;
+        let bx0 = (left - reach).floor().clamp(0.0, w as f32) as u32;
+        let by0 = (top - reach).floor().clamp(0.0, h as f32) as u32;
+        let bx1 = (left + tw + reach).ceil().clamp(0.0, w as f32) as u32;
+        let by1 = (top + th + reach).ceil().clamp(0.0, h as f32) as u32;
+        if bx1 <= bx0 || by1 <= by0 {
+            return Ok(());
+        }
+        let (bw, bh) = (bx1 - bx0, by1 - by0);
+        let mut mark = Surface::new(bw, bh);
         let full = ClipRect {
             x0: 0,
             y0: 0,
-            x1: w,
-            y1: h,
+            x1: bw,
+            y1: bh,
         };
-        chitrakar_render::render_region_at(&doc, &mut mark, full, Transform::default())?;
-        for (px, m) in surface.pixels.iter_mut().zip(&mark.pixels) {
-            let keep = 1.0 - m.a;
-            px.r = m.r + px.r * keep;
-            px.g = m.g + px.g * keep;
-            px.b = m.b + px.b * keep;
-            px.a = m.a + px.a * keep;
+        chitrakar_render::render_region_at(
+            &doc,
+            &mut mark,
+            full,
+            Transform {
+                e: -(bx0 as f32),
+                f: -(by0 as f32),
+                ..Default::default()
+            },
+        )?;
+        for row in 0..bh {
+            let at = ((by0 + row) * w + bx0) as usize;
+            let from = (row * bw) as usize;
+            for (px, m) in surface.pixels[at..at + bw as usize]
+                .iter_mut()
+                .zip(&mark.pixels[from..from + bw as usize])
+            {
+                let keep = 1.0 - m.a;
+                px.r = m.r + px.r * keep;
+                px.g = m.g + px.g * keep;
+                px.b = m.b + px.b * keep;
+                px.a = m.a + px.a * keep;
+            }
         }
         Ok(())
     }
@@ -1515,6 +1544,24 @@ impl Session {
                         }) =>
                 {
                     format!("Resize {}", name(id))
+                }
+                // A layer's outline and its placing changed together — an
+                // anchor dragged, which rewrites the path and where it
+                // sits — is an edit of that layer, not "Multiple edits".
+                many if {
+                    let one = |c: &Command| match c {
+                        Command::SetKind { id, .. } | Command::SetTransform { id, .. } => Some(*id),
+                        _ => None,
+                    };
+                    one(&many[0]).is_some() && many.iter().all(|c| one(c) == one(&many[0]))
+                } =>
+                {
+                    match &many[0] {
+                        Command::SetKind { id, .. } | Command::SetTransform { id, .. } => {
+                            format!("Edit {}", name(id))
+                        }
+                        _ => "Multiple edits".into(),
+                    }
                 }
                 many => match verb_of(&many[0]) {
                     Some(verb) if many.iter().all(|c| verb_of(c) == Some(verb)) => {
@@ -4316,6 +4363,14 @@ impl Session {
     /// there should go into.
     pub fn frame_at(&self, x: f32, y: f32) -> Option<NodeId> {
         chitrakar_render::frame_at(&self.doc, x, y).ok().flatten()
+    }
+
+    /// The frame under a point, looking through `passing` (the layers
+    /// being put down there).
+    pub fn frame_under(&self, x: f32, y: f32, passing: &[NodeId]) -> Option<NodeId> {
+        chitrakar_render::frame_under(&self.doc, x, y, passing)
+            .ok()
+            .flatten()
     }
 
     /// A document point in the coordinates a layer inside `id` is written
@@ -10717,12 +10772,28 @@ impl Session {
         // in sixteen bits: past that it is refused here, before a layer
         // is drawn — asked of the writer, it was said after nineteen
         // minutes of drawing them.
-        let records: usize = self
+        // Counted as the writer writes them: a group is its two records
+        // and what it holds; anything else — a frame among them, which
+        // goes as one picture of itself — is one. (Counted from every
+        // node, a frame was all its layers and the page was one too
+        // many: 32,767 layers were refused that the writer takes.)
+        let mut records = 0usize;
+        let mut walk: Vec<NodeId> = self
             .doc
-            .nodes()
-            .map(|(_, n)| if n.kind.holds_children() { 2 } else { 1 })
-            .sum::<usize>()
-            .saturating_sub(1);
+            .children_of(self.doc.root())
+            .map(|c| c.to_vec())
+            .unwrap_or_default();
+        while let Some(id) = walk.pop() {
+            match self.doc.node(id).map(|n| &n.kind) {
+                Ok(NodeKind::Group) => {
+                    records += 2;
+                    if let Ok(kids) = self.doc.children_of(id) {
+                        walk.extend_from_slice(kids);
+                    }
+                }
+                _ => records += 1,
+            }
+        }
         if records > i16::MAX as usize {
             return Err(EngineError::BadCommand(format!(
                 "it has about {records} layers and group ends to write, and a Photoshop file holds at most {}",
@@ -11169,6 +11240,29 @@ impl Session {
         )
     }
 
+    /// Whether a picture of `pw` × `ph` (drawn with `past` pixels more
+    /// each side) can be had for an export now: the surface it is drawn
+    /// on, the snapshot sharpening takes, and the eight-bit copy that is
+    /// encoded. Asked for and let go, the room is the allocator's to
+    /// hand straight back.
+    fn export_room(pw: u32, ph: u32, past: u32, sharpening: bool) -> bool {
+        let drawn = (pw as usize + 2 * past as usize) * (ph as usize + 2 * past as usize) * 16;
+        let out = pw as usize * ph as usize;
+        let bytes = drawn
+            .saturating_add(if sharpening { out * 16 } else { 0 })
+            .saturating_add(out * 4);
+        let mut room: Vec<u8> = Vec::new();
+        room.try_reserve_exact(bytes).is_ok()
+    }
+
+    /// Whether an export `width` × `height` can be made now, for the
+    /// export windows to say before rather than after the press: the
+    /// engine's memory is the browser's 4 GB less what the document
+    /// holds, far under the 100 megapixels a page may be.
+    pub fn export_fits(&self, width: u32, height: u32, sharpening: bool) -> bool {
+        chitrakar_doc::canvas_fits(width, height) && Self::export_room(width, height, 2, sharpening)
+    }
+
     /// Render and encode as PNG — used by export and tests.
     /// The page as a PNG, drawn as the canvas and the Export window draw
     /// it — with room past the page's edge, as every whole-page file now
@@ -11290,27 +11384,11 @@ impl Session {
         // already holding twenty-six photographs, the export's surfaces
         // could not be had and the engine stopped. Asked for and let go,
         // the room is the allocator's to hand straight back.
-        let surface_bytes = (pw + 2 * past) as usize * (ph + 2 * past) as usize * 16;
-        // A watermark is laid on through a surface of its own the size of
-        // the picture: left out of the count, a page that exported
-        // plainly stopped the engine with one asked for.
-        let surfaces = if self.output_watermark.is_some() {
-            3
-        } else {
-            2
-        };
-        let mut room: Vec<u8> = Vec::new();
-        if room
-            .try_reserve_exact(
-                surface_bytes.saturating_mul(surfaces) + pw as usize * ph as usize * 4,
-            )
-            .is_err()
-        {
+        if !Self::export_room(pw, ph, past, self.output_sharpen > 0.0) {
             return Err(EngineError::BadCommand(format!(
                 "there is not enough memory left to make a picture of {pw} × {ph}; remove some layers, or make it smaller"
             )));
         }
-        drop(room);
         let mut surface = Surface::new(pw + 2 * past, ph + 2 * past);
         chitrakar_render::render_region_at(
             &self.doc,
@@ -11334,14 +11412,19 @@ impl Session {
             },
         )?;
         if past > 0 {
-            let mut cut = Surface::new(pw, ph);
+            // Cut back where it lies: each row moves only towards the
+            // start, so the drawn surface is its own cut, without a
+            // second one the export's size beside it.
             for row in 0..ph {
                 let from = ((row + past) * surface.width + past) as usize;
                 let to = (row * pw) as usize;
-                cut.pixels[to..to + pw as usize]
-                    .copy_from_slice(&surface.pixels[from..from + pw as usize]);
+                surface.pixels.copy_within(from..from + pw as usize, to);
             }
-            surface = cut;
+            surface.pixels.truncate((pw * ph) as usize);
+            surface.pixels.shrink_to_fit();
+            surface.width = pw;
+            surface.height = ph;
+            surface.wanted = None;
         }
         Ok(surface)
     }
@@ -25280,6 +25363,27 @@ mod tests {
             ]))
             .unwrap();
         assert_eq!(session.history_labels().0.last().unwrap(), "Multiple edits");
+
+        // A layer's outline and placing together, as an anchor's drag
+        // writes them, is an edit of that layer.
+        let kind = session.doc.node(c).unwrap().kind.clone();
+        let transform = session.doc.node(c).unwrap().transform;
+        session
+            .apply(Command::Batch(vec![
+                Command::SetKind {
+                    id: c,
+                    kind: Box::new(kind),
+                },
+                Command::SetTransform {
+                    id: c,
+                    transform: Transform {
+                        e: transform.e + 1.0,
+                        ..transform
+                    },
+                },
+            ]))
+            .unwrap();
+        assert_eq!(session.history_labels().0.last().unwrap(), "Edit c");
     }
 
     /// What is picked is what is copied: several layers go on the

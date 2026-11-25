@@ -105,9 +105,14 @@ if (typeof document !== "undefined") {
       if (!numberBox(e.target)) return;
       if (e.key === "Enter") settle(e.target);
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") wholly.add(e.target);
-      // Moving the caret lets go of the whole; a modifier, or Ctrl+C
-      // after Ctrl+A, does not ("7,5" typed then was 75).
-      else if (e.key.length > 1 && !["Shift", "Control", "Meta", "Alt"].includes(e.key) && !e.ctrlKey && !e.metaKey)
+      // Moving the caret lets go of the whole — with Ctrl or ⌘ held too
+      // (Ctrl+End, ⌘→) — but a modifier alone, or Ctrl+C after Ctrl+A,
+      // does not ("7,5" typed then was 75).
+      else if (
+        e.key.length > 1 &&
+        !["Shift", "Control", "Meta", "Alt"].includes(e.key) &&
+        (!(e.ctrlKey || e.metaKey) || /^(Arrow|Home|End|Page)/.test(e.key))
+      )
         wholly.delete(e.target);
     },
     true,

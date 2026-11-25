@@ -61,3 +61,50 @@ export function chipKeys(forget: () => void, rename?: () => void) {
     }
   };
 }
+
+/** A finger's way to forget a chip. Alt-click is a keyboard's, and the
+ * latched Alt of a touch screen sits on the bar, under the scrim of the
+ * develop and export windows, so a kept preset or setup there could not
+ * be let go of by touch at all: held for half a second, the chip asks,
+ * and the tap that ends the hold gives nothing. */
+// One finger holds one chip at a time, and the hold outlives the render
+// it began in (the handlers below are made afresh on each), so its state
+// is kept here rather than in their closure.
+let timer: ReturnType<typeof setTimeout> | undefined;
+let held = false;
+let at = [0, 0];
+const stop = () => {
+  if (timer !== undefined) clearTimeout(timer);
+  timer = undefined;
+};
+export function chipHold(name: string, forget: () => void) {
+  return {
+    onPointerDown: (e: React.PointerEvent<HTMLElement>) => {
+      held = false;
+      stop();
+      if (e.pointerType === "mouse") return;
+      at = [e.clientX, e.clientY];
+      timer = setTimeout(() => {
+        timer = undefined;
+        held = true;
+        if (confirm(`Forget "${name}"?`)) forget();
+      }, 550);
+    },
+    onPointerMove: (e: React.PointerEvent<HTMLElement>) => {
+      // A finger that slides is scrolling the row, not holding the chip.
+      if (timer !== undefined && Math.hypot(e.clientX - at[0], e.clientY - at[1]) > 10) stop();
+    },
+    onPointerUp: stop,
+    onPointerCancel: stop,
+    onContextMenu: (e: React.MouseEvent<HTMLElement>) => {
+      // The system's own menu for a long press (Android's) is not this.
+      if (timer !== undefined || held) e.preventDefault();
+    },
+    onClickCapture: (e: React.MouseEvent<HTMLElement>) => {
+      if (!held) return;
+      held = false;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+  };
+}

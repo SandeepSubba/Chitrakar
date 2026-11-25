@@ -1776,9 +1776,19 @@ impl Page {
                                         num(off),
                                         path_ops(&moved)
                                     );
+                                } else if off > 0.0 {
+                                    // A band inside as thick as the shape
+                                    // leaves no shape to move: it covers
+                                    // all of it, as the engine draws it —
+                                    // the edge stroked twice as wide, cut
+                                    // to the shape. Left out, the PDF
+                                    // showed the fill alone.
+                                    let _ = writeln!(
+                                        self.content,
+                                        "q\n{path}W n\n{} w\n{path}S\nQ",
+                                        num(stroke.width * 2.0)
+                                    );
                                 }
-                                // A band as thick as the shape leaves no
-                                // shape to move, and nothing to draw.
                             }
                             // A centred line, ending and turning the way
                             // the renderer draws it. PDF numbers the same
@@ -2881,7 +2891,16 @@ fn num(v: f32) -> String {
     if v == 0.0 {
         return "0".to_string(); // and not "-0"
     }
-    let s = format!("{v:.4}");
+    // Four places, and more under one so a small number keeps its
+    // figures: a layer scaled by 0.001477 and turned ten degrees was
+    // written 0.0015 0.0003, and came out of the PDF 4% larger and
+    // turned eleven.
+    let places = if v.abs() >= 1.0 {
+        4
+    } else {
+        (4 + (-v.abs().log10()).ceil() as usize).min(12)
+    };
+    let s = format!("{v:.places$}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() || s == "-" {
         "0".to_string()
@@ -3078,6 +3097,51 @@ mod tests {
     use super::*;
     use flate2::read::ZlibDecoder;
     use std::io::Read;
+
+    /// A border inside as thick as the shape covers it all, as the
+    /// engine draws it: the edge stroked twice as wide, cut to itself.
+    #[test]
+    fn an_inside_border_as_wide_as_the_shape_is_drawn() {
+        let mut doc = Document::new(200, 80, chitrakar_color::ColorMode::Rgb);
+        let mut bar = shape(
+            "bar",
+            VectorShape::Rect {
+                width: 100.0,
+                height: 20.0,
+                radius: 0.0,
+            },
+            None,
+        );
+        if let NodeKind::Vector { stroke, .. } = &mut bar.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: RED,
+                width: 30.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: Some(chitrakar_doc::StrokeAlign::Inside),
+            });
+        }
+        add(&mut doc, bar, [10.0, 10.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        let content = page_content(&pdf, 0);
+        assert!(content.contains("W n\n60 w\n"), "{content}");
+    }
+
+    #[test]
+    fn a_small_number_keeps_its_figures() {
+        assert_eq!(num(0.001_477), "0.001477");
+        assert_eq!(num(0.000_26), "0.00026");
+        assert_eq!(num(0.012_34), "0.01234");
+        assert_eq!(num(0.5), "0.5");
+        assert_eq!(num(-1.25), "-1.25");
+        assert_eq!(num(12.345_678), "12.3457");
+        assert_eq!(num(-0.0), "0");
+    }
 
     /// A copy of a blended layer that goes as pixels lands by the blend
     /// it copies, as the engine brings it down where it stands. Drawn by

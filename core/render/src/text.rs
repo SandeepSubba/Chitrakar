@@ -1945,6 +1945,7 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
     } else {
         0.0
     };
+    let track = tracking(spec, scale);
     let mut out = Vec::new();
     let mut para_at = 0usize; // where the paragraph begins in the block
     for paragraph in spec.text.split('\n') {
@@ -1967,11 +1968,22 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
             } else {
                 shape_line_in(" ", para_at + pos - 1, spec, scale, way).1
             };
+            // Tracking follows every letter but a line's last, so a word
+            // and the space before it bring their own after the line's
+            // last letter and after the space: measured without it, a
+            // tracked paragraph wrapped past its width and was right- and
+            // centre-aligned against the wider block.
+            let joined = space
+                + if word.is_empty() {
+                    track
+                } else {
+                    w + 2.0 * track
+                };
             if first {
                 used = w;
                 first = false;
-            } else if used + space + w <= limit {
-                used += space + w;
+            } else if used + joined <= limit {
+                used += joined;
             } else {
                 out.push((paragraph[start..pos - 1].to_string(), para_at + start));
                 start = pos;
@@ -2828,6 +2840,22 @@ mod tests {
         assert_eq!(set(&s).height, plain.height);
         s.paragraph_spacing = -3.0;
         assert_eq!(set(&s).height, plain.height);
+    }
+
+    #[test]
+    fn a_tracked_paragraph_wraps_inside_its_width() {
+        let mut s = spec("The quick brown fox jumps over the lazy dog", 20.0);
+        s.width = 200.0;
+        s.letter_spacing = 0.1;
+        let lines = lines_of(&s, 1.0);
+        assert!(lines.len() > 1);
+        for (line, at) in &lines {
+            let w = line_width(line, *at, &s, 1.0);
+            assert!(
+                w <= 200.0 + 0.01 || !line.contains(' '),
+                "{line:?} is {w} wide, past the 200 it wraps at"
+            );
+        }
     }
 
     #[test]

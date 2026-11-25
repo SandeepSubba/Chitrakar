@@ -28,7 +28,7 @@
  * is unavailable is more useful than its absence.
  */
 
-import { chipKeys } from "./chipKeys";
+import { chipHold, chipKeys } from "./chipKeys";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
 import { watermarkJson, type ExportArea, type ExportFormat, type ExportSetup, type Prefs } from "./prefs";
@@ -275,6 +275,16 @@ export function ExportDialog({
    * worked out in double, a long edge of 175 said 122 across and wrote 123. */
   const px = (side: number, k: number) =>
     Math.max(1, Math.round(Math.fround(Math.fround(side) * Math.fround(Math.max(LEAST_SCALE, k)))));
+  /** A picture drawn whole at the size it goes out (the formats that
+   * are pixels), which the engine's memory has to hold at once. */
+  const drawnWhole = format === "png" || format === "jpeg" || format === "webp" || format === "tiff";
+  const sharpening = (format === "png" || format === "jpeg" || format === "webp") && prefs.exportSharpen > 0;
+  /** Whether the engine has room for a picture this size now. The
+   * browser gives it 4 GB, less what the document holds, which is far
+   * under the hundred megapixels a page may be: a 48-megapixel photo
+   * with a watermark, a Set's @3x and a long edge "as large as it goes"
+   * were all offered here and then refused for memory once pressed. */
+  const roomFor = (w: number, h: number) => !drawnWhole || session.export_fits(w, h, sharpening);
   const heldScale = (w: number, h: number) => {
     let k = Math.min(
       MOST_SCALE,
@@ -290,6 +300,8 @@ export function ExportDialog({
       if (across * down <= 100_000_000) break;
       k *= 1 - 1 / Math.max(across, down);
     }
+    // And as large as the memory left will draw.
+    for (let i = 0; i < 40 && !roomFor(px(w, k), px(h, k)); i++) k *= 0.95;
     return k;
   };
   /** The one scale everything shown is worked out at; the set's other
@@ -375,6 +387,11 @@ export function ExportDialog({
       return `That comes to ${largestW * most} × ${largestH * most}, which is past what can be held at once (${side.toLocaleString("en")} a side${
         format === "webp" ? " in a WebP" : ""
       }, 100 megapixels).`;
+    }
+    if (!roomFor(largestW * most, largestH * most)) {
+      return `That comes to ${largestW * most} × ${largestH * most}, more than there is memory left to draw at once with this document open. Make it smaller (a long edge, or a lower scale)${
+        set ? ", or export one size at a time" : ""
+      }.`;
     }
     return null;
   };
@@ -745,7 +762,12 @@ export function ExportDialog({
                 className={inHand ? "preset setup active" : "preset setup"}
                 aria-pressed={inHand}
                 aria-label={`Setup ${st.name}`}
-                title={`${st.name} — alt-click or Delete to forget it`}
+                title={`${st.name} — alt-click, Delete or a long press to forget it`}
+                {...chipHold(st.name, () =>
+                  setPrefs({
+                    exportSetups: prefs.exportSetups.filter((o) => o.name !== st.name),
+                  }),
+                )}
                 onKeyDown={chipKeys(() =>
                   setPrefs({
                     exportSetups: prefs.exportSetups.filter((o) => o.name !== st.name),
