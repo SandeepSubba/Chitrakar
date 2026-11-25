@@ -69,6 +69,16 @@ where
     })
 }
 
+/// Whether none of the originals is one a layer uses — left out then, as
+/// none at all is: written as `{}` once its last layer was deleted, the
+/// manifest saved again without it, and a save was not its reopening's.
+fn no_originals_in_use<V>(map: &BTreeMap<String, V>) -> bool {
+    IN_USE.with(|keep| match &*keep.borrow() {
+        Some(keep) => !map.keys().any(|id| keep.originals.contains(id)),
+        None => map.is_empty(),
+    })
+}
+
 fn originals_in_use<V, S>(map: &BTreeMap<String, V>, out: S) -> Result<S::Ok, S::Error>
 where
     V: serde::Serialize,
@@ -304,6 +314,19 @@ pub struct Document {
     /// holds them to it.
     #[serde(skip)]
     parents: HashMap<NodeId, NodeId>,
+    /// Whether `parents` has been built (a document made here starts
+    /// with it; one read from a file builds it at its first change).
+    /// Told by a flag, not by its length against the layers': a file
+    /// with a layer nobody holds never matched, and was rebuilt on every
+    /// question.
+    #[serde(skip)]
+    parents_built: bool,
+    /// The map for a document read from a file and not yet changed, made
+    /// at the first question and kept: built afresh for every question,
+    /// a click on a just-opened document of five thousand layers took
+    /// five seconds.
+    #[serde(skip)]
+    parents_read: std::sync::OnceLock<HashMap<NodeId, NodeId>>,
     #[serde(skip)]
     cmyk_profile_bytes: Option<Vec<u8>>,
     #[serde(skip)]
@@ -358,7 +381,7 @@ pub struct Document {
     /// Additive, and left out of the manifest when there are none.
     #[serde(
         default,
-        skip_serializing_if = "BTreeMap::is_empty",
+        skip_serializing_if = "no_originals_in_use",
         serialize_with = "originals_in_use"
     )]
     originals: BTreeMap<String, Original>,
@@ -632,6 +655,8 @@ impl Document {
             copied: Some(std::collections::HashSet::new()),
             drawn: None,
             parents: HashMap::new(),
+            parents_built: true,
+            parents_read: std::sync::OnceLock::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
             guides: Vec::new(),
@@ -828,7 +853,11 @@ impl Document {
             // so it is built here, once, from the child lists. Interior
             // mutability rather than `&mut self`, since asking a parent
             // is a read.
-            return self.parents_from_children().get(&id).copied();
+            return self
+                .parents_read
+                .get_or_init(|| self.parents_from_children())
+                .get(&id)
+                .copied();
         }
         self.parents.get(&id).copied()
     }
@@ -837,7 +866,7 @@ impl Document {
     /// root has a parent, so a map with fewer entries than that is one
     /// that was never filled in.
     fn parents_stale(&self) -> bool {
-        self.parents.len() + 1 != self.nodes.len()
+        !self.parents_built
     }
 
     /// The parent map as the child lists say it is.
@@ -856,7 +885,11 @@ impl Document {
     /// child list, so that what the change keeps in step is the truth.
     fn settle_parents(&mut self) {
         if self.parents_stale() {
-            self.parents = self.parents_from_children();
+            self.parents = self
+                .parents_read
+                .take()
+                .unwrap_or_else(|| self.parents_from_children());
+            self.parents_built = true;
         }
     }
 

@@ -459,8 +459,17 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         let Some(id) = name.strip_prefix(ORIGINALS) else {
             continue;
         };
+        // One that cannot be read is left out, as a picture's is: the
+        // layer keeps its development and says its raw file is missing.
+        // A flipped bit in a 40-megabyte raw refused the whole document.
         let mut bytes = Vec::new();
-        zip.by_name(written)?.read_to_end(&mut bytes)?;
+        let Ok(mut entry) = zip.by_name(written) else {
+            continue;
+        };
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
+        drop(entry);
         // Kept only when they are the bytes the manifest names: a file
         // that has been tampered with is not developed from.
         doc.restore_original_bytes(id, bytes);
@@ -494,9 +503,11 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
     }
     if let Ok(mut entry) = zip.by_name(&named(CMYK_PROFILE_PATH)) {
         let mut icc = Vec::new();
-        entry.read_to_end(&mut icc)?;
-        // Best effort: a profile that no longer parses is dropped.
-        let _ = doc.set_cmyk_profile(icc);
+        // Best effort: a profile that cannot be read, or no longer
+        // parses, is dropped rather than the document.
+        if entry.read_to_end(&mut icc).is_ok() {
+            let _ = doc.set_cmyk_profile(icc);
+        }
     }
     let mut fonts = Vec::new();
     for font in manifest.fonts {
@@ -506,7 +517,10 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
             continue;
         };
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
+        // And one that cannot be read, the same.
+        if entry.read_to_end(&mut bytes).is_err() {
+            continue;
+        }
         fonts.push((font.name, bytes));
     }
     Ok(Opened { doc, fonts })

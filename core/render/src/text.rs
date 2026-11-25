@@ -704,11 +704,16 @@ fn shaped(
     buffer.push_str(&piece.replace('\t', " "));
     // A stretch the bidirectional algorithm reads leftward is shaped
     // that way, whatever its letters: a Latin word inside one is not cut
-    // out of it, and its brackets are mirrored. Anything else is left to
-    // the shaper's own guess, which is how it always was.
-    if rtl {
-        buffer.set_direction(rustybuzz::Direction::RightToLeft);
-    }
+    // out of it, and its brackets are mirrored. And one it reads
+    // rightward is shaped rightward: left to the shaper's own guess,
+    // Arabic-Indic digits (Arabic script, read left to right) were set
+    // right to left, "١٢٣" drawn "٣٢١", and the European digits sharing
+    // their run reversed with them.
+    buffer.set_direction(if rtl {
+        rustybuzz::Direction::RightToLeft
+    } else {
+        rustybuzz::Direction::LeftToRight
+    });
     let off =
         |tag: &[u8; 4]| rustybuzz::Feature::new(rustybuzz::ttf_parser::Tag::from_bytes(tag), 0, ..);
     let features = if ligatures {
@@ -3106,6 +3111,21 @@ mod tests {
     /// italic the face has no oblique for, set along a ring so each glyph
     /// is turned, at two sizes and a fraction of a pixel off the grid.
     /// A tab is set as a space, not as the box a missing glyph is.
+    /// Arabic-Indic digits read left to right, as every number does:
+    /// left to the shaper's guess by their script they were set "٣٢١".
+    #[test]
+    fn arabic_indic_digits_are_set_left_to_right() {
+        let fonts = bundled();
+        for digits in ["١٢٣", "۱۲۳", "2026 - ٢٠٢٦"] {
+            let out = shaped(fonts, &fonts.face, digits, true, false);
+            let clusters: Vec<u32> = out.iter().map(|g| g.cluster).collect();
+            assert!(
+                clusters.windows(2).all(|w| w[0] <= w[1]),
+                "{digits}: {clusters:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_tab_is_set_as_a_space() {
         let fonts = bundled();

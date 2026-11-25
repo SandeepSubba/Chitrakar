@@ -2143,6 +2143,24 @@ impl Session {
                 "the lowest of those layers is clipped to the one under it and the others are not: group them with the layer it is clipped to, or unclip it first".into(),
             ));
         }
+        // All clipped, but to different layers (others between them): the
+        // group can be clipped to one only, as Merge says.
+        if all_clipped {
+            let base_of = |id: NodeId| -> Option<NodeId> {
+                let at = siblings.iter().position(|s| *s == id)?;
+                siblings[..at]
+                    .iter()
+                    .rev()
+                    .find(|s| self.doc.node(**s).is_ok_and(|n| !n.clipped))
+                    .copied()
+            };
+            let first = base_of(ordered[0]);
+            if ordered.iter().any(|id| base_of(*id) != first) {
+                return Err(EngineError::BadCommand(
+                    "those layers are clipped to different layers, and a group can be clipped to only one: group each with the layer it is clipped to".into(),
+                ));
+            }
+        }
         let group_id = self.doc.peek_next_id();
         let carried = self.comps_with_group(group_id, &ordered);
         let mut group = Node::group(name);
@@ -11362,16 +11380,18 @@ impl Session {
     /// on, the snapshot sharpening takes, and the eight-bit copy that is
     /// encoded. Asked for and let go, the room is the allocator's to
     /// hand straight back.
-    fn export_room(pw: u32, ph: u32, past: u32, sharpening: bool) -> bool {
+    fn export_room(pw: u32, ph: u32, past: u32, sharpening: bool, deep: usize) -> bool {
         let drawn = (pw as usize + 2 * past as usize) * (ph as usize + 2 * past as usize) * 16;
         let out = pw as usize * ph as usize;
-        // The surface twice over: once to draw on, and once more for what
-        // drawing it asks along the way — a layer's shadow, a group drawn
-        // apart, a filter's copy. Counted once, a page with a shadow was
-        // let through at a size whose drawing then ran the engine out of
-        // memory, which stops it rather than the export.
+        // The surface once to draw on, once more for what drawing it asks
+        // along the way, and once again for every surface the document
+        // stacks on it at once (`surfaces_deep`): a group drawn apart, a
+        // filter's copy, a shadow and its blur. Counted as two whatever
+        // the document, nested groups with shadows were let through at a
+        // size whose drawing ran the engine out of memory, which stops it
+        // rather than the export.
         let bytes = drawn
-            .saturating_mul(2)
+            .saturating_mul(2 + deep)
             .saturating_add(if sharpening { out * 16 } else { 0 })
             .saturating_add(out * 4);
         let mut room: Vec<u8> = Vec::new();
@@ -11382,11 +11402,65 @@ impl Session {
     /// export windows to say before rather than after the press: the
     /// engine's memory is the browser's 4 GB less what the document
     /// holds, far under the 100 megapixels a page may be.
-    pub fn export_fits(&self, width: u32, height: u32, sharpening: bool) -> bool {
-        let scale = (width as f32 / self.doc.meta.width.max(1) as f32)
-            .max(height as f32 / self.doc.meta.height.max(1) as f32);
+    pub fn export_fits(&self, width: u32, height: u32, scale: f32, sharpening: bool) -> bool {
+        // At the scale the export is drawn at, which a region's size alone
+        // does not say: a picked badge at sixteen times was counted at
+        // one, and its shadow's reach with it.
+        let scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            (width as f32 / self.doc.meta.width.max(1) as f32)
+                .max(height as f32 / self.doc.meta.height.max(1) as f32)
+        };
         chitrakar_doc::canvas_fits(width, height)
-            && Self::export_room(width, height, self.export_past(scale), sharpening)
+            && Self::export_room(
+                width,
+                height,
+                self.export_past(scale),
+                sharpening,
+                self.surfaces_deep(),
+            )
+    }
+
+    /// How many surfaces the size of what is drawn the document can stack
+    /// at once beyond the one it is drawn on: down its deepest branch, a
+    /// group (drawn apart) or a filter (a copy) one each, effects two (a
+    /// shadow and its blur).
+    fn surfaces_deep(&self) -> usize {
+        fn deep(doc: &Document, id: NodeId, level: usize) -> usize {
+            let Ok(node) = doc.node(id) else { return 0 };
+            if level > 256 {
+                return 0;
+            }
+            let own = if node.effects.is_empty() { 0 } else { 2 };
+            match &node.kind {
+                NodeKind::Group | NodeKind::Artboard { .. } => {
+                    let inner = doc
+                        .children_of(id)
+                        .map(|kids| {
+                            kids.iter()
+                                .map(|k| deep(doc, *k, level + 1))
+                                .max()
+                                .unwrap_or(0)
+                        })
+                        .unwrap_or(0);
+                    1 + own + inner
+                }
+                NodeKind::Instance { of, .. } => 1 + own + deep(doc, *of, level + 1),
+                NodeKind::Filter(_) => 1 + own,
+                _ => own,
+            }
+        }
+        let root = self.doc.root();
+        self.doc
+            .children_of(root)
+            .map(|kids| {
+                kids.iter()
+                    .map(|k| deep(&self.doc, *k, 1))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
     }
 
     /// How far past its edge an export at `scale` is drawn: as far as a
@@ -11514,7 +11588,13 @@ impl Session {
         // already holding twenty-six photographs, the export's surfaces
         // could not be had and the engine stopped. Asked for and let go,
         // the room is the allocator's to hand straight back.
-        if !Self::export_room(pw, ph, past, self.output_sharpen > 0.0) {
+        if !Self::export_room(
+            pw,
+            ph,
+            past,
+            self.output_sharpen > 0.0,
+            self.surfaces_deep(),
+        ) {
             return Err(EngineError::BadCommand(format!(
                 "there is not enough memory left to make a picture of {pw} × {ph}; remove some layers, or make it smaller"
             )));

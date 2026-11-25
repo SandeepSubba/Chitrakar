@@ -28,7 +28,15 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // link became a file of its own and the document it named kept the
     // old contents.
     let path = match fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
+        Ok(m) if m.file_type().is_symlink() => match fs::canonicalize(path) {
+            Ok(p) => p,
+            // A link to nothing yet: written where it points, which then
+            // is something.
+            Err(_) => {
+                let to = fs::read_link(path)?;
+                path.parent().map_or(to.clone(), |dir| dir.join(&to))
+            }
+        },
         _ => path.to_path_buf(),
     };
     let path = path.as_path();
@@ -48,6 +56,23 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
         {
             use std::os::unix::fs::MetadataExt;
             if m.is_file() && m.nlink() > 1 {
+                // Written whole beside it first, so a disk with no room
+                // says so before the document is touched (truncated and
+                // then refused, a hard-linked document was lost); then let
+                // go of, and the room it took is the room the document
+                // needs.
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_nanos())
+                    .unwrap_or(0);
+                let trial = path.with_file_name(format!(".chitrakar-{}-{stamp}.part", std::process::id()));
+                let tried = (|| {
+                    let mut f = fs::File::create(&trial)?;
+                    f.write_all(bytes)?;
+                    f.sync_all()
+                })();
+                let _ = fs::remove_file(&trial);
+                tried?;
                 let mut file = fs::OpenOptions::new().write(true).truncate(true).open(path)?;
                 file.write_all(bytes)?;
                 return file.sync_all();
@@ -69,10 +94,16 @@ pub fn write_whole(path: &Path, bytes: &[u8]) -> io::Result<()> {
         let mut file = fs::File::create(&part)?;
         file.write_all(bytes)?;
         file.sync_all()?;
-        // It takes the old one's permissions: a private file came out
-        // readable by everyone.
+        // It takes the old one's permissions, and its group: a private
+        // file came out readable by everyone, and a shared one out of
+        // its group's reach.
         if let Some(m) = &was {
             fs::set_permissions(&part, m.permissions())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let _ = std::os::unix::fs::chown(&part, Some(m.uid()), Some(m.gid()));
+            }
         }
         Ok(())
     })();

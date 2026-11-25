@@ -1066,8 +1066,8 @@ impl WasmSession {
     /// Whether an export of `width` × `height` can be made now, with
     /// the memory the document leaves (sharpened or not): asked by the
     /// export windows before the press rather than said after it.
-    pub fn export_fits(&self, width: u32, height: u32, sharpening: bool) -> bool {
-        self.inner.export_fits(width, height, sharpening)
+    pub fn export_fits(&self, width: u32, height: u32, scale: f32, sharpening: bool) -> bool {
+        self.inner.export_fits(width, height, scale, sharpening)
     }
 
     /// Sharpen what goes out for the screen (0 none, 0.3, 0.6, 1); the

@@ -164,7 +164,10 @@ without reading anything else.*
      before it, a pinch zooming the whole interface. The fifty-first: a large
      export with a shadow stopping the engine, a path at the count
      blanking the editor, Save making a private file public, a comp
-     putting a layer off the page.
+     putting a layer off the page. The fifty-second: nested
+     groups' exports stopping the engine, Arabic-Indic digits set
+     backwards, Ctrl+J misaligning a photograph's copy, a failing Save
+     emptying a hard-linked file, a fine dash stopping the engine.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13093,6 +13096,80 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-second audit (November 2026).** Its check of round 51: an
+  export "as large as it goes" of a page with groups, shadows or filters
+  nested was still offered at a size whose drawing stopped the engine,
+  and a picked badge's export was counted at the page's scale (the room
+  asked is one surface more for each one the document stacks down its
+  deepest branch, `surfaces_deep`, at the scale the export is drawn
+  at); Ctrl+wheel at a page zoom of 90%, 110% or 175% zoomed twice over
+  a notch (anything from 50 is a notch); a failing Save over a hard-
+  linked file emptied it (written whole beside it first), lost the
+  file's group, and refused a link to nothing; a Ctrl+Z while Paste
+  style's development ran joined the development to the step before
+  (joined only if the paste is still the last); an SVG named .xml with a
+  long comment or a prefix, and a DNG whose directory comes after its
+  picture, were read by their first kilobyte (by all of it); keeping a
+  201st brush, setup or preset did nothing without a word; grouping
+  layers clipped to different layers clipped them all to one (refused,
+  as Merge refuses). Limits: a finger on a curve handle near the next
+  anchor can take the anchor; a face name with ; } < > comes back from
+  our SVG in the bundled face; a band wider than an ellipse or a rounded
+  rectangle shows a hole in Chromium's drawing of our SVG.
+  Its files pass, the .chitra format over time and at size: a press on
+  two thousand picked layers took 25 s, every layer asked against every
+  moving one by a search of the whole list (`relatedToAny`, once a
+  drag); a document read from a file built its parent map afresh for
+  every question, five seconds a click at five thousand layers (built
+  once and kept, `parents_read`); a dash a thousandth long on a small
+  shape five wide stopped the engine, from a file or a pasted SVG (finer
+  than a twentieth of a pixel is solid); one flipped bit in a raw
+  original, a font or the press profile refused the whole document (each
+  is left out, as a picture is); a save after a raw layer was deleted
+  wrote `"originals": {}` and the next did not (`no_originals_in_use`).
+  Old files from September's, October's and November's code open with
+  everything kept, and the current files save byte for byte. Limits: a
+  root that is not a group, or a layer listed under a shape, opens
+  without a note; the shipped faces travel inside every file that uses
+  them; a picture past 150 megapixels (a 151-megapixel camera's) saves
+  and does not come back; a long text block is slow to edit, and a run
+  size of 100,000 from a file is not held down; HTML on the clipboard is
+  not read; a file of absurd numbers opens slowly; redoing a placed SVG
+  of twenty thousand shapes takes a minute.
+  Its painting pass: a mouse stroke's width came from its speed in the
+  document's units, so at Fit a stroke was a quarter of the width asked
+  (in the screen's); the vector Brush kept pressure only where the line
+  bent, so a straight stroke lost its swell (`withWidths` keeps the
+  anchors a width needs); a stroke begun in a second frame went into
+  the first frame's paint layer, where it was cut away. Limits: a clone
+  whose source is further than a thousand device pixels outside the
+  window, and the far part of a long heal, are not drawn zoomed in or in
+  a region's export; a stroke going back over itself costs more with its
+  length; paint layers are drawn afresh every frame, so a long painting
+  session slows zooming and sliders; a pen's pressure of nought falls
+  back to the mouse's width; a Shift-line by pen ends at full width;
+  Clone is not aligned; a mask brushed with a translucent ink is brushed
+  whole; a small soft brush never lays full ink.
+  Its interface pass, a print designer, a retoucher and a student on a
+  touch laptop: Arabic-Indic and Persian digits were set backwards, and
+  European digits in their line with them (a run read rightward is shaped
+  rightward); a CMYK document without a press profile wrote an RGB PDF
+  without a word (the window says so); Ctrl+J nudged a photograph's copy
+  twelve pixels, misaligning every duplicate-and-retouch (pictures,
+  paint, adjustments and filters are copied in place); on an inverted
+  brushed mask the brush did nothing and the eraser revealed (swapped,
+  as on any other mask). Limits: artwork not wholly inside a frame stays
+  on the page and out of the frame's PDF, and Layer › Add and Place with
+  a frame picked land on the page; Heal takes the colour under its whole
+  stroke, blemish and all; the first draft of a large photograph lands
+  seconds after it opens; the frames' PDF takes the Export window's last
+  bleed; black text in a CMYK document is four-colour; ink sliders are
+  fractions with no box; swatches cannot be named and nothing spot-like
+  reaches a PDF; the PDF is not PDF/X and embeds its fonts whole; there
+  is no Linear Light; only Dodge and Burn start with a hidden mask; 800%
+  is drawn smoothed; Shift+] sizes rather than hardens; a PDF refused
+  offline needs a reload; the subject window offers its download
+  offline; the interface is English and left to right.
   **A fifty-first audit (November 2026).** Its check of round 50: the
   export's room, halved, no longer covered what drawing a shadow asks
   along the way, and a large export with one stopped the engine (the

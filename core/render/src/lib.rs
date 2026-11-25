@@ -6367,7 +6367,12 @@ pub fn dashed_rings(
                 .sum::<f64>()
         })
         .sum();
-    if !(length.is_finite() && length / per_dash <= MOST_DASHES) {
+    // And a pattern finer than a twentieth of a pixel on average is solid
+    // whatever the line's length: dashes of a thousandth on a small
+    // rectangle were few enough to walk, but each, five wide, lay over
+    // thousands of the others, and the index of them ran the engine out
+    // of memory.
+    if !(length.is_finite() && length / per_dash <= MOST_DASHES && per_dash >= 0.05) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -16018,6 +16023,20 @@ mod tests {
             ramp_color(&stops, 1.0).a < 1e-5,
             "the clear end shows nothing"
         );
+    }
+
+    /// A pattern finer than a twentieth of a pixel is a solid line, on a
+    /// small shape as on a long one: walked, each of its dashes lay over
+    /// thousands of the others, and the engine ran out of memory.
+    #[test]
+    fn a_pattern_finer_than_a_pixel_is_solid() {
+        let rect = VectorShape::Rect {
+            width: 8.0,
+            height: 6.0,
+            radius: 0.0,
+        };
+        assert!(dashed_rings(&rect, &[0.001], 0.0, 0.0).is_empty());
+        assert!(!dashed_rings(&rect, &[1.0], 0.0, 0.0).is_empty());
     }
 
     /// A dotted line is dashes of nothing with gaps between: walked dash

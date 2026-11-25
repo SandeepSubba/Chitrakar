@@ -97,6 +97,7 @@ import {
   sliderToKelvin,
   stepKelvin,
   withDefaults,
+  KEPT_MOST,
 } from "./develop";
 import { GpuFrames } from "./gpuFrames";
 import { PreferencesDialog, type PrefGroup } from "./PreferencesDialog";
@@ -435,6 +436,39 @@ function colorUnder(
  * hundreds of points at screen resolution, which renders the same and
  * cannot be edited by hand; this keeps the shape within `tol` of what was
  * drawn and leaves a handful of anchors to grab afterwards. */
+/** The anchors a stroke keeps, with the ones its pressure needs added
+ * back: kept only where its line bends, a straight stroke pressed light,
+ * heavy and light again was two anchors and a uniform line. Wherever a
+ * width departs by more than a tenth from the straight run between the
+ * kept anchors either side, the furthest is kept as well, until none
+ * does. */
+function withWidths(kept: number[], widths: number[]): number[] {
+  if (widths.length === 0) return kept;
+  const out: number[] = [];
+  const between = (a: number, b: number) => {
+    let worst = -1;
+    let far = 0.1;
+    for (let i = a + 1; i < b; i++) {
+      const t = (i - a) / (b - a);
+      const line = (widths[a] ?? 1) + ((widths[b] ?? 1) - (widths[a] ?? 1)) * t;
+      const off = Math.abs((widths[i] ?? 1) - line);
+      if (off > far) {
+        far = off;
+        worst = i;
+      }
+    }
+    if (worst < 0) return;
+    between(a, worst);
+    out.push(worst);
+    between(worst, b);
+  };
+  for (let k = 0; k < kept.length; k++) {
+    if (k > 0) between(kept[k - 1], kept[k]);
+    out.push(kept[k]);
+  }
+  return out;
+}
+
 function simplifyStroke(pts: [number, number][], tol: number): number[] {
   const walk = (lo: number, hi: number): number[] => {
     let worst = 0;
@@ -453,9 +487,11 @@ function simplifyStroke(pts: [number, number][], tol: number): number[] {
   return walk(0, pts.length - 1);
 }
 
-/** Stroke width from how fast the cursor is travelling, in document units
- * per millisecond: slow strokes lay down a full-width line, fast ones thin
- * out. Clamped so a flick still leaves a visible mark. */
+/** Stroke width from how fast the cursor is travelling, in screen
+ * pixels per millisecond — the hand's speed, whatever the zoom: taken in
+ * document units, the same stroke at Fit came out a quarter of the width
+ * asked for. Slow strokes lay down a full-width line, fast ones thin out.
+ * Clamped so a flick still leaves a visible mark. */
 function speedWidth(speed: number): number {
   return Math.max(0.25, Math.min(1, 1 - speed * 0.35));
 }
@@ -5026,8 +5062,11 @@ export function App() {
       // short of the fingers or a slow notch past them.
       // (Windows at one line a notch sends 33⅓, a third of a whole.)
       const thirds = e.deltaY * 3;
+      // And at a page zoom of 90%, 110% or 175% a notch is 111.1, 90.9 or
+      // 57.1: anything from 50 is a notch, past what a pinch's step is.
       const notch =
         e.deltaMode !== 0 ||
+        Math.abs(e.deltaY) >= 50 ||
         (Math.abs(e.deltaY) >= 33 && Math.abs(thirds - Math.round(thirds)) < 0.01);
       const amount =
         e.ctrlKey && !notch ? Math.min(Math.abs(dy) * 0.01, 1) : Math.abs(dy) * 0.0015;
@@ -5167,6 +5206,42 @@ export function App() {
     return climbs(id, target) || climbs(target, id);
   };
 
+  /** Every layer related to one of `moving` — itself, one inside it, or
+   * one it is inside — worked out once for a drag: asked of each layer
+   * against each moving one, every pair walking the tree by a search of
+   * the whole list, a press on two thousand picked layers took 25 s. */
+  const relatedToAny = (moving: NodeId[]): Set<number> => {
+    const parent = new Map<number, number>();
+    for (const l of layers) parent.set(l.id, l.parent);
+    const moved = new Set<number>(moving);
+    const out = new Set<number>(moving);
+    // Up from each moving layer: what it is inside.
+    for (const m of moving) {
+      let up = parent.get(m);
+      for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
+        if (out.has(up) && !moved.has(up)) break;
+        out.add(up);
+        const next = parent.get(up);
+        if (next === up) break;
+        up = next;
+      }
+    }
+    // And every layer with a moving one above it.
+    for (const l of layers) {
+      let up = parent.get(l.id);
+      for (let hops = 0; up !== undefined && hops <= layers.length; hops++) {
+        if (moved.has(up)) {
+          out.add(l.id);
+          break;
+        }
+        const next = parent.get(up);
+        if (next === up) break;
+        up = next;
+      }
+    }
+    return out;
+  };
+
   /** Turn a document-space displacement into one SetTransform per layer,
    * each expressed in that layer's own parent space. Layers that would not
    * actually move are left out. */
@@ -5229,10 +5304,11 @@ export function App() {
     }
     if (!session) return [xs, ys];
     const seen = seenLayers();
+    const related = relatedToAny(moving);
     for (const layer of layers) {
       const id = layer.id as NodeId;
       if (!seen.has(layer.id)) continue;
-      if (moving.some((m) => relatedTo(id, m))) continue;
+      if (related.has(id)) continue;
       const b = session.bounds_of(id);
       if (b.length !== 4) continue;
       xs.push(...snapLines(b[0], b[0] + b[2]));
@@ -5247,10 +5323,11 @@ export function App() {
     if (!session) return [];
     const out: Box[] = [];
     const seen = seenLayers();
+    const related = relatedToAny(moving);
     for (const layer of layers) {
       const id = layer.id as NodeId;
       if (!seen.has(layer.id)) continue;
-      if (moving.some((m) => relatedTo(id, m))) continue;
+      if (related.has(id)) continue;
       const b = session.bounds_of(id);
       if (b.length === 4) out.push([b[0], b[1], b[0] + b[2], b[1] + b[3]]);
     }
@@ -6108,7 +6185,31 @@ export function App() {
         return false;
       }
     };
-    if (picked && picked.kind === want && !picked.locked && still(picked.id)) return picked.id;
+    // And only where the stroke is: one begun in another frame went into
+    // the first frame's layer, where that frame cut it away.
+    const frameOf = (id: NodeId | undefined): number => {
+      for (let hops = 0; id !== undefined && hops <= layers.length; hops++) {
+        const l = layers.find((x) => x.id === id);
+        if (!l) return -1;
+        if (l.kind === "artboard") return l.id;
+        id = l.parent as NodeId | undefined;
+      }
+      return -1;
+    };
+    // The frame the point is in, whatever is drawn over it there.
+    const here = s.frame_under(
+      at[0],
+      at[1],
+      new Float64Array(layers.filter((l) => l.kind !== "artboard").map((l) => l.id)),
+    );
+    if (
+      picked &&
+      picked.kind === want &&
+      !picked.locked &&
+      still(picked.id) &&
+      frameOf(picked.parent as NodeId | undefined) === here
+    )
+      return picked.id;
     paintCount.current += 1;
     try {
       // Into the frame the stroke begins in, as a shape drawn there goes.
@@ -6615,6 +6716,17 @@ export function App() {
       const from = e.shiftKey ? strokeEnd.current : null;
       const start = from ?? [x, y];
       try {
+        // On a mask shown inverted the brush shows and the eraser hides,
+        // as they do on any other mask: laid as stored, painting where an
+        // inverted mask hid did nothing, and the eraser revealed.
+        let inverted = false;
+        if (onMask) {
+          try {
+            inverted = (JSON.parse(session.mask_json(layer)) as { invert?: boolean } | null)?.invert === true;
+          } catch {
+            inverted = false;
+          }
+        }
         session.paint_begin(
           layer,
           start[0],
@@ -6622,7 +6734,7 @@ export function App() {
           (paintSize / 2) * pressed(e),
           JSON.stringify(currentInk()),
           paintSoftness,
-          erasing,
+          erasing !== inverted,
           onMask,
         );
         if (from) session.paint_extend(x, y, paintSize / 2);
@@ -7370,7 +7482,7 @@ export function App() {
       const want =
         e.pointerType === "pen" && e.pressure > 0
           ? 0.25 + e.pressure * 0.75
-          : speedWidth(step / Math.max(1, now - painting.at));
+          : speedWidth((step * view.zoom) / Math.max(1, now - painting.at));
       painting.width += (want - painting.width) * 0.35;
       painting.at = now;
       lastPaint.current = [px, py];
@@ -7444,7 +7556,7 @@ export function App() {
         const w =
           e.pointerType === "pen" && e.pressure > 0
             ? 0.25 + e.pressure * 0.75
-            : speedWidth(step / Math.max(1, now - (drag.lastAt ?? now)));
+            : speedWidth((step * view.zoom) / Math.max(1, now - (drag.lastAt ?? now)));
         const prev = drag.widths?.[drag.widths.length - 1] ?? 1;
         // Ease toward the new width: sample-to-sample jitter would show up
         // as a lumpy edge.
@@ -7605,7 +7717,8 @@ export function App() {
       const raws = layers.filter((l) => l.developed && ids.includes(l.id));
       // One step with the paste, when the paste was one: two, the first
       // Ctrl+Z left the pasted look on the old development.
-      if (raws.length > 0) void developLike(develop, raws, session.history_mark() !== mark);
+      if (raws.length > 0 && session.history_mark() !== mark) void developLike(develop, raws, session.history_mark());
+      else if (raws.length > 0) void developLike(develop, raws);
     }
   };
 
@@ -7837,7 +7950,7 @@ export function App() {
         stroke = drag.shift && from ? [from, [px, py]] : [[px, py], [px + 0.01, py]];
         strokeWidths = [1, 1];
       }
-      const kept = simplifyStroke(stroke, BRUSH_TOLERANCE);
+      const kept = withWidths(simplifyStroke(stroke, BRUSH_TOLERANCE), strokeWidths);
       if (kept.length < 2) return;
       const pts = kept.map((i) => stroke[i]);
       const widths = kept.map((i) => strokeWidths[i] ?? 1);
@@ -11489,9 +11602,18 @@ export function App() {
   const duplicateSelected = () => {
     const ids = withoutNested(selectionSet);
     if (!session || ids.length === 0) return;
+    // A photograph, a painted or cloned layer, an adjustment or a filter
+    // is copied in place, as Photoshop and Affinity do: nudged twelve
+    // pixels, every duplicate-and-retouch (a copy blurred, a high pass
+    // over it) came out misaligned. A shape is nudged, so the copy can
+    // be seen to be there.
+    const inPlace = ids.every((id) => {
+      const k = layers.find((l) => l.id === id)?.kind;
+      return k === "raster" || k === "paint" || k === "clone" || k === "adjustment" || k === "filter";
+    });
     try {
       const copies = Array.from(
-        session.duplicate_nodes(new Float64Array(ids), true),
+        session.duplicate_nodes(new Float64Array(ids), !inPlace),
       ) as NodeId[];
       // The copies are what is picked afterwards, all of them: a
       // duplicate is usually about to be moved somewhere.
@@ -12398,7 +12520,9 @@ export function App() {
       placing.current = placing.current.then(() => file.arrayBuffer()).then(async (buf) => {
         if (gone()) return;
         const raw = new Uint8Array(buf);
-        const kind = importKind(file.name, raw.subarray(0, 1024), file.type) ?? "picture";
+        // Every byte to go by: a DNG whose directory comes after its
+        // picture (libtiff writes them so) is known only from there.
+        const kind = importKind(file.name, raw, file.type) ?? "picture";
         setImportNotes(null);
         if (kind === "pdf") {
           // The PDF reader is fetched the first time one is opened.
@@ -12864,7 +12988,11 @@ export function App() {
     await developLike(session.developed_settings(source.id), developedOthers);
   };
   /** Develop each of `others` (raw layers) with `settings`, one step. */
-  const developLike = async (settings: string, others: LayerInfo[], joinLast = false) => {
+  /** `joinAfter`: the history's mark just after a step this development
+   * belongs with (a Paste style), joined to it only if that step is
+   * still the last when the development lands — undone meanwhile, the
+   * development went into whatever step was last instead. */
+  const developLike = async (settings: string, others: LayerInfo[], joinAfter?: number) => {
     if (!session || others.length === 0) return;
     // Busy as a development is, so a file that arrives meanwhile waits:
     // opened at once, it took the editor, and the panel then showed this
@@ -12901,7 +13029,8 @@ export function App() {
     } finally {
       // What was developed before anything failed still goes in, as one step.
       try {
-        if (!gone() && session.commit_staged_develop() && joinLast) session.merge_last();
+        const join = joinAfter !== undefined && !gone() && session.history_mark() === joinAfter;
+        if (!gone() && session.commit_staged_develop() && join) session.merge_last();
       } finally {
         session.raw_close();
         setImporting(null);
@@ -13026,7 +13155,7 @@ export function App() {
       // was refused as no picture, and a PNG named .chitra as a damaged
       // document, which then claimed to have opened.
       for (const file of files) {
-        const head = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+        const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer());
         kinds.push(importKind(file.name, head, file.type));
       }
       const named = (f: File) => f.name || "a file";
@@ -13132,7 +13261,7 @@ export function App() {
     const kindOf = async (path: string) => {
       try {
         const bytes = await readPath(path);
-        return importKind(baseName(path), bytes.subarray(0, 1024));
+        return importKind(baseName(path), bytes);
       } catch {
         return null;
       }
@@ -15955,6 +16084,10 @@ export function App() {
                     const same = prefs.brushes.find((o) => o.size === paintSize && o.softness === paintSoftness);
                     if (same) {
                       alert(`This brush is kept already, as ${same.name}.`);
+                      return;
+                    }
+                    if (prefs.brushes.length >= KEPT_MOST) {
+                      alert(`${KEPT_MOST} brushes are kept, as many as are kept: forget one (alt-click it) to keep this one.`);
                       return;
                     }
                     const taken = new Set(prefs.brushes.map((o) => o.name));
@@ -19574,6 +19707,10 @@ function RawDevelopDialog({
                   // A name kept again is the new settings under it, once
                   // asked: the comps and regions ask the same.
                   if (taken.has(name) && !window.confirm(`Settings called “${name}” are kept already. Keep these in their place?`)) return;
+                  if (!taken.has(name) && presets.length >= KEPT_MOST) {
+                    alert(`${KEPT_MOST} settings are kept, as many as are kept: forget one (alt-click or a long press) to keep these.`);
+                    return;
+                  }
                   onPresets([...presets.filter((p) => p.name !== name), { name, settings: { ...s } }]);
                 }}
               >

@@ -29,6 +29,7 @@
  */
 
 import { chipHold, chipKeys } from "./chipKeys";
+import { KEPT_MOST } from "./develop";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmSession } from "./engine";
 import { watermarkJson, type ExportArea, type ExportFormat, type ExportSetup, type Prefs } from "./prefs";
@@ -284,7 +285,9 @@ export function ExportDialog({
    * under the hundred megapixels a page may be: a 48-megapixel photo
    * with a watermark, a Set's @3x and a long edge "as large as it goes"
    * were all offered here and then refused for memory once pressed. */
-  const roomFor = (w: number, h: number) => !drawnWhole || session.export_fits(w, h, sharpening);
+  /** At the scale it is drawn at: a picked badge sixteen times over is
+   * not a page at one, and its shadow reaches sixteen times as far. */
+  const roomFor = (w: number, h: number, k: number) => !drawnWhole || session.export_fits(w, h, k, sharpening);
   const heldScale = (w: number, h: number) => {
     let k = Math.min(
       MOST_SCALE,
@@ -301,7 +304,7 @@ export function ExportDialog({
       k *= 1 - 1 / Math.max(across, down);
     }
     // And as large as the memory left will draw.
-    for (let i = 0; i < 40 && !roomFor(px(w, k), px(h, k)); i++) k *= 0.95;
+    for (let i = 0; i < 40 && !roomFor(px(w, k), px(h, k), k); i++) k *= 0.95;
     return k;
   };
   /** The one scale everything shown is worked out at; the set's other
@@ -388,7 +391,9 @@ export function ExportDialog({
         format === "webp" ? " in a WebP" : ""
       }, 100 megapixels).`;
     }
-    if (!roomFor(largestW * most, largestH * most)) {
+    const drawnAt =
+      Math.max(scale, ...(area === "regions" ? ats.map((i) => scaleFor(i)) : [])) * most;
+    if (!roomFor(largestW * most, largestH * most, drawnAt)) {
       return `That comes to ${largestW * most} × ${largestH * most}, more than there is memory left to draw at once with this document open. Make it smaller (a long edge, or a lower scale)${
         set ? ", or export one size at a time" : ""
       }.`;
@@ -830,6 +835,10 @@ export function ExportDialog({
               ]
                 .filter(Boolean)
                 .join(" ");
+              if (prefs.exportSetups.length >= KEPT_MOST) {
+                alert(`${KEPT_MOST} setups are kept, as many as are kept: forget one (alt-click or a long press) to keep this one.`);
+                return;
+              }
               const taken = new Set(prefs.exportSetups.map((o) => o.name));
               let name = base;
               for (let n = 2; taken.has(name); n++) name = `${base} ${n}`;
@@ -868,7 +877,15 @@ export function ExportDialog({
             </button>
           ))}
         </div>
-        <p className="modal-aside">{spec.note}</p>
+        <p className="modal-aside">
+          {spec.note}
+          {/* A CMYK document with no press profile has no way to inks: its
+              PDF went out as screen colour with nothing said, while the
+              bar said CMYK. */}
+          {format === "pdf" && session.cmyk && !hasIcc
+            ? " This CMYK document has no press profile, so its PDF is in screen colour (RGB): load the printer's profile (Page › Load press profile…) to write inks."
+            : ""}
+        </p>
         {format === "psd" && psdNotes.length > 0 && (
           <p className="modal-aside export-notes" role="status" aria-label="What changes">
             Not as they are here: {psdNotes.join("; ")}.

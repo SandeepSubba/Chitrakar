@@ -126,7 +126,10 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
       heifBrand(bytes)
     )
       return "picture";
-    if (/^\s*(<\?xml|<svg|<!--)/i.test(head) && /<svg[\s>]/i.test(head)) return "svg";
+    // As far in as the bytes go (a long comment can come first), and
+    // with a prefix (<svg:svg>) as well as without.
+    const xml = bytes.length > 1024 ? new TextDecoder("latin1").decode(bytes.subarray(0, 65536)) : head;
+    if (/^\s*(<\?xml|<(?:[\w-]+:)?svg|<!--|<!DOCTYPE)/i.test(xml) && /<(?:[\w-]+:)?svg[\s>]/i.test(xml)) return "svg";
   }
   // Bytes that are none of those, under the document's name: a damaged
   // document, and said to be one.
