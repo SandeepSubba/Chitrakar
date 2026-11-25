@@ -90,6 +90,11 @@ impl WasmSession {
         self.inner.preview_json(command_json).map_err(to_js)
     }
 
+    /// Whether a gesture is being previewed and not yet ended.
+    pub fn previewing(&self) -> bool {
+        self.inner.previewing()
+    }
+
     /// End the preview gesture as one undo step.
     pub fn commit_preview(&mut self) -> bool {
         self.inner.commit_preview()
@@ -1801,6 +1806,12 @@ impl WasmSession {
     /// can use. Process-wide, so once is enough per page load.
     pub fn register_font(name: &str, bytes: &[u8]) -> Result<(), JsError> {
         Session::register_font(name, bytes.to_vec()).map_err(to_js)
+    }
+
+    /// The resolution a picture file says it was made at, or 0 when it
+    /// says none (PNG, JPEG, TIFF, PSD).
+    pub fn picture_dpi(bytes: &[u8]) -> f64 {
+        chitrakar_codecs::picture_dpi(bytes).map_or(0.0, f64::from)
     }
 
     /// The names text blocks can be set in, as a JSON array.

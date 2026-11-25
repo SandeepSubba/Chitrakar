@@ -151,7 +151,10 @@ without reading anything else.*
      twelve steps whatever their size. The forty-seventh: layers drawn
      into a copied group making a file that would not open, a second
      Delete bringing the first back, a pen's stroke lost to a palm,
-     pictures placed on half a pixel, "1,920" read as 1.92.
+     pictures placed on half a pixel, "1,920" read as 1.92. The
+     forty-eighth: an original deleted with its copy lost on undo, a
+     PSD of ten pixels stopping the engine, a file's resolution never
+     read, a reload losing ten seconds of work.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13080,6 +13083,70 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A forty-eighth audit (November 2026).** Its check of round 47 found
+  three things that round broke. A subtree put back was refused as "a
+  copy of nothing" when undo put a copy back before its original, so
+  undoing the Delete, Cut or Merge of a layer and its copy lost both
+  and the step (a copy of a layer not there is not refused: it draws
+  nothing). Every add raised the count by one, so a document opened past
+  it could take no layer anywhere (only an edit inside something copied
+  is counted, and only where it raises the count; a copy pointed at
+  something smaller is not refused). And one copy anywhere made each add
+  walk the whole document, two thousand pasted taking seconds (the
+  layers copies are of are kept, `Document::copied`, and an add walks
+  only up from where it lands). A file is opened by what it draws alone,
+  four million (`OPEN_DRAWN`), not against its layer count, which a
+  delete could take a document past. Also: a PDF past the hundred-
+  megapixel cap was given the dpi of the picture before it was taken
+  down; "2,5" corrected to "7,5" in the same box was 75, "1,920.5" was
+  1.9205 and "0,500" was 500, and Arabic's own decimal mark was dropped
+  (`numberText.ts`); a second Delete took a feathered region hard; a
+  circle sized through its layer's scale was walked at its own size by
+  booleans, the knife, blend and offset (`shape_rings_at`); exporting a
+  PDF or an SVG, or placing a picture the browser decoded, with memory
+  nearly full stopped the engine (`room_for`); a submenu rested on for
+  two seconds closed on its click.
+  Its files pass: a PSD whose merged picture says it is see-through with
+  no channel to say where stopped the engine; a watermark's own surface
+  was not counted in an export's room; a PSD's layers had no budget, and
+  a three-megabyte file took four gigabytes (refused past 400 megapixels
+  of layers, `LAYERS_READ`); float TIFFs and 32-bit PSDs with a linear
+  profile were brightened twice; a picture opened lost the resolution
+  its file said (`picture_dpi`: PNG, JPEG, TIFF, PSD); TIFF's FillOrder 2
+  was ignored; an indexed PSD's see-through entry (1047) came in as a
+  colour; the PSD export wrapped its layer count past 32,767; a
+  switched-off mask went without a note.
+  Its editing pass: a handle taken off the page mid-drag (a finger's tap,
+  Deselect, a tool's key) left its drag a preview with no step, and a
+  drag whose button came up outside the page followed the pointer until
+  the next click (`lostpointercapture` ends it as one step; a mouse
+  moving with no button ends a tool's drag).
+  Its interface pass, a wedding photographer, a keyboard user at 200%
+  in forced colours and a multitasker: Dehaze's dark channel took the
+  develop window to a second a slider (a running minimum, van Herk's,
+  for every reach); a reload lost up to ten seconds of work (the draft
+  is kept as the page is hidden or left); a reload in the develop window
+  asked nothing; the tone curve could not be edited from the keyboard
+  (arrows, [ and ], + and Delete); at 200% Export and Develop opened with
+  the focus out of sight; offline, a raw file was "damaged" when its
+  reader could not be fetched; files dropped over a window were thrown
+  away (taken once it closes); the grading wheel lost its colours in
+  forced colours; a raw opened said Place; a preset with a curve never
+  showed as the one in use.
+  Limits written down: Clarity still costs a third of a second a slider
+  on a 12-megapixel raw, worked out on the page's own thread; a vector
+  mask of many subpaths each with its own way of combining is slow to
+  open; a TIFF of several pages comes in as its first; duotone inks,
+  Knockout, Blend Clipped Layers and text and smart objects come in as
+  pixels without a note; a watermark is not fitted to a narrow export;
+  a float TIFF past 75 megapixels is refused in the reader's words; Set
+  names collide after the scale ("@3x 2"); Ctrl+S mid-drag writes the
+  drag; a shortcut mid-drag splits the gesture into three steps; an
+  ellipse's edge at 150% can differ from a 1.5× export; Escape after an
+  Alt-drag copy leaves the id count moved; RestoreSubtree through the
+  page's script is not held to the count; save with memory full still
+  stops the engine; the number boxes' comma reading does not follow a
+  selection made by mouse.
   **A forty-seventh audit (November 2026).** Its check of round 46:
   the draw count was asked only of a copy being made, so layers drawn
   one at a time into a group copied ten thousand times, or moved into

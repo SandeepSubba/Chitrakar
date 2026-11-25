@@ -155,7 +155,28 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             "it is compressed as a fax is (CCITT), which is not read; save it again uncompressed or with LZW",
         ));
     }
+    // Bits written last first in each byte (FillOrder 2), which the
+    // decoder takes as written: a fax-style scan came in with its pixels
+    // scrambled inside every byte. Turned round here, where the bytes are
+    // as stored — uncompressed; compressed that way it is said.
+    let reversed = dec.find_tag_unsigned::<u16>(Tag::FillOrder).ok().flatten() == Some(2);
+    let stored = dec
+        .find_tag_unsigned::<u16>(Tag::Compression)
+        .ok()
+        .flatten()
+        .unwrap_or(1)
+        == 1;
+    if reversed && !stored {
+        return Err(bad(
+            "its bits are stored last first in each byte (FillOrder 2) and compressed, which is not read; save it again in the usual order",
+        ));
+    }
     let mut data = dec.read_image().map_err(bad)?;
+    if reversed {
+        if let DecodingResult::U8(v) = &mut data {
+            v.iter_mut().for_each(|b| *b = b.reverse_bits());
+        }
+    }
     // Each row's samples are differences from the one two before (grey
     // from grey, alpha from alpha): added back up, a row at a time.
     if differenced {
@@ -297,10 +318,16 @@ pub fn decode_tiff(bytes: &[u8]) -> Result<SourceImage, CodecError> {
             }
         }
     }
+    // Not a float file's: its samples are light, already taken onto the
+    // screen's curve above, as Photoshop takes every 32-bit picture to
+    // be light whatever its profile's curve. Put through a linear
+    // profile as well, the light was brightened twice (40 of 255 came in
+    // at 175 for 110).
     if let (
         Some(icc),
         ColorType::RGB(_) | ColorType::RGBA(_) | ColorType::Gray(_) | ColorType::GrayA(_),
-    ) = (icc.as_deref(), color)
+        false,
+    ) = (icc.as_deref(), color, is_float)
     {
         chitrakar_color::cms::normalize_rgba8_to_srgb(icc, &mut rgba8);
     }
@@ -622,6 +649,17 @@ mod tests {
         let img = crate::decode(&bytes).unwrap();
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(img.rgba8, vec![255, 0, 0, 255, 10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn bits_stored_last_first_are_turned_round() {
+        let mut out = Cursor::new(Vec::new());
+        let mut enc = TiffEncoder::new(&mut out).unwrap();
+        let mut img = enc.new_image::<colortype::Gray8>(2, 1).unwrap();
+        img.encoder().write_tag(Tag::FillOrder, 2u16).unwrap();
+        img.write_data(&[0b0000_0001, 0b1100_0000]).unwrap();
+        let img = crate::decode(&out.into_inner()).unwrap();
+        assert_eq!((img.rgba8[0], img.rgba8[4]), (0b1000_0000, 0b0000_0011));
     }
 
     /// A TIFF from a camera turned on its side says so in its

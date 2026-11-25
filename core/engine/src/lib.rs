@@ -1828,6 +1828,11 @@ impl Session {
         self.preview(parse_command(json)?)
     }
 
+    /// Whether a gesture is being previewed and not yet ended.
+    pub fn previewing(&self) -> bool {
+        self.preview_gesture.is_some()
+    }
+
     /// End the gesture, recording it as one undo step. Returns false if no
     /// preview was active.
     pub fn commit_preview(&mut self) -> bool {
@@ -2827,10 +2832,11 @@ impl Session {
                     (-seen.b * p[0] + seen.a * p[1]) / det,
                 ]
             };
-            let seen_rings: Vec<Vec<[f32; 2]>> = chitrakar_render::shape_rings(shape)
-                .iter()
-                .map(|ring| ring.iter().map(there).collect())
-                .collect();
+            let seen_rings: Vec<Vec<[f32; 2]>> =
+                chitrakar_render::shape_rings_at(shape, seen.max_scale())
+                    .iter()
+                    .map(|ring| ring.iter().map(there).collect())
+                    .collect();
             let Some((first, rest)) = seen_rings.split_first() else {
                 return Err(refused());
             };
@@ -3059,8 +3065,11 @@ impl Session {
                 ));
             };
             let t = node.transform;
+            let seen = chitrakar_render::ancestor_space(&self.doc, *id)
+                .compose(t)
+                .max_scale();
             rings.push(
-                chitrakar_render::shape_rings(shape)
+                chitrakar_render::shape_rings_at(shape, seen)
                     .into_iter()
                     .map(|ring| {
                         ring.into_iter()
@@ -3502,7 +3511,9 @@ impl Session {
                 continue;
             };
             let (pa, pb) = (carry(own, pa), carry(own, pb));
-            let rings: Vec<Ring> = chitrakar_render::shape_rings(shape);
+            let back_scale = chitrakar_render::ancestor_space(&work, id).max_scale();
+            let rings: Vec<Ring> =
+                chitrakar_render::shape_rings_at(shape, back_scale * t.max_scale());
             // The cut is the line dragged, not the whole line through it:
             // a shape it does not cross is left alone. Every shape along
             // the line's run was cut.
@@ -3698,7 +3709,7 @@ impl Session {
                 return Err(EngineError::BadCommand("only shapes can be blended".into()));
             };
             let t = node.transform;
-            let ring = chitrakar_render::shape_rings(shape)
+            let ring = chitrakar_render::shape_rings_at(shape, t.max_scale())
                 .into_iter()
                 .next()
                 .ok_or_else(|| EngineError::BadCommand("this shape has no outline".into()))?;
@@ -7781,7 +7792,9 @@ impl Session {
             let rings = chitrakar_render::boolean::combine_or_nudge(&want, &have, op)
                 .filter(|rings| chitrakar_render::boolean::agrees(&want, &have, rings, op))
                 .unwrap_or_else(|| self.combined_by_pixels(&was, &selection, op));
-            selection = match self.region_on_page(rings, was.feather) {
+            // One softness for the two: the softer of them, so a region
+            // feathered fifteen pixels is not taken hard.
+            selection = match self.region_on_page(rings, was.feather.max(selection.feather)) {
                 Some(left) => left,
                 // Nothing left showing: everything hidden, which is the
                 // page itself turned inside out.
@@ -11058,6 +11071,7 @@ impl Session {
     /// loaded the page is written in ink and carries that profile;
     /// otherwise it is sRGB.
     pub fn export_pdf(&self) -> Result<Vec<u8>, EngineError> {
+        self.room_to_write()?;
         chitrakar_codecs::export_pdf_document(&self.doc)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
@@ -11067,6 +11081,7 @@ impl Session {
     /// and nothing of the document around it. A document with no frames
     /// exports as the one page it always did.
     pub fn export_pdf_frames(&self) -> Result<Vec<u8>, EngineError> {
+        self.room_to_write()?;
         chitrakar_codecs::export_pdf_frames(&self.doc)
             .map_err(|e| EngineError::BadCommand(e.to_string()))
     }
@@ -11083,6 +11098,7 @@ impl Session {
         bleed_mm: f32,
         crop_marks: bool,
     ) -> Result<Vec<u8>, EngineError> {
+        self.room_to_write()?;
         let dpi = if self.doc.meta.dpi.is_finite() && self.doc.meta.dpi > 0.0 {
             self.doc.meta.dpi
         } else {
@@ -11106,7 +11122,33 @@ impl Session {
 
     /// Export vector layers (and embedded rasters/text) as SVG.
     pub fn export_svg(&self) -> Result<String, EngineError> {
+        self.room_to_write()?;
         Ok(chitrakar_codecs::export_svg(&self.doc)?)
+    }
+
+    /// Room asked for before it is needed, and let go: memory a page
+    /// cannot give is a refusal in words, where an allocation that fails
+    /// stops the engine. With the page full of photographs, a PDF or an
+    /// SVG written, or a picture placed through the browser's decoder,
+    /// stopped it.
+    fn room_for(bytes: usize, what: &str) -> Result<(), EngineError> {
+        let mut room: Vec<u8> = Vec::new();
+        if room.try_reserve_exact(bytes).is_err() {
+            return Err(EngineError::BadCommand(format!(
+                "there is not enough memory left for {what}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// What writing the page to a PDF or an SVG can draw on the way: a
+    /// surface the page's size for what it has to set down as pixels.
+    fn room_to_write(&self) -> Result<(), EngineError> {
+        let (w, h) = (self.doc.meta.width as usize, self.doc.meta.height as usize);
+        Self::room_for(
+            w.saturating_mul(h).saturating_mul(16 * 2),
+            "writing this page; remove some layers, or export it as a picture",
+        )
     }
 
     /// Render and encode as PNG — used by export and tests.
@@ -11231,9 +11273,19 @@ impl Session {
         // could not be had and the engine stopped. Asked for and let go,
         // the room is the allocator's to hand straight back.
         let surface_bytes = (pw + 2 * past) as usize * (ph + 2 * past) as usize * 16;
+        // A watermark is laid on through a surface of its own the size of
+        // the picture: left out of the count, a page that exported
+        // plainly stopped the engine with one asked for.
+        let surfaces = if self.output_watermark.is_some() {
+            3
+        } else {
+            2
+        };
         let mut room: Vec<u8> = Vec::new();
         if room
-            .try_reserve_exact(surface_bytes.saturating_mul(2) + pw as usize * ph as usize * 4)
+            .try_reserve_exact(
+                surface_bytes.saturating_mul(surfaces) + pw as usize * ph as usize * 4,
+            )
             .is_err()
         {
             return Err(EngineError::BadCommand(format!(
@@ -11660,6 +11712,11 @@ impl Session {
                 rgba8.len()
             )));
         }
+        // Copied into the document as it is placed.
+        Self::room_for(
+            rgba8.len().saturating_mul(2),
+            &format!("a picture of {width} × {height}; remove a layer or place a smaller one"),
+        )?;
         self.place_picture(
             chitrakar_codecs::SourceImage {
                 width,

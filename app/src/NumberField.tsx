@@ -28,6 +28,9 @@ import { commaIsDecimal, plainDigits, readWritten, settleTyped } from "./numberT
 // caret leaves the box or Enter is pressed: before three digits, or one
 // of several, it was a thousands mark.
 const typed = new WeakMap<HTMLInputElement, { commas: number; point: boolean }>();
+/** Boxes whose whole text was just picked (Ctrl+A): what is typed next
+ * replaces it, and what was counted of it goes. */
+const wholly = new WeakSet<HTMLInputElement>();
 const numberBox = (at: EventTarget | null): at is HTMLInputElement =>
   at instanceof HTMLInputElement && at.type === "number";
 if (typeof document !== "undefined") {
@@ -43,18 +46,39 @@ if (typeof document !== "undefined") {
       if (data.length > 1) {
         plain = readWritten(data, commaDecimal);
       } else {
-        const marks = typed.get(at) ?? { commas: 0, point: false };
-        if (data === ".") marks.point = true;
-        if (data === ",") {
-          marks.commas += 1;
-          typed.set(at, marks);
-          // A second comma says the first was a thousands mark; the
-          // point it went in as is taken out when the box is settled.
-          plain = marks.commas > 1 ? "" : ".";
+        // What was counted is forgotten once the box is emptied or all
+        // of it picked to be typed over: counted on, "2,5" corrected to
+        // "7,5" settled as 75.
+        const held = at.value;
+        const emptied = held === "" && !at.validity.badInput;
+        let marks = typed.get(at) ?? { commas: 0, point: false };
+        if (emptied || wholly.has(at)) marks = { commas: 0, point: false };
+        wholly.delete(at);
+        const one = data === "," ? "," : plainDigits(data);
+        // The point a comma went in as, taken back out: the comma was a
+        // thousands mark after all.
+        const unpoint = () => {
+          if (!held.includes(".")) return;
+          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(at, held.replace(/\./g, ""));
+        };
+        if (one === "," && !commaDecimal && (marks.commas > 0 || marks.point)) {
+          // A second comma: the first was a thousands mark, and so is this.
+          if (!marks.point) unpoint();
+          marks = { commas: marks.commas + 1, point: true };
+          plain = "";
+        } else if (one === ",") {
+          marks = { commas: marks.commas + 1, point: marks.point };
+          plain = ".";
+        } else if (one === "." && marks.commas > 0 && !marks.point && !commaDecimal) {
+          // "1,920.5": a point after a comma makes the comma thousands.
+          unpoint();
+          marks = { commas: 0, point: true };
+          plain = ".";
         } else {
-          typed.set(at, marks);
-          plain = plainDigits(data);
+          if (one === ".") marks.point = true;
+          plain = one;
         }
+        typed.set(at, marks);
       }
       if (plain !== data) {
         e.preventDefault();
@@ -78,7 +102,19 @@ if (typeof document !== "undefined") {
   document.addEventListener(
     "keydown",
     (e) => {
-      if (e.key === "Enter" && numberBox(e.target)) settle(e.target);
+      if (!numberBox(e.target)) return;
+      if (e.key === "Enter") settle(e.target);
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") wholly.add(e.target);
+      else if (e.key.length > 1 && e.key !== "Shift") wholly.delete(e.target);
+    },
+    true,
+  );
+  // Emptied by Backspace or Delete, the box starts again.
+  document.addEventListener(
+    "input",
+    (e) => {
+      const at = e.target;
+      if (numberBox(at) && at.value === "" && !at.validity.badInput) typed.delete(at);
     },
     true,
   );

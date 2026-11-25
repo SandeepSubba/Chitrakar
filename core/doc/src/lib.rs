@@ -168,11 +168,14 @@ pub const MAX_DEPTH: usize = 256;
 /// to double at every level would ask for.
 pub const MAX_DRAWN: u64 = 200_000;
 
-/// What a file is opened with: five times what an edit is held to, and
-/// a quarter as deep again, so a document the editor let be made — copies
-/// made, then layers added to what they copy — opens, while one made to
-/// double at every level is still refused.
-pub const OPEN_DRAWN: u64 = 1_000_000;
+/// What a file is opened with: twenty times what an edit is held to, and
+/// a quarter as deep again, so a document the editor let be made opens,
+/// while one made to double at every level is still refused. It is a
+/// count of draws alone, so that nothing an edit can do — deleting
+/// layers least of all — takes a document that opened past it: held to
+/// a thousand draws a layer as well, a file with fewer layers after a
+/// delete would not open again.
+pub const OPEN_DRAWN: u64 = 4_000_000;
 pub const OPEN_DRAWN_DEPTH: usize = 320;
 
 /// Whether a brush stroke's points and widths are numbers a page can
@@ -272,14 +275,15 @@ pub struct Document {
     /// skip a check that matters, so absence has to mean walk.
     #[serde(skip)]
     nesting: Option<usize>,
-    /// Whether any layer is a live copy, so that the count of what the
-    /// copies draw is only asked of a document that has some. `None` is
-    /// "not known" (a document read from a file, a subtree put back);
-    /// `Some(true)` is kept through a removal, which only ever costs a
-    /// walk nobody needed. Asking by scanning every layer on every add
-    /// made drawing a page's layers cost the square of them.
+    /// The layers live copies are of, so that the count of what the
+    /// copies draw is only asked of an edit inside one of them. `None` is
+    /// "not known" (a document read from a file, a copy removed); one
+    /// left over after its copy goes only ever costs a walk nobody
+    /// needed. Asked of the whole document on every add, drawing a page's
+    /// layers cost the square of them, and with a single copy anywhere
+    /// pasting two thousand layers took seconds.
     #[serde(skip)]
-    copies: Option<bool>,
+    copied: Option<std::collections::HashSet<NodeId>>,
     /// Which group each layer is in — the child lists read the other
     /// way, kept so that asking a layer's parent is a lookup rather than
     /// a scan of every group's list. The session asks it twice per
@@ -618,7 +622,7 @@ impl Document {
             next_id: 1,
             resources: BTreeMap::new(),
             nesting: Some(0),
-            copies: Some(false),
+            copied: Some(std::collections::HashSet::new()),
             parents: HashMap::new(),
             cmyk_profile_bytes: None,
             cmyk_cms: None,
@@ -1258,8 +1262,38 @@ impl Document {
             &cmd,
             Command::AddNode { .. } | Command::MoveNode { .. } | Command::SetKind { .. }
         );
-        let restores = matches!(&cmd, Command::RestoreSubtree { .. });
-        let drawn_before = if grows && !makes_copy && self.has_copies() {
+        // Where the edit lands: only inside something copied does it
+        // add more than itself to what is drawn.
+        let lands = match &cmd {
+            Command::AddNode { parent, .. } | Command::MoveNode { parent, .. } => Some(*parent),
+            Command::SetKind { id, .. } => Some(*id),
+            _ => None,
+        };
+        let copy_of = match &cmd {
+            Command::AddNode { node, .. } => match node.kind {
+                NodeKind::Instance { of, .. } => Some(of),
+                _ => None,
+            },
+            Command::SetKind { kind, .. } => match **kind {
+                NodeKind::Instance { of, .. } => Some(of),
+                _ => None,
+            },
+            _ => None,
+        };
+        let brought: Vec<NodeId> = match &cmd {
+            Command::RestoreSubtree { subtree, .. } => subtree
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| match n.kind {
+                    NodeKind::Instance { of, .. } => Some(of),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let removing = matches!(&cmd, Command::RemoveNode { .. });
+        let counted = makes_copy || (grows && lands.is_some_and(|at| self.inside_copied(at)));
+        let drawn_before = if counted {
             let mut known = HashMap::new();
             self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known)
                 .map(|(_, draws)| draws)
@@ -1304,18 +1338,24 @@ impl Document {
         // 401 copies of a 500-layer group was made and saved, and then
         // refused when opened; a chain of copies each in a group went on
         // until the stack ran out.
-        if makes_copy {
-            self.copies = Some(true);
-        } else if restores && self.copies != Some(true) {
-            self.copies = None;
+        if let Some(known) = &mut self.copied {
+            known.extend(copy_of);
+            known.extend(brought);
         }
-        if makes_copy || drawn_before.is_some() || (deepens && self.has_copies()) {
+        // A copy taken away may leave its original copied by nothing.
+        if removing
+            && matches!(&inverse, Command::RestoreSubtree { subtree, .. }
+                if subtree.nodes.iter().any(|(_, n)| matches!(n.kind, NodeKind::Instance { .. })))
+        {
+            self.copied = None;
+        }
+        if counted || (deepens && self.has_copies()) {
             let mut known = HashMap::new();
+            // Refused only where it raises the count past the most: a
+            // document opened past it takes layers anywhere else, and a
+            // copy pointed at something smaller.
             let refusal = match self.drawn_reach(self.root, 0, MAX_DEPTH, &mut known) {
                 None => Some(DocError::TooDeep { limit: MAX_DEPTH }),
-                Some((_, draws)) if makes_copy && draws > MAX_DRAWN => {
-                    Some(DocError::TooMuchToDraw)
-                }
                 Some((_, draws))
                     if draws > MAX_DRAWN && drawn_before.is_some_and(|before| draws > before) =>
                 {
@@ -1342,17 +1382,47 @@ impl Document {
         Ok(inverse)
     }
 
-    /// Whether any layer is a live copy; see the field.
-    fn has_copies(&mut self) -> bool {
-        if let Some(known) = self.copies {
-            return known;
+    /// The layers live copies are of; see the field.
+    fn copied(&mut self) -> &std::collections::HashSet<NodeId> {
+        if self.copied.is_none() {
+            let all = self
+                .nodes
+                .values()
+                .filter_map(|n| match n.kind {
+                    NodeKind::Instance { of, .. } => Some(of),
+                    _ => None,
+                })
+                .collect();
+            self.copied = Some(all);
         }
-        let any = self
-            .nodes
-            .values()
-            .any(|n| matches!(n.kind, NodeKind::Instance { .. }));
-        self.copies = Some(any);
-        any
+        self.copied.get_or_insert_with(Default::default)
+    }
+
+    /// Whether any layer is a live copy.
+    fn has_copies(&mut self) -> bool {
+        !self.copied().is_empty()
+    }
+
+    /// Whether `at`, or anything it is inside, is what a live copy is of
+    /// — where a layer added is drawn once for every copy.
+    fn inside_copied(&mut self, at: NodeId) -> bool {
+        if self.copied().is_empty() {
+            return false;
+        }
+        self.settle_parents();
+        let mut here = Some(at);
+        let mut steps = 0;
+        while let Some(id) = here {
+            if self.copied.as_ref().is_some_and(|c| c.contains(&id)) {
+                return true;
+            }
+            steps += 1;
+            if steps > MAX_DEPTH + 2 {
+                return true;
+            }
+            here = self.parents.get(&id).copied();
+        }
+        false
     }
 
     /// Which colours a command can have left disagreeing with the
@@ -1579,14 +1649,6 @@ impl Document {
                     .find(|(n, _)| *n != id && !held.contains(n))
                 {
                     return Err(DocError::NotATree(*orphan));
-                }
-                // A copy of something there.
-                for (_, node) in &subtree.nodes {
-                    if let NodeKind::Instance { of, .. } = node.kind {
-                        if !ours.contains(&of) && !self.nodes.contains_key(&of) {
-                            return Err(DocError::UnknownNode(of));
-                        }
-                    }
                 }
                 let siblings = self.children[&parent].len();
                 if index > siblings {
@@ -2251,13 +2313,9 @@ impl Document {
                 })
             }
             // Only where the copies multiply the layers past all measure:
-            // layers added to a group after it was copied four hundred
-            // times took a document past the count, which then would not
-            // open, where a file made to double at every level draws
-            // thousands of times its own size.
-            Some((_, draws)) if draws > OPEN_DRAWN && draws > 1000 * self.nodes.len() as u64 => {
-                return Err(DocError::TooMuchToDraw)
-            }
+            // a file made to double at every level draws thousands of
+            // times its own size.
+            Some((_, draws)) if draws > OPEN_DRAWN => return Err(DocError::TooMuchToDraw),
             Some(_) => {}
         }
         Ok(())
@@ -3654,7 +3712,9 @@ mod tests {
             Err(DocError::IndexOutOfBounds { .. })
         ));
         // A layer held by nobody, a shape holding layers, a layer listed
-        // twice, a copy of nothing.
+        // twice. (A copy of a layer not there is not refused: undo puts a
+        // copy back before its original in the same step, and a copy of
+        // something gone draws nothing.)
         let mut orphan = subtree.clone();
         orphan.nodes.push((NodeId(40), *rect("lost")));
         assert!(matches!(
@@ -3673,14 +3733,6 @@ mod tests {
         assert!(matches!(
             put(&mut doc, 0, twice),
             Err(DocError::NotATree(_))
-        ));
-        let mut copy = subtree.clone();
-        copy.nodes
-            .push((NodeId(42), Node::instance("copy", NodeId(90))));
-        copy.children[0].1.push(NodeId(42));
-        assert!(matches!(
-            put(&mut doc, 0, copy),
-            Err(DocError::UnknownNode(NodeId(90)))
         ));
         assert_eq!(doc.node_count(), 1, "nothing refused was kept");
         // Numbered above the count: kept, and the count moves past it, so
@@ -5050,6 +5102,93 @@ mod tests {
     /// count by layers added to what they copy, the undo of a delete was
     /// refused and the layer lost.
     #[test]
+    fn an_original_deleted_with_its_copy_comes_back() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let original = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("symbol")),
+        })
+        .unwrap();
+        let copy = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("copy", original)),
+        })
+        .unwrap();
+        // As Delete takes both: one step, whose undo puts the copy back
+        // before its original. It was refused as a copy of nothing, and
+        // both layers were lost.
+        let back = doc
+            .apply(Command::Batch(vec![
+                Command::RemoveNode { id: original },
+                Command::RemoveNode { id: copy },
+            ]))
+            .unwrap();
+        doc.apply(back).expect("the delete undone");
+        assert!(doc.node(original).is_ok() && doc.node(copy).is_ok());
+        assert!(doc.check_structure().is_ok());
+    }
+
+    #[test]
+    fn a_document_past_the_count_takes_layers_beside_its_copies() {
+        let mut doc = Document::new(20, 20, ColorMode::Rgb);
+        let root = doc.root();
+        let group = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("G")),
+        })
+        .unwrap();
+        for k in 0..100 {
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: k,
+                node: Box::new(Node::paint("p")),
+            })
+            .unwrap();
+        }
+        // Opened that way: past the count.
+        for k in 0..2100 {
+            doc.apply_inner(Command::AddNode {
+                parent: root,
+                index: 1 + k,
+                node: Box::new(Node::instance("copy", group)),
+            })
+            .unwrap();
+        }
+        // As a document read from a file knows nothing of its copies yet.
+        doc.copied = None;
+        let page = doc.children_of(root).unwrap().len();
+        // A layer on the page beside the copies, and a group made there,
+        // go in; one drawn into what is copied does not.
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: page,
+            node: Box::new(Node::paint("beside")),
+        })
+        .expect("a layer beside the copies");
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("new group")),
+        })
+        .expect("a group beside them");
+        assert!(matches!(
+            doc.apply(Command::AddNode {
+                parent: group,
+                index: 0,
+                node: Box::new(Node::paint("into")),
+            }),
+            Err(DocError::TooMuchToDraw)
+        ));
+    }
+
+    #[test]
     fn a_delete_undone_past_the_count_comes_back() {
         let mut doc = Document::new(20, 20, ColorMode::Rgb);
         let root = doc.root();
@@ -5108,6 +5247,7 @@ mod tests {
             })
             .unwrap();
         }
+        doc.copied = None;
         let gone = doc.children_of(group).unwrap()[0];
         let back = doc.apply(Command::RemoveNode { id: gone }).unwrap();
         doc.apply(back).expect("the delete undone");

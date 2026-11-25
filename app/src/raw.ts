@@ -28,8 +28,14 @@ let threads: Worker[] = [];
 let next = 0;
 const waiting = new Map<number, { done: (b: Uint8Array) => void; fail: (e: Error) => void }>();
 
+/** What a reader that never answered at all most likely was: one whose
+ * code could not be fetched. Said as a file that "may be damaged",
+ * offline it sent people looking for what was wrong with their photo. */
+const UNFETCHED = "the raw reader could not be fetched";
+
 function start(): Worker {
   const w = new Worker(new URL("./rawWorker.ts", import.meta.url), { type: "module" });
+  let spoke = false;
   if (canThread()) {
     // What a thread said before it stopped, for the message.
     let said = "";
@@ -40,7 +46,9 @@ function start(): Worker {
       };
       t.onerror = (e) => {
         e.preventDefault();
-        const why = said.match(/panicked at [^\n]*\n([^\n]+)/)?.[1] ?? "a thread of the raw reader stopped";
+        const why =
+          said.match(/panicked at [^\n]*\n([^\n]+)/)?.[1] ??
+          (!said && !spoke && !e.message ? UNFETCHED : "a thread of the raw reader stopped");
         for (const [, job] of waiting) job.fail(new RawError(`camera raw: ${why}`));
         waiting.clear();
         retire(w);
@@ -53,6 +61,7 @@ function start(): Worker {
     w.postMessage({ kind: "threads", ports: ends }, ends);
   }
   w.onmessage = (e: MessageEvent<{ id: number; packed?: Uint8Array; error?: string; threads?: number }>) => {
+    spoke = true;
     const job = waiting.get(e.data.id);
     waiting.delete(e.data.id);
     if (!job) return;
@@ -68,7 +77,7 @@ function start(): Worker {
   // everything waiting on it.
   w.onerror = (e) => {
     e.preventDefault();
-    for (const [, job] of waiting) job.fail(new RawError(e.message || "the raw reader stopped"));
+    for (const [, job] of waiting) job.fail(new RawError(e.message || (spoke ? "the raw reader stopped" : UNFETCHED)));
     waiting.clear();
     retire(w);
   };

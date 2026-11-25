@@ -23,10 +23,34 @@ use chitrakar_doc::{Command, Document, Node, NodeKind, Transform, VectorShape};
 use std::time::{Duration, Instant};
 
 fn build(n: usize) -> Duration {
+    build_beside(n, false)
+}
+
+/// With a live copy of a group already on the page, beside where the
+/// layers go: one copy anywhere made every add walk the whole document,
+/// and pasting two thousand layers took seconds.
+fn build_beside(n: usize, a_copy: bool) -> Duration {
     let mut doc = Document::new(400, 300, chitrakar_color::ColorMode::Rgb);
     let root = doc.root();
+    let mut first = 0;
+    if a_copy {
+        let group = doc.peek_next_id();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(Node::group("symbol")),
+        })
+        .unwrap();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(Node::instance("copy", group)),
+        })
+        .unwrap();
+        first = 2;
+    }
     let at = Instant::now();
-    for i in 0..n {
+    for i in first..first + n {
         let mut node = Node::vector(
             &format!("l{i}"),
             VectorShape::Rect {
@@ -59,7 +83,7 @@ fn build(n: usize) -> Duration {
     let spent = at.elapsed();
     assert_eq!(
         doc.children_of(root).unwrap().len(),
-        n,
+        first + n,
         "the layers are on it"
     );
     spent
@@ -99,5 +123,20 @@ fn adding_a_layer_costs_one_layer() {
     assert!(
         large > Duration::from_micros(200),
         "the larger build took {large:.2?}, which is too little to have been measured"
+    );
+}
+
+#[test]
+fn adding_a_layer_beside_a_copy_costs_one_layer() {
+    let _ = build_beside(400, true);
+    let (mut small, mut large) = (Duration::MAX, Duration::MAX);
+    for _ in 0..5 {
+        small = small.min(build_beside(800, true));
+        large = large.min(build_beside(3200, true));
+    }
+    let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
+    assert!(
+        ratio < 6.0,
+        "with a copy on the page, 3200 layers cost {large:.2?} against {small:.2?} for 800 — {ratio:.1} times"
     );
 }

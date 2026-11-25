@@ -2943,18 +2943,22 @@ mod tests {
             let text = "lorem ipsum dolor sit amet ".repeat(words / 5);
             let mut s = spec(&text, 16.0);
             s.width = 500.0;
-            (0..3)
-                .map(|_| {
-                    let at = std::time::Instant::now();
-                    let lines = lines_of(&s, 1.0);
-                    assert!(lines.len() > 1);
-                    at.elapsed()
-                })
-                .min()
-                .unwrap()
+            let at = std::time::Instant::now();
+            let lines = lines_of(&s, 1.0);
+            assert!(lines.len() > 1);
+            at.elapsed()
         };
         let _ = timed(500);
-        let (small, large) = (timed(1500), timed(6000));
+        // The least of five of each, taken turn about: a machine busy with
+        // the rest of the workspace's tests only ever adds time, and taken
+        // in turn both sizes share whatever else is running. Read three
+        // times one size and then the other, a full run of the gate put
+        // the ratio past its ceiling twice.
+        let (mut small, mut large) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            small = small.min(timed(1500));
+            large = large.min(timed(6000));
+        }
         let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-9);
         assert!(
             ratio < 8.0,

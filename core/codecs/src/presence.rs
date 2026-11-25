@@ -69,22 +69,64 @@ fn box_mean(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
 fn min_filter(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     let mut rows = vec![0f32; w * h];
     for y in 0..h {
-        let row = &src[y * w..(y + 1) * w];
-        for x in 0..w {
-            let (x0, x1) = (x.saturating_sub(r), (x + r + 1).min(w));
-            rows[y * w + x] = row[x0..x1].iter().copied().fold(f32::INFINITY, f32::min);
-        }
+        running_min(&src[y * w..(y + 1) * w], r, &mut rows[y * w..(y + 1) * w]);
     }
     let mut out = vec![0f32; w * h];
-    for y in 0..h {
-        let (y0, y1) = (y.saturating_sub(r), (y + r + 1).min(h));
-        for x in 0..w {
-            out[y * w + x] = (y0..y1)
-                .map(|yy| rows[yy * w + x])
-                .fold(f32::INFINITY, f32::min);
+    let (mut column, mut least) = (vec![0f32; h], vec![0f32; h]);
+    for x in 0..w {
+        for y in 0..h {
+            column[y] = rows[y * w + x];
+        }
+        running_min(&column, r, &mut least);
+        for y in 0..h {
+            out[y * w + x] = least[y];
         }
     }
     out
+}
+
+/// The smallest value within `r` of each place along a line, cut at its
+/// ends — van Herk and Gil and Werman's way: in blocks a window long, the
+/// least so far from each block's start and the least still to come to
+/// its end, so that any window, which crosses one block's end, is the
+/// lesser of two numbers. Three comparisons a place whatever the reach;
+/// taken window by window, Dehaze's reach of a seventieth of the picture
+/// made every slider in the develop window wait most of a second.
+fn running_min(line: &[f32], r: usize, out: &mut [f32]) {
+    let n = line.len();
+    if n == 0 {
+        return;
+    }
+    let k = 2 * r + 1;
+    // Padded a reach each side with nothing, so every window is whole.
+    let len = n + 2 * r;
+    let at = |i: usize| -> f32 {
+        if i < r || i >= r + n {
+            f32::INFINITY
+        } else {
+            line[i - r]
+        }
+    };
+    let mut ahead = vec![0f32; len];
+    let mut behind = vec![0f32; len];
+    for i in 0..len {
+        ahead[i] = if i % k == 0 {
+            at(i)
+        } else {
+            ahead[i - 1].min(at(i))
+        };
+    }
+    for i in (0..len).rev() {
+        behind[i] = if i % k == k - 1 || i == len - 1 {
+            at(i)
+        } else {
+            behind[i + 1].min(at(i))
+        };
+    }
+    for (x, o) in out.iter_mut().enumerate().take(n) {
+        // The window [x, x + 2r] in the padded line is [x - r, x + r].
+        *o = behind[x].min(ahead[(x + k - 1).min(len - 1)]);
+    }
 }
 
 /// The guided filter's lines: `p` explained, within each window of
@@ -288,6 +330,20 @@ mod tests {
                 [base * tex; 3]
             })
             .collect()
+    }
+
+    #[test]
+    fn the_running_minimum_is_the_windows_least() {
+        let line: Vec<f32> = (0..97).map(|i| ((i * 37 % 23) as f32).sin()).collect();
+        for r in [0, 1, 2, 5, 11, 48, 60] {
+            let mut fast = vec![0f32; line.len()];
+            running_min(&line, r, &mut fast);
+            for (x, got) in fast.iter().enumerate() {
+                let (a, b) = (x.saturating_sub(r), (x + r + 1).min(line.len()));
+                let slow = line[a..b].iter().copied().fold(f32::INFINITY, f32::min);
+                assert_eq!(*got, slow, "reach {r} at {x}");
+            }
+        }
     }
 
     #[test]

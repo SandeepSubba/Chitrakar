@@ -50,6 +50,10 @@ same(settleTyped("1.920", 1, false, true), "1.920", "in a comma-decimal language
 same(settleTyped("1.920", 0, false, false), "1.920", "no comma typed");
 same(settleTyped("-3.000", 1, false, false), "-3000", "negative thousands");
 same(plainDigits("٠١٢٣٤٥٦٧٨٩"), "0123456789", "every Arabic-Indic digit");
+same(readWritten("١٢٫٥", false), "12.5", "Arabic's own decimal mark");
+same(readWritten("١٬٢٠٠", false), "1200", "and its thousands mark");
+same(readWritten("0,500", false), "0.500", "a nought before a comma is a decimal");
+same(settleTyped("0.500", 1, false, false), "0.500", "typed too");
 same(typeof commaIsDecimal("de-DE"), "boolean", "the language is asked");
 
 if (fails.length) {

@@ -291,6 +291,23 @@ export function cleanPresets(x: unknown): DevelopPreset[] {
   return out;
 }
 
+/** The same values, read to a part in a hundred thousand: a curve's
+ * point kept as 0.30000014734 came back from the engine as 0.30000016,
+ * and the preset it was kept as never showed as the one in use. */
+function near(a: unknown, b: unknown): boolean {
+  if (typeof a === "number" && typeof b === "number") return Math.abs(a - b) <= 1e-5;
+  if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((v, i) => near(v, b[i]));
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const ka = Object.keys(a as object);
+    const kb = Object.keys(b as object);
+    return (
+      ka.length === kb.length &&
+      ka.every((k) => near((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+    );
+  }
+  return a === b;
+}
+
 /** Whether settings are a preset's: every one the same. */
 export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
   const keys = Object.keys(RANGES) as (keyof typeof RANGES)[];
@@ -304,9 +321,9 @@ export function samePreset(p: DevelopPreset, s: RawSettings): boolean {
     (p.settings.color_noise ?? p.settings.noise) === (s.color_noise ?? s.noise) &&
     JSON.stringify(p.settings.defringe ?? [0, 0]) === JSON.stringify(s.defringe ?? [0, 0]) &&
     !!p.settings.curve === !!s.curve &&
-    CURVE_KEYS.every((k) => JSON.stringify(p.settings[k] ?? null) === JSON.stringify(s[k] ?? null)) &&
-    JSON.stringify(p.settings.mixer ?? null) === JSON.stringify(s.mixer ?? null) &&
-    JSON.stringify(p.settings.grading ?? null) === JSON.stringify(s.grading ?? null)
+    CURVE_KEYS.every((k) => near(p.settings[k] ?? null, s[k] ?? null)) &&
+    near(p.settings.mixer ?? null, s.mixer ?? null) &&
+    near(p.settings.grading ?? null, s.grading ?? null)
   );
 }
 

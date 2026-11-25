@@ -6496,12 +6496,24 @@ pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2
 /// rectangle's corners become arcs of segments. An open path is treated as
 /// closed, since only its filled area means anything here.
 pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
+    shape_rings_at(shape, 1.0)
+}
+
+/// [`shape_rings`] for a shape seen `scale` times its own size: a circle
+/// of radius 25 sized up thirty times by its layer was walked as a
+/// circle of 25, and a boolean on it was two pixels off.
+pub fn shape_rings_at(shape: &VectorShape, scale: f32) -> Vec<Vec<[f32; 2]>> {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale.min(1e4)
+    } else {
+        1.0
+    };
     match shape {
         VectorShape::Polygon { .. } => {
-            shape_rings(&shape.as_path().unwrap_or_else(|| shape.clone()))
+            shape_rings_at(&shape.as_path().unwrap_or_else(|| shape.clone()), scale)
         }
         VectorShape::Ellipse { rx, ry } => {
-            let n = per_quarter(rx.max(*ry)) * 4;
+            let n = per_quarter(rx.max(*ry) * scale) * 4;
             vec![(0..n)
                 .map(|i| {
                     let a = i as f32 / n as f32 * std::f32::consts::TAU;
@@ -6523,7 +6535,7 @@ pub fn shape_rings(shape: &VectorShape) -> Vec<Vec<[f32; 2]>> {
                     [0.0, *height],
                 ]];
             }
-            let quarter = per_quarter(r);
+            let quarter = per_quarter(r * scale);
             // Each corner is a quarter arc about its own centre, walked in
             // the same direction the square-cornered ring goes.
             let corners = [

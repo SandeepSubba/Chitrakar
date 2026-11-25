@@ -10,6 +10,9 @@
  */
 export function plainDigits(text: string): string {
   return text
+    // Arabic's own decimal and thousands marks.
+    .replace(/\u066b/g, ".")
+    .replace(/\u066c/g, "")
     .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
     .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0));
 }
@@ -33,7 +36,7 @@ export function readWritten(text: string, commaDecimal: boolean): string {
     return comma > point ? t.replace(/\./g, "").replace(",", ".") : t.replace(/,/g, "");
   }
   const commas = t.split(",").length - 1;
-  if (!commaDecimal && (commas > 1 || /^[-+]?\d{1,3},\d{3}$/.test(t))) return t.replace(/,/g, "");
+  if (!commaDecimal && (commas > 1 || /^[-+]?[1-9]\d{0,2},\d{3}$/.test(t))) return t.replace(/,/g, "");
   if (commas > 1) return t.replace(/,/g, "");
   return t.replace(",", ".");
 }
@@ -46,6 +49,7 @@ export function readWritten(text: string, commaDecimal: boolean): string {
  */
 export function settleTyped(value: string, commas: number, point: boolean, commaDecimal: boolean): string {
   if (commas === 0 || point || commaDecimal) return value;
-  if (commas > 1 || /^[-+]?\d{1,3}\.\d{3}$/.test(value)) return value.replace(/\./g, "");
+  // Not after a nought: "0,500" is a half.
+  if (commas > 1 || /^[-+]?[1-9]\d{0,2}\.\d{3}$/.test(value)) return value.replace(/\./g, "");
   return value;
 }

@@ -3074,7 +3074,10 @@ export function App() {
     const now = Date.now();
     draftWaiting.current ??= now;
     const wait = Math.max(0, Math.min(1500, draftWaiting.current + 10_000 - now));
-    const t = setTimeout(() => {
+    let done = false;
+    const keep = () => {
+      if (done) return;
+      done = true;
       draftWaiting.current = null;
       const mine = ++draftRun.current;
       (slotReady.current ?? Promise.resolve(0))
@@ -3100,8 +3103,31 @@ export function App() {
         .catch(() => {
           // A draft that cannot be written is not worth an alert.
         });
-    }, wait);
-    return () => clearTimeout(t);
+    };
+    const t = setTimeout(keep, wait);
+    // And at once when the page is put away or left: waiting out its
+    // breath, a reload lost up to the last ten seconds of work.
+    const hidden = () => {
+      if (document.visibilityState === "hidden") {
+        clearTimeout(t);
+        keep();
+      }
+    };
+    const leaving = () => {
+      clearTimeout(t);
+      keep();
+    };
+    document.addEventListener("visibilitychange", hidden);
+    window.addEventListener("pagehide", leaving);
+    // Before the browser asks whether to leave: begun then, the writing
+    // has the time the question is up for.
+    window.addEventListener("beforeunload", leaving);
+    return () => {
+      clearTimeout(t);
+      document.removeEventListener("visibilitychange", hidden);
+      window.removeEventListener("pagehide", leaving);
+      window.removeEventListener("beforeunload", leaving);
+    };
     // `unsaved` is declared further down, with the history it reads;
     // `savedAt` is what moves it when nothing else here does.
   }, [session, saveTick, layers.length, docName, docPath, savedAt, prefs.keepDraft]);
@@ -7014,6 +7040,15 @@ export function App() {
       const at = docPoint(e);
       lastPointer.current = at;
       measureAt(at[0], at[1], e.altKey && e.buttons === 0);
+    }
+    // A mouse moving with no button held while a drag is under way: its
+    // button came up where the page never heard it (outside the window,
+    // or as the focus went), and the drag is ended there. Left open, the
+    // layer went on following the pointer and was dropped by the next
+    // click with no step in the history.
+    if (e.pointerType === "mouse" && e.buttons === 0 && toolDragRef.current) {
+      onCanvasPointerUp(e);
+      return;
     }
     if (cropEditRef.current) {
       const [x, y] = docPoint(e);
@@ -12246,6 +12281,20 @@ export function App() {
             id = session.place_image(picture, name);
           }
           placed(id, was);
+          // Opened, the page keeps the resolution the file says it was
+          // made at: left at 72, the editor's own 300-dpi exports came
+          // back four times too large to print.
+          if (undoOpen && kind !== "svg") {
+            const dpi = WasmSession.picture_dpi(raw);
+            if (dpi > 0) {
+              try {
+                session.set_dpi(dpi);
+                setDocDpi(dpi);
+              } catch {
+                // A resolution the page will not take is left as it was.
+              }
+            }
+          }
           if (kind === "psd" || kind === "picture" || kind === "svg") {
             const notes = JSON.parse(session.import_notes()) as string[];
             setImportNotes(notes.length > 0 ? { name, notes } : null);
@@ -12308,6 +12357,15 @@ export function App() {
     initial: RawSettings;
     layer: number | null;
   } | null>(null);
+  // A photograph in the develop window is work too, though nothing of it
+  // is in the document yet: a reload threw its settings away without a
+  // word.
+  useEffect(() => {
+    if (!developing) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [developing]);
 
   /** The window's settings, developed in full: placed, or given to the
    * layer as its new picture in one step of history. */
@@ -12394,7 +12452,7 @@ export function App() {
       // damaged, said as such: it was "a camera this editor does not
       // know yet", and the browser's own words after it.
       alert(
-        navigator.onLine === false
+        navigator.onLine === false || /could not be fetched/.test(String(err))
           ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
           : /outside the bounds/i.test(String(err))
             ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the file is damaged (its parts point outside it).`
@@ -12690,7 +12748,9 @@ export function App() {
       // in at 254 and called 600, a page two and a third times too small.
       if (ask.opening) {
         const pageWide = ask.sizes[page]?.[0] ?? 0;
-        const real = pageWide > 0 ? (drawn.width * 72) / pageWide : dpi;
+        // The page as it was finally made: taken down past a hundred
+        // megapixels after the reader drew it, the drawn width was not it.
+        const real = pageWide > 0 ? (session.width * 72) / pageWide : dpi;
         const used = Math.abs(real - dpi) > 0.5 ? Math.round(real * 100) / 100 : dpi;
         session.set_dpi(used);
         setDocDpi(used);
@@ -12906,12 +12966,51 @@ export function App() {
       alert(`${unopened.join(", ")} ${unopened.length > 1 ? "were" : "was"} not opened: open one document at a time.`);
   };
   const onShellDropRef = useRef(onShellDrop);
+  // A handle taken off the page while it was being dragged — the layer
+  // let go of by a finger's tap, Deselect or a tool's key pressed mid-
+  // drag — never hears its button come up, and its drag was left a
+  // preview with no step in the history: undo threw it away, and the
+  // next edit took it in as a step of its own. The page is told the
+  // pointer was let go of, and the drag is ended there as the one step
+  // it was.
+  useEffect(() => {
+    let orphaned = false;
+    const end = () => {
+      const s = liveSession.current;
+      if (!orphaned || !s) return;
+      // Once every button is up: a drag still held ends as its press is
+      // let go of.
+      if (pointersDown.current.size > 0) return;
+      orphaned = false;
+      if (s.previewing() && s.commit_preview()) refresh(s);
+    };
+    const lost = (e: PointerEvent) => {
+      const t = e.target;
+      if (t instanceof Node && t !== document && t.isConnected) return;
+      if (!liveSession.current?.previewing()) return;
+      orphaned = true;
+      end();
+    };
+    // After the page's own handlers have heard the button come up.
+    const up = () => setTimeout(end, 0);
+    document.addEventListener("lostpointercapture", lost, true);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      document.removeEventListener("lostpointercapture", lost, true);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, [refresh]);
   const takeFilesRef = useRef(takeFiles);
   takeFilesRef.current = takeFiles;
   // Files dropped anywhere in the window — on the panel, the rail, the
   // bar — are taken as a drop on the canvas is: there they did nothing,
   // and the browser was left to open the picture in place of the editor.
-  // Not over a window (its own fields take what they take) or a field.
+  // Not into a field. Over a window, what its own fields do not take is
+  // taken once it closes (`takeFiles` waits): it was thrown away without
+  // a word, and a photograph dropped while the develop window was up
+  // never came.
   useEffect(() => {
     const over = (e: DragEvent) => {
       if (!e.dataTransfer?.types.includes("Files")) return;
@@ -12920,7 +13019,7 @@ export function App() {
     const drop = (e: DragEvent) => {
       if (e.defaultPrevented || !e.dataTransfer?.files.length) return;
       e.preventDefault();
-      if (aWindowIsUp() || isTextEntry(e.target)) return;
+      if (isTextEntry(e.target)) return;
       takeFilesRef.current(Array.from(e.dataTransfer.files));
     };
     window.addEventListener("dragover", over);
@@ -14686,7 +14785,7 @@ export function App() {
           name={developing.name}
           info={developing.info}
           initial={developing.initial}
-          action={developing.layer === null ? "Place" : "Develop"}
+          action={developing.layer !== null ? "Develop" : rawUndoOpen.current ? "Open" : "Place"}
           historyKey={(e) => {
             const fired = chords.byChord[chordFromEvent(e)];
             return fired === "undo" || fired === "redo" ? fired : undefined;
@@ -17332,8 +17431,8 @@ export function App() {
                     never said Open, and called the tools "the rail". */}
                 <span>
                   No layers yet. Open a photo (File › Open), drop a
-                  picture onto the page, pick a shape from the tools on the
-                  left and drag on the page, or type with the text tool.
+                  picture onto the page, pick a shape from the tools and
+                  drag on the page, or type with the text tool.
                 </span>
               </li>
             )}
@@ -20953,7 +21052,8 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
     clear(opening);
     setOpen(false);
   });
-  /** When the pointer resting on the row last opened it. */
+  /** When the pointer resting on the row opened it, while it has not
+   * left the row since (0 otherwise). */
   const hovered = useRef(0);
   const show = () => {
     clear(closing);
@@ -20990,7 +21090,10 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
           show();
         }, 120);
       }}
-      onPointerLeave={hide}
+      onPointerLeave={() => {
+        hovered.current = 0;
+        hide();
+      }}
     >
       <button
         ref={rowRef}
@@ -21004,11 +21107,12 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
           // in: the menu closes on any click inside it, and this one
           // has not chosen anything yet.
           e.stopPropagation();
-          // Opened a moment ago by the pointer resting on it, the click
+          // Opened by the pointer resting on it, the click
           // that followed is the same wish, not a second thought: it
           // closed what the rest had just opened, and a pen, which
           // hovers before it lands, took two taps for every submenu.
-          const justHovered = performance.now() - hovered.current < 1500;
+          // However long it rested: the pointer has not left the row.
+          const justHovered = hovered.current > 0;
           hovered.current = 0;
           if (open && !justHovered) setOpen(false);
           else show();
@@ -21227,6 +21331,71 @@ function CurveEditor({
     previewing: boolean;
   } | null>(null);
   const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+  /** The point the keys move, counted along the curve from its left. */
+  const [keyed, setKeyed] = useState(0);
+  const [keying, setKeying] = useState(false);
+  /** From the keyboard: arrows move the picked point a level (ten with
+   * Shift), [ and ] pick another, + adds one halfway to the next, and
+   * Delete takes it away. The curve was a picture to the keyboard, and
+   * no point of it could be put or moved without a mouse. */
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const pts = sorted(points);
+    if (pts.length === 0) return;
+    const at = Math.min(keyed, pts.length - 1);
+    const step = (e.shiftKey ? 10 : 1) / 255;
+    const move = (dx: number, dy: number) => {
+      const next = [...pts];
+      const lo = at > 0 ? next[at - 1][0] + 0.005 : 0;
+      const hi = at < next.length - 1 ? next[at + 1][0] - 0.005 : 1;
+      const [x, y] = next[at];
+      next[at] = [Math.min(hi, Math.max(lo, x + dx)), clamp01(y + dy)];
+      onEdit(next, false);
+    };
+    switch (e.key) {
+      case "ArrowUp":
+        move(0, step);
+        break;
+      case "ArrowDown":
+        move(0, -step);
+        break;
+      case "ArrowLeft":
+        move(-step, 0);
+        break;
+      case "ArrowRight":
+        move(step, 0);
+        break;
+      case "[":
+        setKeyed(Math.max(0, at - 1));
+        break;
+      case "]":
+        setKeyed(Math.min(pts.length - 1, at + 1));
+        break;
+      case "+":
+      case "=": {
+        const b = pts[Math.min(at + 1, pts.length - 1)];
+        const a = pts[at === pts.length - 1 ? at - 1 : at];
+        if (!a || !b || b[0] - a[0] < 0.02) return;
+        const mid = (a[0] + b[0]) / 2;
+        const made = sorted([...pts, [mid, curveSamples(pts).reduce((best, q) => (Math.abs(q[0] - mid) < Math.abs(best[0] - mid) ? q : best))[1]]]);
+        onEdit(made, false);
+        setKeyed(made.findIndex((q) => q[0] === mid));
+        break;
+      }
+      case "Delete":
+      case "Backspace":
+        if (pts.length <= 2) return;
+        onEdit(
+          pts.filter((_, j) => j !== at),
+          false,
+        );
+        setKeyed(Math.max(0, at - 1));
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  };
   const local = (
     e: React.PointerEvent | React.MouseEvent,
   ): [number, number] => {
@@ -21312,8 +21481,14 @@ function CurveEditor({
         ref={svgRef}
         className="curve-editor"
         viewBox={`0 0 ${SIZE} ${SIZE}`}
-        role="img"
+        role="application"
+        tabIndex={0}
         aria-label={label}
+        aria-roledescription="curve"
+        aria-description="Arrow keys move the picked point, Shift for ten; [ and ] pick another; + adds a point; Delete takes it away."
+        onKeyDown={onKeyDown}
+        onFocus={() => setKeying(true)}
+        onBlur={() => setKeying(false)}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -21344,14 +21519,14 @@ function CurveEditor({
           />
         ))}
         <path className="line" style={{ stroke: colour }} d={line} />
-        {points.map(([x, y], i) => (
+        {sorted(points).map(([x, y], i) => (
           <circle
             key={i}
-            className="pt"
+            className={keying && i === Math.min(keyed, points.length - 1) ? "pt keyed" : "pt"}
             style={{ fill: colour }}
             cx={px(x)}
             cy={py(y)}
-            r={4}
+            r={keying && i === Math.min(keyed, points.length - 1) ? 6 : 4}
           />
         ))}
       </svg>

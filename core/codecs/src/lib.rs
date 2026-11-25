@@ -17,6 +17,7 @@ mod presence;
 pub mod psd;
 pub mod psd_export;
 pub mod raw;
+pub mod resolution;
 mod strokes;
 mod subset;
 pub mod svg;
@@ -33,6 +34,7 @@ pub use pdf::{
     export_pdf, export_pdf_document, export_pdf_document_marked, export_pdf_frames,
     export_pdf_frames_marked, PdfError, PrintMarks,
 };
+pub use resolution::picture_dpi;
 pub use svg::export_svg;
 pub use svg_import::{import_svg, ImportedSvg};
 pub use tiff_export::{export_cmyk_tiff, export_rgb_tiff, TiffError};

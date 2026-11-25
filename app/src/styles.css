@@ -4874,6 +4874,7 @@ button.fold:hover {
   .prefs-swatch,
   .style-chip,
   .ramp-preview,
+  .grade-wheel,
   #engine-page,
   #engine-canvas {
     forced-color-adjust: none;
@@ -4943,4 +4944,14 @@ button.fold:hover {
   min-height: 2.5rem;
   min-width: 4.5rem;
   font-size: 0.85rem;
+}
+
+/* The point the keys move, while the curve has the focus. */
+.curve-editor .pt.keyed {
+  stroke: var(--text);
+  stroke-width: 2;
+}
+.curve-editor:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

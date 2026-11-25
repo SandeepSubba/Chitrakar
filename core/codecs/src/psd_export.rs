@@ -433,6 +433,15 @@ pub fn write_psd(
 
     let mut recs = Vec::new();
     records(items, &mut recs);
+    // The count is a 16-bit number: past it, it wrapped, and the file
+    // said 32735 layers where it held 32801.
+    if recs.len() > i16::MAX as usize {
+        return Err(CodecError::Format(format!(
+            "it has {} layers and group ends to write, and a Photoshop file holds at most {}",
+            recs.len(),
+            i16::MAX
+        )));
+    }
     let mut info = Vec::new();
     // Negative: the flattened picture's first extra channel is its
     // transparency.

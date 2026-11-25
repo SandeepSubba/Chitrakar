@@ -127,7 +127,16 @@ export function watchWindowFocus(doc: Document = document): void {
       if (!win.hasAttribute("tabindex")) win.setAttribute("tabindex", "-1");
       win.focus({ preventScroll: true });
     } else {
-      firstStop(win)?.focus({ preventScroll: true });
+      const first = firstStop(win);
+      first?.focus({ preventScroll: true });
+      // Brought into sight within the window, not the page: at twice the
+      // size the Export window opened with the focus four hundred pixels
+      // below what showed of it, and nothing said where it was.
+      if (first instanceof HTMLElement && typeof first.scrollIntoView === "function") {
+        const box = first.getBoundingClientRect();
+        const room = doc.defaultView?.innerHeight ?? Infinity;
+        if (box.bottom > room || box.top < 0) first.scrollIntoView({ block: "nearest" });
+      }
     }
   };
   const open = new Map<Element, HTMLElement | null>();

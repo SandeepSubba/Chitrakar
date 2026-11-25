@@ -228,6 +228,7 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
     let n = r.u32()? as usize;
     let mut res = r.sub(n)?;
     let mut icc: Option<Vec<u8>> = None;
+    let mut see_through: Option<usize> = None;
     while res.left() >= 12 {
         if res.take(4)? != b"8BIM" {
             break;
@@ -243,8 +244,14 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
         if id == 1039 {
             icc = Some(data.to_vec());
         }
+        // An indexed file's see-through entry: its pixels came in the
+        // palette's colour, an opaque green where nothing was.
+        if id == 1047 && data.len() >= 2 {
+            see_through = Some(u16::from_be_bytes([data[0], data[1]]) as usize);
+        }
     }
-    let colour = Colour::new(&h, &palette, icc.as_deref());
+    let mut colour = Colour::new(&h, &palette, icc.as_deref());
+    colour.see_through = see_through.filter(|_| h.mode == Mode::Indexed);
 
     let n = r.len(big)?;
     let mut lm = r.sub(n)?;
@@ -578,6 +585,11 @@ fn fill_knots(
     out
 }
 
+/// The most pixels a file's layers may come to, all of them together.
+/// Each is held at four bytes a pixel once read, so this is about 1.6
+/// gigabytes: what a page can spare beside the surfaces it draws on.
+const LAYERS_READ: u64 = 400_000_000;
+
 fn read_layers(
     r: &mut R,
     h: &Header,
@@ -588,6 +600,29 @@ fn read_layers(
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
         records.push(read_record(r, h.big)?);
+    }
+    // What the layers will come to, asked before any is decoded: a
+    // three-megabyte file of a hundred compressed 3000-pixel layers
+    // took four gigabytes and a minute to open, and its first frame
+    // stopped the engine. The page the editor draws them on needs room
+    // of its own, so the layers are held to a part of what there is.
+    let pixels_in: u64 = records
+        .iter()
+        .map(|rec| {
+            let side = |a: i32, b: i32| (b as i64 - a as i64).max(0) as u64;
+            let own = side(rec.left, rec.right) * side(rec.top, rec.bottom);
+            let mask = rec
+                .mask
+                .map_or(0, |(t, l, b, rr, _, _)| side(l, rr) * side(t, b));
+            own + mask / 4
+        })
+        .sum();
+    if pixels_in > LAYERS_READ {
+        return Err(bad(format!(
+            "its layers come to {} megapixels, more than the editor can hold at once ({}); merge some in Photoshop, or open a flattened copy",
+            pixels_in / 1_000_000,
+            LAYERS_READ / 1_000_000
+        )));
     }
     // The channels' pixels follow every record, in the records' order.
     let mut pixels: Vec<Option<PsdPixels>> = Vec::with_capacity(count);
@@ -642,6 +677,14 @@ fn read_layers(
             (Some(m), true) => (Some(m), -3),
             _ => (rec.mask, -2),
         };
+        // A mask switched off draws nothing in Photoshop either, but it is
+        // kept there to be switched on: said, where it went without a word.
+        if matches!(mask_box, Some((_, _, _, _, _, true))) && get(mask_id).is_some() {
+            lost.push(format!(
+                "the switched-off mask of \"{}\" (the layer comes in as it shows, without it)",
+                rec.name
+            ));
+        }
         // How far the mask is softened over: its own feather and the
         // vector mask's, which are laid on the two together here.
         let vfeather = rec.vector.as_ref().map_or(0.0, |v| v.feather);
@@ -1433,8 +1476,13 @@ fn read_merged(r: &mut R, h: &Header, colour: &Colour, alpha: bool) -> Result<Ve
     // Photoshop keeps the merged picture of a see-through document over
     // white; the white is taken back out where it shows, or soft edges
     // came in pale (for RGB and grey, whose white is all of each channel).
-    if alpha_index != usize::MAX && h.depth <= 16 && matches!(h.mode, Mode::Rgb | Mode::Grey) {
-        let coverage = planes[alpha_index].clone();
+    // Only where the file has that channel: one saying its merged
+    // picture is see-through with no channel to say where stopped the
+    // engine here.
+    if let (Some(coverage), true) = (
+        planes.get(alpha_index).cloned(),
+        h.depth <= 16 && matches!(h.mode, Mode::Rgb | Mode::Grey),
+    ) {
         for (c, plane) in planes.iter_mut().enumerate() {
             if c == alpha_index {
                 continue;
@@ -1457,6 +1505,8 @@ fn read_merged(r: &mut R, h: &Header, colour: &Colour, alpha: bool) -> Result<Ve
 struct Colour {
     mode: Mode,
     palette: Vec<u8>,
+    /// The palette entry that is no colour at all (resource 1047).
+    see_through: Option<usize>,
     icc_rgb: Option<Vec<u8>>,
     cmyk: Option<chitrakar_color::cms::CmykCms>,
 }
@@ -1466,10 +1516,15 @@ impl Colour {
         Colour {
             mode: h.mode,
             palette: palette.to_vec(),
+            see_through: None,
             // A grey file's own grey profile too: its tones, read as sRGB's,
             // came in wrong (`normalize_rgba8_to_srgb` takes either).
+            // Not a 32-bit file's: its samples are light, taken onto the
+            // screen's curve as they are read, whatever its profile's own
+            // curve says, as Photoshop reads them. A linear profile put
+            // over them as well brightened them twice.
             icc_rgb: icc
-                .filter(|_| matches!(h.mode, Mode::Rgb | Mode::Grey))
+                .filter(|_| matches!(h.mode, Mode::Rgb | Mode::Grey) && h.depth != 32)
                 .map(<[u8]>::to_vec),
             cmyk: icc
                 .filter(|_| h.mode == Mode::Cmyk)
@@ -1524,6 +1579,10 @@ impl Colour {
                     }
                 }
                 Mode::Lab => lab_to_srgb8(at(0, i, 0.0), at(1, i, 0.5), at(2, i, 0.5)),
+            };
+            let a = match self.see_through {
+                Some(t) if (at(0, i, 0.0) * 255.0).round() as usize == t => 0.0,
+                _ => a,
             };
             out[i * 4..i * 4 + 4].copy_from_slice(&[px[0], px[1], px[2], b8(a)]);
         }
@@ -2422,5 +2481,26 @@ mod tests {
             let _ = read_psd(&bytes[..cut]);
         }
         assert!(read_psd(b"8BPS\0\x01junk").is_err());
+    }
+
+    #[test]
+    fn a_see_through_merged_picture_without_its_channel_is_not_panicked_over() {
+        // A negative layer count says the merged picture has its own
+        // see-through channel; a header of three channels has none to
+        // give, and reading it stopped the engine.
+        let mut bytes = write(
+            4,
+            4,
+            &[layer("L", [0, 0, 4, 4], solid(4, 4, [1, 2, 3, 255]))],
+            &solid(4, 4, [0, 0, 0, 255]),
+        );
+        bytes[12..14].copy_from_slice(&3u16.to_be_bytes());
+        let colour = u32::from_be_bytes(bytes[26..30].try_into().unwrap()) as usize;
+        let at = 30 + colour;
+        let resources = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        let count = at + 4 + resources + 8;
+        let n = i16::from_be_bytes([bytes[count], bytes[count + 1]]);
+        bytes[count..count + 2].copy_from_slice(&(-n.abs()).to_be_bytes());
+        let _ = read_psd(&bytes);
     }
 }
