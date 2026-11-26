@@ -349,15 +349,12 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     // diagram came in saying "Text is not SVG - cannot display" along its
     // foot. Its labels come in by their own fallback text.
     let quieted;
-    const DRAWIO_WARNING: &[u8] = b"Text is not SVG - cannot display";
-    let data = if data
-        .windows(DRAWIO_WARNING.len())
-        .any(|w| w == DRAWIO_WARNING)
-    {
-        quieted = replace_ignoring_case(data, DRAWIO_WARNING, b"");
-        &quieted[..]
-    } else {
-        data
+    let data = match without_drawio_warning(data) {
+        Some(q) => {
+            quieted = q;
+            &quieted[..]
+        }
+        None => data,
     };
     let mut opt = usvg::Options::default();
     // A picture the file holds that is stored on its side (a camera's
@@ -3195,6 +3192,41 @@ fn upright_if_turned(bytes: &[u8]) -> Option<Vec<u8>> {
 /// has no decoder for — they are passed over rather than guessed at,
 /// which is the same answer as before for those two and a picture for
 /// the two that matter.
+/// The file without draw.io's warning to readers that cannot show its
+/// labels: every `<text>` element whose whole content is "Text is not
+/// SVG - cannot display", taken out tag and all. A label that only says
+/// it among other words is left as it is. Nothing when there is none.
+fn without_drawio_warning(data: &[u8]) -> Option<Vec<u8>> {
+    const WARNING: &[u8] = b">Text is not SVG - cannot display</text>";
+    let find = |hay: &[u8], needle: &[u8], from: usize| {
+        hay.get(from..)?
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .map(|i| i + from)
+    };
+    let mut out = Vec::with_capacity(data.len());
+    let (mut copied, mut from, mut any) = (0, 0, false);
+    while let Some(at) = find(data, WARNING, from) {
+        let end = at + WARNING.len();
+        // The element's start: the last "<text" before the warning.
+        let start = data[copied..at]
+            .windows(5)
+            .rposition(|w| w == b"<text")
+            .map(|i| i + copied);
+        if let Some(start) = start {
+            out.extend_from_slice(&data[copied..start]);
+            copied = end;
+            any = true;
+        }
+        from = end;
+    }
+    if !any {
+        return None;
+    }
+    out.extend_from_slice(&data[copied..]);
+    Some(out)
+}
+
 fn picture_of(
     img: &usvg::Image,
     kind: &usvg::ImageKind,
@@ -5010,6 +5042,19 @@ mod tests {
             px[0] > 240 && px[1] > 150 && px[2] < 20,
             "orange, not multiplied: {px:?}"
         );
+    }
+
+    /// draw.io's warning to readers that cannot show its labels is left
+    /// out; a label of other words that says it among them is kept.
+    #[test]
+    fn drawios_warning_is_left_out() {
+        let svg = br##"<svg><text x="10">Our note: Text is not SVG - cannot display, said draw.io</text><switch><g requiredFeatures="x"/><a xlink:href="y"><text text-anchor="middle" x="50%" y="100%">Text is not SVG - cannot display</text></a></switch></svg>"##;
+        let out = String::from_utf8(without_drawio_warning(svg).unwrap()).unwrap();
+        assert_eq!(
+            out,
+            r##"<svg><text x="10">Our note: Text is not SVG - cannot display, said draw.io</text><switch><g requiredFeatures="x"/><a xlink:href="y"></a></switch></svg>"##
+        );
+        assert!(without_drawio_warning(b"<svg><text>Hello</text></svg>").is_none());
     }
 
     /// A shape wholly inside a group's rectangular clip wears no mask; one

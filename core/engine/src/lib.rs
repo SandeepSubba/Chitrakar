@@ -1967,10 +1967,22 @@ impl Session {
         let (Some(newer), Some(older)) = (self.undo.pop(), self.undo.pop()) else {
             return false;
         };
-        // Undone newest first: the drag taken back, then the copy.
+        // Undone newest first: the drag taken back, then the copy. Kept
+        // one level deep: a batch runs its parts in order, so a batch inside
+        // one is the same as its parts laid in. Wrapped each time instead,
+        // six hundred shapes dropped into a frame (each joined to the move)
+        // made a batch six hundred deep, and undoing it ran the engine out
+        // of stack and took the page down.
+        let mut parts = Vec::new();
+        for inverse in [newer.inverse, older.inverse] {
+            match inverse {
+                Command::Batch(inner) => parts.extend(inner),
+                one => parts.push(one),
+            }
+        }
         let serial = self.next_serial();
         self.undo.push(HistoryEntry {
-            inverse: Command::Batch(vec![newer.inverse, older.inverse]),
+            inverse: Command::Batch(parts),
             label: older.label,
             serial,
         });
@@ -7178,8 +7190,7 @@ impl Session {
                 // middles, which is what spaced evenly means for layers of
                 // different sizes, and what makes the result stable if
                 // you run it twice. Spread over the page, the outermost
-                // two go to its edges first. A key has nothing to add:
-                // the outermost already stay.
+                // two go to its edges first.
                 let (near, far) = if horizontal { (0, 2) } else { (1, 3) };
                 let n = boxes.len();
                 let (mut from, mut to_edge) = (boxes[0].1[near], boxes[n - 1].1[far]);
@@ -7188,17 +7199,42 @@ impl Session {
                     from = ground[near];
                     to_edge = ground[far];
                 }
-                let sizes: f32 = boxes.iter().map(|(_, b)| b[far] - b[near]).sum();
-                let gap = (to_edge - from - sizes) / (n - 1) as f32;
-                let mut at = from;
-                for (id, b) in boxes.iter() {
-                    let d = at - b[near];
-                    deltas.push((
-                        *id,
-                        if horizontal { d } else { 0.0 },
-                        if horizontal { 0.0 } else { d },
-                    ));
-                    at += b[far] - b[near] + gap;
+                // A key between them stays too: each side of it is spaced
+                // on its own, between the outermost and the key. Spaced
+                // as one run, the key layer was the one that moved.
+                let pivot = match to {
+                    AlignTo::Key(k) => boxes
+                        .iter()
+                        .position(|(id, _)| *id == k)
+                        .filter(|&i| i > 0 && i + 1 < n),
+                    _ => None,
+                };
+                let runs: Vec<(usize, usize, f32, f32)> = match pivot {
+                    Some(i) => vec![
+                        (0, i, from, boxes[i].1[far]),
+                        (i, n - 1, boxes[i].1[near], to_edge),
+                    ],
+                    None => vec![(0, n - 1, from, to_edge)],
+                };
+                for (first, last, from, to_edge) in runs {
+                    let run = &boxes[first..=last];
+                    let sizes: f32 = run.iter().map(|(_, b)| b[far] - b[near]).sum();
+                    let gap = (to_edge - from - sizes) / (run.len() - 1).max(1) as f32;
+                    let mut at = from;
+                    for (k, (id, b)) in run.iter().enumerate() {
+                        // The key closes one run and opens the next: moved
+                        // by neither.
+                        if pivot.is_some() && (first + k) == pivot.unwrap() && k + 1 == run.len() {
+                            continue;
+                        }
+                        let d = at - b[near];
+                        deltas.push((
+                            *id,
+                            if horizontal { d } else { 0.0 },
+                            if horizontal { 0.0 } else { d },
+                        ));
+                        at += b[far] - b[near] + gap;
+                    }
                 }
             }
             other => {
@@ -7210,7 +7246,9 @@ impl Session {
 
         let mut cmds = Vec::new();
         for (id, dx, dy) in deltas {
-            if dx == 0.0 && dy == 0.0 {
+            // A locked layer among those picked counts toward the box they
+            // line up with and stays where it is.
+            if (dx == 0.0 && dy == 0.0) || self.unlocked(id).is_err() {
                 continue;
             }
             // A displacement in document space is a vector, so only the
@@ -11551,7 +11589,10 @@ impl Session {
             self.doc.meta.width as f32 * scale,
             self.doc.meta.height as f32 * scale,
         );
-        if (width as f32) + 1.5 < pw || (height as f32) + 1.5 < ph {
+        // Only where something reaches past an edge at all: a plain
+        // photograph's region was offered a third less than it could be.
+        let part = (width as f32) + 1.5 < pw || (height as f32) + 1.5 < ph;
+        if part && self.export_past(scale) > 0 {
             4
         } else {
             0
@@ -26283,6 +26324,46 @@ mod tests {
             assert!((bb[1] + bb[3] - 50.0).abs() < 1e-3, "to the key's bottom");
         }
         assert_eq!(session.bounds_of(b).unwrap(), before);
+        session.undo().unwrap();
+        // Spaced evenly with a key between the others: the key stays as the
+        // outermost two do, and each side of it is spaced on its own. It
+        // was the key that moved.
+        let d = place(&mut session, "d", 180.0, 10.0, 20.0);
+        let (ba, bd) = (session.bounds_of(a).unwrap(), session.bounds_of(d).unwrap());
+        session
+            .align_nodes_to(&[a, b, c, d], "distribute-h", AlignTo::Key(b))
+            .unwrap();
+        assert_eq!(session.bounds_of(b).unwrap(), before, "the key stays");
+        assert_eq!(session.bounds_of(a).unwrap(), ba, "the first stays");
+        assert_eq!(session.bounds_of(d).unwrap(), bd, "the last stays");
+        let c_now = session.bounds_of(c).unwrap();
+        let gaps = (c_now[0] - right(&session, b), bd[0] - (c_now[0] + c_now[2]));
+        assert!(
+            (gaps.0 - gaps.1).abs() < 1e-3,
+            "the one between the key and the last is spaced between them: {gaps:?}"
+        );
+        session.undo().unwrap();
+        // A locked layer picked with another counts toward the box they
+        // line up with and stays: the other went to the page's edge.
+        session
+            .apply(Command::SetLocked {
+                id: b,
+                locked: true,
+            })
+            .unwrap();
+        session
+            .align_nodes_to(&[b, c], "left", AlignTo::Selection)
+            .unwrap();
+        assert_eq!(
+            session.bounds_of(b).unwrap(),
+            before,
+            "the locked one stays"
+        );
+        assert!(
+            (x0(&session, c) - 60.0).abs() < 1e-3,
+            "and the other lines up with it, not the page: {}",
+            x0(&session, c)
+        );
     }
 
     #[test]
@@ -27856,6 +27937,28 @@ mod tests {
         // Nothing to fold into.
         let mut lone = Session::new(10, 10, ColorMode::Rgb);
         assert!(!lone.merge_last());
+
+        // Thousands folded into one step stay a batch one deep: wrapped a
+        // level each time, undoing six hundred ran out of stack.
+        let mut many = Session::new(200, 100, ColorMode::Rgb);
+        let first = add_rect(&mut many, "a", 4.0, 3.0);
+        for i in 1..=3000 {
+            many.apply(Command::SetTransform {
+                id: first,
+                transform: Transform::translation((i % 100 + 1) as f32, 0.0),
+            })
+            .unwrap();
+            assert!(many.merge_last());
+        }
+        assert_eq!(many.history_labels().0.len(), 1);
+        many.undo().unwrap();
+        assert!(many
+            .document()
+            .children_of(many.document().root())
+            .unwrap()
+            .is_empty());
+        many.redo().unwrap();
+        assert_eq!(many.transform_of(first).unwrap().e, 1.0);
     }
 
     /// A matte handed in by something that looked at the picture.

@@ -498,6 +498,12 @@ pub fn write_psd(
     if info.len() % 2 == 1 {
         info.push(0);
     }
+    // No layers at all is no layer section at all, its length nought: a
+    // section holding a count of nought is refused by ImageMagick as
+    // "InvalidNumberOfLayers", and no picture came out.
+    if recs.is_empty() {
+        info.clear();
+    }
     let mut lm = Vec::new();
     lm.extend_from_slice(&(info.len() as u32).to_be_bytes());
     lm.extend(info);
@@ -763,6 +769,23 @@ mod tests {
         assert_eq!((none.width, none.height), (0, 0));
         let bytes = write_psd(4, 4, 72.0, &[PsdOutItem::Layer(none)], &[0; 64]).unwrap();
         assert!(read_psd(&bytes).is_ok());
+    }
+
+    /// A document of no layers writes no layer section: one holding a
+    /// count of nought stopped ImageMagick, and the file read as nothing.
+    #[test]
+    fn no_layers_is_no_layer_section() {
+        let psd = write_psd(4, 3, 72.0, &[], &solid(4, 3, [255, 0, 0, 255])).unwrap();
+        let len = |at: usize| u32::from_be_bytes(psd[at..at + 4].try_into().unwrap()) as usize;
+        // Past the header, the colour mode data and the resources.
+        let mut at = 26;
+        at += 4 + len(at);
+        at += 4 + len(at);
+        assert_eq!(
+            (len(at), len(at + 4)),
+            (8, 0),
+            "a layer section of no length"
+        );
     }
 
     #[test]

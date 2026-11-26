@@ -171,6 +171,9 @@ without reading anything else.*
      The fifty-third: a 12-megapixel wand taking seven minutes, Hide
      selection hardening a brushed mask, Cut and Copy taking the whole
      layer with a region picked, a long history slowing every key.
+     The fifty-fourth: a turned corner snapped fifty pixels past its
+     guide, the key layer moved by Space evenly, a picked layer off the
+     page exported half empty, Share failing on a slow phone.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13099,6 +13102,72 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-fourth audit (November 2026).** Its check of round 53: six hundred shapes dropped
+  onto a frame and undone took the page down, each layer's step joined
+  to the move by a batch round the last, six hundred deep (joined one
+  level deep); a grainy 12-megapixel wand region, exact and fast in the
+  engine, was drawn as 83,474 marching polygons with a halo each and
+  froze the page for minutes a pan (past two thousand rings, one still
+  path: the region shows in 1.4 s, a pan in a quarter of a second); an
+  SVG named .xml behind a long comment was refused when dropped though
+  it opened (read as far as Open reads when the first 64 KB say
+  nothing); draw.io's warning was never taken out (its own text
+  element is); a thick stroke with fine dashes came out solid (judged
+  against a thousand overlaps, not 64); leaving the feather box applied
+  what it showed, undone or not (only what was typed); a region's export
+  was offered a third less for nothing (the extra room only when
+  something reaches past its edge); Cut on a locked layer copied before
+  it was refused. Limits: Copy or Cut with a region throws away a
+  layer's gradient mask, and a feathered region softens a hard shape
+  mask it is combined with; a Paste style undone mid-development and
+  redone comes back undeveloped; a layer masked by a grainy region pans
+  in seconds and grows in nine; fifty undos with the focus on a History
+  row can leave the drawn stretch and drop the focus onto a layer;
+  Delete on a locked layer's own row deletes it; Delete with two layers
+  picked takes them whole, the region aside; a font renamed on opening
+  one file and missing in the next gives two notes that disagree.
+  Its editing pass, placing things: a turned layer's corner dragged to a
+  guide was thrown fifty pixels past it, the line caught on the page's
+  axes and the scale worked out on the layer's own (worked out along
+  the corner's own line, on the page); Space evenly with a key layer
+  between the others moved the key (each side of it is spaced on its
+  own); aligning with a locked layer among those picked sent the other
+  to the page's edge (the locked one counts and stays), and Space
+  evenly with too few that can move said nothing (it says why); Shift
+  on the rotation knob rounded the turn rather than the angle, so a
+  layer at 20 degrees never came level (the angle it ends at, on the
+  page); the knob turned a layer inside a stretched or skewed group in
+  the group's own space and squashed it (turned on the page). Limits:
+  the typed angle is the layer's own, so inside a stretched or skewed
+  group typing one squashes it as the knob used to; a flipped or skewed
+  frame exports upright and unflipped; Shift does not hold a drag to an
+  axis; hidden clone layers can move a gradient's edge pixels by a few
+  levels; a comp keeps where layers are, not a frame's size, a blend or
+  effects; a scale of several layers is "Move" in the history.
+  Its files pass, what we write for other programs: a picked layer
+  hanging off the page went out the size of the whole layer, the part
+  past the page's edge empty (cut to the page, as a region is); a PSD of
+  no layers wrote a layer section holding a count of nought, which
+  ImageMagick refuses (no section at all). Limits: a colour overlay on
+  text, and any adjustment or filter on top, make a PDF's text pixels;
+  a file's density follows the export's scale; nothing we write carries
+  an sRGB tag; an SVG's size is in pixels whatever the document's dpi;
+  text running past the end of an open guide shows its last glyph in
+  our SVG.
+  Its interface pass, a designer with a pen at 150%, a slow phone, and a
+  person who customises everything: Share on a slow phone made its
+  photograph for longer than a press lasts and was refused (the file is
+  kept and a second press sends it, said in the window); a pen held
+  still with the Text tool left a stray "Text" layer and opened the menu
+  over another layer, and a slow short pen drag was thrown away for the
+  menu (a pen asks for the menu only with Move and Node, and any
+  movement past two pixels is the drag); a Ctrl+Alt chord ate AltGr's
+  letters while typing (AltGr is never a chord). Limits: working out a
+  12-megapixel JPEG's size freezes a slow phone for seconds, and a
+  slider on it runs at four frames a second; the phone's Straighten
+  slider is coarse; Zoom in rebound lets go of the other plus keys;
+  "Put everything back" leaves the panel's width and a floated toolbar,
+  and is not undone; a pen's eraser end does nothing.
   **A fifty-third audit (November 2026).** Its check of round 52: the export's room, asked
   for in one piece, was refused past 2 GB on 32-bit WebAssembly before
   any memory was looked at, so a 45-megapixel photograph with a sharpen,

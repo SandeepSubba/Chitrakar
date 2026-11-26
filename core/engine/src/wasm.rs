@@ -1776,12 +1776,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
-    /// Apply what was staged as one step; how many pictures it was.
     /// Let go of the staged developments without a step.
     pub fn discard_staged_develop(&mut self) {
         self.inner.discard_staged_develop()
     }
 
+    /// Apply what was staged as one step; how many pictures it was.
     pub fn commit_staged_develop(&mut self) -> Result<u32, JsError> {
         self.inner
             .commit_staged_develop()

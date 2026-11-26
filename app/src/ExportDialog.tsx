@@ -43,7 +43,7 @@ const MOST_SCALE = 16;
 /** The least scale the engine draws at (`MIN_EXPORT_SCALE`): a long edge
  * of 16 on a page 20,000 wide was said 16 × 1 and written 20 × 1. */
 const LEAST_SCALE = 0.001;
-import { fileSafe, type Outgoing } from "./files";
+import { fileSafe, forgetReadyShare, ShareAgain, type Outgoing } from "./files";
 
 /** What each format is called, what it writes, and what it can do.
  *
@@ -549,6 +549,8 @@ export function ExportDialog({
   /** What a Photoshop file carries across differently, once made. */
   const [psdNotes, setPsdNotes] = useState<string[]>([]);
   const [failed, setFailed] = useState<string | null>(null);
+  /** The files a share made are ready and wait for a second press. */
+  const [ready, setReady] = useState(false);
   /** The picture beside the settings: a URL the browser can show, and
    * whether it is the file itself or the page standing in for one the
    * browser cannot decode. */
@@ -564,6 +566,10 @@ export function ExportDialog({
   const [measure, setMeasure] = useState(0);
 
   useEffect(() => {
+    // Whatever changed, files kept for a second Share press are not what
+    // the window now says.
+    forgetReadyShare();
+    setReady(false);
     if (refusal) {
       setSize(null);
       setFailed(null);
@@ -670,7 +676,10 @@ export function ExportDialog({
       // closed under the person when the first one's writing ended.
       if ((await (via === "share" && share ? share : write)(files)) && open.current) onClose();
     } catch (err) {
-      if (open.current) setFailed(said(err));
+      if (!open.current) return;
+      // Made, but too late for the press that asked: kept for the next.
+      if (err instanceof ShareAgain) setReady(true);
+      else setFailed(said(err));
     }
     // `scales` and `nameAt` are made afresh each render from what the
     // dependencies below say.
@@ -1080,6 +1089,8 @@ export function ExportDialog({
             <span className="export-refusal">{refusal}</span>
           ) : failed ? (
             <span className="export-refusal">Could not be made: {failed}</span>
+          ) : ready ? (
+            <span>Ready: press Share… again to send it.</span>
           ) : size === -1 ? (
             <>
               <span>{name}</span>
@@ -1108,7 +1119,14 @@ export function ExportDialog({
             // The same bytes as Export, to the share sheet: on a phone
             // that is where a picture goes next, and Save to Files is
             // one of its answers.
-            <button className="mask-button" disabled={!!refusal} onClick={() => run("share")}>
+            <button
+              className="mask-button"
+              disabled={!!refusal}
+              onClick={() => {
+                setReady(false);
+                void run("share");
+              }}
+            >
               Share…
             </button>
           )}

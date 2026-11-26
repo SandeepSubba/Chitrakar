@@ -21773,6 +21773,41 @@ assert(
   );
 }
 
+// 9dz. The fifty-fourth audit. A picked layer hanging off the page went
+// out the size of the whole layer, the part past the edge empty.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [s.x + (x * s.width) / 400, s.y + (y * s.height) / 300];
+  await pickTool("Rect");
+  await page.mouse.move(...at(100, 100));
+  await page.mouse.down();
+  await page.mouse.move(...at(220, 220), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const x = page.locator(".geometry .geo-x input");
+  await x.click();
+  await x.press("Control+a");
+  await page.keyboard.type("340");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(250);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.click('.export-formats .preset:text-is("PNG")');
+  await page.click('.export-scales .preset:text-is("1\u00d7")');
+  await page.selectOption('select[aria-label="Area"]', "selection");
+  await page.waitForTimeout(600);
+  const [shot] = await Promise.all([page.waitForEvent("download"), page.click(".modal-actions .primary")]);
+  const bytes = await readFile(await shot.path());
+  const [w, h] = [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+  assert(w === 60 && h === 120, `what is picked goes out as far as the page goes (${w} × ${h}, want 60 × 120)`);
+  await page.keyboard.press("Control+Shift+E");
+  await page.waitForSelector('[role=dialog][aria-label="Export"]');
+  await page.selectOption('select[aria-label="Area"]', "page");
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
+}
+
 // 9dy. The fifty-third audit. With a region picked out, Cut and Edit ›
 // Delete took the whole layer where the Delete key took the region, and
 // Copy copied all of it; a history of thousands of steps drew a row for

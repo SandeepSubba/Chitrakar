@@ -1276,6 +1276,8 @@ function dropUnsettled(el: Element | null): boolean {
  * Ctrl+= zoomed the whole window rather than the page. */
 function passesChord(e: React.KeyboardEvent): boolean {
   if (!(e.ctrlKey || e.metaKey)) return false;
+  // AltGr (reported as Ctrl+Alt on Windows) is typing, the box's own.
+  if (e.nativeEvent.getModifierState?.("AltGraph")) return false;
   if (["a", "c", "v", "x", "z", "y"].includes(e.key.toLowerCase())) return false;
   // Nor whatever chord the person has given those same commands: Undo
   // moved to Ctrl+U and pressed in the box undid the document instead
@@ -1878,6 +1880,10 @@ const COARSE = "(pointer: coarse)";
  * Android itself waits, so the editor's answer comes first. */
 const LONG_PRESS_MS = 450;
 const LONG_PRESS_SLOP = 10;
+/** Past this many rings, a region's ants are one still path. */
+const MANY_ANT_RINGS = 2000;
+/** How far a pen held still may wander before its hold is a drag. */
+const PEN_HOLD_SLOP = 2;
 /** How far the layers sheet's grip has to be pulled to move it a step. */
 const SHEET_STEP = 60;
 /** How long a finger is held on a layer's row before the row lifts to be
@@ -3346,6 +3352,17 @@ export function App() {
    * since a rounded box, an ellipse and a freehand path each flatten
    * differently and two answers would show as ants off the edge. */
   const [antRings, setAntRings] = useState<[number, number][][]>([]);
+  /** A feather typed into the bar's box and not yet applied. */
+  const featherTyped = useRef(false);
+  /** The rings of a region of very many as one path, worked out once a
+   * view rather than once a render. */
+  const antPath = useMemo(() => {
+    if (antRings.length <= MANY_ANT_RINGS) return "";
+    const { x, y, zoom } = view;
+    return antRings
+      .map((ring) => `M${ring.map((p) => `${(x + p[0] * zoom).toFixed(1)},${(y + p[1] * zoom).toFixed(1)}`).join("L")}Z`)
+      .join("");
+  }, [antRings, view]);
 
   /** The engine's own frame laid on the canvas: what changed since the
    * last one, or — after a frame the graphics card drew, which the
@@ -5388,6 +5405,23 @@ export function App() {
     return acc;
   };
 
+  /** A box cut to the page, as a region's export box is: what is drawn
+   * of a layer stops at the page's edge, and a picked layer hanging off
+   * it was written the size of the whole layer with the rest empty
+   * (white, in a JPEG). Nothing when nothing of it is on the page. */
+  const onPage = (
+    box: [number, number, number, number] | null,
+  ): [number, number, number, number] | null => {
+    if (!box || !session) return null;
+    const cut: [number, number, number, number] = [
+      Math.max(0, box[0]),
+      Math.max(0, box[1]),
+      Math.min(session.width, box[2]),
+      Math.min(session.height, box[3]),
+    ];
+    return cut[2] > cut[0] && cut[3] > cut[1] ? cut : null;
+  };
+
   /** Fingers on the canvas, by pointer id, in the canvas's coordinates.
    * Pointer events say nothing about the other fingers, so they are kept
    * here: two of them are a pinch. */
@@ -5487,8 +5521,11 @@ export function App() {
         window.removeEventListener("pointerup", lifted, true);
         window.removeEventListener("pointercancel", done, true);
       };
+      // A pen is precise: any movement past its own wobble is the drag it
+      // meant. With a finger's slop, a slow nudge of eight pixels was
+      // thrown away for the menu.
       const moved = (e: PointerEvent) => {
-        if (e.pointerId === at.id && Math.hypot(e.clientX - at.x, e.clientY - at.y) > LONG_PRESS_SLOP) done();
+        if (e.pointerId === at.id && Math.hypot(e.clientX - at.x, e.clientY - at.y) > PEN_HOLD_SLOP) done();
       };
       const lifted = (e: PointerEvent) => {
         if (e.pointerId !== at.id) return;
@@ -5858,7 +5895,7 @@ export function App() {
   const onHostPointerMove = (e: React.PointerEvent) => {
     if (ignoredRef.current.has(e.pointerId)) return;
     const long = longRef.current;
-    if (long?.id === e.pointerId && Math.hypot(e.clientX - long.x, e.clientY - long.y) > LONG_PRESS_SLOP) {
+    if (long?.id === e.pointerId && Math.hypot(e.clientX - long.x, e.clientY - long.y) > (long.defer ? PEN_HOLD_SLOP : LONG_PRESS_SLOP)) {
       clearLong();
     }
     if (e.pointerType === "touch" && touchesRef.current.has(e.pointerId)) {
@@ -6374,7 +6411,14 @@ export function App() {
     // mouse's right button opens. Not while painting, where a finger held
     // in one place is putting down paint, and is meant to.
     // A pen held still asks the same: a Pencil has no button to ask with.
-    const alone = e.pointerType === "pen" || (e.pointerType === "touch" && touchesRef.current.size === 1);
+    // A pen asks only with the tools that pick (Move, Node): with Text a
+    // hold before lifting is placing the block, and asked as the menu it
+    // left a stray "Text" layer behind; with Zoom, Fill, a marquee or a
+    // shape a slow press did nothing at all. A Windows pen's barrel
+    // button asks with every tool.
+    const alone =
+      (e.pointerType === "pen" && (tool === "Move" || tool === "Node")) ||
+      (e.pointerType === "touch" && touchesRef.current.size === 1);
     if (alone && !replaying.current && !painting && !cloning && tool !== "Pen" && tool !== "Brush") {
       // A finger asks at once, as a phone's long press does; a pen, which
       // is held still a moment to place its nib before the drag it
@@ -8384,18 +8428,45 @@ export function App() {
      * corner follows the point on the diagonal nearest the cursor rather
      * than either axis alone, so it tracks the line the shape's own
      * proportions describe. */
+    // Where a point of the box is on the page: the other way from
+    // `boxPoint`, read off where three points of the page land.
+    const pageOf = (() => {
+      const o = boxPoint(drag, e, [0, 0]);
+      const ux = boxPoint(drag, e, [1, 0]);
+      const uy = boxPoint(drag, e, [0, 1]);
+      if (!o || !ux || !uy) return null;
+      const [a, b, c, d] = [ux[0] - o[0], ux[1] - o[1], uy[0] - o[0], uy[1] - o[1]];
+      const det = a * d - b * c;
+      if (Math.abs(det) < 1e-12) return null;
+      return (bx: number, by: number): [number, number] => {
+        const [u, v] = [bx - o[0], by - o[1]];
+        return [(d * u - c * v) / det, (a * v - b * u) / det];
+      };
+    })();
+    /** How far along its line from the point held still the corner has to
+     * go to land on the line it caught, measured on the page — where the
+     * line is. Read in the box's own axes, which a turned layer's are
+     * not, a corner three pixels from a guide was thrown fifty past it. */
+    const onCaught = (): number | null => {
+      if (!pageOf || !(caught[0] || caught[1])) return null;
+      const pf = pageOf(fx, fy);
+      const pc = pageOf(west ? x0 : x1, north ? y0 : y1);
+      const k =
+        caught[0] && Math.abs(pc[0] - pf[0]) > 1e-6
+          ? (px - pf[0]) / (pc[0] - pf[0])
+          : caught[1] && Math.abs(pc[1] - pf[1]) > 1e-6
+            ? (py - pf[1]) / (pc[1] - pf[1])
+            : NaN;
+      return Number.isFinite(k) && k > 0 ? k : null;
+    };
     const locked = (cx: number, cy: number) =>
       Math.max(
         MIN_SIZE / Math.max(w0, h0),
         // A caught axis is exact — the corner is on that line and the
         // other side follows from the shape. With neither caught, the
         // diagonal decides.
-        caught[0]
-          ? span(cx, fx) / w0
-          : caught[1]
-            ? span(cy, fy) / h0
-            : (Math.abs(cx - fx) * w0 + Math.abs(cy - fy) * h0) /
-              (w0 * w0 + h0 * h0),
+        onCaught() ??
+          (Math.abs(cx - fx) * w0 + Math.abs(cy - fy) * h0) / (w0 * w0 + h0 * h0),
       );
     // A side moves one axis and leaves the other be, the way a side
     // handle does everywhere; only a corner keeps the proportions.
@@ -9932,7 +10003,12 @@ export function App() {
    * about the gaps between layers, so it still wants two. */
   const alignSelection = (mode: string) => {
     const least = mode.startsWith("distribute") ? 2 : 1;
-    if (!session || movableSelection.length < least) return;
+    if (!session) return;
+    if (movableSelection.length < least) {
+      // Picked, but locked: said, where the press did nothing at all.
+      if (selectionSet.length >= least) alert("Align: the layers picked are locked, and a locked layer stays where it is.");
+      return;
+    }
     // What they line up with: each other, the page, or the key — the
     // picked layer wearing the handles, which stays put. One layer on its
     // own has no others and is its own key, so it goes to what it sits
@@ -9940,8 +10016,13 @@ export function App() {
     const alone = selectionSet.length < 2;
     const to = alone ? "selection" : prefs.alignTo;
     const key = to === "key" && selected !== null ? selected : -1;
+    // Lining up edges, a locked layer picked with the others counts
+    // toward the box they line up with, and the engine leaves it where it
+    // is. Sent without it, the one layer left lined up with the page.
+    // Spacing evenly moves only what can move.
+    const ids = mode.startsWith("distribute") ? movableSelection : selectionSet;
     try {
-      session.align_nodes_to(new Float64Array(movableSelection), mode, to, key);
+      session.align_nodes_to(new Float64Array(ids), mode, to, key);
       refresh(session);
     } catch (err) {
       alert(`Align: ${said(err)}`);
@@ -10323,6 +10404,12 @@ export function App() {
    * hidden, as Delete hides it. */
   const cutSelected = () => {
     const region = aboutRegion();
+    // Refused before anything is copied: a locked layer's region was put
+    // on the clipboard and then not cut.
+    if (region && selectedLocked()) {
+      alert("Cut: that layer is locked");
+      return;
+    }
     if (!copySelected()) return;
     if (region) maskFromSelection(true);
     else deleteSelected();
@@ -10639,6 +10726,11 @@ export function App() {
    * small ones that drift. */
   const rotateDragRef = useRef<{
     t0: Transform;
+    /** The layer's parent space and its inverse: the turn is made on the
+     * page and carried back into it. */
+    space: Transform;
+    back: Transform;
+    /** The centre of its box, on the page. */
     centre: [number, number];
     start: number;
   } | null>(null);
@@ -10647,16 +10739,19 @@ export function App() {
     if (handleRefuses(e)) return;
     if (!session || selected === null || !selBounds || selBounds.length !== 4)
       return;
+    const space = toTransform(session.parent_space_of(selected));
+    const back = invertT(space);
+    if (!back) return;
     e.stopPropagation();
-    const inv = inverseOf(toTransform(session.parent_space_of(selected)));
-    const docCentre: [number, number] = [
+    const centre: [number, number] = [
       selBounds[0] + selBounds[2] / 2,
       selBounds[1] + selBounds[3] / 2,
     ];
-    const centre: [number, number] = inv ? inv(...docCentre) : docCentre;
-    const [px, py] = layerPoint(e);
+    const [px, py] = docPoint(e);
     rotateDragRef.current = {
       t0: toTransform(session.transform_of(selected)),
+      space,
+      back,
       centre,
       start: Math.atan2(py - centre[1], px - centre[0]),
     };
@@ -10667,24 +10762,34 @@ export function App() {
     const drag = rotateDragRef.current;
     if (!drag || !session || selected === null) return;
     if (e.buttons === 0) return;
-    const [px, py] = layerPoint(e);
+    const [px, py] = docPoint(e);
     const [cx, cy] = drag.centre;
     let d = Math.atan2(py - cy, px - cx) - drag.start;
-    // Shift snaps to 15 degrees, the usual courtesy for straightening up.
-    if (e.shiftKey) d = Math.round(d / (Math.PI / 12)) * (Math.PI / 12);
+    // The turn is made on the page and carried back into the space the
+    // layer sits in: made in a stretched or skewed group's own space, it
+    // squashed the layer as it turned, and a typed 45 came out 23.6.
+    const onPage = composeT(drag.space, drag.t0);
+    // Shift stands the layer at a multiple of 15 degrees on the page, the
+    // usual courtesy for straightening up — the angle it ends at, not the
+    // turn: a layer at 20 degrees snapped by its turn never came level.
+    if (e.shiftKey) {
+      const step = Math.PI / 12;
+      const was = Math.atan2(onPage.b, onPage.a);
+      d = Math.round((was + d) / step) * step - was;
+    }
     const [cos, sin] = [Math.cos(d), Math.sin(d)];
-    const t = drag.t0;
+    const turn: Transform = {
+      a: cos,
+      b: sin,
+      c: -sin,
+      d: cos,
+      e: cx - cos * cx + sin * cy,
+      f: cy - sin * cx - cos * cy,
+    };
     preview({
       SetTransform: {
         id: selected,
-        transform: {
-          a: cos * t.a - sin * t.b,
-          b: sin * t.a + cos * t.b,
-          c: cos * t.c - sin * t.d,
-          d: sin * t.c + cos * t.d,
-          e: cos * (t.e - cx) - sin * (t.f - cy) + cx,
-          f: sin * (t.e - cx) + cos * (t.f - cy) + cy,
-        },
+        transform: composeT(drag.back, composeT(turn, onPage)),
       },
     });
   };
@@ -12270,7 +12375,7 @@ export function App() {
     if (!session) return;
     const region = antRings.length > 0;
     if (!region && selectionSet.length === 0) return;
-    const box = region ? null : unionBounds(selectionSet);
+    const box = region ? null : onPage(unionBounds(selectionSet));
     if (!region && !box) return;
     const [x, y, w, h] = box
       ? [box[0], box[1], box[2] - box[0], box[3] - box[1]]
@@ -13188,7 +13293,14 @@ export function App() {
       // document, which then claimed to have opened.
       for (const file of files) {
         const head = new Uint8Array(await file.slice(0, 65536).arrayBuffer());
-        kinds.push(importKind(file.name, head, file.type));
+        let kind = importKind(file.name, head, file.type);
+        // Nothing known by its first 64 KB, and more to it: read as far
+        // as Open reads, so an SVG named .xml behind a long comment is
+        // one dropped as it is one opened.
+        if (kind === null && file.size > head.length) {
+          kind = importKind(file.name, new Uint8Array(await file.slice(0, 16 << 20).arrayBuffer()), file.type);
+        }
+        kinds.push(kind);
       }
       const named = (f: File) => f.name || "a file";
       let at = kinds.indexOf("document");
@@ -15292,7 +15404,7 @@ export function App() {
               const b = session.region_export_box(-1);
               if (b.length === 4) return [b[0], b[1], b[0] + b[2], b[1] + b[3]];
             }
-            return unionBounds(selectionSet, true);
+            return onPage(unionBounds(selectionSet, true));
           }}
           hasIcc={hasIcc}
           keptRegions={kept}
@@ -15593,11 +15705,21 @@ export function App() {
               aria-label="Selection feather"
               // Applied when it has been typed, not at each keystroke:
               // "12" was two steps of history, blurred at 1 on the way.
-              onValue={setSelectionFeather}
+              // And only what was typed: leaving the box applied what it
+              // showed, undone or not, and a Tab through it softened a
+              // region nobody had touched.
+              onValue={(v) => {
+                featherTyped.current = true;
+                setSelectionFeather(v);
+              }}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && session?.feather_selection(selectionFeather)) refresh(session);
+                if (e.key !== "Enter") return;
+                featherTyped.current = false;
+                if (session?.feather_selection(selectionFeather)) refresh(session);
               }}
               onBlur={() => {
+                if (!featherTyped.current) return;
+                featherTyped.current = false;
                 if (session?.feather_selection(selectionFeather)) refresh(session);
               }}
             />
@@ -16861,7 +16983,7 @@ export function App() {
               other — a pale one under a dark dashed one — so the edge
               reads on a dark picture and on a light one, which one
               colour cannot do. */}
-          {antRings.length > 0 && (
+          {antRings.length > 0 && antRings.length <= MANY_ANT_RINGS && (
             <svg className="ants" aria-label="What is picked out">
               {antRings.map((ring, i) => (
                 <polygon
@@ -16874,6 +16996,15 @@ export function App() {
                     .join(" ")}
                 />
               ))}
+            </svg>
+          )}
+          {/* A grainy wand region is tens of thousands of rings: drawn as
+              one path, standing still and without the pale halo, which
+              as a marching polygon apiece froze the page for a minute
+              and every pan after it for longer. */}
+          {antRings.length > MANY_ANT_RINGS && (
+            <svg className="ants many" aria-label="What is picked out">
+              <path d={antPath} />
             </svg>
           )}
           {spacing.length > 0 && (

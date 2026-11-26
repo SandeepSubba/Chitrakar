@@ -125,6 +125,10 @@ export function isChord(s: unknown): s is string {
 
 /** The chord a key press makes, in the same spelling the table uses. */
 export function chordFromEvent(e: KeyboardEvent): string {
+  // AltGr is a letter being typed (ę, @, €), though Windows reports it as
+  // Ctrl+Alt: read as that chord, a command given Ctrl+Alt+E duplicated
+  // the text being typed into and ate the ę.
+  if (e.getModifierState?.("AltGraph")) return "";
   const parts: string[] = [];
   if (e.ctrlKey || e.metaKey) parts.push("mod");
   if (e.altKey) parts.push("alt");

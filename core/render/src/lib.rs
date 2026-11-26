@@ -6369,7 +6369,7 @@ pub fn dashed_rings(
         })
         .sum();
     // And a pattern so fine against the stroke's width that each dash
-    // lies over more than a few dozen of the others is solid whatever
+    // lies over more than a thousand of the others is solid whatever
     // the line's length: dashes of a thousandth on a small rectangle
     // were few enough to walk, but each, five wide, lay over thousands
     // of the others, and the index of them ran the engine out of memory.
@@ -6381,7 +6381,7 @@ pub fn dashed_rings(
     } else {
         f64::INFINITY
     };
-    if !(length.is_finite() && length / per_dash <= MOST_DASHES && width / per_dash <= 64.0) {
+    if !(length.is_finite() && length / per_dash <= MOST_DASHES && width / per_dash <= 1000.0) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -16071,6 +16071,9 @@ mod tests {
         // Fine in the shape's own units, but a stroke as fine as it: a
         // shape scaled up fifty times shows these as dashes.
         assert!(!dashed_rings(&rect, &[0.04], 0.0, 0.0, 0.1).is_empty());
+        // And a thick stroke with dashes of a pixel is still dashes: a
+        // hundred wide over a pattern of one was drawn solid.
+        assert!(!dashed_rings(&rect, &[1.0], 0.0, 0.0, 100.0).is_empty());
     }
 
     /// A dotted line is dashes of nothing with gaps between: walked dash

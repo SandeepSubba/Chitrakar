@@ -2001,6 +2001,17 @@ body {
   filter: drop-shadow(0 0 0.5px #fff) drop-shadow(0 0 0.5px #fff);
 }
 
+/* A region of thousands of rings: one still path of dark dashes, with no
+   halo to filter and no march to repaint each frame. */
+.ants.many path {
+  fill: none;
+  stroke-width: 1;
+}
+.ants.many > * {
+  animation: none;
+  filter: none;
+}
+
 /* A region still being dragged out does not march: it is following the
    pointer, and a second motion on top of that reads as a stutter. */
 .ants.drawing > * {

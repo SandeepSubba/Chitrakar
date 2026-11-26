@@ -295,8 +295,39 @@ export function canShareFiles(): boolean {
  * person's to say — Files, a message, another app, AirDrop. Answers
  * whether they went; false is the sheet put away. A format the sheet
  * will not take is said, naming it. */
+/** Thrown by `shareFiles` when the files took so long to make that the
+ * press asking for them no longer counts as one (a browser lets a share
+ * be asked for only a few seconds after a press): they are kept, and the
+ * next press shares them at once. */
+export class ShareAgain extends Error {
+  constructor() {
+    super("the file is ready: press Share… again to send it");
+    this.name = "ShareAgain";
+  }
+}
+
+/** Files made for a share that had to wait for a second press, by their
+ * names: the same names asked for again are these files. */
+let readyToShare: { key: string; files: File[] } | null = null;
+
+/** Forget files kept for a second press: what they were made from has
+ * changed (a quality, a watermark) though their names may not have. */
+export function forgetReadyShare(): void {
+  readyToShare = null;
+}
+
 export async function shareFiles(title: string, files: Outgoing[]): Promise<boolean> {
-  const made = files.map((f) => new File([f.make() as BlobPart], f.name, { type: f.type }));
+  const key = files.map((f) => `${f.name}\u0000${f.type}`).join("\u0001");
+  const kept = readyToShare?.key === key ? readyToShare.files : null;
+  readyToShare = null;
+  const made = kept ?? files.map((f) => new File([f.make() as BlobPart], f.name, { type: f.type }));
+  // A photograph's encode on a slow phone outlasts the press: asked
+  // then, the share was refused as "not handling a user gesture".
+  const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+  if (!kept && activation && !activation.isActive) {
+    readyToShare = { key, files: made };
+    throw new ShareAgain();
+  }
   if (!navigator.canShare?.({ files: made })) {
     const kinds = [...new Set(made.map((f) => f.type || "unknown"))].join(", ");
     throw new Error(`this device cannot share ${made.length === 1 ? "this kind of file" : "these files"} (${kinds})`);
