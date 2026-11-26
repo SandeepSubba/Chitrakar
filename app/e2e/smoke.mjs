@@ -3845,7 +3845,7 @@ assert(
   const dialog = page.locator('[role="dialog"][aria-label="Find and replace"]');
   assert(await dialog.isVisible(), "the window opens");
   await dialog.locator('input[aria-label="Find"]').fill("fish");
-  const found = dialog.locator('[aria-label="Found"]');
+  const found = dialog.locator('p.found');
   assert(
     (await found.textContent()).includes("4 found in 2 layers"),
     `counted as it is typed (${await found.textContent()})`,
@@ -12344,7 +12344,14 @@ assert(
     "with a region picked, the softness of its edge is offered",
   );
   await soften.fill("10");
-  await soften.dispatchEvent("change");
+  // Applied on Enter, not at each keystroke (one step, not two).
+  const featherSteps = await page.locator(".history li").count();
+  await soften.press("Enter");
+  await page.waitForTimeout(150);
+  assert(
+    (await page.locator(".history li").count()) === featherSteps + 1,
+    "typing a feather of 10 is one step of history",
+  );
   await page.waitForTimeout(400);
 
   await pickTool("Move");
@@ -12919,6 +12926,7 @@ assert(
   // the tool's setting, not the region's — and a softened region leaves
   // with room round it for the fade. This one is about reach, so say so.
   await page.locator('[aria-label="Selection feather"]').fill("0");
+  await page.locator('[aria-label="Selection feather"]').press("Enter");
   await page.waitForTimeout(300);
 
   const grow = page.locator('[aria-label="Grow what is picked"]');
@@ -21762,6 +21770,73 @@ assert(
   assert(
     (await page.locator(".panel ul li .layer-name").count()) === rowsBefore,
     `and the document it was opened over is still there (${await page.locator(".panel ul li .layer-name").count()} of ${rowsBefore} rows)`,
+  );
+}
+
+// 9dy. The fifty-third audit. With a region picked out, Cut and Edit ›
+// Delete took the whole layer where the Delete key took the region, and
+// Copy copied all of it; a history of thousands of steps drew a row for
+// each, and every keypress paid for redrawing them all.
+{
+  await newDocument(400, 300, "rgb");
+  const s = await page.locator("#engine-page").boundingBox();
+  const at = (x, y) => [s.x + (x * s.width) / 400, s.y + (y * s.height) / 300];
+  await pickTool("Rect");
+  await page.mouse.move(...at(10, 10));
+  await page.mouse.down();
+  await page.mouse.move(...at(390, 290), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(250);
+  const rows = page.locator(".panel ul.layer-list li[data-id]");
+  assert((await rows.count()) === 1, "one shape to begin with");
+  const ink = (await canvasPixel(60, 150)).slice(0, 3).join();
+  await pickTool("Select");
+  await page.mouse.move(...at(200, 0));
+  await page.mouse.down();
+  await page.mouse.move(...at(400, 300), { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  await page.locator("#engine-canvas").hover();
+  await page.keyboard.press("Control+x");
+  await page.waitForTimeout(350);
+  assert((await rows.count()) === 1, "Ctrl+X with a region keeps the layer");
+  assert(
+    (await canvasPixel(300, 150)).slice(0, 3).join() !== ink &&
+      (await canvasPixel(60, 150)).slice(0, 3).join() === ink,
+    "and takes away what is inside the region, and only that",
+  );
+  await page.keyboard.press("Control+v");
+  await page.waitForTimeout(400);
+  assert((await rows.count()) === 2, "what was cut pastes as a layer");
+  assert(
+    (await canvasPixel(300, 150)).slice(0, 3).join() === ink,
+    "showing what was inside the region",
+  );
+  await menuClick("Edit", "Delete");
+  await page.waitForTimeout(350);
+  assert((await rows.count()) === 2, "Edit › Delete with a region keeps the layer too");
+  assert(
+    (await canvasPixel(300, 150)).slice(0, 3).join() !== ink,
+    "and hides the region on it, as the Delete key does",
+  );
+
+  // Three hundred steps of history draw a stretch of rows, not three
+  // hundred, and the row past the stretch takes you into the rest.
+  await page.keyboard.press("Escape");
+  await pickTool("Move");
+  await page.mouse.click(...at(60, 150));
+  await page.waitForTimeout(150);
+  for (let i = 0; i < 300; i++) await page.keyboard.press(i % 2 ? "ArrowLeft" : "ArrowRight");
+  await page.waitForTimeout(400);
+  const drawn = await page.locator(".history li").count();
+  assert(drawn > 150 && drawn < 260, `a long history draws a stretch of it (${drawn} rows)`);
+  const earlier = page.locator(".history li.history-more button").first();
+  assert(/earlier steps/.test(await earlier.textContent()), "and says how many steps are before it");
+  await earlier.click();
+  await page.waitForTimeout(400);
+  assert(
+    (await page.locator(".history li.history-more.future").count()) === 1,
+    "pressed, it goes back into them, and the steps after are a row of their own",
   );
 }
 

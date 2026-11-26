@@ -168,6 +168,9 @@ without reading anything else.*
      groups' exports stopping the engine, Arabic-Indic digits set
      backwards, Ctrl+J misaligning a photograph's copy, a failing Save
      emptying a hard-linked file, a fine dash stopping the engine.
+     The fifty-third: a 12-megapixel wand taking seven minutes, Hide
+     selection hardening a brushed mask, Cut and Copy taking the whole
+     layer with a region picked, a long history slowing every key.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13096,6 +13099,90 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-third audit (November 2026).** Its check of round 52: the export's room, asked
+  for in one piece, was refused past 2 GB on 32-bit WebAssembly before
+  any memory was looked at, so a 45-megapixel photograph with a sharpen,
+  a 24-megapixel group with a shadow and a 60-megapixel photograph would
+  not export at their own size (asked for a gigabyte at a time, all held
+  at once; a group with a shadow counted as the two surfaces measured,
+  not three, and a layer blended or clipped, and a part of the page
+  whose effects run past its edge, counted as more than nothing, which
+  the larger sizes then on offer showed); Oil paint, Twirl, Pinch, Surface blur and Radial blur hold
+  more than a copy while they work, and Oil paint was offered at sizes
+  that stopped the engine (each weighed by what it holds); undoing a
+  Paste style while it developed let the development land as a step of
+  its own (it goes with the paste); a damaged font or press profile in a
+  file opened without a word and the next save went without it (said);
+  an SVG named .xml with a byte-order mark, or behind a comment of more
+  than 64 KB, was "not a picture" or "not a lens profile" (read as Open
+  reads it, sixteen megabytes in); groups of Arabic-Indic digits with
+  spaces between were set in typed order where the bidi rules, and so
+  our own SVG, run them leftward (ordered by the rules); letting go of
+  five thousand dragged layers took half a minute (the layers moving
+  are a set, and a page with no frame asks nothing); a dash pattern fine
+  in a shape's own units was drawn solid on a shape scaled up fifty
+  times, where it is dashes of two pixels (judged against the stroke's
+  width). Limits: a Twirl or Pinch inside nested groups with shadows is
+  offered smaller than it can be drawn; a hard-linked file whose new
+  contents would fit is refused when a trial copy does not, a dangling
+  chain of links or a loop of them is saved as a plain file, and a file
+  of a group the person is not in takes their own; Ctrl+J with a
+  photograph picked beside a shape nudges both; a wheel notch zooms a
+  little differently at each device scale and page zoom, and a pinch
+  sent as one event zooms less than the same sent as two; a nested
+  document of fifty thousand layers takes seconds a click.
+  Its selections pass: the wand traced its region in time growing with
+  the square of the page, seven and a half minutes on a grainy
+  12-megapixel photograph (two seconds: each ring started where a
+  cursor through the corners had got to, not from a fresh search of
+  them all); Hide selection on a brushed mask made the whole mask a hard
+  staircase of pixels the brush could no longer work on (the region is
+  rubbed out as one more stroke, confined to it); Cut, Copy and Edit ›
+  Delete took the whole layer with a region picked (they take what is
+  inside it: Copy copies the layer wearing the region, Cut hides it
+  after, Delete hides it); a feathered region's export was too opaque
+  where its fade ran off the page (worked out with room round it); a
+  locked layer could be hidden part of with Delete; typing a feather was
+  a step a keystroke (applied on Enter). Limits: Shrink pulls a region
+  in from the page's edges; Hide selection on a gradient mask replaces
+  the gradient; merging inside a turned group is resampled, up to a
+  third off at the edges; a mask made from a lasso, wand or combined
+  region is sampled four by four; a layer masked by a grainy wand
+  region of thousands of rings takes seconds a frame to draw.
+  Its vector-import pass: a shape inside its own rectangular clip wore
+  the clip as a mask (left off when the clip holds it whole); a lone
+  blend inside an isolated group blended with what was under the group
+  (isolated); draw.io's "Text is not SVG" warning came in as text
+  (taken out); an SVG opened as a document took the 72 dpi a picture
+  takes (96, the SVG's own). Limits: filters other than blur, shadow and
+  offset — cairo's feImage and feBlend, Sketch's shadow-only filter,
+  Inkscape's, Illustrator's and CSS drop shadows — are left out; a WebP
+  or GIF inside an SVG is left out (the engine carries no decoder for
+  either, 190 KB of WebAssembly for something rare); CSS Color 4
+  values are black and a CSS transform is ignored; a gradient of no
+  length paints its first stop; LibreOffice's gradients of strips come
+  in washed out; a dense PDF at a high dpi is refused; a PDF's
+  annotations without appearance streams are not drawn; coordinates in
+  the millions collapse; systemLanguage is always English.
+  Its interface pass, accessibility, an iPad viewer and a power user all
+  day: a history of four thousand steps drew a row each and every
+  keypress paid for them all, a nudge 11 ms to 36 (a stretch of two
+  hundred is drawn, with a row each way for the rest); a lock button
+  focused by the keyboard on a row not picked was invisible, and on a
+  touch screen never showed (shown when focused, and faint on a touch
+  screen); placeholders kept the browser's grey, 2.8:1 in the dark
+  theme (the theme's quiet colour); the panel's fields' focus ring was
+  under 3:1 with any accent but the theme's own (the ring every other
+  control wears); menu hints were 4.4:1 in the light theme (the light
+  quiet colour darkened); the Curves channels were coloured letters
+  under 4.5:1 (the letter in the text colour, the ink under it); Find
+  and replace's count named itself "Found" (it says what it found).
+  Limits: opening a JPEG, PDF or raw is unsaved work until it is saved
+  as a .chitra, and a comp shown and shown back is a change; one finger
+  on the page belongs to the tool; a comp has no PDF export of its own;
+  the comp chips and the tools' "More" triangles are small; fields'
+  borders are under 3:1 against the panel; the engine's memory is not
+  handed back, so a 12-megapixel PDF export leaves the tab at 1.6 GB.
   **A fifty-second audit (November 2026).** Its check of round 51: an
   export "as large as it goes" of a page with groups, shadows or filters
   nested was still offered at a size whose drawing stopped the engine,

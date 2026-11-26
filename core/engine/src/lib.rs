@@ -1681,6 +1681,13 @@ impl Session {
         self.undo.last().map_or(self.forgotten, |e| e.serial)
     }
 
+    /// Whether the step a mark was taken just after is still done: in the
+    /// history behind where it stands, not undone (nor undone and
+    /// replaced by another).
+    pub fn history_holds(&self, mark: u64) -> bool {
+        self.undo.iter().any(|e| e.serial == mark)
+    }
+
     /// Whether a layer is one a live copy has made its own: it stands in
     /// for one of the original's layers by its place among the copy's
     /// children (`copy_children`).
@@ -6621,6 +6628,13 @@ impl Session {
             .iter()
             .map(|id| self.clip_of(*id))
             .collect::<Result<Vec<_>, _>>()?;
+        self.to_clipboard(roots);
+        Ok(())
+    }
+
+    /// Put copied layers on the clipboard, with the pictures, originals
+    /// and followed layers they need to be put down anywhere.
+    fn to_clipboard(&self, roots: Vec<ClipNode>) {
         let (mut resources, mut originals) = (Vec::new(), Vec::new());
         for root in &roots {
             self.collect_resources(root, &mut resources, &mut originals);
@@ -6638,7 +6652,6 @@ impl Session {
                 followed,
             })
         });
-        Ok(())
     }
 
     /// The picked nodes in the order the document holds them, leaving out
@@ -7915,22 +7928,110 @@ impl Session {
     /// so it is carried across; the two are the same kind of thing
     /// either side of that.
     pub fn mask_from_selection(&mut self, id: NodeId, hide: bool) -> Result<(), EngineError> {
+        // A locked layer is not given a mask any more than it is brushed:
+        // Delete hid part of one without a word.
+        self.unlocked(id)?;
+        let mask = self.selection_mask(id, if hide { Holding::Hide } else { Holding::Show })?;
+        self.apply_labeled(
+            Command::SetMask {
+                id,
+                mask: Some(Box::new(mask)),
+            },
+            Some(if hide {
+                "Hide what is picked".into()
+            } else {
+                "Mask from selection".into()
+            }),
+        )
+    }
+
+    /// Copy what of a layer is inside the region picked out of the page:
+    /// the layer whole, wearing a mask that shows the region and no more
+    /// of it than it showed already. Cut, Copy and Edit › Delete took the
+    /// whole layer with a region picked, where only the Delete key took
+    /// the region.
+    pub fn copy_region(&self, id: NodeId) -> Result<(), EngineError> {
+        let mask = self.selection_mask(id, Holding::Inside)?;
+        let mut root = self.clip_of(id)?;
+        root.node.mask = Some(mask);
+        self.to_clipboard(vec![root]);
+        Ok(())
+    }
+
+    /// The mask a layer would wear for the region picked out of the page,
+    /// held the way `how` says, without giving it.
+    fn selection_mask(&self, id: NodeId, how: Holding) -> Result<chitrakar_doc::Mask, EngineError> {
         let Some(mut selection) = self.doc.selection().cloned() else {
             return Err(EngineError::BadCommand("nothing is picked out".into()));
         };
         let parent = chitrakar_render::ancestor_space(&self.doc, id);
+        let existing = self.doc.node(id)?.mask.clone();
+        // A mask brushed by hand keeps every stroke it has, and the region
+        // is rubbed out of it as one more: a stroke over the whole page,
+        // confined to the region (or, keeping only what is inside, to
+        // everything but it). Combined as an outline, the brush's soft
+        // edges came back as a hard staircase of pixels, and the mask was
+        // a shape the brush could no longer work on.
+        if how != Holding::Show {
+            if let Some(existing) = &existing {
+                if let chitrakar_doc::MaskKind::Painted { strokes } = &existing.kind {
+                    let (w, h) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+                    let mut confine = selection.clone();
+                    if how == Holding::Inside {
+                        confine.invert = !confine.invert;
+                    }
+                    let over = chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Painted {
+                            strokes: vec![chitrakar_doc::PaintStroke {
+                                points: vec![[w * 0.5, h * 0.5]],
+                                // Past every corner of the page, as the
+                                // dodge layer's own covering stroke is.
+                                radii: vec![(w * w + h * h).sqrt().max(1_000_000.0)],
+                                color: chitrakar_color::AuthoredColor::Srgb {
+                                    r: 0.0,
+                                    g: 0.0,
+                                    b: 0.0,
+                                    a: 1.0,
+                                },
+                                softness: 0.0,
+                                // An inverted mask hides what is painted.
+                                erase: !existing.invert,
+                                source: [0.0, 0.0],
+                                heal: false,
+                                clip: Some(Box::new(confine)),
+                            }],
+                        },
+                        invert: false,
+                        feather: 0.0,
+                    };
+                    let Some(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Painted { strokes: carried },
+                        ..
+                    }) = Self::carried_into(&over, parent)
+                    else {
+                        return Err(EngineError::BadCommand(
+                            "this layer sits in a space with no thickness".into(),
+                        ));
+                    };
+                    let mut strokes = strokes.clone();
+                    strokes.extend(carried);
+                    return Ok(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Painted { strokes },
+                        ..existing.clone()
+                    });
+                }
+            }
+        }
         // Hiding more of a layer that already hides some: what it hid
         // stays hidden, as a second Delete in any editor leaves the
         // first. Handed the region alone, the first part deleted came
         // back, and a mask brushed by hand was thrown away. Combined as
         // regions are, so a shape stays a shape; a gradient has no edge
-        // to take a region from and is replaced as before.
-        let kept = self
-            .doc
-            .node(id)?
-            .mask
-            .clone()
-            .filter(|m| hide && !matches!(m.kind, chitrakar_doc::MaskKind::Gradient { .. }));
+        // to take a region from and is replaced as before. Keeping what
+        // is inside is the same with the overlap kept.
+        let kept = existing.filter(|m| {
+            how != Holding::Show && !matches!(m.kind, chitrakar_doc::MaskKind::Gradient { .. })
+        });
         if let Some(existing) = kept {
             let Some(was) =
                 Self::seen_from(parent).and_then(|back| Self::carried_into(&existing, back))
@@ -7939,7 +8040,11 @@ impl Session {
                     "this layer sits in a space with no thickness".into(),
                 ));
             };
-            let op = chitrakar_render::boolean::BoolOp::Subtract;
+            let op = if how == Holding::Hide {
+                chitrakar_render::boolean::BoolOp::Subtract
+            } else {
+                chitrakar_render::boolean::BoolOp::Intersect
+            };
             let (want, have) = (self.region_rings(&was)?, self.region_rings(&selection)?);
             let rings = chitrakar_render::boolean::combine_or_nudge(&want, &have, op)
                 .filter(|rings| chitrakar_render::boolean::agrees(&want, &have, rings, op))
@@ -7961,7 +8066,7 @@ impl Session {
                     all
                 }
             };
-        } else if hide {
+        } else if how == Holding::Hide {
             // The other way round: hold the layer to everything *but*
             // what is picked, which is what deleting a selection means in
             // an editor that cuts pixels out — done here by hiding them,
@@ -7969,22 +8074,9 @@ impl Session {
             // changed its mind about.
             selection.invert = !selection.invert;
         }
-        let Some(mask) = Self::carried_into(&selection, parent) else {
-            return Err(EngineError::BadCommand(
-                "this layer sits in a space with no thickness".into(),
-            ));
-        };
-        self.apply_labeled(
-            Command::SetMask {
-                id,
-                mask: Some(Box::new(mask)),
-            },
-            Some(if hide {
-                "Hide what is picked".into()
-            } else {
-                "Mask from selection".into()
-            }),
-        )
+        Self::carried_into(&selection, parent).ok_or_else(|| {
+            EngineError::BadCommand("this layer sits in a space with no thickness".into())
+        })
     }
 
     /// Pick out what a layer covers.
@@ -9315,11 +9407,17 @@ impl Session {
         // The coverage is asked for at that scale, in the space the
         // picture was drawn in: the region carried through the export's
         // own transform rather than worked out small and stretched.
+        //
+        // On a surface with room round the picture for the softening to
+        // reach into: the blur's margin stops at the surface's edge, and
+        // with the surface the region's own box, a fade running off the
+        // page came out more opaque than the canvas draws it.
+        let room = ((region.feather.max(0.0) * scale * 3.0).ceil() as u32 + 4).min(4096);
         let seen = Transform {
             a: scale,
             d: scale,
-            e: -bx * scale,
-            f: -by * scale,
+            e: -bx * scale + room as f32,
+            f: -by * scale + room as f32,
             ..Default::default()
         };
         let cover = chitrakar_render::mask_plane_over(
@@ -9327,12 +9425,12 @@ impl Session {
             region,
             seen,
             chitrakar_render::ClipRect {
-                x0: 0,
-                y0: 0,
-                x1: w,
-                y1: h,
+                x0: room,
+                y0: room,
+                x1: room + w,
+                y1: room + h,
             },
-            (w, h),
+            (w + 2 * room, h + 2 * room),
         );
         for (p, c) in out.pixels.iter_mut().zip(&cover) {
             // Premultiplied, so scaling the whole pixel by the coverage
@@ -11390,12 +11488,32 @@ impl Session {
         // the document, nested groups with shadows were let through at a
         // size whose drawing ran the engine out of memory, which stops it
         // rather than the export.
+        // And the picture cut back out of the drawing while the drawing
+        // is still held (with a region's coverage beside it): a picked
+        // region at the largest size offered stopped the engine without
+        // it.
         let bytes = drawn
             .saturating_mul(2 + deep)
+            .saturating_add(out * 16)
             .saturating_add(if sharpening { out * 16 } else { 0 })
             .saturating_add(out * 4);
-        let mut room: Vec<u8> = Vec::new();
-        room.try_reserve_exact(bytes).is_ok()
+        // Asked for in pieces, all held at once: one request past 2 GB is
+        // refused on 32-bit WebAssembly before any memory is looked at,
+        // and a 45-megapixel photograph with a sharpen was refused with
+        // the engine's 4 GB nearly empty.
+        const PIECE: usize = 1 << 30;
+        let mut held: Vec<Vec<u8>> = Vec::new();
+        let mut left = bytes;
+        while left > 0 {
+            let take = left.min(PIECE);
+            let mut piece: Vec<u8> = Vec::new();
+            if piece.try_reserve_exact(take).is_err() {
+                return false;
+            }
+            held.push(piece);
+            left -= take;
+        }
+        true
     }
 
     /// Whether an export `width` × `height` can be made now, for the
@@ -11418,8 +11536,26 @@ impl Session {
                 height,
                 self.export_past(scale),
                 sharpening,
-                self.surfaces_deep(),
+                self.surfaces_deep() + self.part_of_page(width, height, scale),
             )
+    }
+
+    /// The surfaces more an export of part of the page holds: a layer
+    /// whose effects reach past the part's edge is drawn on a copy of it
+    /// widened by their reach, with its cut read again over the copy
+    /// (`draw_with_room`). Uncounted, a picked region with a clipped
+    /// shadow at the largest size offered stopped the engine. Part of
+    /// the page is smaller than the page at the scale it is drawn at.
+    fn part_of_page(&self, width: u32, height: u32, scale: f32) -> usize {
+        let (pw, ph) = (
+            self.doc.meta.width as f32 * scale,
+            self.doc.meta.height as f32 * scale,
+        );
+        if (width as f32) + 1.5 < pw || (height as f32) + 1.5 < ph {
+            4
+        } else {
+            0
+        }
     }
 
     /// How many surfaces the size of what is drawn the document can stack
@@ -11444,11 +11580,39 @@ impl Session {
                                 .unwrap_or(0)
                         })
                         .unwrap_or(0);
-                    1 + own + inner
+                    // Measured: a group with a shadow stacks two
+                    // surfaces down the branch, not three (its own, and
+                    // one more for the shadow, whose blur reuses room the
+                    // group's inside has let go of). Counted as three,
+                    // six nested groups at the page's own size were
+                    // refused that drew in three quarters of the memory.
+                    1 + own.min(1) + inner
                 }
-                NodeKind::Instance { of, .. } => 1 + own + deep(doc, *of, level + 1),
-                NodeKind::Filter(_) => 1 + own,
-                _ => own,
+                NodeKind::Instance { of, .. } => 1 + own.min(1) + deep(doc, *of, level + 1),
+                // A filter's copy, and whatever more it holds while it
+                // works, in surfaces: measured, and rounded up. Oil paint
+                // keeps 84 bytes a pixel of its own beside the copy, and
+                // was let through at sizes that stopped the engine.
+                NodeKind::Filter(f) => {
+                    own + match f {
+                        chitrakar_doc::Filter::OilPaint { .. } => 7,
+                        chitrakar_doc::Filter::Twirl { .. }
+                        | chitrakar_doc::Filter::Pinch { .. } => 8,
+                        chitrakar_doc::Filter::SurfaceBlur { .. } => 4,
+                        chitrakar_doc::Filter::RadialBlur { .. } => 3,
+                        _ => 1,
+                    }
+                }
+                // A layer blended other than Normal is drawn on a surface
+                // of its own and then blended with a copy of what is
+                // under it, two more measured: counted as nothing, a
+                // masked Multiply was offered at a hundred megapixels and
+                // stopped the engine.
+                // And one clipped to the layer under it is drawn apart
+                // with that base, two more again.
+                _ => own.max(
+                    2 * usize::from(node.blend != chitrakar_doc::BlendMode::Normal || node.clipped),
+                ),
             }
         }
         let root = self.doc.root();
@@ -11593,7 +11757,7 @@ impl Session {
             ph,
             past,
             self.output_sharpen > 0.0,
-            self.surfaces_deep(),
+            self.surfaces_deep() + self.part_of_page(pw, ph, scale),
         ) {
             return Err(EngineError::BadCommand(format!(
                 "there is not enough memory left to make a picture of {pw} × {ph}; remove some layers, or make it smaller"
@@ -12303,6 +12467,12 @@ impl Session {
                 .apply_labeled(Command::Batch(cmds), Some(format!("Develop {n} pictures")))
                 .map(|()| n),
         }
+    }
+
+    /// Let go of the developments staged, without a step: what they were
+    /// for (a Paste style) was undone while they were being made.
+    pub fn discard_staged_develop(&mut self) {
+        self.staged_develop.clear();
     }
 
     /// The command that gives a layer its raw file developed with
@@ -13449,8 +13619,15 @@ impl Session {
                 .map_or(name.clone(), |(from, to)| {
                     format!("{to}{}", &name[from.len()..])
                 });
-            if !has_font(&name) || !differs(&name, &bytes) {
-                let _ = register_font(&name, bytes);
+            if (!has_font(&name) || !differs(&name, &bytes))
+                && register_font(&name, bytes).is_err()
+                && name != chitrakar_render::text::DEFAULT_FONT
+            {
+                // Read, but not a face: said, as one that could not be
+                // read is.
+                opened.lost.push(format!(
+                    "its font \"{name}\" could not be read, and its text is set in the bundled face"
+                ));
             }
         }
         for (from, to) in &renamed {
@@ -13471,6 +13648,9 @@ impl Session {
                 )
             })
             .collect();
+        session
+            .import_notes
+            .extend(std::mem::take(&mut opened.lost));
         if held > 0 {
             session.import_notes.push(format!(
                 "{held} layer effect{} asked for more than can be drawn, and {} held to what can",
@@ -13701,6 +13881,17 @@ pub fn shift_rows<T: Copy>(buf: &mut [T], w: usize, h: usize, dx: i64, dy: i64, 
             buf[row + w - d..row + w].fill(blank);
         }
     }
+}
+
+/// How a layer is held to the region picked out of the page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Holding {
+    /// Shows the region and nothing else (Mask from selection).
+    Show,
+    /// Hides the region, and whatever it hid already (Delete).
+    Hide,
+    /// Shows what of the region it showed already (Copy, Cut).
+    Inside,
 }
 
 #[cfg(test)]
@@ -30218,6 +30409,248 @@ mod tests {
         }
     }
 
+    /// Hide selection on a layer whose mask was brushed keeps the brush's
+    /// soft edge and adds the region as one more stroke: combined as an
+    /// outline, the whole mask came back as a hard staircase, and the
+    /// eraser then refused the layer as wearing "another kind" of mask.
+    /// A locked layer is not masked at all.
+    #[test]
+    fn hiding_a_region_on_a_brushed_mask_keeps_the_brush_soft() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let cover = add_rect(&mut session, "cover", 200.0, 100.0);
+        let soft = chitrakar_doc::PaintStroke {
+            points: vec![[50.0, 0.0], [50.0, 100.0]],
+            radii: vec![25.0],
+            color: chitrakar_color::AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            softness: 1.0,
+            erase: true,
+            source: [0.0; 2],
+            heal: false,
+            clip: None,
+        };
+        for invert in [false, true] {
+            // Inverted, the mask hides what is painted: the same picture
+            // is the whole page rubbed out and the stroke painted back.
+            let strokes = if invert {
+                vec![
+                    chitrakar_doc::PaintStroke {
+                        points: vec![[100.0, 50.0]],
+                        radii: vec![1000.0],
+                        softness: 0.0,
+                        ..soft.clone()
+                    },
+                    chitrakar_doc::PaintStroke {
+                        erase: false,
+                        ..soft.clone()
+                    },
+                ]
+            } else {
+                vec![soft.clone()]
+            };
+            session
+                .apply(Command::SetMask {
+                    id: cover,
+                    mask: Some(Box::new(chitrakar_doc::Mask {
+                        kind: chitrakar_doc::MaskKind::Painted { strokes },
+                        invert,
+                        feather: 0.0,
+                    })),
+                })
+                .unwrap();
+            let before = session.render().unwrap();
+            session
+                .pick_region(
+                    VectorShape::Rect {
+                        width: 60.0,
+                        height: 100.0,
+                        radius: 0.0,
+                    },
+                    Transform::translation(120.0, 0.0),
+                    "replace",
+                )
+                .unwrap();
+            session.mask_from_selection(cover, true).unwrap();
+            let after = session.render().unwrap();
+            assert!(
+                matches!(
+                    session
+                        .document()
+                        .node(cover)
+                        .unwrap()
+                        .mask
+                        .as_ref()
+                        .unwrap()
+                        .kind,
+                    chitrakar_doc::MaskKind::Painted { .. }
+                ),
+                "the mask is still one a brush can work on"
+            );
+            for x in 0..110 {
+                let (was, now) = (before.get(x, 50).a, after.get(x, 50).a);
+                assert!(
+                    (was - now).abs() < 0.01,
+                    "invert {invert}: x={x} was {was}, now {now}"
+                );
+            }
+            assert!(
+                after.get(150, 50).a < 0.01,
+                "invert {invert}: the region is hidden"
+            );
+            assert!(
+                after.get(190, 50).a > 0.99,
+                "invert {invert}: and past it shows"
+            );
+            session
+                .apply(Command::SetSelection { selection: None })
+                .unwrap();
+        }
+        // Locked, Delete with a region picked hides nothing.
+        session
+            .apply(Command::SetLocked {
+                id: cover,
+                locked: true,
+            })
+            .unwrap();
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 20.0,
+                    height: 20.0,
+                    radius: 0.0,
+                },
+                Transform::translation(10.0, 10.0),
+                "replace",
+            )
+            .unwrap();
+        let steps = session.history_labels().0.len();
+        assert!(session.mask_from_selection(cover, true).is_err());
+        assert_eq!(session.history_labels().0.len(), steps);
+    }
+
+    /// A feathered region exported on its own fades as the canvas draws
+    /// it where the fade runs off the page: worked out over the region's
+    /// box alone, the blur stopped at the page's edge and came out more
+    /// opaque there (123 against the canvas's 117).
+    #[test]
+    fn a_feathered_region_exports_as_the_canvas_draws_it_at_the_page_edge() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let cover = add_rect(&mut session, "cover", 100.0, 100.0);
+        session
+            .pick_region(
+                VectorShape::Rect {
+                    width: 60.0,
+                    height: 36.0,
+                    radius: 0.0,
+                },
+                Transform::translation(20.0, 60.0),
+                "replace",
+            )
+            .unwrap();
+        session.feather_selection(4.0).unwrap();
+        let png = session.selection_png(1.0).unwrap();
+        let out = chitrakar_codecs::decode(&png).unwrap();
+        // Where the export sits on the page: the region's box, grown by
+        // the fade and held to the page.
+        let b = session.region_export_box(None).unwrap();
+        session.mask_from_selection(cover, false).unwrap();
+        // The page as the canvas and its export draw it (the session's
+        // own `render` stops a fade at the page's edge; the canvas does
+        // not, and neither does the page's export).
+        let page = session.render_scaled(1.0, None).unwrap();
+        let (ox, oy) = (b[0], b[1]);
+        assert_eq!(oy + out.height, 100, "the export reaches the page's edge");
+        for y in 90..100u32 {
+            let canvas = page.get(50, y).a;
+            let i = (((y - oy) * out.width + (50 - ox)) * 4 + 3) as usize;
+            let exported = out.rgba8[i] as f32 / 255.0;
+            assert!(
+                (canvas - exported).abs() < 2.0 / 255.0,
+                "row {y}: the canvas shows {canvas}, the export {exported}"
+            );
+        }
+    }
+
+    /// Copy with a region picked out copies what of the layer is inside
+    /// it — the layer wearing the region — and Cut hides it after; the
+    /// two took the whole layer. What the layer already hid stays hidden
+    /// on the copy.
+    #[test]
+    fn copying_with_a_region_copies_what_is_inside_it() {
+        let mut session = Session::new(200, 100, ColorMode::Rgb);
+        let cover = add_rect(&mut session, "cover", 200.0, 100.0);
+        let pick = |s: &mut Session, x: f32, w: f32| {
+            s.pick_region(
+                VectorShape::Rect {
+                    width: w,
+                    height: 100.0,
+                    radius: 0.0,
+                },
+                Transform::translation(x, 0.0),
+                "replace",
+            )
+            .unwrap();
+        };
+        // Hidden already: the far right.
+        pick(&mut session, 160.0, 40.0);
+        session.mask_from_selection(cover, true).unwrap();
+        // Picked: the right half.
+        pick(&mut session, 100.0, 100.0);
+        session.copy_region(cover).unwrap();
+        session
+            .apply(Command::SetVisible {
+                id: cover,
+                visible: false,
+            })
+            .unwrap();
+        let pasted = session.paste(None).unwrap();
+        assert_eq!(pasted.len(), 1);
+        session
+            .apply(Command::SetTransform {
+                id: pasted[0],
+                transform: Transform::default(),
+            })
+            .unwrap();
+        let page = session.render_scaled(1.0, None).unwrap();
+        assert!(
+            page.get(50, 50).a < 0.01,
+            "outside the region is not copied"
+        );
+        assert!(page.get(130, 50).a > 0.99, "inside it is");
+        assert!(
+            page.get(180, 50).a < 0.01,
+            "and what was hidden stays hidden"
+        );
+    }
+
+    /// A mark taken after a step says whether that step is still done:
+    /// undone, or undone and replaced, it is not; redone, it is again.
+    /// Paste style's development lands only on a paste still done.
+    #[test]
+    fn a_mark_says_whether_its_step_is_still_done() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        add_rect(&mut session, "a", 10.0, 10.0);
+        let mark = session.history_mark();
+        assert!(session.history_holds(mark));
+        add_rect(&mut session, "b", 10.0, 10.0);
+        assert!(session.history_holds(mark), "a later step leaves it done");
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(!session.history_holds(mark), "undone, it is not");
+        session.redo().unwrap();
+        assert!(session.history_holds(mark), "redone, it is again");
+        session.undo().unwrap();
+        add_rect(&mut session, "c", 10.0, 10.0);
+        assert!(
+            !session.history_holds(mark),
+            "undone and replaced, it is not"
+        );
+    }
+
     #[test]
     fn a_picked_region_fills_hides_and_crops() {
         let ink = chitrakar_color::AuthoredColor::Srgb {
@@ -33818,6 +34251,35 @@ mod tests {
         );
         let again = chitrakar_codecs::load_chitra_with_fonts(&session.save().unwrap()).unwrap();
         assert_eq!(again.fonts.len(), 2, "both faces go back into the file");
+    }
+
+    /// A file carrying a face that is not one opens, and says its text is
+    /// in the bundled face: it opened without a word, and the next save
+    /// left the face out.
+    #[test]
+    fn a_files_damaged_font_is_said() {
+        let mut doc = chitrakar_doc::Document::new(64, 64, ColorMode::Rgb);
+        let root = doc.root();
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(text_in("Damaged Face")),
+        })
+        .unwrap();
+        let bytes = chitrakar_codecs::save_chitra_with_fonts(
+            &doc,
+            &[("Damaged Face", b"this is not a font at all".as_slice())],
+        )
+        .unwrap();
+        let session = Session::load(&bytes).unwrap();
+        assert!(
+            session
+                .import_notes()
+                .iter()
+                .any(|n| n.contains("Damaged Face") && n.contains("bundled face")),
+            "{:?}",
+            session.import_notes()
+        );
     }
 
     /// A file whose shadow asks for a blur of ten thousand, a border a

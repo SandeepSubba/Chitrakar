@@ -58,7 +58,8 @@
   --panel: #ffffff;
   --border: #d4d4dc;
   --text: #1b1b22;
-  --muted: #6b6b78;
+  /* 4.8:1 on the menus' #ebebeb; #6b6b78 was 4.4 there. */
+  --muted: #65656f;
   --accent: #3b5bdb;
   --accent-text: var(--accent-on-light, var(--accent));
   /* And as a line on the panel — a focus ring, a picked border — which
@@ -92,6 +93,13 @@
 :focus-visible {
   outline: 2px solid var(--accent-line);
   outline-offset: 1px;
+}
+
+/* A field's hint in the theme's own quiet colour: the browser's grey
+   is the same in either theme, and under 3:1 on the dark one. */
+::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 
 html,
@@ -1073,6 +1081,11 @@ body {
   font-style: italic;
 }
 
+/* The steps a long history leaves undrawn, as one row each way. */
+.history li.history-more button {
+  color: var(--muted);
+}
+
 .panel .kind {
   display: grid;
   place-items: center;
@@ -1190,7 +1203,9 @@ body {
 .layer-props input[type="number"]:focus-visible,
 .layer-props input[type="text"]:focus-visible,
 .layer-props select:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  /* The ring every other control wears: the accent let through at 70%
+     fell under 3:1 against the field with almost any accent chosen. */
+  outline: 2px solid var(--accent-line);
   outline-offset: -1px;
 }
 
@@ -3165,8 +3180,16 @@ body {
 }
 .panel li:hover .lock-toggle,
 .panel li.selected .lock-toggle,
-.lock-toggle[aria-pressed="true"] {
+.lock-toggle[aria-pressed="true"],
+.lock-toggle:focus-visible {
   opacity: 1;
+}
+/* A touch screen has no hover to bring it up: there it always shows,
+   faint, so a lock can be found on a row that is not picked. */
+@media (hover: none) {
+  .lock-toggle {
+    opacity: 0.6;
+  }
 }
 /* The document's palette, beside the colour being drawn with. */
 .palette {
@@ -3445,13 +3468,18 @@ button.fold:hover {
   border: 1px solid var(--border);
   border-radius: 5px;
   background: none;
+  /* The letter in the text's own colour and the channel's ink under it:
+     a green or blue letter on the panel was under 3:1 in one theme or
+     the other. */
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--ink, transparent);
   font: inherit;
   font-size: 0.75rem;
   cursor: pointer;
 }
 .curve-channels button.active {
-  border-color: currentColor;
-  background: color-mix(in srgb, currentColor 14%, transparent);
+  border-color: var(--ink, var(--accent-line));
+  background: color-mix(in srgb, var(--ink, var(--accent)) 18%, transparent);
 }
 /* What a channel mixer's row adds to: muted at the picture's own
    brightness, in the note colour when the channel is brighter or darker. */

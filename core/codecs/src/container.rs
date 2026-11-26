@@ -115,6 +115,9 @@ pub type FontFile<'a> = (&'a str, &'a [u8]);
 pub struct Opened {
     pub doc: Document,
     pub fonts: Vec<(String, Vec<u8>)>,
+    /// What the file holds that could not be read and was left out, said
+    /// in words for the person opening it.
+    pub lost: Vec<String>,
 }
 
 /// Serialize a document to `.chitra` bytes. Resource pixels are stored as
@@ -501,29 +504,38 @@ pub fn load_chitra_with_fonts(bytes: &[u8]) -> Result<Opened, ContainerError> {
         // size disagrees — the manifest is the source of truth.
         doc.restore_resource_bytes(&id, img.rgba8);
     }
+    let mut lost = Vec::new();
     if let Ok(mut entry) = zip.by_name(&named(CMYK_PROFILE_PATH)) {
         let mut icc = Vec::new();
         // Best effort: a profile that cannot be read, or no longer
-        // parses, is dropped rather than the document.
-        if entry.read_to_end(&mut icc).is_ok() {
-            let _ = doc.set_cmyk_profile(icc);
+        // parses, is dropped rather than the document — and said, since
+        // the next save goes without it.
+        if entry.read_to_end(&mut icc).is_err() || doc.set_cmyk_profile(icc).is_err() {
+            lost.push(
+                "its press profile could not be read and is left out; load it again with Load press profile…"
+                    .to_string(),
+            );
         }
     }
     let mut fonts = Vec::new();
     for font in manifest.fonts {
         // A listed face whose file is missing is left out rather than
         // failing the open; its text falls back to the bundled face.
-        let Ok(mut entry) = zip.by_name(&named(&font.file)) else {
-            continue;
-        };
-        let mut bytes = Vec::new();
-        // And one that cannot be read, the same.
-        if entry.read_to_end(&mut bytes).is_err() {
-            continue;
+        // And one that cannot be read, the same — said, as a damaged raw
+        // original is.
+        let read = zip.by_name(&named(&font.file)).ok().and_then(|mut entry| {
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).ok().map(|_| bytes)
+        });
+        match read {
+            Some(bytes) => fonts.push((font.name, bytes)),
+            None => lost.push(format!(
+                "its font \"{}\" could not be read, and its text is set in the bundled face",
+                font.name
+            )),
         }
-        fonts.push((font.name, bytes));
     }
-    Ok(Opened { doc, fonts })
+    Ok(Opened { doc, fonts, lost })
 }
 
 #[cfg(test)]

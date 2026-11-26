@@ -36,6 +36,14 @@ check(importKind("x", bytes([0x89], "PNG")) === "picture", "a PNG");
 check(importKind("x", bytes([0xff, 0xd8, 0xff, 0xe0])) === "picture", "a JPEG");
 check(importKind("scan.tif", bytes("II*", [0])) === "picture", "a TIFF");
 check(importKind("x", bytes("<svg xmlns='http://www.w3.org/2000/svg'>")) === "svg", "an SVG");
+check(
+  importKind("drawing.xml", bytes([0xef, 0xbb, 0xbf], "<?xml version='1.0'?><svg xmlns='http://www.w3.org/2000/svg'>")) === "svg",
+  "an SVG named .xml with a byte-order mark",
+);
+check(
+  importKind("drawing.xml", bytes("<!--" + "x".repeat(100000) + "--><svg xmlns='http://www.w3.org/2000/svg'>")) === "svg",
+  "an SVG named .xml behind a comment longer than 64 KB",
+);
 check(importKind("x", bytes([0, 0, 0, 24], "ftypheic")) === "picture", "a HEIC is a picture");
 
 // A raw file is told by its name, even though it is a TIFF inside.

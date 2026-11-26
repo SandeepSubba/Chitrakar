@@ -128,8 +128,15 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
       return "picture";
     // As far in as the bytes go (a long comment can come first), and
     // with a prefix (<svg:svg>) as well as without.
-    const xml = bytes.length > 1024 ? new TextDecoder("latin1").decode(bytes.subarray(0, 65536)) : head;
-    if (/^\s*(<\?xml|<(?:[\w-]+:)?svg|<!--|<!DOCTYPE)/i.test(xml) && /<(?:[\w-]+:)?svg[\s>]/i.test(xml)) return "svg";
+    // A UTF-8 byte-order mark before it is passed over (it read as "ï»¿"
+    // and the file was "not a picture"), and a file that begins as XML is
+    // looked through for its <svg as far as sixteen megabytes: a comment
+    // of more than the first 64 KB hid it.
+    const opening = new TextDecoder("latin1").decode(bytes.subarray(0, 1024)).replace(/^\xEF\xBB\xBF/, "");
+    if (/^\s*(<\?xml|<(?:[\w-]+:)?svg|<!--|<!DOCTYPE)/i.test(opening)) {
+      const xml = new TextDecoder("latin1").decode(bytes.subarray(0, 16 << 20));
+      if (/<(?:[\w-]+:)?svg[\s>]/i.test(xml)) return "svg";
+    }
   }
   // Bytes that are none of those, under the document's name: a damaged
   // document, and said to be one.

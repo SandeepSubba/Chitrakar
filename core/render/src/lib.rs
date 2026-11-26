@@ -6280,6 +6280,7 @@ pub fn dashed_rings(
     dash: &[f32],
     offset: f32,
     inward: f32,
+    width: f32,
 ) -> Vec<Vec<[f32; 2]>> {
     let pattern: Vec<f32> = dash.iter().map(|d| d.max(0.0)).collect();
     if pattern.is_empty() || pattern.iter().all(|d| *d <= 0.0) {
@@ -6367,12 +6368,20 @@ pub fn dashed_rings(
                 .sum::<f64>()
         })
         .sum();
-    // And a pattern finer than a twentieth of a pixel on average is solid
-    // whatever the line's length: dashes of a thousandth on a small
-    // rectangle were few enough to walk, but each, five wide, lay over
-    // thousands of the others, and the index of them ran the engine out
-    // of memory.
-    if !(length.is_finite() && length / per_dash <= MOST_DASHES && per_dash >= 0.05) {
+    // And a pattern so fine against the stroke's width that each dash
+    // lies over more than a few dozen of the others is solid whatever
+    // the line's length: dashes of a thousandth on a small rectangle
+    // were few enough to walk, but each, five wide, lay over thousands
+    // of the others, and the index of them ran the engine out of memory.
+    // Judged against the width rather than as a length of its own,
+    // which would have been in the shape's units: a pattern of 0.04 on
+    // a shape scaled fifty times is dashes of two pixels on the page.
+    let width = if width.is_finite() {
+        width.max(0.0) as f64
+    } else {
+        f64::INFINITY
+    };
+    if !(length.is_finite() && length / per_dash <= MOST_DASHES && width / per_dash <= 64.0) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -6489,7 +6498,20 @@ pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2
         }
     };
     let mut rings = Vec::new();
-    while let Some((&start, _)) = from.iter().find(|(_, next)| !next.is_empty()) {
+    // Each ring starts at the first corner, in order, that still has an
+    // edge to give. Edges are only ever taken, so a corner passed over
+    // empty stays empty and one cursor through the corners finds every
+    // start: searching the whole map again for each ring (and sweeping
+    // it clean after) made a grainy 12-megapixel wand take minutes.
+    let corners: Vec<(u32, u32)> = from.keys().copied().collect();
+    let mut cursor = 0;
+    loop {
+        while cursor < corners.len() && from[&corners[cursor]].is_empty() {
+            cursor += 1;
+        }
+        let Some(&start) = corners.get(cursor) else {
+            break;
+        };
         let mut ring: Vec<(u32, u32)> = vec![start];
         let mut at_point = start;
         // The direction the walk arrived by, which decides what it does
@@ -6541,7 +6563,6 @@ pub fn trace_pixels(inside: &[bool], width: u32, height: u32) -> Vec<Vec<[f32; 2
         if out.len() >= 3 {
             rings.push(out);
         }
-        from.retain(|_, next| !next.is_empty());
     }
     rings
 }
@@ -6977,7 +6998,13 @@ pub fn stroke_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke) -> Vec
         StrokeAlign::Centre => 0.0,
         StrokeAlign::Outside => -stroke.width / 2.0,
     };
-    let runs = dashed_rings(shape, &stroke.dash, stroke.dash_offset, inward);
+    let runs = dashed_rings(
+        shape,
+        &stroke.dash,
+        stroke.dash_offset,
+        inward,
+        stroke.width,
+    );
     if !runs.is_empty() {
         let half = stroke.width / 2.0;
         for run in runs {
@@ -13089,8 +13116,12 @@ pub fn frame_under(
     y: f32,
     passing: &[NodeId],
 ) -> Result<Option<NodeId>, DocError> {
+    // Asked of every layer the walk meets, so held as a set: searched as
+    // a list, letting go of five thousand dragged layers took half a
+    // minute (the page asks once a layer).
+    let passing: std::collections::HashSet<NodeId> = passing.iter().copied().collect();
     Ok(
-        match frame_in(doc, doc.root(), x, y, Transform::default(), passing)? {
+        match frame_in(doc, doc.root(), x, y, Transform::default(), &passing)? {
             Under::Frame(frame) => Some(frame),
             Under::Covered | Under::Open => None,
         },
@@ -13111,7 +13142,7 @@ fn frame_in(
     x: f32,
     y: f32,
     parent: Transform,
-    passing: &[NodeId],
+    passing: &std::collections::HashSet<NodeId>,
 ) -> Result<Under, DocError> {
     for &child in doc.children_of(group)?.iter().rev() {
         let node = doc.node(child)?;
@@ -16025,7 +16056,7 @@ mod tests {
         );
     }
 
-    /// A pattern finer than a twentieth of a pixel is a solid line, on a
+    /// A pattern far finer than the stroke's width is a solid line, on a
     /// small shape as on a long one: walked, each of its dashes lay over
     /// thousands of the others, and the engine ran out of memory.
     #[test]
@@ -16035,8 +16066,11 @@ mod tests {
             height: 6.0,
             radius: 0.0,
         };
-        assert!(dashed_rings(&rect, &[0.001], 0.0, 0.0).is_empty());
-        assert!(!dashed_rings(&rect, &[1.0], 0.0, 0.0).is_empty());
+        assert!(dashed_rings(&rect, &[0.001], 0.0, 0.0, 5.0).is_empty());
+        assert!(!dashed_rings(&rect, &[1.0], 0.0, 0.0, 5.0).is_empty());
+        // Fine in the shape's own units, but a stroke as fine as it: a
+        // shape scaled up fifty times shows these as dashes.
+        assert!(!dashed_rings(&rect, &[0.04], 0.0, 0.0, 0.1).is_empty());
     }
 
     /// A dotted line is dashes of nothing with gaps between: walked dash
@@ -16050,7 +16084,7 @@ mod tests {
             handles: Vec::new(),
             subpaths: Vec::new(),
         };
-        let dots = dashed_rings(&line, &[0.0, 25.0], 0.0, 0.0);
+        let dots = dashed_rings(&line, &[0.0, 25.0], 0.0, 0.0, 4.0);
         assert_eq!(dots.len(), 16, "a dot every 25 along 400, from its start");
     }
 
@@ -16479,6 +16513,45 @@ mod tests {
 
         // Nothing selected is nothing traced.
         assert!(trace_pixels(&grid(3, 3, &[]), 3, 3).is_empty());
+    }
+
+    #[test]
+    fn a_grainy_region_traces_in_time_proportional_to_its_edges() {
+        // Grain picked out by colour is thousands of small rings. Each
+        // one searched the whole edge map for where to start, so the
+        // time went as the square of the page: a 12-megapixel photograph
+        // took seven minutes. Every pixel's area is still accounted for.
+        let (w, h) = (900usize, 700usize);
+        let mut seed = 12345u32;
+        let inside: Vec<bool> = (0..w * h)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                (seed >> 16).is_multiple_of(3)
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let rings = trace_pixels(&inside, w as u32, h as u32);
+        let took = started.elapsed();
+        let area: f64 = rings
+            .iter()
+            .map(|r| {
+                let n = r.len();
+                (0..n)
+                    .map(|i| {
+                        let (a, b) = (r[i], r[(i + 1) % n]);
+                        (a[0] as f64 * b[1] as f64 - b[0] as f64 * a[1] as f64) / 2.0
+                    })
+                    .sum::<f64>()
+            })
+            .sum();
+        let picked = inside.iter().filter(|&&p| p).count() as f64;
+        assert_eq!(area, picked, "every pixel traced once, holes taken out");
+        assert!(rings.len() > 50_000, "grain is many rings: {}", rings.len());
+        assert!(
+            took.as_secs_f32() < 10.0,
+            "{} rings took {took:?}",
+            rings.len()
+        );
     }
     use super::*;
     use chitrakar_color::{AuthoredColor, ColorMode};

@@ -1294,6 +1294,12 @@ impl WasmSession {
         self.inner.copy_nodes(&ids).map_err(to_js)
     }
 
+    /// Put what of a layer is inside the region picked out of the page on
+    /// the clipboard: the layer, wearing the region as its mask.
+    pub fn copy_region(&self, id: f64) -> Result<(), JsError> {
+        self.inner.copy_region(NodeId(id as u64)).map_err(to_js)
+    }
+
     /// Paste the clipboard into the root; returns the new layers' ids,
     /// bottom first, and nothing at all when the clipboard is empty.
     pub fn paste(&mut self) -> Result<Vec<f64>, JsError> {
@@ -1488,6 +1494,11 @@ impl WasmSession {
     /// is remembered against.
     pub fn history_mark(&self) -> f64 {
         self.inner.history_mark() as f64
+    }
+
+    /// Whether the step a mark was taken after is still done.
+    pub fn history_holds(&self, mark: f64) -> bool {
+        self.inner.history_holds(mark as u64)
     }
 
     /// Every palette name a colour in the document stands for, as JSON.
@@ -1766,6 +1777,11 @@ impl WasmSession {
     }
 
     /// Apply what was staged as one step; how many pictures it was.
+    /// Let go of the staged developments without a step.
+    pub fn discard_staged_develop(&mut self) {
+        self.inner.discard_staged_develop()
+    }
+
     pub fn commit_staged_develop(&mut self) -> Result<u32, JsError> {
         self.inner
             .commit_staged_develop()

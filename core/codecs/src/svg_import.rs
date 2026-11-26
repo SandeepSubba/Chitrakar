@@ -344,6 +344,21 @@ pub fn import_svg(data: &[u8]) -> Result<ImportedSvg, String> {
     } else {
         data
     };
+    // draw.io puts a line for readers that cannot show its labels, behind
+    // a <switch> no browser takes; the reader here takes it, and every
+    // diagram came in saying "Text is not SVG - cannot display" along its
+    // foot. Its labels come in by their own fallback text.
+    let quieted;
+    const DRAWIO_WARNING: &[u8] = b"Text is not SVG - cannot display";
+    let data = if data
+        .windows(DRAWIO_WARNING.len())
+        .any(|w| w == DRAWIO_WARNING)
+    {
+        quieted = replace_ignoring_case(data, DRAWIO_WARNING, b"");
+        &quieted[..]
+    } else {
+        data
+    };
     let mut opt = usvg::Options::default();
     // A picture the file holds that is stored on its side (a camera's
     // JPEG with Orientation 5 to 8) is handed to the reader upright:
@@ -1402,6 +1417,32 @@ fn narrowed(region: Vec<Vec<[f32; 2]>>, by: Vec<Vec<[f32; 2]>>) -> Option<Vec<Ve
     Some(combine_or_nudge(&region, &by, BoolOp::Intersect).unwrap_or(region))
 }
 
+/// A clip that is one upright rectangle, as its box: what a frame, an
+/// artboard or a chart's axes clip to.
+fn rect_of(rings: &[Vec<[f32; 2]>]) -> Option<[f32; 4]> {
+    let [ring] = rings else { return None };
+    let pts: Vec<[f32; 2]> = {
+        let mut v = ring.clone();
+        if v.len() > 1 && v.first() == v.last() {
+            v.pop();
+        }
+        v
+    };
+    if pts.len() != 4 {
+        return None;
+    }
+    let (x0, x1) = pts
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p[0]), b.max(p[0])));
+    let (y0, y1) = pts
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p[1]), b.max(p[1])));
+    let on_edge = |v: f32, a: f32, b: f32| (v - a).abs() < 1e-3 || (v - b).abs() < 1e-3;
+    pts.iter()
+        .all(|p| on_edge(p[0], x0, x1) && on_edge(p[1], y0, y1))
+        .then_some([x0, y0, x1, y1])
+}
+
 /// The region a group is seen through, in document space, or `None` for
 /// a group with no clip; an empty region shows nothing.
 ///
@@ -2355,7 +2396,9 @@ fn walk(
     // a clip or a mask, which isolate in every reader — with a blend
     // inside it keeps the blend inside it: flattened, the blend would
     // reach everything under the group.
-    let isolating = group.should_isolate() && holds_a_blend(group) && draws_more_than_one(group);
+    // With one layer in it as much as with several: the blend of one
+    // layer alone, flattened, reached through to the backdrop.
+    let isolating = group.should_isolate() && holds_a_blend(group);
     // A filter that is a shadow, an outline or an inner shadow comes in as
     // the engine's own effects (`effects_of`); on one layer they are that
     // layer's, and on more — or faded, since a fade takes the shadow with
@@ -2593,8 +2636,24 @@ fn walk(
                         p.abs_transform()
                     };
                     let fixed = if place.text { None } else { fix(said) };
+                    // A shape wholly inside a rectangular clip is not cut
+                    // by it, and wears nothing: a Figma frame's or a chart's
+                    // axes' clip worn by each of two thousand points made
+                    // every frame work out two thousand masks over the
+                    // whole page, half a minute a zoom.
+                    let uncut = fixed.is_none()
+                        && place.effects.is_empty()
+                        && clip
+                            .and_then(|c| rect_of(c))
+                            .is_some_and(|[x0, y0, x1, y1]| {
+                                let b = p.abs_stroke_bounding_box();
+                                b.left() >= x0
+                                    && b.top() >= y0
+                                    && b.right() <= x1
+                                    && b.bottom() <= y1
+                            });
                     for (k, mut node) in shapes_of(p, said, opacity).into_iter().enumerate() {
-                        node.mask = worn.clone();
+                        node.mask = if uncut { None } else { worn.clone() };
                         node.blend = place.blend;
                         // A path that came in as a fill and a stroke over
                         // it casts its shadow once, from the first.
@@ -3142,11 +3201,13 @@ fn picture_of(
     opacity: f32,
     below: usize,
 ) -> Option<ImportedImage> {
-    let bytes: &[u8] = match kind {
-        usvg::ImageKind::PNG(data) | usvg::ImageKind::JPEG(data) => data,
+    // A PNG or JPEG goes through the engine's own reader. A WebP or GIF
+    // inside an SVG has none: the engine carries a WebP encoder only, a
+    // decoder being 190 KB more of WebAssembly for something rare.
+    let decoded = match kind {
+        usvg::ImageKind::PNG(data) | usvg::ImageKind::JPEG(data) => crate::decode(data).ok()?,
         _ => return None,
     };
-    let decoded = crate::decode(bytes).ok()?;
     if decoded.width == 0 || decoded.height == 0 {
         return None;
     }
@@ -4928,6 +4989,48 @@ mod tests {
         let cmds = imported.into_commands(&mut out, root, 0, first);
         out.apply(Command::Batch(cmds)).unwrap();
         out
+    }
+
+    /// One blended layer inside an isolated group blends with nothing but
+    /// what the group holds: flattened, it reached the backdrop.
+    #[test]
+    fn a_lone_blend_in_an_isolated_group_stays_inside() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+             <rect width="40" height="40" fill="#3366cc"/>
+             <g style="isolation:isolate">
+               <rect x="10" y="10" width="20" height="20" fill="#ffa500" style="mix-blend-mode:multiply"/>
+             </g>
+           </svg>"##;
+        let doc = brought_in(svg, 40, 40);
+        let px = chitrakar_render::render(&doc)
+            .unwrap()
+            .get(20, 20)
+            .to_srgb8();
+        assert!(
+            px[0] > 240 && px[1] > 150 && px[2] < 20,
+            "orange, not multiplied: {px:?}"
+        );
+    }
+
+    /// A shape wholly inside a group's rectangular clip wears no mask; one
+    /// crossing its edge still does.
+    #[test]
+    fn a_shape_inside_its_clip_wears_none() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+             <defs><clipPath id="c"><rect x="10" y="10" width="80" height="80"/></clipPath></defs>
+             <g clip-path="url(#c)">
+               <rect x="20" y="20" width="10" height="10" fill="#cc0000"/>
+               <rect x="80" y="20" width="30" height="10" fill="#0000cc"/>
+             </g>
+           </svg>"##;
+        let doc = brought_in(svg, 100, 100);
+        let masks: Vec<bool> = doc
+            .nodes()
+            .filter(|(_, n)| matches!(n.kind, chitrakar_doc::NodeKind::Vector { .. }))
+            .map(|(_, n)| n.mask.is_some())
+            .collect();
+        assert_eq!(masks.iter().filter(|m| **m).count(), 1, "{masks:?}");
+        assert_eq!(masks.len(), 2);
     }
 
     /// A page exported and brought back in covers what it covered.

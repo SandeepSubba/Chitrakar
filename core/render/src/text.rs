@@ -499,6 +499,12 @@ fn reads_leftward(c: char) -> bool {
     matches!(unicode_bidi::bidi_class(c), R | AL | RLE | RLO | RLI)
 }
 
+/// Whether a character is an Arabic number to the bidi rules (AN): the
+/// Arabic-Indic and Persian digits and their separators.
+fn arabic_number(c: char) -> bool {
+    c >= '\u{0600}' && unicode_bidi::bidi_class(c) == unicode_bidi::BidiClass::AN
+}
+
 /// The paragraph a line at `at` in the block was wrapped out of, or the
 /// line itself when it is not a slice of the block's text.
 fn paragraph_of<'a>(spec: &'a TextSpec, at: usize, line: &'a str) -> &'a str {
@@ -540,7 +546,10 @@ fn in_reading_order_in(
 ) -> Vec<(usize, usize, Option<usize>, bool)> {
     let pieces = pieces_in(spec, at, line.len());
     let way = way.unwrap_or_else(|| ParagraphWay::of(paragraph_of(spec, at, line)));
-    if !way.leftward && !line.chars().any(reads_leftward) {
+    // Arabic-Indic digits are ordered by the bidi rules too, though they
+    // read rightward: groups of them with spaces between run leftward as
+    // a whole, as a browser sets them (the SVG did, the PNG did not).
+    if !way.leftward && !line.chars().any(|c| reads_leftward(c) || arabic_number(c)) {
         return pieces
             .into_iter()
             .map(|(f, t, r)| (f, t, r, false))
@@ -3124,6 +3133,27 @@ mod tests {
                 "{digits}: {clusters:?}"
             );
         }
+    }
+
+    /// Groups of Arabic-Indic digits with spaces between, in a line that
+    /// reads rightward, run leftward as a whole, as the bidi rules (and
+    /// every browser, so our own SVG) set them: "١٢ ٣٤" is "٣٤ ١٢" on the
+    /// page. Each group still reads rightward inside.
+    #[test]
+    fn arabic_indic_number_groups_run_leftward() {
+        let line = "١٢ ٣٤";
+        let s = spec(line, 20.0);
+        let order = in_reading_order_in(line, 0, &s, None);
+        let starts: Vec<usize> = order.iter().map(|p| p.0).collect();
+        assert_eq!(starts, vec![5, 4, 0], "{order:?}");
+        assert!(
+            !order[0].3 && !order[2].3,
+            "each group reads rightward inside"
+        );
+        // European digits are left as they are.
+        let plain = "12 34";
+        let order = in_reading_order_in(plain, 0, &spec(plain, 20.0), None);
+        assert_eq!(order.len(), 1);
     }
 
     #[test]

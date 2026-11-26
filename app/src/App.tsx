@@ -6270,6 +6270,10 @@ export function App() {
     const all = JSON.parse(s.layers_json()) as LayerInfo[];
     const byId = new Map(all.map((l) => [l.id as NodeId, l]));
     const moved = selectionSet.length > 0 ? selectionSet : selected !== null ? [selected] : [];
+    // No frame anywhere: nothing to go into or come out of, and nothing
+    // to ask a layer at a time.
+    if (!all.some((l) => l.kind === "artboard")) return;
+    const passing = new Float64Array(moved);
     for (const id of moved) {
       const parent = byId.get(id)?.parent as NodeId | undefined;
       if (parent === undefined) continue;
@@ -6283,7 +6287,7 @@ export function App() {
         // Looked for through what is being put down, which covers its
         // own middle: asked of the page as it stands, every shape
         // dropped on a frame found itself there and never went in.
-        const into = s.frame_under(box[0] + box[2] / 2, box[1] + box[3] / 2, new Float64Array(moved));
+        const into = s.frame_under(box[0] + box[2] / 2, box[1] + box[3] / 2, passing);
         if (into < 0) continue;
         const room = s.bounds_of(into);
         if (
@@ -6318,7 +6322,7 @@ export function App() {
       ) {
         continue;
       }
-      const under = s.frame_under(box[0] + box[2] / 2, box[1] + box[3] / 2, new Float64Array(moved));
+      const under = s.frame_under(box[0] + box[2] / 2, box[1] + box[3] / 2, passing);
       if (under === parent) continue;
       // Not into itself, nor into a frame of its own.
       let up: NodeId | undefined = under >= 0 ? (under as NodeId) : undefined;
@@ -9572,13 +9576,21 @@ export function App() {
     setMultiSel([]);
   };
 
-  const copySelected = () => {
-    if (!session || selectionSet.length === 0) return;
+  /** Whether Copy, Cut and Delete are about a region picked out of the
+   * page rather than the whole picked layer: there is a region, and one
+   * layer to take it from, as the Delete key has long read it. */
+  const aboutRegion = () => antRings.length > 0 && selected !== null && selectionSet.length === 1;
+
+  const copySelected = (): boolean => {
+    if (!session || selectionSet.length === 0) return false;
     try {
-      session.copy_nodes(new Float64Array(selectionSet));
+      // With a region picked out, what is inside it is what is copied:
+      // the layer wearing the region, where the whole layer went.
+      if (aboutRegion()) session.copy_region(selected!);
+      else session.copy_nodes(new Float64Array(selectionSet));
     } catch (err) {
       alert(`Copy: ${said(err)}`);
-      return;
+      return false;
     }
     // And take the system clipboard with it. A picture copied in another
     // application sits there until that application lets go of it, and a
@@ -9602,6 +9614,7 @@ export function App() {
     } catch {
       /* storage refused: each tab pastes its own copy, as before */
     }
+    return true;
   };
 
   const pasteClipboard = () => {
@@ -9745,8 +9758,7 @@ export function App() {
             copySelected();
             return;
           case "cut":
-            copySelected();
-            deleteSelected();
+            cutSelected();
             return;
           // Ctrl+V pastes the in-app clipboard a beat later, unless the
           // paste event has already served a picture from another
@@ -10306,10 +10318,14 @@ export function App() {
     ["exclude", "exclude", "Keep everything but the overlap"],
   ];
 
-  /** Copy the picked layer and take it out, as the shortcut does. */
+  /** Copy the picked layer and take it out, as the shortcut does; with
+   * a region picked out, what is inside the region is copied and then
+   * hidden, as Delete hides it. */
   const cutSelected = () => {
-    copySelected();
-    deleteSelected();
+    const region = aboutRegion();
+    if (!copySelected()) return;
+    if (region) maskFromSelection(true);
+    else deleteSelected();
   };
 
   /** Frame the picked layers, or the whole page when nothing is picked. */
@@ -11757,6 +11773,7 @@ export function App() {
    * row's own handler held the history of the render that drew it, and
    * a row React never redraws kept it — four thousand steps held
    * millions of copies of their labels (memory grew as the square). */
+  const shownSteps = historyWindow(history.past.length, history.future.length);
   const historyNow = useRef(history);
   historyNow.current = history;
   /** Whether there is work here that has not been saved. */
@@ -12606,7 +12623,17 @@ export function App() {
           // Opened, the page keeps the resolution the file says it was
           // made at: left at 72, the editor's own 300-dpi exports came
           // back four times too large to print.
-          if (undoOpen && kind !== "svg") {
+          if (undoOpen && kind === "svg") {
+            // An SVG's pixel is CSS's, ninety-six to the inch: opened at
+            // seventy-two, Inkscape's A5 came out of a PDF a third too
+            // large, and every size in mm a third off.
+            try {
+              session.set_dpi(96);
+              setDocDpi(96);
+            } catch {
+              // Left as it was.
+            }
+          } else if (undoOpen) {
             const dpi = WasmSession.picture_dpi(raw);
             if (dpi > 0) {
               try {
@@ -13030,7 +13057,12 @@ export function App() {
       // What was developed before anything failed still goes in, as one step.
       try {
         const join = joinAfter !== undefined && !gone() && session.history_mark() === joinAfter;
-        if (!gone() && session.commit_staged_develop() && join) session.merge_last();
+        // The paste it belongs with undone meanwhile: the development goes
+        // with it, rather than landing as a step of its own over a paste
+        // that could then not be redone.
+        if (joinAfter !== undefined && !gone() && !session.history_holds(joinAfter)) {
+          session.discard_staged_develop();
+        } else if (!gone() && session.commit_staged_develop() && join) session.merge_last();
       } finally {
         session.raw_close();
         setImporting(null);
@@ -13140,10 +13172,10 @@ export function App() {
       const lens: File[] = [];
       for (const f of files) {
         if (!/\.xml$/i.test(f.name)) continue;
-        // Far enough in for a long comment first, and with a prefix
-        // (<svg:svg>) as well as without.
-        const head = new TextDecoder().decode(await f.slice(0, 65536).arrayBuffer());
-        if (!/<(?:[\w-]+:)?svg[\s>]/i.test(head)) lens.push(f);
+        // Judged as Open judges it (`importKind`): a byte-order mark, a
+        // comment longer than 64 KB, a prefix (<svg:svg>).
+        const head = new Uint8Array(await f.slice(0, 16 << 20).arrayBuffer());
+        if (importKind(f.name, head, f.type) !== "svg") lens.push(f);
       }
       if (lens.length > 0 && session) {
         files = files.filter((f) => !lens.includes(f));
@@ -13868,7 +13900,13 @@ export function App() {
         item("duplicate", "duplicate", "Duplicate", duplicateSelected, hint("duplicate")),
         // Affinity's Duplicate Linked: a copy that follows the original.
         item("instance", "instance", "Duplicate linked", instanceSelected),
-        item("delete", "trash", "Delete", () => deleteSelected(), "Del"),
+        item(
+          "delete",
+          "trash",
+          "Delete",
+          () => (aboutRegion() ? maskFromSelection(true) : deleteSelected()),
+          "Del",
+        ),
         SEP,
         // What a selection is filled or outlined with, as Photoshop's
         // Edit menu has them.
@@ -15551,11 +15589,16 @@ export function App() {
               max={200}
               step={1}
               value={Math.round(selectionFeather)}
-              title="How far the edge is softened over, in page pixels"
+              title="How far the edge is softened over, in page pixels; Enter (or leaving the box) applies it"
               aria-label="Selection feather"
-              onValue={(want) => {
-                setSelectionFeather(want);
-                if (session?.feather_selection(want)) refresh(session);
+              // Applied when it has been typed, not at each keystroke:
+              // "12" was two steps of history, blurred at 1 on the way.
+              onValue={setSelectionFeather}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && session?.feather_selection(selectionFeather)) refresh(session);
+              }}
+              onBlur={() => {
+                if (session?.feather_selection(selectionFeather)) refresh(session);
               }}
             />
           )}
@@ -18608,7 +18651,21 @@ export function App() {
                     undone or redone is the same row — and the same
                     button, which keeps the focus: drawn as two lists,
                     Ctrl+Z on a row put the focus on the page. */}
-                {[...history.past, ...history.future].map((label, step) => {
+                {/* A long history is drawn as the stretch of it around
+                    the step the document is at: four thousand rows made
+                    every keypress pay for redrawing them all (a nudge
+                    went from 11 ms to 36). The rest is a row saying how
+                    many steps are beyond it, which takes you to the
+                    nearest of them. */}
+                {shownSteps.lo > 0 && (
+                  <li className="history-more">
+                    <button data-step={shownSteps.lo - 1}>
+                      {shownSteps.lo} earlier steps…
+                    </button>
+                  </li>
+                )}
+                {[...history.past, ...history.future].slice(shownSteps.lo, shownSteps.hi).map((label, i) => {
+                  const step = shownSteps.lo + i;
                   const done = step < history.past.length;
                   const current = step === history.past.length - 1;
                   return (
@@ -18624,6 +18681,17 @@ export function App() {
                     </li>
                   );
                 })}
+                {shownSteps.hi <
+                  history.past.length + history.future.length && (
+                  <li className="history-more future">
+                    <button data-step={shownSteps.hi}>
+                      {history.past.length +
+                        history.future.length -
+                        shownSteps.hi}{" "}
+                      later steps…
+                    </button>
+                  </li>
+                )}
               </ol>
             </div>
           )}
@@ -18631,6 +18699,20 @@ export function App() {
       </div>
     </div>
   );
+}
+
+/** How many rows of history are drawn at once. */
+const HISTORY_ROWS = 200;
+
+/** The steps the History list draws, `lo` up to but not `hi`: the step
+ * the document is at and most of the room behind it, where the steps a
+ * person goes back to are. */
+function historyWindow(past: number, future: number): { lo: number; hi: number } {
+  const total = past + future;
+  if (total <= HISTORY_ROWS) return { lo: 0, hi: total };
+  const ahead = Math.min(future, HISTORY_ROWS / 4);
+  const lo = Math.max(0, Math.min(past + ahead - HISTORY_ROWS, total - HISTORY_ROWS));
+  return { lo, hi: Math.min(total, lo + HISTORY_ROWS) };
 }
 
 function topLevelCount(layers: LayerInfo[]): number {
@@ -19166,7 +19248,7 @@ function FindReplaceDialog({
           <input type="checkbox" checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
           Whole words
         </label>
-        <p className="found" aria-live="polite" aria-label="Found">
+        <p className="found" aria-live="polite">
           {find.length === 0
             ? "Every text layer is searched."
             : found.matches === 0
@@ -22155,7 +22237,7 @@ function CurvesPanel({
             key={key}
             type="button"
             className={key === channel ? "active" : ""}
-            style={{ color: colour }}
+            style={{ "--ink": colour } as React.CSSProperties}
             aria-pressed={key === channel}
             aria-label={`${name} channel`}
             onClick={() => setChannel(key)}
@@ -22424,7 +22506,7 @@ function KindProps({
                 key={name}
                 type="button"
                 className={i === band ? "active" : ""}
-                style={{ color: colour }}
+                style={{ "--ink": colour } as React.CSSProperties}
                 aria-pressed={i === band}
                 aria-label={`${name} band`}
                 onClick={() => setBand(i)}
