@@ -199,6 +199,14 @@ pub fn read_psd(bytes: &[u8]) -> Result<PsdFile, CodecError> {
     if !matches!(depth, 1 | 8 | 16 | 32) {
         return Err(bad(format!("{depth} bits a channel are not read")));
     }
+    // Photoshop keeps from one to 56 channels. A header saying 65535, on
+    // a page thirty thousand tall, asked for room for two billion row
+    // lengths before a byte of them was read, and stopped the engine.
+    if !(1..=56).contains(&channels) {
+        return Err(bad(format!(
+            "it says it has {channels} channels, where a Photoshop file has from 1 to 56"
+        )));
+    }
     // The page a PSD opens as is a page like any other, held to what a
     // page may be. A header said 20000 square and the reading set it
     // aside, which stopped the engine for good.
@@ -606,21 +614,46 @@ fn read_layers(
     // took four gigabytes and a minute to open, and its first frame
     // stopped the engine. The page the editor draws them on needs room
     // of its own, so the layers are held to a part of what there is.
+    let side = |a: i32, b: i32| (b as i64 - a as i64).max(0) as u64;
     let pixels_in: u64 = records
         .iter()
+        .map(|rec| side(rec.left, rec.right) * side(rec.top, rec.bottom))
+        .sum();
+    let with_masks: u64 = records
+        .iter()
         .map(|rec| {
-            let side = |a: i32, b: i32| (b as i64 - a as i64).max(0) as u64;
             let own = side(rec.left, rec.right) * side(rec.top, rec.bottom);
-            let mask = rec
-                .mask
-                .map_or(0, |(t, l, b, rr, _, _)| side(l, rr) * side(t, b));
-            own + mask / 4
+            // A mask as it is built: over the layer's box and its own
+            // together, or the whole page for one that shows outside its
+            // box (a group's usual "reveal all"). Counted as a quarter of
+            // its own box, sixty such group masks on an A3 page stopped
+            // the engine.
+            let page = h.width as u64 * h.height as u64;
+            let built = |m: Option<(i32, i32, i32, i32, u8, bool)>| {
+                m.map_or(0, |(t, l, b, rr, default, _)| {
+                    let area = if default != 0 {
+                        page
+                    } else {
+                        side(l.min(rec.left), rr.max(rec.right))
+                            * side(t.min(rec.top), b.max(rec.bottom))
+                    };
+                    // A group's mask is the only thing built for it;
+                    // a layer's is built beside its picture and held
+                    // with it, twice the cost (measured: forty group
+                    // masks on an A3 page opened, three page-sized
+                    // layers with page-sized masks did not).
+                    let weight = if own == 0 { 1 } else { 2 };
+                    weight * area.min(page.max(1) * 4)
+                })
+            };
+            own + built(rec.mask) + built(rec.real_mask)
         })
         .sum();
-    if pixels_in > LAYERS_READ {
+    if pixels_in > LAYERS_READ || with_masks > 2 * LAYERS_READ {
         return Err(bad(format!(
-            "its layers come to {} megapixels, more than the editor can hold at once ({}); merge some in Photoshop, or open a flattened copy",
-            pixels_in / 1_000_000,
+            "its layers{} come to {} megapixels, more than the editor can hold at once ({}); merge some in Photoshop, or open a flattened copy",
+            if pixels_in > LAYERS_READ { "" } else { " and their masks" },
+            pixels_in.max(with_masks / 2) / 1_000_000,
             LAYERS_READ / 1_000_000
         )));
     }

@@ -124,7 +124,19 @@ pub fn register_font(name: &str, bytes: Vec<u8>) -> Result<(), String> {
         .write()
         .map_err(|_| "font registry poisoned")?
         .insert(name.to_string(), fonts);
+    FACES_CHANGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(())
+}
+
+/// Counted up each time a face is registered or replaced, for what keeps
+/// text drawn to know its drawing may now be in another face: kept by
+/// the face's name alone, a block drawn in the fallback before its face
+/// was added stayed in the fallback at every zoom it had been drawn at.
+static FACES_CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times the faces have changed (`FACES_CHANGED`).
+pub fn faces_changed() -> u64 {
+    FACES_CHANGED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether a face answers to `name` — the bundled one always does.
@@ -1270,7 +1282,7 @@ fn along_outlines(
     spec: &TextSpec,
     scale: f32,
     phase: [f32; 2],
-) -> (Vec<(ab_glyph::OutlinedGlyph, u8)>, [f32; 4]) {
+) -> (Vec<(ab_glyph::OutlinedGlyph, u16)>, [f32; 4]) {
     let cuts = Palette::of(spec, scale);
     let (glyphs, _) = along_glyphs(spec, scale);
     let mut out = Vec::with_capacity(glyphs.len());
@@ -1610,7 +1622,9 @@ pub struct TextRaster {
     /// block's own fill and never looks here.
     pub colors: Vec<AuthoredColor>,
     /// Which of `colors` inked each pixel. Empty alongside `colors`.
-    pub tint: Vec<u8>,
+    /// Sixteen bits: at eight the 257th colour of a block was drawn in
+    /// the first's.
+    pub tint: Vec<u16>,
     /// Where the raster's top-left sits in the block's own space, in
     /// natural (unscaled) pixels: the origin for text in lines, and the
     /// glyphs' extent for text along a guide, which can run anywhere.
@@ -2003,12 +2017,106 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
                 start = pos;
                 used = w;
             }
+            // A word wider than the line on a line of its own is broken
+            // where it fills it, beside a Chinese, Japanese or Korean
+            // character, as a browser breaks them: written without spaces,
+            // a paragraph of them was one word, and ran off the block as a
+            // single line however narrow it was. A long Latin word still
+            // runs past the edge, as it does in a browser.
+            let end = pos + word.len();
+            if start == pos && used > limit {
+                let width = |from: usize, to: usize| {
+                    shape_line_in(&paragraph[from..to], para_at + from, spec, scale, way).1
+                };
+                while start < end && width(start, end) > limit {
+                    // The places a line may end inside the word: between
+                    // letters, never inside a cluster.
+                    let cuts: Vec<usize> = paragraph[start..end]
+                        .char_indices()
+                        .skip(1)
+                        .map(|(i, _)| start + i)
+                        .filter(|&i| {
+                            let (before, after) = (&paragraph[..i], &paragraph[i..]);
+                            (before.chars().next_back().is_some_and(ideographic)
+                                || after.chars().next().is_some_and(ideographic))
+                                && may_break_before(before, after)
+                        })
+                        .collect();
+                    if cuts.is_empty() {
+                        break;
+                    }
+                    // The furthest that fits, found by halving; at least
+                    // one letter a line, however narrow the block.
+                    let (mut lo, mut hi) = (0usize, cuts.len());
+                    while lo < hi {
+                        let mid = (lo + hi).div_ceil(2);
+                        if width(start, cuts[mid - 1]) <= limit {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    let cut = cuts[lo.max(1) - 1];
+                    out.push((paragraph[start..cut].to_string(), para_at + start));
+                    start = cut;
+                }
+                used = width(start, end);
+            }
             pos += word.len() + 1;
         }
         out.push((paragraph[start..].to_string(), para_at + start));
         para_at += paragraph.len() + 1;
     }
     out
+}
+
+/// Whether a character is one a line may break beside with no space:
+/// Chinese, Japanese and Korean ideographs, kana and their punctuation.
+fn ideographic(c: char) -> bool {
+    matches!(c,
+        '\u{2E80}'..='\u{2FDF}'
+        | '\u{3000}'..='\u{303F}'
+        | '\u{3040}'..='\u{30FF}'
+        | '\u{3100}'..='\u{31BF}'
+        | '\u{31F0}'..='\u{31FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{AC00}'..='\u{D7AF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FF00}'..='\u{FFEF}'
+        | '\u{20000}'..='\u{3FFFF}')
+}
+
+/// Whether a line may end between `before` and `after` inside a word:
+/// not before a mark that sits on the letter before it, a variation
+/// selector, a skin tone or a joiner, and not after a joiner.
+fn may_break_before(before: &str, after: &str) -> bool {
+    let joins = |c: char| {
+        matches!(c,
+            '\u{0300}'..='\u{036F}'
+            | '\u{0483}'..='\u{0489}'
+            | '\u{0591}'..='\u{05BD}'
+            | '\u{0610}'..='\u{061A}'
+            | '\u{064B}'..='\u{065F}'
+            | '\u{0E31}'
+            | '\u{0E34}'..='\u{0E3A}'
+            | '\u{0E47}'..='\u{0E4E}'
+            | '\u{0900}'..='\u{0903}'
+            | '\u{093A}'..='\u{094F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{200C}'..='\u{200D}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{3099}'..='\u{309A}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FE20}'..='\u{FE2F}'
+            | '\u{1F3FB}'..='\u{1F3FF}'
+            | '\u{E0020}'..='\u{E007F}'
+            | '\u{E0100}'..='\u{E01EF}')
+    };
+    let next = after.chars().next();
+    let last = before.chars().next_back();
+    !(next.is_some_and(joins) || last == Some('\u{200D}'))
 }
 
 /// Baseline-to-baseline distance: the font's own line height, scaled by
@@ -2035,7 +2143,7 @@ struct Cut {
     px: f32,
     slant: f32,
     passes: Vec<f32>,
-    tint: u8,
+    tint: u16,
 }
 
 /// The cuts a block is set in, indexed by run — entry zero is the
@@ -2070,7 +2178,7 @@ impl Palette {
                     0.0
                 },
                 passes: smear_passes(smear(&styling, scale)),
-                tint: tint as u8,
+                tint: tint.min(u16::MAX as usize) as u16,
             });
         }
         Palette { cuts, colors }
@@ -2196,11 +2304,11 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     // Every metric below is in raster pixels already: the layout's for
     // where lines sit, each run's cut for the size its glyphs are drawn.
     let cuts = Palette::of(spec, scale);
-    let mut tint = vec![0u8; if cuts.many() { coverage.len() } else { 0 }];
+    let mut tint = vec![0u16; if cuts.many() { coverage.len() } else { 0 }];
     // Lay ink down and remember whose it is: where two pieces overlap —
     // a leaned glyph reaching over its neighbour — the one that covers
     // the pixel more is the one whose colour shows.
-    let mut ink = |x: i32, y: i32, c: f32, whose: u8| {
+    let mut ink = |x: i32, y: i32, c: f32, whose: u16| {
         if x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height {
             let i = (y as u32 * width + x as u32) as usize;
             if c > coverage[i] {
@@ -2254,7 +2362,7 @@ pub fn rasterize_on_grid(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRa
     // a line's bands are cut into by its runs add up where they meet, so
     // the seam between two colours is not a notch.
     // Kept by pixel, since bands are thin and the raster can be huge.
-    let mut laid: std::collections::HashMap<u32, (f32, f32, u8)> = Default::default();
+    let mut laid: std::collections::HashMap<u32, (f32, f32, u16)> = Default::default();
     let share = |p: u32, lo: f32, hi: f32| (hi.min(p as f32 + 1.0) - lo.max(p as f32)).max(0.0);
     for (band, whose) in decoration_bands(spec, &l, scale) {
         let [x0, y0, x1, y1] = [
@@ -2308,7 +2416,7 @@ fn rasterize_along(spec: &TextSpec, scale: f32, phase: [f32; 2]) -> TextRaster {
     );
     let mut coverage = vec![0f32; (width * height) as usize];
     let colors = Palette::of(spec, scale).colors();
-    let mut tint = vec![0u8; if colors.is_empty() { 0 } else { coverage.len() }];
+    let mut tint = vec![0u16; if colors.is_empty() { 0 } else { coverage.len() }];
     for (outlined, whose) in outlines {
         let bounds = outlined.px_bounds();
         outlined.draw(|gx, gy, c| {
@@ -3024,6 +3132,22 @@ mod tests {
         assert_eq!(lines_only(&cut, 1.0), vec!["aa", "bb"]);
     }
 
+    /// Chinese and Japanese, written without spaces, wrap between their
+    /// characters; a long Latin word still runs past the edge.
+    #[test]
+    fn text_without_spaces_wraps_between_ideographs() {
+        let text = "日本語の文章です。日本語の文章です。日本語の文章です。";
+        let mut cjk = spec(text, 20.0);
+        cjk.width = 80.0;
+        let lines = lines_of(&cjk, 1.0);
+        assert!(lines.len() > 2, "{lines:?}");
+        let joined: String = lines.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(joined, text, "every character on one line or another");
+        for (line, at) in &lines {
+            assert_eq!(&text[*at..*at + line.len()], line.as_str());
+        }
+    }
+
     #[test]
     fn a_width_wraps_words_and_holds_the_block_to_it() {
         let loose = spec("the quick brown fox jumps over the lazy dog", 20.0);
@@ -3593,6 +3717,36 @@ mod tests {
             let odd = sized("Big word", 3, nonsense);
             assert_eq!(set(&odd).height, set(&plain).height, "{nonsense:?}");
         }
+    }
+
+    /// A block of three hundred colours keeps each: counted in a byte,
+    /// the 257th was inked in the first's colour.
+    #[test]
+    fn a_block_of_hundreds_of_colours_keeps_each() {
+        let text: String = "x".repeat(300);
+        let mut many = spec(&text, 20.0);
+        many.runs = (0..300)
+            .map(|i| {
+                let mut run = chitrakar_doc::StyleRun::over(i, i + 1);
+                run.fill = Some(AuthoredColor::Srgb {
+                    r: i as f32 / 300.0,
+                    g: 0.0,
+                    b: 1.0,
+                    a: 1.0,
+                });
+                run
+            })
+            .collect();
+        let r = rasterize(&many);
+        let last = r.colors.len() - 1;
+        assert!(r.colors.len() > 256, "{}", r.colors.len());
+        assert!(
+            r.tint
+                .iter()
+                .zip(&r.coverage)
+                .any(|(t, c)| *c > 0.5 && *t as usize == last),
+            "the last colour inks its letter"
+        );
     }
 
     /// A run that only changes colour changes nothing about where the

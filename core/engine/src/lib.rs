@@ -758,6 +758,11 @@ pub struct Session {
     /// about the part of the surface the page does not cover, which is
     /// exactly the part such a move leaves stale.
     stale_all: bool,
+    /// How many times the faces had changed when the cache was last
+    /// drawn (`text::faces_changed`): a face added since — the one a block
+    /// names, missing until then — draws it anew, where the block kept
+    /// the fallback it was drawn in.
+    faces_seen: u64,
     /// How far the cache has been shifted by pans since the last
     /// `render_cached`, in its own pixels, and after it how far it was
     /// shifted by the pans before that one (`last_shift`): what was
@@ -913,6 +918,7 @@ impl Session {
             stale: None,
             stale_more: Vec::new(),
             stale_all: true,
+            faces_seen: chitrakar_render::text::faces_changed(),
             shifted: None,
             last_shift: None,
             repainted: Vec::new(),
@@ -10608,6 +10614,11 @@ impl Session {
     /// since the last call. Returns the cached surface and the region that
     /// was just recomputed (None if the cache was already clean).
     pub fn render_cached(&mut self) -> Result<(&Surface, Option<ClipRect>), EngineError> {
+        let faces = chitrakar_render::text::faces_changed();
+        if faces != self.faces_seen {
+            self.faces_seen = faces;
+            self.stale_all = true;
+        }
         let view = self.view_transform();
         let scale = self.view_scale;
         let (w, h) = self.present_size();

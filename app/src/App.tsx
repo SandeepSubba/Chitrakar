@@ -1853,6 +1853,51 @@ const svgFile = (words: string): File | null => {
 
 /** The submenu open in each menu, by the menu it opens from. */
 const openSubs = new WeakMap<Element, () => void>();
+/** Where that open submenu's popup is, by the same menu, for the pointer
+ * heading into it (`headingInto`). */
+const openSubPopups = new WeakMap<Element, () => DOMRect | null>();
+
+/** The pointer's last two places in the window, for menu aim, and when
+ * it last moved. */
+const pointerTrail: [number, number][] = [];
+let pointerMovedAt = 0;
+if (typeof window !== "undefined") {
+  window.addEventListener(
+    "pointermove",
+    (e) => {
+      if (e.pointerType !== "mouse" && e.pointerType !== "pen") return;
+      const last = pointerTrail[pointerTrail.length - 1];
+      // Only a step worth a direction: a jitter of a pixel says nothing.
+      if (last && Math.hypot(e.clientX - last[0], e.clientY - last[1]) < 2) return;
+      pointerTrail.push([e.clientX, e.clientY]);
+      if (pointerTrail.length > 2) pointerTrail.shift();
+      pointerMovedAt = performance.now();
+    },
+    { capture: true, passive: true },
+  );
+}
+
+/** Whether the pointer is on its way into a popup: its last step points
+ * inside the triangle from where it was to the popup's near edge. A
+ * pointer crossing the rows under a submenu's row on the diagonal to its
+ * last row passed over Align and Transform, which each opened their own
+ * in its place. */
+function headingInto(rect: DOMRect | null): boolean {
+  // A pointer come to rest is going nowhere: it means the row it is on.
+  if (!rect || pointerTrail.length < 2 || performance.now() - pointerMovedAt > 150) return false;
+  const [[x0, y0], [x1, y1]] = pointerTrail;
+  // The near edge: the popup's left side when it is to the right.
+  const nearX = x1 <= rect.left ? rect.left : x1 >= rect.right ? rect.right : null;
+  if (nearX === null) return false;
+  const toward = Math.sign(nearX - x0);
+  if (toward === 0 || Math.sign(x1 - x0) !== toward) return false;
+  // Inside the cone from the earlier point to the edge's two ends.
+  const cross = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx;
+  const [dx, dy] = [x1 - x0, y1 - y0];
+  const top = cross(nearX - x0, rect.top - y0, dx, dy);
+  const bottom = cross(nearX - x0, rect.bottom - y0, dx, dy);
+  return Math.sign(top) !== Math.sign(bottom) || top === 0 || bottom === 0;
+}
 
 /** The six bands of colour a picture is spoken to in, in the order a
  * colour wheel is read, each drawn in something like its own colour. */
@@ -3352,17 +3397,19 @@ export function App() {
    * since a rounded box, an ellipse and a freehand path each flatten
    * differently and two answers would show as ants off the edge. */
   const [antRings, setAntRings] = useState<[number, number][][]>([]);
-  /** A feather typed into the bar's box and not yet applied. */
+  /** A feather typed into the bar's box and not yet applied, and what the
+   * box said when it was entered. */
   const featherTyped = useRef(false);
+  const featherWasTyped = useRef(0);
   /** The rings of a region of very many as one path, worked out once a
    * view rather than once a render. */
+  // In the page's own pixels, once a region: the view moves it by a
+  // transform. Built afresh each pan and zoom, a 24-megapixel region's
+  // path was 34 MB of text made over again every frame.
   const antPath = useMemo(() => {
     if (antRings.length <= MANY_ANT_RINGS) return "";
-    const { x, y, zoom } = view;
-    return antRings
-      .map((ring) => `M${ring.map((p) => `${(x + p[0] * zoom).toFixed(1)},${(y + p[1] * zoom).toFixed(1)}`).join("L")}Z`)
-      .join("");
-  }, [antRings, view]);
+    return antRings.map((ring) => `M${ring.map((p) => `${p[0]},${p[1]}`).join("L")}Z`).join("");
+  }, [antRings]);
 
   /** The engine's own frame laid on the canvas: what changed since the
    * last one, or — after a frame the graphics card drew, which the
@@ -4431,11 +4478,15 @@ export function App() {
    * picked — so a rectangle, an ellipse, a line or a text block can be
    * made from the menus, and from the keyboard, where every other way of
    * making one is a drag. */
+  /** The text block being typed was added from the menus, so the focus
+   * goes to its row when the typing is done. */
+  const textFromKeys = useRef(false);
   const addInView = (kind: "Rect" | "Ellipse" | "Line" | "Text" | "Frame") => {
     if (!session || !canvasRef.current) return;
     const r = canvasRef.current.getBoundingClientRect();
     const [cx, cy] = docPoint({ clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
     if (kind === "Text") {
+      textFromKeys.current = true;
       dropText(cx, cy);
       return;
     }
@@ -6411,13 +6462,14 @@ export function App() {
     // mouse's right button opens. Not while painting, where a finger held
     // in one place is putting down paint, and is meant to.
     // A pen held still asks the same: a Pencil has no button to ask with.
-    // A pen asks only with the tools that pick (Move, Node): with Text a
+    // A pen asks only with the tool that picks (Move) — with Node a press
+    // on a shape has already made it a path by then — : with Text a
     // hold before lifting is placing the block, and asked as the menu it
     // left a stray "Text" layer behind; with Zoom, Fill, a marquee or a
     // shape a slow press did nothing at all. A Windows pen's barrel
     // button asks with every tool.
     const alone =
-      (e.pointerType === "pen" && (tool === "Move" || tool === "Node")) ||
+      (e.pointerType === "pen" && tool === "Move") ||
       (e.pointerType === "touch" && touchesRef.current.size === 1);
     if (alone && !replaying.current && !painting && !cloning && tool !== "Pen" && tool !== "Brush") {
       // A finger asks at once, as a phone's long press does; a pen, which
@@ -8511,8 +8563,24 @@ export function App() {
       }
     } else {
       const s = free ? 0 : locked(lx, ly);
-      const sx = along ? 1 : free ? span(lx, fx) / w0 : s;
-      const sy = across ? 1 : free ? span(ly, fy) / h0 : s;
+      // A side that caught a line lands its middle on it, measured on the
+      // page as a corner's is: read in a turned layer's own axes, a side
+      // dragged to a guide stopped fifty pixels short of it.
+      const sideOnLine = (() => {
+        if (!side || !pageOf || !(caught[0] || caught[1])) return null;
+        const [mx, my] = [(x0 + x1) / 2, (y0 + y1) / 2];
+        const pf = pageOf(across ? fx : mx, across ? my : fy);
+        const pc = pageOf(across ? (west ? x0 : x1) : mx, across ? my : north ? y0 : y1);
+        const k =
+          caught[0] && Math.abs(pc[0] - pf[0]) > 1e-6
+            ? (px - pf[0]) / (pc[0] - pf[0])
+            : caught[1] && Math.abs(pc[1] - pf[1]) > 1e-6
+              ? (py - pf[1]) / (pc[1] - pf[1])
+              : NaN;
+        return Number.isFinite(k) && k > 0 ? Math.max(MIN_SIZE / Math.max(w0, h0), k) : null;
+      })();
+      const sx = along ? 1 : free ? (across ? sideOnLine : null) ?? span(lx, fx) / w0 : s;
+      const sy = across ? 1 : free ? (along ? sideOnLine : null) ?? span(ly, fy) / h0 : s;
       // A scale (sx, sy) about (fx, fy).
       M = { a: sx, b: 0, c: 0, d: sy, e: (1 - sx) * fx, f: (1 - sy) * fy };
     }
@@ -9525,6 +9593,24 @@ export function App() {
   const closeInlineText = (keep: boolean) => {
     if (!inlineText) return;
     setInlineText(null);
+    // A block added from the menus by the keyboard hands the focus to its
+    // row when the typing is done, as a shape added the same way does:
+    // the box it was typed in goes, and the focus went with it to the
+    // page, where a screen reader is nowhere.
+    if (textFromKeys.current) {
+      textFromKeys.current = false;
+      const id = inlineText.id;
+      requestAnimationFrame(() => {
+        if (document.activeElement && document.activeElement !== document.body) return;
+        const row =
+          document.querySelector<HTMLElement>(`.layer-list li[data-id="${id}"]`) ??
+          document.querySelector<HTMLElement>(".layer-list li.selected");
+        if (row) {
+          row.dataset.keys = "1";
+          row.focus();
+        }
+      });
+    }
     if (!session) return;
     // A block the Text tool has only just put down, with nothing else
     // done since: what is typed into it is part of putting it down, one
@@ -10020,7 +10106,14 @@ export function App() {
     // toward the box they line up with, and the engine leaves it where it
     // is. Sent without it, the one layer left lined up with the page.
     // Spacing evenly moves only what can move.
-    const ids = mode.startsWith("distribute") ? movableSelection : selectionSet;
+    // Spacing evenly moves only what can move, but a key that is locked
+    // is still the key: sent without it, the rest were spaced as one run
+    // and laid over it.
+    const ids = mode.startsWith("distribute")
+      ? key >= 0 && !movableSelection.includes(key as NodeId)
+        ? [...movableSelection, key as NodeId]
+        : movableSelection
+      : selectionSet;
     try {
       session.align_nodes_to(new Float64Array(ids), mode, to, key);
       refresh(session);
@@ -12375,8 +12468,13 @@ export function App() {
     if (!session) return;
     const region = antRings.length > 0;
     if (!region && selectionSet.length === 0) return;
-    const box = region ? null : onPage(unionBounds(selectionSet));
-    if (!region && !box) return;
+    // With what its effects reach, as Export's "what is picked" has it: a
+    // layer's shadow was cut off the copy.
+    const box = region ? null : onPage(unionBounds(selectionSet, true));
+    if (!region && !box) {
+      alert("Copy as image: nothing of what is picked is on the page.");
+      return;
+    }
     const [x, y, w, h] = box
       ? [box[0], box[1], box[2] - box[0], box[3] - box[1]]
       : [0, 0, 0, 0];
@@ -12563,7 +12661,9 @@ export function App() {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    file.arrayBuffer().then((buf) => {
+    // Once the engine is there: a file chosen in the moments after the
+    // page appeared found it not yet started, and failed in its words.
+    Promise.all([file.arrayBuffer(), initEngine()]).then(([buf]) => {
       const bytes = new Uint8Array(buf);
       if (importKind(file.name, bytes.subarray(0, 1024), file.type) === "document") {
         openDocumentBytes(bytes, file.name);
@@ -13256,6 +13356,13 @@ export function App() {
     // File › Open asks; one the editor cannot read is said, where it
     // used to be dropped without a word.
     void (async () => {
+      // A launch, a share or a drop in the first moments of the page waits
+      // for the engine to have started.
+      try {
+        await initEngine();
+      } catch {
+        return;
+      }
       // And for the raws in hand to be developed and placed: the window
       // goes before the development is placed, and a document opened in
       // that moment took the session it was going into. Having waited,
@@ -15712,7 +15819,16 @@ export function App() {
                 featherTyped.current = true;
                 setSelectionFeather(v);
               }}
+              onFocus={() => {
+                featherWasTyped.current = selectionFeather;
+              }}
               onKeyDown={(e) => {
+                // Escape takes back what was typed rather than applying it.
+                if (e.key === "Escape") {
+                  featherTyped.current = false;
+                  setSelectionFeather(featherWasTyped.current);
+                  return;
+                }
                 if (e.key !== "Enter") return;
                 featherTyped.current = false;
                 if (session?.feather_selection(selectionFeather)) refresh(session);
@@ -17004,7 +17120,11 @@ export function App() {
               and every pan after it for longer. */}
           {antRings.length > MANY_ANT_RINGS && (
             <svg className="ants many" aria-label="What is picked out">
-              <path d={antPath} />
+              <path
+                d={antPath}
+                transform={`translate(${view.x} ${view.y}) scale(${view.zoom})`}
+                vectorEffect="non-scaling-stroke"
+              />
             </svg>
           )}
           {spacing.length > 0 && (
@@ -21706,6 +21826,7 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
       const before = openSubs.get(pop);
       if (before && before !== closeNow.current) before();
       openSubs.set(pop, closeNow.current);
+      openSubPopups.set(pop, () => popRef.current?.getBoundingClientRect() ?? null);
     }
     place();
     setOpen(true);
@@ -21713,11 +21834,20 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
   const hide = () => {
     clear(opening);
     clear(closing);
-    closing.current = window.setTimeout(() => {
+    // Not while the pointer is on its way into the popup, across the rows
+    // under this one: asked again each beat, it closes once the pointer
+    // has come to rest elsewhere or turned away.
+    const later = () => {
+      if (open && headingInto(popRef.current?.getBoundingClientRect() ?? null)) {
+        closing.current = window.setTimeout(later, 150);
+        return;
+      }
       closing.current = null;
       setOpen(false);
-    }, 250);
+    };
+    closing.current = window.setTimeout(later, 250);
   };
+  const popRef = useRef<HTMLDivElement>(null);
   return (
     <div
       className={open ? "menu-sub open" : "menu-sub"}
@@ -21725,10 +21855,26 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
         clear(closing);
         if (open || dead) return;
         clear(opening);
-        opening.current = window.setTimeout(() => {
+        // Crossed on the way into a sibling's open popup, this row waits
+        // longer before it takes the popup's place: the pointer is only
+        // passing (menu aim).
+        const pop = rowRef.current?.closest(".menu-pop") ?? null;
+        const passing = () => {
+          const sibling = pop ? openSubPopups.get(pop) : undefined;
+          return !!sibling && openSubs.get(pop!) !== closeNow.current && headingInto(sibling());
+        };
+        // Asked again when the beat is up: still on its way, it waits
+        // another; come to rest on this row, it opens this row's.
+        const attempt = () => {
+          if (passing()) {
+            opening.current = window.setTimeout(attempt, 120);
+            return;
+          }
+          opening.current = null;
           hovered.current = performance.now();
           show();
-        }, 120);
+        };
+        opening.current = window.setTimeout(attempt, 120);
       }}
       onPointerLeave={() => {
         hovered.current = 0;
@@ -21766,6 +21912,7 @@ function SubMenu({ entry }: { entry: Extract<MenuEntry, { kind: "sub" }> }) {
       </button>
       {open && !dead && (
         <div
+          ref={popRef}
           className="menu-pop sub"
           role="menu"
           aria-label={entry.label}

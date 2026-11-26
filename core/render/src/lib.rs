@@ -6264,6 +6264,10 @@ pub fn inset(shape: &VectorShape, by: f32) -> Option<VectorShape> {
 /// (`dashed_rings`).
 const MOST_DASHES: f64 = 100_000.0;
 
+/// The most dashes times overlaps a stroke is walked for before it is
+/// drawn solid (`dashed_rings`).
+const DASH_WORK: f64 = 200_000.0;
+
 /// The outline broken into the pieces a dash pattern leaves, as open
 /// polylines in the shape's own space.
 ///
@@ -6381,7 +6385,19 @@ pub fn dashed_rings(
     } else {
         f64::INFINITY
     };
-    if !(length.is_finite() && length / per_dash <= MOST_DASHES && width / per_dash <= 1000.0) {
+    // And what walking it costs is the dashes times how many of the others
+    // each lies over: a band 300 wide dashed by single pixels round a
+    // 4000-pixel page was a third of a million dashes over each other in
+    // hundreds, and took half a minute a zoom. Past a few hundred thousand
+    // of those, the band is drawn solid, which at that fineness is what it
+    // looks like; a small shape keeps its fine dashes.
+    let dashes = length / per_dash;
+    let over = (width / per_dash).max(1.0);
+    if !(length.is_finite()
+        && dashes <= MOST_DASHES
+        && over <= 1000.0
+        && dashes * over <= DASH_WORK)
+    {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -12411,13 +12427,18 @@ fn text_raster_kept(
     t: Transform,
 ) -> (std::sync::Arc<text::TextRaster>, f32) {
     use std::sync::{Arc, Mutex};
-    type Key = (chitrakar_doc::TextSpec, u32, [u32; 2]);
+    type Key = (chitrakar_doc::TextSpec, u32, [u32; 2], u64);
     static KEPT: Mutex<Vec<(Key, Arc<text::TextRaster>, f32)>> = Mutex::new(Vec::new());
     const MOST: usize = 48;
     const BYTES: usize = 48 << 20;
     let scale = text_raster_scale(spec, t);
     let phase = grid_phase(t, scale);
-    let key: Key = (spec.clone(), scale.to_bits(), phase.map(f32::to_bits));
+    let key: Key = (
+        spec.clone(),
+        scale.to_bits(),
+        phase.map(f32::to_bits),
+        text::faces_changed(),
+    );
     {
         let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(i) = kept.iter().position(|(k, _, _)| *k == key) {
@@ -12431,7 +12452,7 @@ fn text_raster_kept(
     let raster = Arc::new(raster);
     let mut kept = KEPT.lock().unwrap_or_else(|p| p.into_inner());
     kept.push((key, raster.clone(), scale));
-    let size = |r: &text::TextRaster| r.coverage.len() * 4 + r.tint.len();
+    let size = |r: &text::TextRaster| r.coverage.len() * 4 + r.tint.len() * 2;
     while kept.len() > MOST || kept.iter().map(|(_, r, _)| size(r)).sum::<usize>() > BYTES {
         if kept.len() <= 1 {
             break;
@@ -16074,6 +16095,14 @@ mod tests {
         // And a thick stroke with dashes of a pixel is still dashes: a
         // hundred wide over a pattern of one was drawn solid.
         assert!(!dashed_rings(&rect, &[1.0], 0.0, 0.0, 100.0).is_empty());
+        // But round a page-sized shape it is a third of a million dashes
+        // each over hundreds of others, and drawn solid.
+        let page = VectorShape::Rect {
+            width: 3800.0,
+            height: 2800.0,
+            radius: 0.0,
+        };
+        assert!(dashed_rings(&page, &[1.0], 0.0, 0.0, 300.0).is_empty());
     }
 
     /// A dotted line is dashes of nothing with gaps between: walked dash

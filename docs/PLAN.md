@@ -174,6 +174,9 @@ without reading anything else.*
      The fifty-fourth: a turned corner snapped fifty pixels past its
      guide, the key layer moved by Space evenly, a picked layer off the
      page exported half empty, Share failing on a slow phone.
+     The fifty-fifth: sixty group masks stopping the engine, a 104-byte
+     PSD stopping it, a face added late not showing, Chinese never
+     wrapping, submenus switching under a diagonal pointer.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13102,6 +13105,70 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-fifth audit (November 2026).** Its check of round 54: a thick band dashed by
+  single pixels round a page-sized shape, dashed again by round 54's
+  looser rule, took half a minute a zoom (drawn solid past a few hundred
+  thousand dashes-times-overlaps); a grainy region's ants made their
+  34 MB path afresh each pan (once a region, moved by a transform);
+  Space evenly to a key layer that is locked laid the rest over it (the
+  key goes with them); a turned layer's side dragged to a guide stopped
+  short of it (measured on the page, as a corner is); Escape in the
+  feather box applied what was typed (it takes it back); a draw.io
+  label whose tspan came before the phrase was taken out whole (only
+  an element that is the phrase); with the Node tool a pen held still
+  made a shape a path before it asked for the menu (the pen asks only
+  with Move); Copy as image left a layer's shadow off and said nothing
+  for a layer wholly off the page. Limits: a 24-megapixel grainy region
+  of 170,000 rings still pans in seconds, its masked photograph draws
+  its first frame in twenty-five, and Grow on it does not finish.
+  Its text pass: a face added after its text was drawn (a file's missing
+  face, or a second file of the same name) did not show at any zoom
+  already drawn, the drawing kept by the face's name (kept by how many
+  times the faces have changed, and the canvas drawn anew when they
+  do); Chinese and Japanese, written without spaces, never wrapped
+  (they break between their characters, as a browser breaks them); the
+  257th colour in one block was drawn in the first's (sixteen bits a
+  pixel); a file opened in the first moments of the page failed in the
+  engine's words (it waits for the engine). Limits: the canvas text box
+  puts the caret over the wrong letters where its own drawing differs
+  from the engine's — a made-up bold, line heights other than one, tabs,
+  wrapping, faces added by the person, and Chinese in the bundled face;
+  Thai does not wrap; underline and strike-through are left off text
+  set along a path; turned or skewed text is drawn soft; the font
+  picker sets the whole block; Ctrl+B, I and U do nothing in the text
+  box; the Text tool on a block puts a new one over it and has no
+  drag-out box; Tab in the text box leaves it; U+2028 and U+2029 are
+  not line breaks and a lone CR is a box; a loaded face's bold is not
+  paired with it; there is no fallback face for scripts the bundled
+  face does not have; Find and replace changes locked and hidden
+  layers.
+  Its files pass, raster and layered files from other programs: masks
+  were counted at a quarter of their own box toward what a PSD may
+  hold, though built over the layer's box and theirs (the page, for a
+  group's usual "reveal all"), and sixty group masks on an A3 page
+  stopped the engine (counted as built, a layer's twice); a header
+  saying 65,535 channels asked for room for two billion row lengths
+  (from 1 to 56); three hundred layers' import notes made a bar taller
+  than the window, with OK off screen on a phone (a few lines, and a
+  scrollbar). Limits: a clipped run does not take its base's opacity
+  or blend; 16-bit TIFFs and PSDs with a profile are cut to eight bits
+  before it is applied, so dark tones are posterized; a 0% fill on a
+  clipping base hides what is clipped to it; a damaged alpha channel
+  comes in as a box; some TIFF refusals are in the decoder's words; a
+  truncated JPEG opens grey without a word; a PSB over 100 megapixels is
+  refused where a PNG is opened reduced; layer names without Unicode
+  come in as their bytes; saved selections, paths, locks and channel
+  restrictions are dropped without a note.
+  Its interface pass, a teacher on a projector, a screen-reader user
+  and a 4K trackpad: a submenu switched as the pointer crossed the rows
+  under it on its way in (menu aim: the open one waits while the
+  pointer heads into it, and the rows crossed wait too); a text block
+  added from the menus dropped the focus to the page when its typing
+  was done (to its row). Limits: pinching a 12-megapixel photograph on
+  a 4K screen runs at fifteen frames a second; the largest interface
+  size is small on a 4K screen at device scale 1; a layer row's name
+  repeats its buttons; Feather… puts the focus on its slider; long
+  menus scroll at 1024×768 at the larger size.
   **A fifty-fourth audit (November 2026).** Its check of round 53: six hundred shapes dropped
   onto a frame and undone took the page down, each layer's step joined
   to the move by a batch round the last, six hundred deep (joined one

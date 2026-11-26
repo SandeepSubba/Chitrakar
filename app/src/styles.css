@@ -4490,6 +4490,11 @@ button.fold:hover {
 .recover.import-notes span {
   flex: 1;
   min-width: 0;
+  /* A few lines and a scrollbar: three hundred layers' notes made a bar
+     taller than the window, the canvas nothing high and OK off screen. */
+  max-height: 6.5em;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* The develop window: the photograph beside its settings, as wide as

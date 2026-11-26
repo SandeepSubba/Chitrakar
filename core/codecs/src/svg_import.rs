@@ -3212,7 +3212,10 @@ fn without_drawio_warning(data: &[u8]) -> Option<Vec<u8>> {
         let start = data[copied..at]
             .windows(5)
             .rposition(|w| w == b"<text")
-            .map(|i| i + copied);
+            .map(|i| i + copied)
+            // Only where its opening tag runs straight into the phrase: a
+            // label whose <tspan> came first was taken out whole.
+            .filter(|&start| !data[start..at].contains(&b'>'));
         if let Some(start) = start {
             out.extend_from_slice(&data[copied..start]);
             copied = end;
@@ -5055,6 +5058,9 @@ mod tests {
             r##"<svg><text x="10">Our note: Text is not SVG - cannot display, said draw.io</text><switch><g requiredFeatures="x"/><a xlink:href="y"></a></switch></svg>"##
         );
         assert!(without_drawio_warning(b"<svg><text>Hello</text></svg>").is_none());
+        // A label of its own that ends in the phrase after a tspan is kept.
+        let label = br#"<svg><text><tspan font-weight="bold">Note: </tspan>Text is not SVG - cannot display</text></svg>"#;
+        assert!(without_drawio_warning(label).is_none());
     }
 
     /// A shape wholly inside a group's rectangular clip wears no mask; one
