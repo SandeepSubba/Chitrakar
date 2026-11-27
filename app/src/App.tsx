@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Icon, IconName } from "./icons";
 import {
@@ -209,6 +209,42 @@ function mixAuthored(
     };
   }
   return a;
+}
+
+/** A shape of the marching ants drawn twice: a white line under it and
+ * the dark dashes over, so it shows on a page of any colour. */
+function underAndOver(shape: React.ReactElement<{ className?: string }>) {
+  return (
+    <>
+      {cloneElement(shape, { className: "under", key: "under" })}
+      {cloneElement(shape, { key: "over" })}
+    </>
+  );
+}
+
+/** An uncontrolled box that takes a new value from outside: at once
+ * when it is not being typed in, and while it has the focus only if
+ * nothing has been typed in it yet. */
+function ShownField({
+  shown,
+  ...props
+}: { shown: string | number } & React.InputHTMLAttributes<HTMLInputElement>) {
+  const ref = useRef<HTMLInputElement>(null);
+  const last = useRef(String(shown));
+  useEffect(() => {
+    const el = ref.current;
+    const now = String(shown);
+    if (el) {
+      // What the box was given, kept current whatever has the focus:
+      // React leaves a focused number box's default alone, and the box
+      // then took the next Ctrl+Z for typing of its own to take back.
+      const edited = el.value !== last.current;
+      el.defaultValue = now;
+      if (document.activeElement !== el || !edited) el.value = now;
+    }
+    last.current = now;
+  }, [shown]);
+  return <input ref={ref} defaultValue={shown} {...props} />;
 }
 
 /** `next` with the alpha `was` had. A colour well knows only the
@@ -4627,6 +4663,19 @@ export function App() {
     if (added) {
       setSelected(added.id as NodeId);
       setMultiSel([]);
+      // Made from the keyboard, the focus goes to its row, as a text
+      // block's does, so F2 names it and the arrows go on from there; it
+      // was left on the page, where F2 did nothing.
+      if (keyedLast.current) {
+        requestAnimationFrame(() => {
+          if (document.activeElement && document.activeElement !== document.body) return;
+          const row = document.querySelector<HTMLElement>(`.layer-list li[data-id="${added.id}"]`);
+          if (row) {
+            row.dataset.keys = "1";
+            row.focus();
+          }
+        });
+      }
     }
   };
 
@@ -4823,7 +4872,15 @@ export function App() {
       // layer is renamed in an input, and both contain the letters below.
       const typing =
         isTextEntry(e.target) || e.target instanceof HTMLSelectElement;
-      if (!typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // A bracket typed with AltGr (which Windows reports as Ctrl and Alt
+      // together) or with Option on a Mac, as German and many other
+      // layouts type them, is still the bracket: the brush did not
+      // change size on them.
+      const typedBracket =
+        (e.key === "[" || e.key === "]") &&
+        !e.metaKey &&
+        (e.getModifierState?.("AltGraph") || (e.ctrlKey && e.altKey) || (onAMac() && e.altKey && !e.ctrlKey));
+      if (!typing && ((!e.metaKey && !e.ctrlKey && !e.altKey) || typedBracket)) {
         // Shift on a digit types its symbol (shift+5 is %), so a tool
         // given a digit is found by the key itself when shift is down —
         // or its family, which the Tools page says is shift+5, could not
@@ -12577,6 +12634,19 @@ export function App() {
   };
 
   /** Open a .chitra from its bytes, whether chosen or dropped. */
+  /** A large document's opening said on the page before it starts: the
+   * page cannot draw while the engine reads, and a 190 MB document held
+   * it still for seconds with nothing to say why. */
+  const saidOpening = async (name: string, size: number, open: () => boolean): Promise<boolean> => {
+    if (size < 8e6) return open();
+    setImporting(`Opening ${name}…`);
+    await nextPaint();
+    try {
+      return open();
+    } finally {
+      setImporting(null);
+    }
+  };
   const openDocumentBytes = (
     bytes: Uint8Array,
     name?: string,
@@ -12747,10 +12817,10 @@ export function App() {
     if (!file) return;
     // Once the engine is there: a file chosen in the moments after the
     // page appeared found it not yet started, and failed in its words.
-    Promise.all([file.arrayBuffer(), initEngine()]).then(([buf]) => {
+    Promise.all([file.arrayBuffer(), initEngine()]).then(async ([buf]) => {
       const bytes = new Uint8Array(buf);
       if (importKind(file.name, bytes.subarray(0, 1024), file.type) === "document") {
-        openDocumentBytes(bytes, file.name);
+        await saidOpening(file.name, bytes.length, () => openDocumentBytes(bytes, file.name));
       } else {
         openForeign(file);
       }
@@ -12882,7 +12952,10 @@ export function App() {
           if (!rawBusy.current) void openNextRawRef.current();
           return;
         }
-        const slow = kind === "psd" || raw.length > 24e6;
+        // Past a few megabytes a picture takes long enough to read for
+        // the page to say so: a 12-megapixel JPEG held a slow laptop's
+        // page still for two seconds without a word.
+        const slow = kind === "psd" || raw.length > 4e6;
         if (slow) {
           setImporting(`Reading ${name}…`);
           await nextPaint();
@@ -12902,9 +12975,11 @@ export function App() {
           // its size and the step is "Open"): the document is then named
           // after it too, as File › Open names it, rather than saving as
           // untitled.chitra.
+          let openedHere = false;
           if (!undoOpen) {
             const past = (JSON.parse(session.history_json()) as { past?: string[] }).past ?? [];
             if (past.length === 1 && past[0] === `Open ${name}`) {
+              openedHere = true;
               const named = name.replace(/\.[a-z0-9]+$/i, "");
               if (named) setDocName((d) => (d === "untitled" ? named : d));
             }
@@ -12912,7 +12987,9 @@ export function App() {
           // Opened, the page keeps the resolution the file says it was
           // made at: left at 72, the editor's own 300-dpi exports came
           // back four times too large to print.
-          if (undoOpen && kind === "svg") {
+          // And at the resolution it says, as File › Open takes it: a
+          // 300-dpi picture dropped on an empty page opened at 72.
+          if ((undoOpen || openedHere) && kind === "svg") {
             // An SVG's pixel is CSS's, ninety-six to the inch: opened at
             // seventy-two, Inkscape's A5 came out of a PDF a third too
             // large, and every size in mm a third off.
@@ -12922,7 +12999,7 @@ export function App() {
             } catch {
               // Left as it was.
             }
-          } else if (undoOpen) {
+          } else if (undoOpen || openedHere) {
             const dpi = WasmSession.picture_dpi(raw);
             if (dpi > 0) {
               try {
@@ -13094,7 +13171,10 @@ export function App() {
           ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the raw reader is not on this device yet, and there is no network to fetch it. Open a raw file once online and it is kept.\n\n(${err})`
           : /outside the bounds/i.test(String(err))
             ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the file is damaged (its parts point outside it).`
-            : `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
+            : // No room for it is said as no room, not as a damaged file.
+              /not enough memory left/i.test(String(err))
+              ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: ${said(err)}.`
+              : `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
       );
       next.undoOpen?.();
       rawDone.current += 1;
@@ -13404,7 +13484,17 @@ export function App() {
       // And at the resolution it was really drawn at: a page past what
       // the reader draws is taken down, and an A0 asked for at 600 came
       // in at 254 and called 600, a page two and a third times too small.
-      if (ask.opening) {
+      // Dropped or placed on an empty page, the PDF opens it, and is
+      // taken as File › Open takes it: at the resolution asked for, and
+      // the document named after it (it stayed at 72 and untitled, and
+      // exported a page twice the size).
+      const past = (JSON.parse(session.history_json()) as { past?: string[] }).past ?? [];
+      const openedHere = !ask.opening && past.length === 1 && past[0] === `Open ${label}`;
+      if (openedHere) {
+        const named = ask.name.replace(/\.[a-z0-9]+$/i, "");
+        if (named) setDocName((d) => (d === "untitled" ? named : d));
+      }
+      if (ask.opening || openedHere) {
         const pageWide = ask.sizes[page]?.[0] ?? 0;
         // The page as it was finally made: taken down past a hundred
         // megapixels after the reader drew it, the drawn width was not it.
@@ -13528,7 +13618,8 @@ export function App() {
       // is placed as though it had come alone if none opens.
       while (at >= 0 && !opened) {
         const doc = files[at];
-        opened = openDocumentBytes(new Uint8Array(await doc.arrayBuffer()), doc.name);
+        const bytes = new Uint8Array(await doc.arrayBuffer());
+        opened = await saidOpening(doc.name, bytes.length, () => openDocumentBytes(bytes, doc.name));
         if (!opened) {
           files = files.filter((_, i) => i !== at);
           kinds.splice(at, 1);
@@ -15339,7 +15430,7 @@ export function App() {
                   Rename…
                 </MenuItem>
               )}
-              <MenuItem icon="trash" onClick={() => deleteSelected()} hint="Del">
+              <MenuItem icon="trash" onClick={() => deleteSelected()} hint={onAMac() ? "⌫" : "Del"}>
                 Delete
               </MenuItem>
             </>
@@ -16201,7 +16292,7 @@ export function App() {
                 key={i}
                 className="swatch"
                 style={{ background: colorToHex(sw.color) }}
-                title={`${sw.name} (${colorToHex(sw.color)}) — shift-click to make it mean the colour in hand, alt-click (or Delete) to take it out`}
+                title={macWords(`${sw.name} (${colorToHex(sw.color)}) — shift-click to make it mean the colour in hand, alt-click (or Delete) to take it out`)}
                 aria-label={`Colour ${sw.name}, ${colorToHex(sw.color)}`}
                 aria-pressed={linkedSwatch === sw.name}
                 onKeyDown={chipKeys(() => setPalette(swatches.filter((_, j) => j !== i)))}
@@ -16303,13 +16394,13 @@ export function App() {
                     background: st.look.fill ? colorToHex(st.look.fill) : "transparent",
                     borderColor: st.look.stroke ? colorToHex(st.look.stroke.color) : undefined,
                   }}
-                  title={`${st.name} — give this look to what is picked${
+                  title={macWords(`${st.name} — give this look to what is picked${
                     st.look.text
                       ? `, and set text in ${st.look.text.size}px${st.look.text.bold ? " bold" : ""}${
                           st.look.text.italic ? " italic" : ""
                         }`
                       : ""
-                  }; shift-click to keep the picked layer's look under this name, alt-click (or Delete) to forget it`}
+                  }; shift-click to keep the picked layer's look under this name, alt-click (or Delete) to forget it`)}
                   aria-label={`Style ${st.name}`}
                   dir="auto"
                   aria-pressed={selectedLayer?.style === st.name}
@@ -16445,7 +16536,7 @@ export function App() {
                     <button
                       key={br.name}
                       className={inHand ? "swatch brush-chip active" : "swatch brush-chip"}
-                      title={`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click (or Delete) to forget it`}
+                      title={macWords(`${br.name}: ${br.size} px, ${Math.round(br.softness * 100)}% soft — alt-click (or Delete) to forget it`)}
                       aria-label={/^brush\b/i.test(br.name) ? br.name : `Brush ${br.name}`}
                       aria-pressed={inHand}
                       onKeyDown={chipKeys(() =>
@@ -16482,7 +16573,7 @@ export function App() {
                       return;
                     }
                     if (prefs.brushes.length >= KEPT_MOST) {
-                      alert(`${KEPT_MOST} brushes are kept, as many as are kept: forget one (alt-click it) to keep this one.`);
+                      alert(macWords(`${KEPT_MOST} brushes are kept, as many as are kept: forget one (alt-click it) to keep this one.`));
                       return;
                     }
                     const taken = new Set(prefs.brushes.map((o) => o.name));
@@ -17215,17 +17306,21 @@ export function App() {
               colour cannot do. */}
           {antRings.length > 0 && antRings.length <= MANY_ANT_RINGS && (
             <svg className="ants" aria-label="What is picked out">
-              {antRings.map((ring, i) => (
-                <polygon
-                  key={i}
-                  points={ring
-                    .map(
-                      (p) =>
-                        `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`,
-                    )
-                    .join(" ")}
-                />
-              ))}
+              {/* Each ring twice: a white line, and the dark dashes over
+                  it, so the ants show on any page — a halo of soft white
+                  round dark dashes was faint on a mid-grey or black page
+                  at a screen's own size. */}
+              {antRings.map((ring, i) => {
+                const points = ring
+                  .map((p) => `${view.x + p[0] * view.zoom},${view.y + p[1] * view.zoom}`)
+                  .join(" ");
+                return (
+                  <Fragment key={i}>
+                    <polygon className="under" points={points} />
+                    <polygon points={points} />
+                  </Fragment>
+                );
+              })}
             </svg>
           )}
           {/* A grainy wand region is tens of thousands of rings: drawn as
@@ -17290,17 +17385,19 @@ export function App() {
           )}
           {knifeLine && (
             <svg className="ants drawing knife-line" aria-hidden="true">
-              <line
-                x1={view.x + knifeLine[0] * view.zoom}
-                y1={view.y + knifeLine[1] * view.zoom}
-                x2={view.x + knifeLine[2] * view.zoom}
-                y2={view.y + knifeLine[3] * view.zoom}
-              />
+              {underAndOver(
+                <line
+                  x1={view.x + knifeLine[0] * view.zoom}
+                  y1={view.y + knifeLine[1] * view.zoom}
+                  x2={view.x + knifeLine[2] * view.zoom}
+                  y2={view.y + knifeLine[3] * view.zoom}
+                />,
+              )}
             </svg>
           )}
           {regionDrag && (
             <svg className="ants drawing" aria-hidden="true">
-              {regionDrag.points ? (
+              {underAndOver(regionDrag.points ? (
                 <polygon
                   points={(() => {
                     const pts = regionDrag.points;
@@ -17327,7 +17424,7 @@ export function App() {
                   width={regionDrag.w * view.zoom}
                   height={regionDrag.h * view.zoom}
                 />
-              )}
+              ))}
             </svg>
           )}
           {selQuad && (
@@ -17544,7 +17641,7 @@ export function App() {
                       key={side}
                       className={`handle side ${side}`}
                       data-handle={side}
-                      title="Stretch (hold Ctrl to skew)"
+                      title={macWords("Stretch (hold Ctrl to skew)")}
                       style={{ left: (p[0] + q[0]) / 2, top: (p[1] + q[1]) / 2 }}
                       onPointerDown={(e) => onHandlePointerDown(e, side)}
                       onPointerMove={onHandlePointerMove}
@@ -18119,7 +18216,7 @@ export function App() {
                   aria-pressed={l.visible}
                   title={
                     solo === l.id
-                      ? "Shown on its own — alt-click to show the page again"
+                      ? macWords("Shown on its own — alt-click to show the page again")
                       : macWords(`${l.visible ? "Hide" : "Show"} layer (alt-click to see it on its own)`)
                   }
                 >
@@ -18448,16 +18545,19 @@ export function App() {
                   ).map(([field, label, value]) => (
                     <label key={field} className={`geo-${field}`}>
                       {label}
-                      <input
+                      <ShownField
                         type="number"
                         step={units === "px" ? "1" : "0.01"}
-                        // Keyed by the value so a committed edit re-reads
-                        // from the document rather than keeping a stale
-                        // draft: the box moves for reasons other than this
-                        // field (a drag, an undo, an align). Shown and
+                        // The box moves for reasons other than this field
+                        // (a drag, an undo, an align, the other side with
+                        // the proportions kept), and the field shows what
+                        // the document says when it does. Keyed by the
+                        // value, it was a new field each time: typing W
+                        // and tabbing to H swapped H out from under the
+                        // focus, and the page took the keys. Shown and
                         // read in the chosen units.
-                        key={`${field}${units}${Math.round(value * 100)}`}
-                        defaultValue={inUnits(value, units, docDpi)}
+                        key={`${field}${units}`}
+                        shown={inUnits(value, units, docDpi)}
                         onKeyDown={fieldKeys}
                         onBlur={(e) => {
                           if (asGiven(e.currentTarget)) return;
@@ -20135,7 +20235,7 @@ function RawDevelopDialog({
                     className={inHand ? "preset setup active" : "preset setup"}
                     aria-pressed={inHand}
                     aria-label={`Preset ${p.name}`}
-                    title={`${p.name} — alt-click, Delete or a long press to forget it`}
+                    title={macWords(`${p.name} — alt-click, Delete or a long press to forget it`)}
                     {...chipHold(p.name, () => onPresets(presets.filter((o) => o.name !== p.name)))}
                     onKeyDown={chipKeys(() => onPresets(presets.filter((o) => o.name !== p.name)))}
                     onClick={(e) => {
@@ -20162,7 +20262,7 @@ function RawDevelopDialog({
                   // asked: the comps and regions ask the same.
                   if (taken.has(name) && !window.confirm(`Settings called “${name}” are kept already. Keep these in their place?`)) return;
                   if (!taken.has(name) && presets.length >= KEPT_MOST) {
-                    alert(`${KEPT_MOST} settings are kept, as many as are kept: forget one (alt-click or a long press) to keep these.`);
+                    alert(macWords(`${KEPT_MOST} settings are kept, as many as are kept: forget one (alt-click or a long press) to keep these.`));
                     return;
                   }
                   onPresets([...presets.filter((p) => p.name !== name), { name, settings: { ...s } }]);

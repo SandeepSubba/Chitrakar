@@ -8621,7 +8621,7 @@ assert(
   await page.mouse.move(...at(140, 10));
   await page.mouse.down();
   await page.mouse.move(...at(140, 110), { steps: 8 });
-  assert((await page.locator(".knife-line line").count()) === 1, "the line is drawn as it is dragged");
+  assert((await page.locator(".knife-line line:not(.under)").count()) === 1, "the line is drawn as it is dragged");
   await page.mouse.up();
   await page.waitForTimeout(300);
   assert(
@@ -12133,7 +12133,7 @@ assert(
   // each other is two rings, and reading one of them would say the
   // second box had not been added.
   const antBox = async () => {
-    const polys = await page.$$eval(".ants polygon", (els) =>
+    const polys = await page.$$eval(".ants polygon:not(.under)", (els) =>
       els.map((el) => el.getAttribute("points")),
     );
     const pts = polys
@@ -12214,7 +12214,7 @@ assert(
   // Inside out it is still a region: the ants run round the page as
   // well as round the hole, and it can still be added to.
   assert(
-    (await page.locator(".ants polygon").count()) === 2,
+    (await page.locator(".ants polygon:not(.under)").count()) === 2,
     "the ants run round both the page and the hole in it",
   );
   await page.keyboard.press("Control+z");
@@ -12298,7 +12298,7 @@ assert(
   await page.mouse.up();
   await page.waitForTimeout(350);
   const antAt = async () => {
-    const polys = await page.$$eval(".ants polygon", (els) =>
+    const polys = await page.$$eval(".ants polygon:not(.under)", (els) =>
       els.map((el) => el.getAttribute("points")),
     );
     const pts = polys
@@ -12323,7 +12323,7 @@ assert(
     `the region went with the pointer (${x0},${y0} -> ${x1},${y1})`,
   );
   assert(
-    (await page.locator(".ants polygon").count()) === 1,
+    (await page.locator(".ants polygon:not(.under)").count()) === 1,
     "and it is still the one region, not a second one",
   );
   // One entry for the whole drag.
@@ -12449,7 +12449,7 @@ assert(
   await page.waitForTimeout(450);
   assert((await page.locator(".ants").count()) === 1, "the wand picked something");
   const wandBox = async () => {
-    const polys = await page.$$eval(".ants polygon", (els) =>
+    const polys = await page.$$eval(".ants polygon:not(.under)", (els) =>
       els.map((el) => el.getAttribute("points")),
     );
     const pts = polys
@@ -12495,7 +12495,7 @@ assert(
     `the far square came in unclicked (${bothOfThem[2].toFixed(0)} vs ${oneOfThem.toFixed(0)})`,
   );
   assert(
-    (await page.locator(".ants polygon").count()) === 2,
+    (await page.locator(".ants polygon:not(.under)").count()) === 2,
     "one region, a ring round each",
   );
   await page.selectOption('[aria-label="Wand reach"]', "touching");
@@ -12521,7 +12521,7 @@ assert(
   await page.mouse.click(...on(320, 250));
   await page.waitForTimeout(450);
   assert(
-    (await page.locator(".ants polygon").count()) === 2,
+    (await page.locator(".ants polygon:not(.under)").count()) === 2,
     "the ground is picked with the square as a hole in it",
   );
 
@@ -12636,7 +12636,7 @@ assert(
   assert((await offer.count()) === 0, "a shape is not offered the photograph model's download");
   assert((await page.locator(".ants").count()) === 1, "a subject was picked out");
   const antBox = async () => {
-    const polys = await page.$$eval(".ants polygon", (els) =>
+    const polys = await page.$$eval(".ants polygon:not(.under)", (els) =>
       els.map((el) => el.getAttribute("points")),
     );
     const pts = polys
@@ -12828,9 +12828,9 @@ assert(
     [MODEL_URL, RED],
   );
   await page.click('button[aria-label="Select subject"]');
-  await page.waitForFunction(() => document.querySelectorAll(".ants polygon").length >= 2, null, { timeout: 30000 });
+  await page.waitForFunction(() => document.querySelectorAll(".ants polygon:not(.under)").length >= 2, null, { timeout: 30000 });
   assert((await offer.count()) === 0, "with the model kept it is not offered again");
-  const polys = await page.$$eval(".ants polygon", (els) => els.map((el) => el.getAttribute("points")));
+  const polys = await page.$$eval(".ants polygon:not(.under)", (els) => els.map((el) => el.getAttribute("points")));
   const pts = polys.join(" ").trim().split(/\s+/).map((p) => p.split(",").map(Number));
   const xs = pts.map((p) => p[0]);
   const view = await page.locator("#engine-page").boundingBox();
@@ -12888,10 +12888,10 @@ assert(
 
   await menuClick("Select", "Layer's shape");
   await page.waitForTimeout(400);
-  const rings = await page.locator(".ants polygon").count();
+  const rings = await page.locator(".ants polygon:not(.under)").count();
   assert(rings === 2, `two boxes clear of each other are two rings (${rings})`);
   const pts = (
-    await page.$$eval(".ants polygon", (els) =>
+    await page.$$eval(".ants polygon:not(.under)", (els) =>
       els.map((el) => el.getAttribute("points")),
     )
   )
@@ -12940,7 +12940,7 @@ assert(
   await page.waitForTimeout(350);
   const antBox = async () => {
     const pts = (
-      await page.$$eval(".ants polygon", (els) =>
+      await page.$$eval(".ants polygon:not(.under)", (els) =>
         els.map((el) => el.getAttribute("points")),
       )
     )
@@ -13148,7 +13148,7 @@ assert(
   await page.waitForTimeout(400);
   const antBox = async () => {
     const pts = (
-      await page.$$eval(".ants polygon", (els) =>
+      await page.$$eval(".ants polygon:not(.under)", (els) =>
         els.map((el) => el.getAttribute("points")),
       )
     )
@@ -13398,7 +13398,7 @@ assert(
 
   const antBox = async () => {
     const pts = (
-      await page.$$eval(".ants polygon", (els) =>
+      await page.$$eval(".ants polygon:not(.under)", (els) =>
         els.map((el) => el.getAttribute("points")),
       )
     )
@@ -17538,7 +17538,7 @@ assert(
   await page.click('button[aria-label="Inverse"]');
   await page.waitForTimeout(400);
   assert(
-    (await page.locator(".ants polygon").count()) === 2,
+    (await page.locator(".ants polygon:not(.under)").count()) === 2,
     "inverting it leaves the page's own edge and the hole in it",
   );
   // The softening window is the same one the menu opens.
@@ -21316,7 +21316,7 @@ assert(
     await page.waitForTimeout(250);
   };
   const antsBox = () =>
-    page.$$eval(".ants polygon", (els) => {
+    page.$$eval(".ants polygon:not(.under)", (els) => {
       const xs = [], ys = [];
       for (const el of els)
         for (const p of el.points ? Array.from(el.points) : []) {
@@ -21846,8 +21846,11 @@ assert(
   await page.mouse.move(s.x + 120, s.y + 90, { steps: 4 });
   await page.mouse.up();
   await page.waitForTimeout(300);
-  const antStroke = await page.$eval(".ants polygon", (el) => getComputedStyle(el).stroke);
+  const antStroke = await page.$eval(".ants polygon:not(.under)", (el) => getComputedStyle(el).stroke);
   assert(antStroke === "rgb(0, 0, 0)", `the ants are dark on a white page (${antStroke})`);
+  // Over a white line of their own, so they show on a dark page too.
+  const underStroke = await page.$eval(".ants polygon.under", (el) => getComputedStyle(el).stroke);
+  assert(underStroke === "rgb(255, 255, 255)", `with a white line under them (${underStroke})`);
   await page.keyboard.press("Control+d");
   await pickTool("Move");
   await page.keyboard.press("Control+Shift+E");

@@ -13263,20 +13263,52 @@ pub fn artboard_pixels(
     if !(pw.is_finite() && ph.is_finite() && pw <= 16384.0 && ph <= 16384.0) {
         return Ok(None);
     }
+    // Drawn with room past each side, as the page's exports are, and cut
+    // back: drawn to the frame's edge and no further, a feathered mask
+    // meeting the edge was softened as if it carried on past it, full
+    // to the last row where the canvas fades.
+    let reach = (filter_reach(doc) as f32)
+        .max(effects_reach(doc) * 2.0)
+        .max(softening_reach(doc))
+        * scale
+        * sx.max(sy);
+    let past = if reach.is_finite() && reach > 0.0 {
+        ((reach.ceil() as u32).saturating_add(2)).min(1024)
+    } else {
+        0
+    };
+    let (w, h) = (pw as u32, ph as u32);
     let fit = Transform {
         a: pw / width,
         d: ph / height,
+        e: past as f32,
+        f: past as f32,
         ..Default::default()
     };
     let Some(back) = invert(node.transform) else {
         return Ok(None);
     };
-    let mut surface = Surface::new(pw as u32, ph as u32);
+    let mut surface = Surface::new(w + 2 * past, h + 2 * past);
     let clip = surface.full_clip();
     // `render_layer` composes the node's own transform onto what it is
     // given, so undo that transform first: what is left is the frame in
     // its own space, blown up to the surface.
     render_layer(doc, id, &mut surface, clip, fit.compose(back), false)?;
+    if past > 0 {
+        // Each row moves only towards the start, so the surface is its
+        // own cut.
+        for row in 0..h {
+            let from = ((row + past) * surface.width + past) as usize;
+            surface
+                .pixels
+                .copy_within(from..from + w as usize, (row * w) as usize);
+        }
+        surface.pixels.truncate((w * h) as usize);
+        surface.pixels.shrink_to_fit();
+        surface.width = w;
+        surface.height = h;
+        surface.wanted = None;
+    }
     Ok(Some(surface))
 }
 
@@ -18104,6 +18136,53 @@ mod tests {
         let big = artboard_pixels(&doc, board, 2.0).unwrap().unwrap();
         assert_eq!((big.width, big.height), (80, 60));
         assert_eq!(big.get(10, 10).to_srgb8(), [0, 0, 255, 255]);
+    }
+
+    /// A feathered mask that runs past a frame's edge is drawn in the
+    /// frame's export as on the page: drawn only to the edge, it was
+    /// softened as if it carried on, full to the last row where the page
+    /// fades.
+    #[test]
+    fn a_feathered_mask_at_a_frames_edge_exports_as_the_page_shows_it() {
+        let mut doc = Document::new(200, 160, ColorMode::Rgb);
+        let board = artboard(&mut doc, 120.0, 80.0, (20.0, 30.0));
+        doc.apply(Command::AddNode {
+            parent: board,
+            index: 0,
+            node: filled_rect("wide", 120.0, 80.0, BLUE),
+        })
+        .unwrap();
+        let id = doc.children_of(board).unwrap()[0];
+        doc.apply(Command::SetMask {
+            id,
+            mask: Some(Box::new(Mask {
+                kind: MaskKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 50.0,
+                        height: 80.0,
+                        radius: 0.0,
+                    },
+                    transform: Transform::translation(60.0, 0.0),
+                },
+                invert: false,
+                feather: 4.0,
+            })),
+        })
+        .unwrap();
+        let page = render(&doc).unwrap();
+        let out = artboard_pixels(&doc, board, 1.0).unwrap().unwrap();
+        for (x, y) in [(85u32, 0u32), (62, 0), (85, 79), (85, 40)] {
+            let (a, b) = (
+                page.get(20 + x, 30 + y).to_srgb8(),
+                out.get(x, y).to_srgb8(),
+            );
+            for c in 0..4 {
+                assert!(
+                    a[c].abs_diff(b[c]) <= 2,
+                    "at ({x}, {y}) the page shows {a:?} and the export {b:?}"
+                );
+            }
+        }
     }
 
     /// A frame turned on the page is still cut to its box — with a

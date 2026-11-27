@@ -507,6 +507,23 @@ fn reads_leftward(c: char) -> bool {
     if c < '\u{0590}' {
         return false;
     }
+    // Nor anything outside the blocks right-to-left scripts live in (and
+    // their marks, U+200F, U+202B, U+202E and U+2067): Chinese, Korean
+    // and Devanagari asked the table of every letter of their paragraph
+    // for every line wrapped out of it, which made a long one quadratic.
+    if !matches!(c,
+        '\u{0590}'..='\u{08FF}'
+        | '\u{200F}'
+        | '\u{202B}'
+        | '\u{202E}'
+        | '\u{2067}'
+        | '\u{FB1D}'..='\u{FDFF}'
+        | '\u{FE70}'..='\u{FEFF}'
+        | '\u{10800}'..='\u{10FFF}'
+        | '\u{1E800}'..='\u{1EFFF}')
+    {
+        return false;
+    }
     use unicode_bidi::BidiClass::*;
     matches!(unicode_bidi::bidi_class(c), R | AL | RLE | RLO | RLI)
 }
@@ -514,7 +531,8 @@ fn reads_leftward(c: char) -> bool {
 /// Whether a character is an Arabic number to the bidi rules (AN): the
 /// Arabic-Indic and Persian digits and their separators.
 fn arabic_number(c: char) -> bool {
-    c >= '\u{0600}' && unicode_bidi::bidi_class(c) == unicode_bidi::BidiClass::AN
+    matches!(c, '\u{0600}'..='\u{08FF}' | '\u{10D30}'..='\u{10E7F}')
+        && unicode_bidi::bidi_class(c) == unicode_bidi::BidiClass::AN
 }
 
 /// The paragraph a line at `at` in the block was wrapped out of, or the
@@ -3283,6 +3301,24 @@ mod tests {
 
     /// Chinese and Japanese, written without spaces, wrap between their
     /// characters; a long Latin word still runs past the edge.
+    /// The blocks `reads_leftward` and `arabic_number` look in before
+    /// asking the table hold every character the table says reads
+    /// leftward or is an Arabic number.
+    #[test]
+    fn the_quick_answers_for_direction_miss_nothing() {
+        use unicode_bidi::BidiClass::*;
+        for c in (0..=0x10FFFFu32).filter_map(char::from_u32) {
+            let class = unicode_bidi::bidi_class(c);
+            assert_eq!(
+                reads_leftward(c),
+                matches!(class, R | AL | RLE | RLO | RLI),
+                "{c:?} U+{:04X}",
+                c as u32
+            );
+            assert_eq!(arabic_number(c), class == AN, "U+{:04X}", c as u32);
+        }
+    }
+
     #[test]
     fn text_without_spaces_wraps_between_ideographs() {
         let text = "日本語の文章です。日本語の文章です。日本語の文章です。";

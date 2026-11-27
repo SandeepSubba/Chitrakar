@@ -1995,7 +1995,7 @@ body {
   fill: none;
   /* No stroke of its own: this rule is the more particular, and its white
      outweighed the dark dashes below, so a region on a white page was
-     white dashes on white — not there at all. The pale half is the halo. */
+     white dashes on white — not there at all. The pale half is `.under`. */
   stroke-width: 1;
   paint-order: stroke;
 }
@@ -2011,7 +2011,15 @@ body {
   stroke-dasharray: 4 4;
   stroke-dashoffset: 0;
   animation: march 0.6s linear infinite;
-  filter: drop-shadow(0 0 0.5px #fff) drop-shadow(0 0 0.5px #fff);
+}
+
+/* The white line each shape of the ants is drawn on first, solid and
+   still: dark dashes over white show on a page of any colour, where a
+   soft white halo round them was faint on mid-grey and black. */
+.ants .under {
+  stroke: #fff;
+  stroke-dasharray: none;
+  animation: none;
 }
 
 /* A region of thousands of rings: one still path of dark dashes, with no

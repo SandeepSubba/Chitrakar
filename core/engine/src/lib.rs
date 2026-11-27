@@ -37,6 +37,39 @@ const MIN_EXPORT_SCALE: f32 = 0.001;
 /// developments of a twenty-megapixel photograph to undo through.
 #[cfg(not(test))]
 const HISTORY_PICTURES_MOST: usize = 1 << 30;
+/// `rgba` (straight alpha, `w` by `h`) taken down to `nw` by `nh`: each
+/// new pixel the mean of the old ones under it, weighed by their alpha so
+/// a clear pixel's colour does not darken an edge.
+fn taken_down(w: u32, h: u32, rgba: &[u8], nw: u32, nh: u32) -> Vec<u8> {
+    let (w, h, nw, nh) = (w as usize, h as usize, nw as usize, nh as usize);
+    let mut out = vec![0u8; nw * nh * 4];
+    for ny in 0..nh {
+        let (y0, y1) = (ny * h / nh, ((ny + 1) * h).div_ceil(nh).min(h));
+        for nx in 0..nw {
+            let (x0, x1) = (nx * w / nw, ((nx + 1) * w).div_ceil(nw).min(w));
+            let mut sum = [0u64; 4];
+            for y in y0..y1 {
+                for px in rgba[(y * w + x0) * 4..(y * w + x1) * 4].chunks_exact(4) {
+                    let a = px[3] as u64;
+                    sum[0] += px[0] as u64 * a;
+                    sum[1] += px[1] as u64 * a;
+                    sum[2] += px[2] as u64 * a;
+                    sum[3] += a;
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)).max(1) as u64;
+            let o = (ny * nw + nx) * 4;
+            if sum[3] > 0 {
+                for c in 0..3 {
+                    out[o + c] = ((sum[c] + sum[3] / 2) / sum[3]).min(255) as u8;
+                }
+            }
+            out[o + 3] = ((sum[3] + n / 2) / n) as u8;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 const HISTORY_PICTURES_MOST: usize = 4 << 20;
 
@@ -7202,6 +7235,14 @@ impl Session {
                 let (mut from, mut to_edge) = (boxes[0].1[near], boxes[n - 1].1[far]);
                 if to == AlignTo::Page {
                     let ground = self.ground_of(boxes[0].0);
+                    // Spread over a frame, they have to share it: spaced
+                    // across the first one's, a layer of another frame was
+                    // carried into this one's, where its own cut it away.
+                    if boxes.iter().any(|(id, _)| self.ground_of(*id) != ground) {
+                        return Err(EngineError::BadCommand(
+                            "the layers picked are in different frames; space each frame's layers on their own, or space them to each other".into(),
+                        ));
+                    }
                     from = ground[near];
                     to_edge = ground[far];
                 }
@@ -11502,12 +11543,23 @@ impl Session {
     /// stops the engine. With the page full of photographs, a PDF or an
     /// SVG written, or a picture placed through the browser's decoder,
     /// stopped it.
+    ///
+    /// Asked for in pieces, all held at once: one request past 2 GB is
+    /// refused on 32-bit WebAssembly before any memory is looked at.
     fn room_for(bytes: usize, what: &str) -> Result<(), EngineError> {
-        let mut room: Vec<u8> = Vec::new();
-        if room.try_reserve_exact(bytes).is_err() {
-            return Err(EngineError::BadCommand(format!(
-                "there is not enough memory left for {what}"
-            )));
+        const PIECE: usize = 1 << 30;
+        let mut held: Vec<Vec<u8>> = Vec::new();
+        let mut left = bytes;
+        while left > 0 {
+            let take = left.min(PIECE);
+            let mut piece: Vec<u8> = Vec::new();
+            if piece.try_reserve_exact(take).is_err() {
+                return Err(EngineError::BadCommand(format!(
+                    "there is not enough memory left for {what}"
+                )));
+            }
+            held.push(piece);
+            left -= take;
         }
         Ok(())
     }
@@ -11515,9 +11567,13 @@ impl Session {
     /// What writing the page to a PDF or an SVG can draw on the way: a
     /// surface the page's size for what it has to set down as pixels.
     fn room_to_write(&self) -> Result<(), EngineError> {
+        // Never past the 48 megapixels the PDF writer draws a page's
+        // pixels at (`PRINT_PIXELS_MOST`): asked for the whole page, an
+        // A1 page at 300 dpi with one photograph on it was refused.
         let (w, h) = (self.doc.meta.width as usize, self.doc.meta.height as usize);
+        let drawn = w.saturating_mul(h).min(48_000_000);
         Self::room_for(
-            w.saturating_mul(h).saturating_mul(16 * 2),
+            drawn.saturating_mul(16 * 2),
             "writing this page; remove some layers, or export it as a picture",
         )
     }
@@ -12239,6 +12295,27 @@ impl Session {
                 rgba8.len()
             )));
         }
+        // A drawing past what a page can be is taken down to a hundred
+        // megapixels here, as the PDF window says it will be, before any
+        // room is asked: room for twice the whole drawing refused a
+        // 16384-pixel square page even into an empty document, and kept
+        // whole, the drawing was held at twice the page it made.
+        let (width, height, rgba8) =
+            if width as u64 * height as u64 > chitrakar_doc::MAX_CANVAS_PIXELS {
+                let k = (chitrakar_doc::MAX_CANVAS_PIXELS as f64 / (width as f64 * height as f64))
+                    .sqrt();
+                let (w, h) = (
+                    ((width as f64 * k).floor() as u32).max(1),
+                    ((height as f64 * k).floor() as u32).max(1),
+                );
+                Self::room_for(
+                    w as usize * h as usize * 4,
+                    &format!("a picture of {w} × {h}; remove a layer or place a smaller one"),
+                )?;
+                (w, h, taken_down(width, height, &rgba8, w, h))
+            } else {
+                (width, height, rgba8)
+            };
         // Copied into the document as it is placed.
         Self::room_for(
             rgba8.len().saturating_mul(2),
@@ -12289,14 +12366,23 @@ impl Session {
         // Room for what developing and placing it takes, asked for before
         // any of it is made: the development, its pixels carried in from
         // the develop worker, the picture kept and the frames drawn from
-        // it, some sixteen bytes a pixel. A seventh 61-megapixel raw
-        // placed beside six stopped the engine; refused here, it is said.
+        // it, some twelve bytes a pixel (a 151-megapixel raw was
+        // measured at 1.9 GB all told). A seventh 61-megapixel raw placed
+        // beside six stopped the engine; refused here, it is said.
         let (w, h) = photo.size();
+        let empty = self
+            .doc
+            .children_of(self.doc.root())
+            .map_or(true, |c| c.is_empty());
         Self::room_for(
-            (w as usize).saturating_mul(h as usize).saturating_mul(16),
-            &format!(
-                "a photograph of {w} × {h} beside what this document holds; place it in a document of its own, or remove some layers"
-            ),
+            (w as usize).saturating_mul(h as usize).saturating_mul(12),
+            &if empty {
+                format!("a photograph of {w} × {h}; it is larger than the editor can develop here")
+            } else {
+                format!(
+                    "a photograph of {w} × {h} beside what this document holds; place it in a document of its own, or remove some layers"
+                )
+            },
         )?;
         // A file that carries no corrections of its own (a Canon's) gets
         // its lens's from a profile, where there is one for it.
@@ -13226,6 +13312,45 @@ impl Session {
             }
             other => other,
         };
+        // Those bounds box each group's box in turn, which a turned group
+        // swells: a bar standing upright inside a group turned 45° was
+        // exported as a square half again its length, its neighbour with
+        // it. Cut to the tight box of what the layer draws, grown by as
+        // far as any effect in the document reaches (both hold all of
+        // it, so what they share does).
+        let bounds = match (
+            bounds,
+            chitrakar_render::node_visual_bounds(&self.doc, id).ok(),
+        ) {
+            (Bounds::Rect(a0, b0, a1, b1), Some(Bounds::Rect(x0, y0, x1, y1))) => {
+                let t = chitrakar_render::ancestor_space(&self.doc, id)
+                    .compose(self.doc.node(id).ok()?.transform);
+                let k = (t.a * t.a + t.b * t.b)
+                    .sqrt()
+                    .max((t.c * t.c + t.d * t.d).sqrt())
+                    .max(1.0);
+                let pad = chitrakar_render::effects_reach(&self.doc) * 2.0 * k
+                    + chitrakar_render::filter_reach(&self.doc) as f32 * k
+                    + chitrakar_render::softening_reach(&self.doc) * k
+                    + 1.0;
+                if pad.is_finite() {
+                    let (c0, d0, c1, d1) = (
+                        a0.max(x0 - pad),
+                        b0.max(y0 - pad),
+                        a1.min(x1 + pad),
+                        b1.min(y1 + pad),
+                    );
+                    if c1 > c0 && d1 > d0 {
+                        Bounds::Rect(c0, d0, c1, d1)
+                    } else {
+                        Bounds::Rect(a0, b0, a1, b1)
+                    }
+                } else {
+                    Bounds::Rect(a0, b0, a1, b1)
+                }
+            }
+            (other, _) => other,
+        };
         match bounds {
             Bounds::None => None,
             Bounds::Everything => Some([
@@ -13985,6 +14110,19 @@ mod tests {
     }
 
     use super::*;
+
+    /// A drawing taken down is the mean of what it covers, weighed by
+    /// alpha: a clear pixel beside a red one leaves red, half there.
+    #[test]
+    fn a_drawing_taken_down_keeps_its_colours_and_edges() {
+        let rgba = [
+            255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 255, 255, //
+            255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 255, 255,
+        ];
+        let out = taken_down(4, 2, &rgba, 2, 1);
+        assert_eq!(&out[..4], &[255, 0, 0, 128]);
+        assert_eq!(&out[4..], &[0, 0, 255, 255]);
+    }
 
     fn psd_two_layers() -> Vec<u8> {
         use chitrakar_codecs::psd::sample::{layer, write};
@@ -16495,6 +16633,54 @@ mod tests {
         assert_eq!(held.document().node(rect).unwrap().transform.e, 0.0);
         // And the session itself still shows the drag.
         assert_eq!(s.document().node(rect).unwrap().transform.e, 90.0);
+    }
+
+    /// A layer standing upright inside a turned group is exported (and
+    /// copied as an image) at its own size, not as the box of its box:
+    /// a 160 by 20 bar in a group turned 45° came out 180 square, with
+    /// its neighbour in it.
+    #[test]
+    fn an_upright_layer_in_a_turned_group_is_drawn_in_its_own_box() {
+        let mut s = Session::new(400, 400, chitrakar_color::ColorMode::Rgb);
+        let root = s.document().root();
+        let mut group = chitrakar_doc::Node::group("turned");
+        let r = std::f32::consts::FRAC_PI_4;
+        group.transform = Transform {
+            a: r.cos(),
+            b: r.sin(),
+            c: -r.sin(),
+            d: r.cos(),
+            e: 200.0,
+            f: 200.0,
+        };
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(group),
+        })
+        .unwrap();
+        let g = s.document().children_of(root).unwrap()[0];
+        let mut bar = filled_rect("bar", 160.0, 20.0);
+        bar.transform = Transform {
+            a: r.cos(),
+            b: -r.sin(),
+            c: r.sin(),
+            d: r.cos(),
+            e: 0.0,
+            f: 0.0,
+        };
+        s.apply(Command::AddNode {
+            parent: g,
+            index: 0,
+            node: bar,
+        })
+        .unwrap();
+        let id = s.document().children_of(g).unwrap()[0];
+        let [_, _, w, h] = s.drawn_bounds_of(id).unwrap();
+        assert!(
+            (159.0..=164.0).contains(&w) && (19.0..=24.0).contains(&h),
+            "{w} × {h}"
+        );
     }
 
     /// An export of what is picked, for a live copy of a layer wearing a

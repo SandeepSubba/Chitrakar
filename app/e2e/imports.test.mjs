@@ -32,6 +32,20 @@ const bytes = (...parts) =>
 check(importKind("x", bytes("8BPS", [0, 1])) === "psd", "a Photoshop file by its bytes");
 check(importKind("x.bin", bytes("%PDF-1.7\n")) === "pdf", "a PDF by its bytes");
 check(importKind("old.ai", bytes("junk\n%PDF-1.5")) === "pdf", "an Illustrator file with its PDF a way in");
+// A picture that mentions a PDF in its first kilobyte is still the
+// picture: a PNG's comment, a JPEG's description, an SVG's comment.
+check(
+  importKind("c.png", bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a], "tEXtComment from %PDF-1.5")) === "picture",
+  "a PNG whose comment says %PDF- is a picture",
+);
+check(
+  importKind("c.jpg", bytes([0xff, 0xd8, 0xff, 0xe1], "Exif made from %PDF-1.4")) === "picture",
+  "a JPEG whose description says %PDF- is a picture",
+);
+check(
+  importKind("c.svg", bytes("<!-- converted from a.pdf (%PDF-1.5) by pdf2svg -->\n<svg xmlns='http://www.w3.org/2000/svg'/>")) === "svg",
+  "an SVG whose comment says %PDF- is an SVG",
+);
 check(importKind("x", bytes([0x89], "PNG")) === "picture", "a PNG");
 check(importKind("x", bytes([0xff, 0xd8, 0xff, 0xe0])) === "picture", "a JPEG");
 check(importKind("scan.tif", bytes("II*", [0])) === "picture", "a TIFF");
@@ -96,6 +110,8 @@ check(unreadable("a.png", bytes([0x89]), "broken").includes("broken"), "anything
 // An engine's refusal, said in words.
 check(said(new Error("invalid command: the picture is 9 × 9")) === "the picture is 9 × 9", "the wrapping comes off a sentence");
 check(said("Error: invalid command: io error: out of memory").includes("larger than"), "out of memory is said as size");
+check(said(new Error("unreachable")).includes("reader stopped"), "a reader's trap is said in words");
+check(said("RuntimeError: unreachable").includes("reader stopped"), "and with the browser's prefix");
 check(
   said("invalid command: SVG data parsing failed cause nodes limit reached").includes("more parts"),
   "an SVG over the reader's count is too big, not broken",

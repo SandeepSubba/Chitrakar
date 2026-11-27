@@ -181,6 +181,9 @@ without reading anything else.*
      starting with a stop, a PDF gradient fading through black, the
      ants invisible on a white page, a seventh large raw stopping the
      engine, a clipped sky coming back magenta.
+     The fifty-seventh: feathered PSD masks stopping the engine again,
+     a 150-megapixel raw refused, a frame's export hard where the page
+     fades, a PDF page promised and refused, W losing the focus to H.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13109,6 +13112,80 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-seventh audit (November 2026).** Its check of round 56:
+  the PSD mask budget left out the feather's margin, and sixty masks
+  feathered by a thousand pixels stopped the engine (counted with it);
+  an untouched "hide all" mask was not built and its layer showed in
+  full (built from its default); a single 150-megapixel raw was refused
+  on an empty page, sixteen bytes a pixel asked for at once (twelve, in
+  pieces of a gigabyte), and the refusal was said as a damaged file
+  (said as no room, with advice for an empty page); a paragraph of
+  Chinese was still quadratic to wrap, every line asking the bidi table
+  of every letter (only the right-to-left blocks are asked); the ants
+  were faint on mid-grey and black at a screen's own size (each ring a
+  white line under the dark dashes); tooltips and alerts on chips,
+  handles and the solo eye still said Ctrl and Alt on a Mac; a colour
+  matrix of noughts or a black level at or past white still developed
+  black (taken as absent). Limits: forty masks feathered by a thousand
+  pixels, or 150 by five hundred, are refused though they opened at two
+  to three gigabytes; the highlight rebuild is neutral only
+  under a daylight balance — under shade or tungsten a clipped sky comes
+  back tinted, and one clipped in every colour magenta when darkened;
+  a palette chip clicked onto a translucent shape makes it opaque.
+  Its editing pass, documents with frames over long sessions: a
+  feathered mask at a frame's edge was exported full where the page
+  fades (a frame is drawn with room past its edge and cut back); a
+  layer standing upright in a turned group was exported and copied as
+  the box of its box, a neighbour in it (cut to its own box, grown by
+  what effects reach); Space evenly to the frame carried a layer of
+  another frame into the first one's, where it was cut away (refused
+  in words when they are in different frames). Limits: an incremental
+  frame differs from a full one along an edge on a half pixel of a frame
+  in a turned group, under a Multiply layer, in the engine though not
+  seen in the editor; a comp does not carry a group's opacity onto its
+  children through Ungroup; a frame drawn inside a frame lands on the
+  page above them; a shape and a brush disagree on the frame under page
+  artwork; a frame's export size follows its scale on the page; All
+  frames as a PDF passes over frames inside a group; Duplicate with an
+  offset in a turned, scaled frame moves the other way; the frames' PDF
+  puts Pixelate's grid elsewhere.
+  Its files pass, PDF and the browser's own decoders: a 30-inch page at
+  600 dpi was promised a hundred megapixels and refused even into an
+  empty page, room asked for twice the whole drawing (taken down to a
+  hundred megapixels first, and kept so); a PDF or a picture dropped on
+  an empty page opened at 72 dpi, the PDF untitled (at the resolution
+  asked or said, and named); a PNG, JPEG or SVG that mentions "%PDF-"
+  in its first kilobyte was sent to the PDF reader (asked after the
+  pictures' signatures); an A1 page at 300 dpi could not be exported as
+  a PDF, room asked for the whole page past what the writer draws (its
+  48 megapixels at most, and every room asked for in pieces); the PDF
+  reader stopping said "unreachable" (in words); a page thinner than a
+  pixel came back no rows high (one pixel across). Limits: a PDF of a
+  600,000-triangle mesh holds the page for minutes; 16-bit PNGs with a
+  profile are cut to eight bits first, like TIFF and PSD; a picture
+  the browser will not decode for its size is said as maybe damaged;
+  a compact picture past a hundred megapixels freezes the page without a
+  word; a small page's dpi is worked out from its floored width;
+  hayro draws a Type 3 glyph stroked and filled in black, and an HDR
+  AVIF differs from Chrome's.
+  Its interface pass, a keyboard-only person, a slow laptop and other
+  languages: W typed with the proportions kept, then Tab, lost the focus
+  as H was made anew (the fields keep their element and take the
+  document's value); AltGr and Option brackets did not size the brush;
+  "1.920" in a German page was 1.92 (a point before three digits is the
+  thousands mark where the comma is the decimal); a large document or
+  picture opened without a word while the page stood still (said); a
+  shape made from the keyboard left the focus on the page (to its row).
+  Limits: on a slow laptop the Export window, Quick export and a save
+  freeze the page for seconds with no word and no cancel, and the draft
+  encodes every picture again on the page's thread for seconds after a
+  large document opens; a German keyboard has no key for Bring forward
+  (Ctrl and + zooms); polygons, stars and the shape library can only be
+  dragged; the keys sheet does not list the layer list's keys; Escape in
+  Find layers drops the focus; text size is a slider only; New
+  document's presets come after Create in Tab order; forty layers are a
+  hundred and twenty Tab stops; a few spoken names differ from what is
+  shown; Develop has no boxes for temperature and tint.
   **A fifty-sixth audit (November 2026).** Its check of round 55: the
   PSD budget for masks refused posters of small layers with untouched
   masks that opened before, counting any mask that showed as the page

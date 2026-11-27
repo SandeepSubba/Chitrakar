@@ -34,6 +34,7 @@ import {
   boundChords,
   chordFromEvent,
   chordLabel,
+  macWords,
   onAMac,
   browserKeeps,
   claimable,
@@ -256,7 +257,7 @@ export function PreferencesDialog({
           setRefused(
             pressed
               ? `${chordLabel(pressed)} on its own belongs to the tools — hold ${onAMac() ? "Cmd or Option" : "Ctrl or Alt"} with it.`
-              : "That key cannot be given; try a letter, a digit or a sign with Ctrl or Alt.",
+              : macWords("That key cannot be given; try a letter, a digit or a sign with Ctrl or Alt."),
           );
           return;
         }

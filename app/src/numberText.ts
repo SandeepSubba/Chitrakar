@@ -31,7 +31,10 @@ export function readWritten(text: string, commaDecimal: boolean): string {
   const t = plainDigits(text.trim());
   const comma = t.lastIndexOf(",");
   const point = t.lastIndexOf(".");
-  if (comma < 0) return t;
+  // Where the comma is the decimal, a point before three digits (or
+  // several of them) is the thousands mark: "1.920" pasted into a German
+  // page's width made it two pixels wide.
+  if (comma < 0) return commaDecimal && /^[-+]?[1-9]\d{0,2}(\.\d{3})+$/.test(t) ? t.replace(/\./g, "") : t;
   if (point >= 0) {
     return comma > point ? t.replace(/\./g, "").replace(",", ".") : t.replace(/,/g, "");
   }
@@ -48,6 +51,10 @@ export function readWritten(text: string, commaDecimal: boolean): string {
  * or more, or one before exactly three digits, were thousands marks.
  */
 export function settleTyped(value: string, commas: number, point: boolean, commaDecimal: boolean): string {
+  // The other way round where the comma is the decimal: a point typed
+  // before exactly three digits was a thousands mark ("1.920" is 1920).
+  if (commaDecimal && point && commas === 0 && /^[-+]?[1-9]\d{0,2}\.\d{3}$/.test(value))
+    return value.replace(/\./g, "");
   if (commas === 0 || point || commaDecimal) return value;
   // Not after a nought: "0,500" is a half.
   if (commas > 1 || /^[-+]?[1-9]\d{0,2}\.\d{3}$/.test(value)) return value.replace(/\./g, "");

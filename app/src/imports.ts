@@ -102,9 +102,7 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
     // is often named by the browser rather than by its maker.
     if (starts(bytes, [0x50, 0x4b, 0x03, 0x04])) return "document";
     if (starts(bytes, ascii("8BPS"))) return "psd";
-    // A PDF's header may sit a little way in.
-    const head = String.fromCharCode(...bytes.slice(0, 1024));
-    if (head.includes("%PDF-")) return "pdf";
+    if (starts(bytes, ascii("%PDF-"))) return "pdf";
     // A raw file is a TIFF, or a format of the camera maker's own, and
     // never starts as a JPEG or a PNG does: one that does was named for
     // the camera rather than for what it holds (a phone's ".dng" that is
@@ -137,6 +135,11 @@ export function importKind(name: string, bytes?: Uint8Array, type = ""): ImportK
       const xml = new TextDecoder("latin1").decode(bytes.subarray(0, 16 << 20));
       if (/<(?:[\w-]+:)?svg[\s>]/i.test(xml)) return "svg";
     }
+    // A PDF's header may sit a little way in — asked after the pictures'
+    // own signatures, since a PNG's comment or a JPEG's description that
+    // says "%PDF-1.5" was sent to the PDF reader and refused.
+    const head = String.fromCharCode(...bytes.slice(0, 1024));
+    if (head.includes("%PDF-")) return "pdf";
   }
   // Bytes that are none of those, under the document's name: a damaged
   // document, and said to be one.
@@ -164,6 +167,10 @@ export function said(err: unknown): string {
     // sentence that already says it.
     .replace(/\s*\((?:InvalidProfile|UnsupportedProfileConnection|InvalidFont)\)/g, "");
   const plain: [RegExp, string][] = [
+    // A reader's WebAssembly stopping on the file (the PDF reader on an
+    // image that says it is two billion pixels wide, a content stream
+    // that unpacks to gigabytes) said nothing but "unreachable".
+    [/^unreachable$|^unreachable executed|wasm trap|function signature mismatch/i, "the reader stopped on this file: it may be damaged, or too large to draw"],
     [/out of memory|memory limit exceeded|capacity overflow|allocation/i, "it is larger than the editor can hold in memory"],
     // The raw reader's words for a camera it does not know, or a file
     // that ends where its parts say they go on.

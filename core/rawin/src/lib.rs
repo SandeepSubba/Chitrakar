@@ -80,8 +80,10 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // tungsten matrices swap from one run to the next.)
     // A matrix with a number in it that is no number (an entry n/0 or
     // 0/0) is as good as none: kept, it developed a black photograph.
-    raw.color_matrix
-        .retain(|_, m| !m.is_empty() && m.iter().all(|v| v.is_finite()));
+    // Nor is one of noughts, which takes every colour to black.
+    raw.color_matrix.retain(|_, m| {
+        !m.is_empty() && m.iter().all(|v| v.is_finite()) && m.iter().any(|v| *v != 0.0)
+    });
     let blended = as_shot_matrix(&raw.color_matrix, &raw.wb_coeffs);
     let matrix = blended.as_ref().or_else(|| {
         raw.color_matrix
@@ -218,6 +220,13 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
     let whites = &raw.whitelevel.0;
     let white = [0, 1, 2, 3].map(|i| *whites.get(i).or(whites.first()).unwrap_or(&65535) as f32);
+    // A black at or past white is no black: it left nothing between them,
+    // and the photograph developed black without a word.
+    for (b, w) in black.iter_mut().zip(white) {
+        if *b >= w {
+            *b = 0.0;
+        }
+    }
     // The area worth keeping: the camera's crop, else its active area.
     let crops = crops_of(raw.crop_area.or(raw.active_area), raw.width, raw.height);
     let samples = match &raw.data {

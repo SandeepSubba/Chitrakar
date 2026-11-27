@@ -37,6 +37,7 @@ import { WatermarkRow } from "./WatermarkRow";
 import { NumberField } from "./NumberField";
 import { said } from "./imports";
 import { enterMeansGo } from "./dialogKeys";
+import { macWords } from "./commands";
 
 /** As far as the engine scales a page going out (`render_scaled`). */
 const MOST_SCALE = 16;
@@ -776,7 +777,7 @@ export function ExportDialog({
                 className={inHand ? "preset setup active" : "preset setup"}
                 aria-pressed={inHand}
                 aria-label={`Setup ${st.name}`}
-                title={`${st.name} — alt-click, Delete or a long press to forget it`}
+                title={macWords(`${st.name} — alt-click, Delete or a long press to forget it`)}
                 {...chipHold(st.name, () =>
                   setPrefs({
                     exportSetups: prefs.exportSetups.filter((o) => o.name !== st.name),
@@ -845,7 +846,7 @@ export function ExportDialog({
                 .filter(Boolean)
                 .join(" ");
               if (prefs.exportSetups.length >= KEPT_MOST) {
-                alert(`${KEPT_MOST} setups are kept, as many as are kept: forget one (alt-click or a long press) to keep this one.`);
+                alert(macWords(`${KEPT_MOST} setups are kept, as many as are kept: forget one (alt-click or a long press) to keep this one.`));
                 return;
               }
               const taken = new Set(prefs.exportSetups.map((o) => o.name));

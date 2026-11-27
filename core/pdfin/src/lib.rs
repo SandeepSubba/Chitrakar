@@ -99,17 +99,22 @@ pub fn render_pdf_page(bytes: &[u8], page: usize, dpi: f32) -> Result<Page, PdfE
     // window promised, the page's last row lost. Nudged up by a part in a
     // hundred thousand, a whole size lands whole.
     scale *= 1.0 + 1e-5;
-    if (w * scale).round() < 1.0 || (h * scale).round() < 1.0 {
+    if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
         return Err(bad("a page with no size"));
     }
+    // A side thinner than a pixel at this resolution is drawn one pixel
+    // across, as the window says it comes in: the renderer floors, and a
+    // page 3 points tall at 18 dpi came back no rows high and was refused
+    // in the engine's words.
+    let (x_scale, y_scale) = (scale.max(1.00001 / w), scale.max(1.00001 / h));
     let pixmap = render(
         p,
         &RenderCache::new(),
         &InterpreterSettings::default(),
         &RenderSettings::default(),
         &PixmapSettings {
-            x_scale: scale,
-            y_scale: scale,
+            x_scale,
+            y_scale,
             ..Default::default()
         },
     );
@@ -201,6 +206,16 @@ mod tests {
         assert_eq!(px(90, 200 - 90), &[255, 0, 0, 255]);
         // Clear where the page draws nothing.
         assert_eq!(px(10, 10)[3], 0);
+    }
+
+    /// A page thinner than a pixel at the resolution asked for comes
+    /// back one pixel across, as the window says, rather than none.
+    #[test]
+    fn a_page_thinner_than_a_pixel_is_one_pixel_across() {
+        // 200 × 100 points at 0.5 dpi: 1.39 × 0.69 pixels.
+        let img = render_pdf_page(&one_page(), 0, 0.5).unwrap();
+        assert_eq!((img.width, img.height), (1, 1));
+        assert_eq!(img.rgba8.len(), 4);
     }
 
     #[test]

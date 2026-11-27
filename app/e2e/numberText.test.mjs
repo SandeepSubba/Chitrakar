@@ -31,6 +31,15 @@ same(readWritten("12,5", false), "12.5", "a decimal comma");
 same(readWritten("1,920", false), "1920", "a thousands comma");
 same(readWritten("1,920,000", false), "1920000", "two thousands commas");
 same(readWritten("1,234.5", false), "1234.5", "thousands then point");
+// Where the comma is the decimal, a point before three digits is the
+// thousands mark: "1.920" in a German page's width was 1.92.
+same(readWritten("1.920", true), "1920", "a German thousands point, pasted");
+same(readWritten("1.920.000", true), "1920000", "two German thousands points");
+same(readWritten("1.5", true), "1.5", "a point before one digit is still a point");
+same(settleTyped("1.920", 0, true, true), "1920", "a German thousands point, typed");
+same(settleTyped("0.500", 0, true, true), "0.500", "not after a nought");
+same(settleTyped("12.5", 0, true, true), "12.5", "nor before fewer than three digits");
+same(settleTyped("12.5", 1, false, true), "12.5", "a German decimal comma, typed");
 same(readWritten("1.234,5", false), "1234.5", "points then decimal comma");
 same(readWritten("-0,25", false), "-0.25", "negative decimal comma");
 same(readWritten("12,50", false), "12.50", "two digits after is a decimal");

@@ -614,16 +614,28 @@ fn mask_box_of(
     has_pixels: bool,
 ) -> Option<(i32, i32, i32, i32)> {
     let (t, l, b, rr, default, off) = mask?;
-    if off || !has_pixels {
+    if off {
         return None;
     }
     let empty = b <= t || rr <= l;
     if empty && default == 255 {
         return None;
     }
+    // An untouched "hide all" has no pixels to read (its channel is
+    // empty) and is built all the same, all of it its default: skipped
+    // for having none, its layer showed in full.
+    if !(has_pixels || (empty && default == 0)) {
+        return None;
+    }
     let group = !matches!(rec.section, Section::Pixels);
     let (mut x0, mut y0, mut x1, mut y1) = if empty {
-        (rec.left, rec.top, rec.right, rec.bottom)
+        // The layer's own box, and a pixel where it has none (a group's
+        // record), so a "hide all" has something to be.
+        if rec.right > rec.left && rec.bottom > rec.top {
+            (rec.left, rec.top, rec.right, rec.bottom)
+        } else {
+            (rec.left, rec.top, rec.left + 1, rec.top + 1)
+        }
     } else {
         (
             rec.left.min(l),
@@ -690,14 +702,32 @@ fn read_layers(
             let page = (0, 0, h.width as i32, h.height as i32);
             let has = |id: i16| rec.channels.iter().any(|c| c.0 == id);
             let area = |(x0, y0, x1, y1): (i32, i32, i32, i32)| side(x0, x1) * side(y0, y1);
-            let pixel = mask_box(rec, page, has(-3), has(-2));
-            let vector = (pixel.is_none() && rec.vector.is_some()).then_some(
-                if matches!(rec.section, Section::Pixels) {
+            // Grown by the feather's margin where the default shows, as
+            // the reader grows it: left out, sixty masks feathered by a
+            // thousand pixels stopped the engine.
+            let vfeather = rec.vector.as_ref().map_or(0.0, |v| v.feather);
+            let margin = (2.0 * rec.feather.max(vfeather)).ceil().min(4000.0) as i32;
+            let shows = |m: Option<(i32, i32, i32, i32, u8, bool)>| m.is_some_and(|m| m.4 > 0);
+            let pixel = mask_box(rec, page, has(-3), has(-2)).map(|(x0, y0, x1, y1)| {
+                let default_shows = if rec.real_mask.is_some() && has(-3) {
+                    shows(rec.real_mask)
+                } else {
+                    shows(rec.mask)
+                };
+                if default_shows {
+                    (x0 - margin, y0 - margin, x1 + margin, y1 + margin)
+                } else {
+                    (x0, y0, x1, y1)
+                }
+            });
+            let vector = (pixel.is_none() && rec.vector.is_some()).then_some({
+                let (x0, y0, x1, y1) = if matches!(rec.section, Section::Pixels) {
                     (rec.left, rec.top, rec.right, rec.bottom)
                 } else {
                     page
-                },
-            );
+                };
+                (x0 - margin, y0 - margin, x1 + margin, y1 + margin)
+            });
             let built = pixel.or(vector).map_or(0, area);
             // A group's mask is the only thing built for it; a layer's
             // is built beside its picture and held with it, twice the
@@ -2437,6 +2467,28 @@ mod tests {
             "outside it, the default: {}",
             cov(3, 3)
         );
+    }
+
+    /// An untouched "hide all" (an empty box, black round it) hides the
+    /// layer: it has no pixels to read and was left out, and the layer
+    /// showed in full. An untouched "reveal all" is no mask at all.
+    #[test]
+    fn an_untouched_hide_all_hides_and_a_reveal_all_is_no_mask() {
+        let mut hidden = layer("Hidden", [0, 0, 4, 4], solid(4, 4, [0, 255, 0, 255]));
+        hidden.mask = Some(([0, 0, 0, 0], 0, vec![]));
+        let mut shown = layer("Shown", [0, 0, 4, 4], solid(4, 4, [0, 255, 0, 255]));
+        shown.mask = Some(([0, 0, 0, 0], 255, vec![]));
+        let bytes = write(4, 4, &[hidden, shown], &solid(4, 4, [0, 0, 0, 255]));
+        let f = read_psd(&bytes).unwrap();
+        let PsdItem::Pixels(h) = &f.items[0] else {
+            panic!()
+        };
+        let m = h.mask.as_ref().expect("the hide-all is a mask");
+        assert!(m.rgba.chunks(4).all(|p| p[0] == 0), "and hides it all");
+        let PsdItem::Pixels(s) = &f.items[1] else {
+            panic!()
+        };
+        assert!(s.mask.is_none(), "an untouched reveal-all is no mask");
     }
 
     #[test]
