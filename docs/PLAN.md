@@ -184,6 +184,10 @@ without reading anything else.*
      The fifty-seventh: feathered PSD masks stopping the engine again,
      a 150-megapixel raw refused, a frame's export hard where the page
      fades, a PDF page promised and refused, W losing the focus to H.
+     The fifty-eighth: a wand's Shift-click held for a minute and a
+     half, the subject's matte a staircase, a filled shape's border not
+     its own, a pen's double-click doubling an anchor, typed text pushed
+     off a phone.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13112,6 +13116,76 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-eighth audit (November 2026).** Its check of round 57: a
+  frame ten thousand pixels square with a shadow stopped the engine on
+  export, its room past the edge asked for blind (only where it can be
+  had, else drawn to the edge as before); What is picked and Copy as
+  image cut the hook of a j off text, cut to the box it is set in (the
+  tighter box only under a turned group, and never round text); the
+  PDF window promised a page placed beside other layers at its whole
+  size and it came in at a hundred megapixels (said either way); the
+  layers panel's Delete still said Del on a Mac; a raw past 600
+  megapixels was said as damaged (as too large). Limits: an SVG of a
+  page past the browser's longest string comes out empty without a
+  word; a region of thousands of rings has no white line under its
+  dashes and cannot be seen on black; a black level one short of white
+  still develops black; twenty masks feathered by a thousand pixels open
+  but each zoom takes twenty seconds; a .chitra with a damaged picture
+  opens it clear without a word.
+  Its interface pass, a
+  designer who changes everything, a novice who clicks everything and a
+  phone in portrait: text typed on the canvas was pushed twice as far as
+  the shrinking window asked, under the bar or off a turned phone's top,
+  and never followed sideways (a shift counts as made until it is drawn,
+  and the end of a long line is kept in sight); Ctrl+Alt+[ bound to a
+  command sized the brush instead (a chord a command holds is the
+  command's); Escape on the first stroke of a paint layer emptied the
+  redo list (a step taken back gives back the list it cleared); Ctrl+Z
+  during a layer-row drag undid the step before and the drop still
+  landed (it lets go of the drag, as Escape does); picking Crop scrolled
+  the rail under the pointer (the rail stays where it was pressed).
+  Limits: the opacity slider resumes after Escape when the button is
+  still held; a toolbar dropped low becomes a rail of two tools, and Put
+  everything back leaves it there; a blocking alert comes once per click
+  of a double-click; the develop window is cramped on a phone; a narrow
+  panel cuts digits off its fields; a phone's menus still list Ctrl
+  chords; the view stays off centre after a resize mid-drag; style chips
+  are named twice to a screen reader.
+  Its files pass, a photographer's day: a Shift-click with the wand on a
+  12-megapixel photograph held the page for 18 to 92 seconds (outlines
+  of tens of thousands of points are combined over the page's pixels,
+  three seconds); the subject model's matte made a staircase edge, kept
+  at 320 pixels and read nearest (laid over the page smoothly, up to
+  4096 along its longer side), and its soft edges were too clear, its
+  greys read as encoded (stored as the coverage they say); an export of
+  what is picked carried the camera of another photograph (that of the
+  photograph picked, or none); the first photograph placed on a page
+  made in the New window replaced the page (a chosen page is kept).
+  Limits: a lens correction made before a crop is centred on the page
+  after it; the colour subject pick can choose the wrong thing on an
+  edited photograph; two tabs can both restore the same crashed tab's
+  draft; there is no content-aware fill, colour-range selection or
+  contact sheet.
+  Its editing pass, vector drawing: a filled shape's border outside its
+  fill picked the layer under it (the border is the shape's too); the
+  Node tool added no anchor for a press on a curve between the points it
+  was sampled at, or one away from the press (the nearest point found
+  exactly); a pen path finished by a double-click doubled its last
+  anchor, and an end arrow vanished (the second press counted from the
+  presses, and a head finds its direction past a doubled anchor); the
+  anchor last pressed outlived undo, a change of tool and its own
+  removal, so Delete, Split and Round corners took another (let go of
+  then); Line ends and Line corners were offered for paths alone, though
+  dashes and the corners of rects, polygons and stars wear them (offered
+  there too). Limits: a press with the Node tool on a dashed rect or
+  ellipse makes it a path and moves its dashes; our SVG reader points a
+  start arrow along the chord where the first handle is nought (the
+  reader's own markers); thin curves are picked within their half-width
+  only; a live copy is picked over its whole box; a broken handle pair
+  mirrors again when one is dragged; the Pen cannot make a cusp; anchors
+  are not converted one at a time; there is no Reverse path; stretching a
+  stroked shape stretches its stroke; Offset closes an open path; dashes
+  on a rounded star drift a pixel from SVG and PDF.
   **A fifty-seventh audit (November 2026).** Its check of round 56:
   the PSD mask budget left out the feather's margin, and sixty masks
   feathered by a thousand pixels stopped the engine (counted with it);

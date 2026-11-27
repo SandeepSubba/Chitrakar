@@ -169,6 +169,7 @@ export function ExportDialog({
   fileName,
   hasRegion,
   selectionBounds,
+  pickedIds,
   hasIcc,
   keptRegions,
   keptComps,
@@ -187,6 +188,9 @@ export function ExportDialog({
   hasRegion: boolean;
   /** The picked layers' box, when there is no region but there are layers. */
   selectionBounds: () => [number, number, number, number] | null;
+  /** The picked layers, whose photograph's camera an export of what is
+   * picked carries (not the bottom photograph on the page). */
+  pickedIds: () => number[];
   /** Whether a press profile is loaded — the only way a TIFF can go. */
   hasIcc: boolean;
   /** The regions kept by name, in the order the engine holds them: a
@@ -217,6 +221,9 @@ export function ExportDialog({
     (asked === "comps" && keptComps.length === 0)
       ? "page"
       : asked;
+  /** Layers picked, and only they going out (no region): their own
+   * photograph's camera is what the file carries. */
+  const pickedOnly = area === "selection" && !hasRegion;
   /** The names a file each is written for, when the area is one of the
    * two that write several: the regions, or the comps. */
   const many: string[] = area === "regions" ? keptRegions : area === "comps" ? keptComps : [];
@@ -455,11 +462,16 @@ export function ExportDialog({
         session.set_output_sharpen(0);
         session.set_output_watermark("");
       }
-      const out = format === "jpeg" && prefs.exportCameraData ? session.jpeg_with_capture(bytes) : bytes;
+      const out =
+        format === "jpeg" && prefs.exportCameraData
+          ? pickedOnly
+            ? session.jpeg_with_capture_of(bytes, new Float64Array(pickedIds()))
+            : session.jpeg_with_capture(bytes)
+          : bytes;
       made.set(key, out);
       return out;
     };
-  }, [encodePlain, format, pixels, prefs.exportCameraData, prefs.exportSharpen, prefs.exportWatermark, session]);
+  }, [encodePlain, format, pixels, pickedOnly, pickedIds, prefs.exportCameraData, prefs.exportSharpen, prefs.exportWatermark, session]);
   /** How many layers a Photoshop file draws, each alone over the page. */
   const layerCount = useMemo(() => {
     try {
@@ -470,7 +482,10 @@ export function ExportDialog({
   }, [session]);
   /** The photograph's camera and lens, for the window to say what a JPEG
    * will carry; empty where the page holds no photograph that said. */
-  const cameraSummary = useMemo(() => session.capture_summary(), [session]);
+  const cameraSummary = useMemo(
+    () => (pickedOnly ? session.capture_summary_of(new Float64Array(pickedIds())) : session.capture_summary()),
+    [session, pickedOnly, pickedIds],
+  );
 
   const encodeOne = useCallback((scale: number): Uint8Array => {
     switch (format) {

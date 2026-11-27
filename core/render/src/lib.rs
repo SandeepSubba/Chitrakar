@@ -7685,11 +7685,22 @@ fn marker_pieces(shape: &VectorShape, stroke: &chitrakar_doc::Stroke, out: &mut 
         let (dx, dy) = if out { (h[2], h[3]) } else { (h[0], h[1]) };
         (dx * dx + dy * dy > 1e-12).then(|| [points[i][0] + dx, points[i][1] + dy])
     };
+    // And past an anchor lying on the end itself (a double-click that
+    // put the last one down twice): measured from it, the line had no
+    // direction there and the head was dropped.
+    let apart = |p: [f32; 2], q: [f32; 2]| (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) > 1e-12;
     let into_last = handle(n - 1, false)
         .or_else(|| handle(n - 2, true))
+        .or_else(|| {
+            (0..n - 1)
+                .rev()
+                .map(|i| points[i])
+                .find(|&p| apart(p, points[n - 1]))
+        })
         .unwrap_or(points[n - 2]);
     let out_of_first = handle(0, true)
         .or_else(|| handle(1, false))
+        .or_else(|| (1..n).map(|i| points[i]).find(|&p| apart(p, points[0])))
         .unwrap_or(points[1]);
     // At each end, the way the line is travelling there: into the last
     // point, and out of the first.
@@ -13272,12 +13283,33 @@ pub fn artboard_pixels(
         .max(softening_reach(doc))
         * scale
         * sx.max(sy);
-    let past = if reach.is_finite() && reach > 0.0 {
+    let mut past = if reach.is_finite() && reach > 0.0 {
         ((reach.ceil() as u32).saturating_add(2)).min(1024)
     } else {
         0
     };
     let (w, h) = (pw as u32, ph as u32);
+    // Only where the room for it can be had: asked for blind, the margin
+    // on a frame ten thousand pixels square with a shadow stopped the
+    // engine, where without it the frame had exported. Asked in pieces,
+    // since one request past 2 GB is refused on 32-bit WebAssembly.
+    if past > 0 {
+        let bytes = ((w + 2 * past) as usize)
+            .saturating_mul((h + 2 * past) as usize)
+            .saturating_mul(std::mem::size_of::<chitrakar_color::LinearRgba>() * 2);
+        let mut held: Vec<Vec<u8>> = Vec::new();
+        let mut left = bytes;
+        while left > 0 {
+            let take = left.min(1 << 30);
+            let mut piece: Vec<u8> = Vec::new();
+            if piece.try_reserve_exact(take).is_err() {
+                past = 0;
+                break;
+            }
+            held.push(piece);
+            left -= take;
+        }
+    }
     let fit = Transform {
         a: pw / width,
         d: ph / height,
@@ -15639,28 +15671,31 @@ fn hit_child(
                 if let Some((lx, ly)) = to_local(parent.compose(node.transform), x, y) {
                     let flat = flatten_shape(shape);
                     let shape = flat.as_ref();
-                    let hit = if fill.is_some() || gradient.is_some() {
-                        shape_covers(shape, lx, ly)
-                    } else if let Some(s) = stroke {
-                        // A dashed outline is picked along the whole of
-                        // it: clicking a gap should still catch the line.
-                        let solid = chitrakar_doc::Stroke {
-                            dash: Vec::new(),
-                            dash_offset: 0.0,
-                            ..s.clone()
-                        };
-                        stroke_covers(
-                            shape,
-                            s.width,
-                            stroke_align(shape, s),
-                            &stroke_pieces(shape, &solid),
-                            None,
-                            lx,
-                            ly,
-                        )
-                    } else {
-                        false
-                    };
+                    // The fill, and the border too: a filled shape's
+                    // border outside its fill (an outside border, the outer
+                    // half of a centred one, an open path's stroke) picked
+                    // the layer under it.
+                    let filled =
+                        (fill.is_some() || gradient.is_some()) && shape_covers(shape, lx, ly);
+                    let hit = filled
+                        || stroke.as_ref().is_some_and(|s| {
+                            // A dashed outline is picked along the whole of
+                            // it: clicking a gap should still catch the line.
+                            let solid = chitrakar_doc::Stroke {
+                                dash: Vec::new(),
+                                dash_offset: 0.0,
+                                ..s.clone()
+                            };
+                            stroke_covers(
+                                shape,
+                                s.width,
+                                stroke_align(shape, s),
+                                &stroke_pieces(shape, &solid),
+                                None,
+                                lx,
+                                ly,
+                            )
+                        });
                     if hit {
                         return Ok(Some(child));
                     }
@@ -25955,6 +25990,95 @@ mod tests {
         .unwrap();
         let after = render(&doc).unwrap().get(24, 16).to_srgb8();
         assert_eq!(before, after, "same point of the shape, same colour");
+    }
+
+    /// A line whose last anchor was put down twice still carries its
+    /// head, pointing the way the line goes, as it does without the twin.
+    #[test]
+    fn a_doubled_end_anchor_keeps_its_arrowhead() {
+        let line = |points: Vec<[f32; 2]>| {
+            let mut doc = Document::new(160, 60, ColorMode::Rgb);
+            let n = points.len();
+            let mut node = Node::vector(
+                "line",
+                VectorShape::Path {
+                    points,
+                    closed: false,
+                    smooth: false,
+                    handles: vec![[0.0; 4]; n],
+                    subpaths: Vec::new(),
+                },
+            );
+            node.transform = Transform::translation(20.0, 20.0);
+            if let NodeKind::Vector { stroke, .. } = &mut node.kind {
+                *stroke = Some(chitrakar_doc::Stroke {
+                    color: RED,
+                    width: 4.0,
+                    widths: Vec::new(),
+                    dash: Vec::new(),
+                    dash_offset: 0.0,
+                    cap: Default::default(),
+                    join: Default::default(),
+                    start_marker: Default::default(),
+                    end_marker: chitrakar_doc::Marker::Arrow,
+                    align: None,
+                });
+            }
+            add(&mut doc, Box::new(node));
+            render(&doc).unwrap()
+        };
+        let once = line(vec![[0.0, 0.0], [52.0, 20.0], [104.0, 0.0]]);
+        let twice = line(vec![[0.0, 0.0], [52.0, 20.0], [104.0, 0.0], [104.0, 0.0]]);
+        for y in 0..60 {
+            for x in 0..160 {
+                assert_eq!(
+                    once.get(x, y).to_srgb8(),
+                    twice.get(x, y).to_srgb8(),
+                    "at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    /// A filled shape is picked by its border where the border lies
+    /// outside the fill: an outside border picked the layer under it.
+    #[test]
+    fn a_filled_shapes_outside_border_picks_it() {
+        let mut doc = Document::new(300, 200, ColorMode::Rgb);
+        add(&mut doc, filled_rect("under", 300.0, 200.0, BLUE));
+        let mut top = filled_rect("top", 200.0, 100.0, RED);
+        top.transform = Transform::translation(50.0, 50.0);
+        if let NodeKind::Vector { stroke, .. } = &mut top.kind {
+            *stroke = Some(chitrakar_doc::Stroke {
+                color: BLUE,
+                width: 20.0,
+                widths: Vec::new(),
+                dash: Vec::new(),
+                dash_offset: 0.0,
+                cap: Default::default(),
+                join: Default::default(),
+                start_marker: Default::default(),
+                end_marker: Default::default(),
+                align: Some(chitrakar_doc::StrokeAlign::Outside),
+            });
+        }
+        add(&mut doc, top);
+        let id = *doc.children_of(doc.root()).unwrap().last().unwrap();
+        assert_eq!(
+            hit_test(&doc, 42.0, 100.0).unwrap(),
+            Some(id),
+            "the border, left of the fill"
+        );
+        assert_eq!(
+            hit_test(&doc, 150.0, 42.0).unwrap(),
+            Some(id),
+            "and above it"
+        );
+        assert_ne!(
+            hit_test(&doc, 20.0, 100.0).unwrap(),
+            Some(id),
+            "but not past it"
+        );
     }
 
     #[test]

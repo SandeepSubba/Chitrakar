@@ -4217,7 +4217,14 @@ assert(
     (await page.locator(".panel ul li", { hasText: "shot.png" }).count()) === 1,
     "a dropped image file became a layer named after the file",
   );
-  assert((await canvasPixel(10, 10))[0] > 200, "and its pixels landed at the origin");
+  // The page was chosen in New, so it keeps its size and the picture
+  // lands in the middle of it.
+  const mid = await canvasPixel(300, 200);
+  const corner = await canvasPixel(10, 10);
+  assert(
+    mid[0] > 200 && mid[1] < 60 && !(corner[0] > 200 && corner[1] < 60),
+    `and its pixels landed in the middle of the page it was dropped on (${mid} / ${corner})`,
+  );
   assert(
     (await page.locator(".panel ul li.selected").count()) === 1,
     "and it is picked, ready to move",
@@ -13573,7 +13580,8 @@ assert(
 // 9av. A photograph opened into an empty document takes the page with
 // it, and the view is framed for the page it becomes — otherwise the
 // picture opens showing a corner of itself, which is the thing taking
-// the page's size was supposed to stop.
+// the page's size was supposed to stop. Opened, not placed: a page
+// whose size was chosen in New keeps it under a placed picture (8x5).
 {
   await newDocument(200, 150, "rgb");
   const host = await page.locator(".canvas-host").boundingBox();
@@ -13588,7 +13596,7 @@ assert(
     return c.toDataURL("image/png").split(",")[1];
   });
   await page.setInputFiles(
-    'input[accept^="image/*,"]',
+    'input[accept^=".chitra,"]',
     {
       name: "photograph.png",
       mimeType: "image/png",
@@ -15394,10 +15402,15 @@ assert(
   const place = (name, buffer, mimeType = "") =>
     page.setInputFiles('input[accept^="image/*,"]', { name, mimeType, buffer });
 
-  // A TIFF into an empty page opens it: the page is the picture's shape,
-  // and every corner of it is the picture's colour.
+  // A TIFF opened is a page of its shape, every corner of it the
+  // picture's colour. (Placed on a page chosen in New, it would keep
+  // that page: 8x5.)
   await newDocument(200, 150, "rgb");
-  await place("scan.tif", tiff(80, 20, [200, 30, 30, 255]), "image/tiff");
+  await page.setInputFiles('input[accept^=".chitra,"]', {
+    name: "scan.tif",
+    mimeType: "image/tiff",
+    buffer: tiff(80, 20, [200, 30, 30, 255]),
+  });
   await page.waitForTimeout(500);
   assert((await layerNames()).join() === "scan.tif", `the TIFF is one picture layer (${await layerNames()})`);
   assert(Math.abs((await ratio()) - 4) < 0.05, `and the page took its shape (${(await ratio()).toFixed(2)})`);
@@ -15456,8 +15469,14 @@ assert(
   const pdfFetched = () =>
     page.evaluate(() => performance.getEntriesByType("resource").some((e) => e.name.includes("chitrakar_pdf_in")));
   assert(!(await pdfFetched()), "the PDF reader is not loaded with the editor");
+  // Opened, so the page is the PDF page's (placed on a page chosen in
+  // New, it would keep that page: 8x5).
   await newDocument(200, 150, "rgb");
-  await place("leaflet.pdf", pdf([[200, 100, 1, 0, 0], [100, 100, 0, 0, 1]]), "application/pdf");
+  await page.setInputFiles('input[accept^=".chitra,"]', {
+    name: "leaflet.pdf",
+    mimeType: "application/pdf",
+    buffer: pdf([[200, 100, 1, 0, 0], [100, 100, 0, 0, 1]]),
+  });
   const ask = page.locator('[role="dialog"][aria-label="Place PDF"]');
   await ask.waitFor();
   assert(await pdfFetched(), "and is, once one is");
@@ -15465,7 +15484,7 @@ assert(
   await ask.locator('input[aria-label="Resolution"]').fill("144");
   const size = await ask.locator('[aria-label="Page size"]').textContent();
   assert(size.includes("200 × 200 px"), `the size it comes to is said (${size})`);
-  await ask.locator('button:text-is("Place")').click();
+  await ask.locator('button:text-is("Open")').click();
   await page.waitForTimeout(600);
   assert((await layerNames()).join() === "leaflet.pdf — page 2", `the page asked for is the layer (${await layerNames()})`);
   assert(Math.abs((await ratio()) - 1) < 0.05, "a square page for a square page");
@@ -15866,7 +15885,10 @@ assert(
   await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
   await settle();
   assert((await layerNames()).join() === "card.dng", `placed, it is one picture (${await layerNames()})`);
-  const placedWarm = await canvasPixel(16, 16);
+  // The page was chosen in New, so it keeps its 200 × 150 and the
+  // 64 × 32 photograph lands in the middle of it, at (68, 59).
+  const onCard = (x, y) => [68 + x, 59 + y];
+  const placedWarm = await canvasPixel(...onCard(16, 16));
   assert(placedWarm[0] > placedWarm[2] * 1.2, `developed in full as the window showed it (${placedWarm})`);
   const again = page.locator('button.develop-again');
   assert(await again.isVisible(), "a developed picture offers to be developed again");
@@ -15884,7 +15906,7 @@ assert(
   await win.locator('button:text-is("Develop")').click();
   await page.waitForFunction(() => !document.querySelector('[role="dialog"][aria-label="Develop"]') && !document.querySelector('[aria-label="Reading"]'));
   await settle();
-  const cool = await canvasPixel(16, 16);
+  const cool = await canvasPixel(...onCard(16, 16));
   assert(cool[2] > cool[0] * 1.2, `developed again, cooler (${cool})`);
   // Developed on every core: the page is cross-origin isolated (as the
   // harness, the dev server, the shell and the service worker make it),
@@ -15902,7 +15924,7 @@ assert(
   assert((await page.locator(".history").innerText()).includes("Develop"), "history says it was developed");
   await page.keyboard.press("Control+z");
   await settle();
-  const back = await canvasPixel(16, 16);
+  const back = await canvasPixel(...onCard(16, 16));
   assert(back[0] > back[2] * 1.2, `one undo takes the new development back (${back})`);
   // From the Layer menu too.
   await (await menuItem("Layer", "Develop again…")).click();
@@ -16351,7 +16373,7 @@ assert(
   assert(psd.subarray(0, 4).toString() === "8BPS", "and it is one");
   // Opened again, it is the page's layers, the top one still multiplied.
   await newDocument(200, 150, "rgb");
-  await page.setInputFiles('input[accept^="image/*,"]', { name: "back.psd", mimeType: "", buffer: psd });
+  await page.setInputFiles('input[accept^=".chitra,"]', { name: "back.psd", mimeType: "", buffer: psd });
   await page.waitForTimeout(600);
   assert((await names()).join() === before.join(), `the layers came back (${await names()} against ${before})`);
   assert((await masked()) === 1, "and the mask with its layer");

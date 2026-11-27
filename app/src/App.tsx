@@ -2761,6 +2761,24 @@ export function App() {
   const erasing = tool === "Eraser";
   const painting = tool === "Paint" || tool === "Eraser";
   const cloning = tool === "Clone" || tool === "Heal";
+  // A tool picked on the rail leaves the rail where it was: picking Crop
+  // brought its ratio in at the rail's end and the rail scrolled, so the
+  // second click of a double-click landed on the Eyedropper.
+  const railPressed = useRef<number | null>(null);
+  useEffect(() => {
+    const rail = railRef.current;
+    const was = railPressed.current;
+    railPressed.current = null;
+    if (!rail || was === null || window.matchMedia("(max-width: 640px)").matches) return;
+    const hold = () => {
+      if (rail.scrollTop !== was) rail.scrollTop = was;
+    };
+    hold();
+    requestAnimationFrame(() => {
+      hold();
+      requestAnimationFrame(hold);
+    });
+  }, [tool]);
   // On a phone the rail is a row that scrolls, and what a tool brings
   // with it — a paint tool's width and edge — comes at its far end, past
   // the edge of the screen. Picking such a tool brings them into sight.
@@ -2938,6 +2956,9 @@ export function App() {
     () => boundChords(prefs.commandKeys, prefs.menuKeys),
     [prefs.commandKeys, prefs.menuKeys],
   );
+  /** The chords as they are now, for handlers made before a rebinding. */
+  const chordsRef = useRef(chords);
+  chordsRef.current = chords;
   textChords = new Set(
     (["undo", "redo", "select-all", "cut", "copy", "paste"] as CommandId[])
       .map((id) => chords.of[id])
@@ -3744,10 +3765,13 @@ export function App() {
   }, []);
 
   const newDocument = useCallback(
-    (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72) => {
+    (useCmyk: boolean, width = DOC_WIDTH, height = DOC_HEIGHT, dpi = 72, chosen = false) => {
       // A document asked for is something done, and kept.
       untouchedStart.current = false;
       const s = guardSession(new WasmSession(width, height, useCmyk));
+      // A page whose size was chosen in the New window is the page: a
+      // photograph placed on it is placed, not opened in its place.
+      if (chosen) s.keep_page();
       fitSession(s, width, height);
       s.set_dpi(dpi);
       setDocDpi(dpi);
@@ -3817,6 +3841,9 @@ export function App() {
    * back with it — and drop it when that layer is gone. */
   const followHistory = useCallback(
     (s: WasmSession) => {
+      // The anchor last taken hold of is let go of: undone or redone, it
+      // was another anchor by then, and Delete or Split took that one.
+      pickedAnchorRef.current = null;
       const alive = new Set(
         (JSON.parse(s.layers_json()) as LayerInfo[]).map((l) => l.id as NodeId),
       );
@@ -4554,6 +4581,8 @@ export function App() {
   /** The text block being typed was added from the menus, so the focus
    * goes to its row when the typing is done. */
   const textFromKeys = useRef(false);
+  /** When the Pen was last pressed, to know a double-click's second press. */
+  const penPressAt = useRef<number | null>(null);
   /** Whether the last thing the person did was press a key rather than
    * a pointer: the menus are reached both ways, and only a block made
    * from the keyboard hands its focus to its row — made with the mouse,
@@ -4879,6 +4908,10 @@ export function App() {
       const typedBracket =
         (e.key === "[" || e.key === "]") &&
         !e.metaKey &&
+        // Unless the person has given that chord to a command or a menu
+        // row: Ctrl+Alt+[ bound to Send backward sized the brush.
+        !chords.byChord[chordFromEvent(e)] &&
+        !chords.menuByChord[chordFromEvent(e)] &&
         (e.getModifierState?.("AltGraph") || (e.ctrlKey && e.altKey) || (onAMac() && e.altKey && !e.ctrlKey));
       if (!typing && ((!e.metaKey && !e.ctrlKey && !e.altKey) || typedBracket)) {
         // Shift on a digit types its symbol (shift+5 is %), so a tool
@@ -7110,8 +7143,14 @@ export function App() {
             : snapPoint(x, y, ...snapTargets([]), e.ctrlKey || e.metaKey);
         // The second press of a double-click lands where the first did:
         // it finishes the path (onCanvasDoubleClick) rather than adding
-        // an anchor on top of the last one.
-        if (last && e.detail >= 2 && Math.hypot(ax - last[0], ay - last[1]) < 4 / view.zoom) {
+        // an anchor on top of the last one. Counted from the presses
+        // themselves: a pointer press says 0 for its click count in
+        // Chromium, and every double-click doubled the last anchor (and
+        // an arrow at that end vanished).
+        const again =
+          e.detail >= 2 || (penPressAt.current !== null && e.timeStamp - penPressAt.current < 500);
+        penPressAt.current = e.timeStamp;
+        if (last && again && Math.hypot(ax - last[0], ay - last[1]) < 4 / view.zoom) {
           return;
         }
         setPenPoints((pts) => [...pts, [ax, ay]]);
@@ -9433,8 +9472,12 @@ export function App() {
     // Escape takes the drag back, as it takes back a drag on the page:
     // it let go of the picked layers and left the line standing, and the
     // release dropped the row anyway.
+    // And so do undo and redo, as on the page: Ctrl+Z took back the step
+    // before the drag, and the release still dropped the row.
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key !== "Escape" || !drag.active) return;
+      if (!drag.active) return;
+      const fired = chordsRef.current.byChord[chordFromEvent(ev)];
+      if (ev.key !== "Escape" && fired !== "undo" && fired !== "redo") return;
       ev.preventDefault();
       ev.stopPropagation();
       onCancel();
@@ -9622,14 +9665,25 @@ export function App() {
   useEffect(() => {
     if (!editing) return;
     const host = hostRef.current;
+    // A shift asked for and not yet drawn: the window's resize and the
+    // visual viewport's both come for one keyboard, and each measured
+    // the block where it stood before the other's shift, so it moved
+    // twice as far — under the bar, or off the top on a turned phone.
+    let owed = { x: 0, y: 0 };
     const keepInSight = () => {
       if (host && (host.scrollTop !== 0 || host.scrollLeft !== 0)) {
         host.scrollTop = 0;
         host.scrollLeft = 0;
       }
-      const box = inlineRef.current?.getBoundingClientRect();
+      const drawn = inlineRef.current?.getBoundingClientRect();
       const room = host?.getBoundingClientRect();
-      if (!box || !room) return;
+      if (!drawn || !room) return;
+      const box = {
+        top: drawn.top + owed.y,
+        bottom: drawn.bottom + owed.y,
+        left: drawn.left + owed.x,
+        right: drawn.right + owed.x,
+      };
       const seen = window.visualViewport;
       let bottom = Math.min(room.bottom, seen ? seen.offsetTop + seen.height : window.innerHeight);
       // On a phone the rail lies along the bottom, over the canvas.
@@ -9651,7 +9705,25 @@ export function App() {
           : box.top < top + margin
             ? top + margin - box.top
             : 0;
-      if (by !== 0) setView((v) => ({ ...v, y: v.y + by }));
+      // And sideways: a long caption ran past a phone's edge with the
+      // caret off screen. Its end is kept in sight, and its start when
+      // it is wider than the canvas.
+      const right = Math.min(room.right, seen ? seen.offsetLeft + seen.width : window.innerWidth);
+      const bx =
+        box.right > right - margin && box.right - box.left < right - room.left - 2 * margin
+          ? right - margin - box.right
+          : box.left < room.left + margin
+            ? room.left + margin - box.left
+            : 0;
+      if (by === 0 && bx === 0) return;
+      owed = { x: owed.x + bx, y: owed.y + by };
+      setView((v) => ({ ...v, x: v.x + bx, y: v.y + by }));
+      // Drawn by two frames on: what is owed is in the box by then.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          owed = { x: owed.x - bx, y: owed.y - by };
+        }),
+      );
     };
     const settle = () => requestAnimationFrame(keepInSight);
     window.visualViewport?.addEventListener("resize", settle);
@@ -10762,6 +10834,11 @@ export function App() {
    * from these, so renormalization never accumulates drift). */
   /** The anchor last pressed, on which layer: where Cut the path cuts. */
   const pickedAnchorRef = useRef<{ id: number; idx: number } | null>(null);
+  // Nor is it held past the Node tool: Round corners from the Move tool
+  // rounded the one corner last dragged instead of them all.
+  useEffect(() => {
+    if (tool !== "Node") pickedAnchorRef.current = null;
+  }, [tool]);
 
   const anchorDragRef = useRef<{
     idx: number;
@@ -10805,6 +10882,9 @@ export function App() {
         alert(`Remove anchor: ${said(err)}`);
         return;
       }
+      // Taken off, it is no anchor to cut at or take off again: Delete
+      // after it took the next one along.
+      pickedAnchorRef.current = null;
       refresh(session);
       return;
     }
@@ -13172,7 +13252,7 @@ export function App() {
           : /outside the bounds/i.test(String(err))
             ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: the file is damaged (its parts point outside it).`
             : // No room for it is said as no room, not as a damaged file.
-              /not enough memory left/i.test(String(err))
+              /not enough memory left|capacity overflow|out of memory/i.test(String(err))
               ? `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: ${said(err)}.`
               : `Could not ${next.undoOpen ? "open" : "place"} ${next.name}: it may be damaged, or from a camera this editor does not know yet.\n\n(${err})`,
       );
@@ -15665,7 +15745,6 @@ export function App() {
           name={pdfAsk.name}
           sizes={pdfAsk.sizes}
           opening={!!pdfAsk.opening}
-          fills={!!pdfAsk.fills}
           onCancel={() => {
             setPdfAsk(null);
             pdfUndoOpen.current?.();
@@ -15703,6 +15782,7 @@ export function App() {
           write={(files) => writeFiles("Export", files, docPath)}
           share={canShareFiles() ? (files) => shareFiles(fileName(), files) : undefined}
           hasRegion={antRings.length > 0}
+          pickedIds={() => selectionSet}
           selectionBounds={() => {
             // A region is what leaves when there is one, so the box the
             // engine exports it in is what the window should be sizing
@@ -15768,7 +15848,7 @@ export function App() {
           onCancel={() => setNewDocOpen(false)}
           onCreate={(w, h, useCmyk, dpi) => {
             setNewDocOpen(false);
-            newDocument(useCmyk, w, h, dpi);
+            newDocument(useCmyk, w, h, dpi, true);
           }}
         />
       )}
@@ -15776,6 +15856,9 @@ export function App() {
         <nav
           ref={railRef}
           className={floating ? "toolbar floating" : "toolbar"}
+          onPointerDownCapture={(e) => {
+            railPressed.current = e.currentTarget.scrollTop;
+          }}
           aria-label="Tools"
           // As tall as the window leaves below where it was put: held to
           // the window's height, it ran past the bottom by its own top.
@@ -17977,7 +18060,7 @@ export function App() {
               <button
                 onClick={() => deleteSelected()}
                 disabled={selected === null}
-                title="Delete selected layer (Del)"
+                title={`Delete selected layer (${onAMac() ? "⌫" : "Del"})`}
                 aria-label="Delete selected layer"
               >
                 <Icon name="trash" size={16} />
@@ -20725,7 +20808,6 @@ function PdfDialog({
   name,
   sizes,
   opening,
-  fills,
   onCancel,
   onPlace,
 }: {
@@ -20733,9 +20815,6 @@ function PdfDialog({
   sizes: [number, number][];
   /** Opened as a document, not placed into one: said with its own verb. */
   opening: boolean;
-  /** Placed on a page with nothing on it, which takes its size as an
-   * opened one does — and is held to what a document can be the same. */
-  fills: boolean;
   onCancel: () => void;
   onPlace: (page: number, dpi: number) => void;
 }) {
@@ -20766,7 +20845,10 @@ function PdfDialog({
   // Only a page opened is a document of its own, held to what a document
   // can be; one placed comes in whole and is scaled onto the page, and
   // was promised "taken down" all the same.
-  const down = opening || fills ? Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph))) : 1;
+  // Placed or opened alike: the engine takes any page past a hundred
+  // megapixels down before it keeps it, and a page placed beside other
+  // layers was promised at its whole size and came in smaller.
+  const down = Math.min(1, Math.sqrt(100e6 / Math.max(1, pw * ph)));
   const [lw, lh] = [Math.max(1, Math.floor(pw * down)), Math.max(1, Math.floor(ph * down))];
   const ok = page >= 1 && page <= sizes.length && dpi > 0;
   const go = () => ok && onPlace(page - 1, dpi);
@@ -24455,18 +24537,24 @@ function KindProps({
               </select>
             </label>
           ))}
-        {/* Where a line stops and how it turns a corner. A rect's and an
-            ellipse's stroke is a band lying inside a closed outline: it
-            never stops, and its corners are the shape's own — so neither
-            question arises and neither is asked. */}
+        {/* Where a line stops and how it turns a corner: for a path, for
+            any dashed border (each dash has two ends), and for the corners
+            of a rect, a polygon or a star. Asked of paths alone, every
+            dashed rect border and every stroked star was round for good. */}
         {v.stroke &&
-          "Path" in v.shape &&
           (
             [
               ["Ends", "cap", ["Butt", "Round", "Square"]],
               ["Corners", "join", ["Miter", "Round", "Bevel"]],
             ] as const
-          ).map(([label, key, choices]) => (
+          )
+            .filter(([, key]) =>
+              "Path" in v.shape ||
+              (key === "cap"
+                ? (v.stroke!.dash ?? []).length > 0
+                : "Polygon" in v.shape || ("Rect" in v.shape && v.shape.Rect.radius <= 0)),
+            )
+            .map(([label, key, choices]) => (
             <label className="row" key={key}>
               {label}
               <select

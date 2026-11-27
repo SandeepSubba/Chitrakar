@@ -767,6 +767,16 @@ pub struct Session {
     /// as: said as 0, a page never saved read as saved.
     forgotten: u64,
     redo: Vec<HistoryEntry>,
+    /// The redo list the newest step cleared, and that step's serial:
+    /// put back if that step is taken back (`take_back`), since a step
+    /// that was only the start of something let go of — a stroke's
+    /// layer, an alt-drag's copy — should leave nothing behind, and it
+    /// left the redo list empty.
+    cleared_redo: Option<(u64, Vec<HistoryEntry>)>,
+    /// A page the person asked for, at a size they chose (File › New):
+    /// the first picture placed on it is placed, not opened in its place
+    /// at its own size, as it is on the page the editor starts with.
+    page_kept: bool,
     cache: Option<Surface>,
     /// Reused scratch surface for padded region renders under filters.
     scratch: Option<Surface>,
@@ -946,6 +956,8 @@ impl Session {
             undo: Vec::new(),
             forgotten: 0,
             redo: Vec::new(),
+            cleared_redo: None,
+            page_kept: false,
             cache: None,
             scratch: None,
             stale: None,
@@ -1642,7 +1654,7 @@ impl Session {
             label,
             serial,
         });
-        self.redo.clear();
+        self.clear_redo_for(serial);
         self.hold_history_in_memory();
         Ok(true)
     }
@@ -1843,7 +1855,7 @@ impl Session {
             label,
             serial,
         });
-        self.redo.clear();
+        self.clear_redo_for(serial);
         self.hold_history_in_memory();
         Ok(())
     }
@@ -1950,7 +1962,7 @@ impl Session {
                     label,
                     serial,
                 });
-                self.redo.clear();
+                self.clear_redo_for(serial);
                 true
             }
             None => false,
@@ -2079,6 +2091,11 @@ impl Session {
         }
     }
 
+    /// Say the page is one the person chose (`page_kept`).
+    pub fn keep_page(&mut self) {
+        self.page_kept = true;
+    }
+
     /// Undo the newest step and forget it, rather than keeping it to be
     /// redone: for a step that was the start of something let go of —
     /// the copy an alt-drag began by making, a stroke's layer, a text
@@ -2086,11 +2103,26 @@ impl Session {
     /// in the redo list, and redoing brought back a copy lying on its
     /// original, an empty layer or a block reading "Text".
     pub fn take_back(&mut self) -> Result<bool, EngineError> {
+        let newest = self.undo.last().map(|e| e.serial);
         if !self.undo()? {
             return Ok(false);
         }
         self.redo.pop();
+        // And what it cleared is as it was: Escape on the first stroke of
+        // a paint layer left nothing to redo where there had been steps.
+        if let (Some(serial), Some((cleared, _))) = (newest, &self.cleared_redo) {
+            if *cleared == serial && self.redo.is_empty() {
+                self.redo = self.cleared_redo.take().map(|(_, r)| r).unwrap_or_default();
+            }
+        }
         Ok(true)
+    }
+
+    /// The redo list let go of for the step `serial`, kept aside until
+    /// another step comes, for `take_back` to put back.
+    fn clear_redo_for(&mut self, serial: u64) {
+        let cleared = std::mem::take(&mut self.redo);
+        self.cleared_redo = Some((serial, cleared));
     }
 
     pub fn redo(&mut self) -> Result<bool, EngineError> {
@@ -5487,6 +5519,28 @@ impl Session {
                 }
             }
         }
+        // Then narrowed round the nearest sample, so the anchor goes where
+        // the press was: read off the samples alone, a press on the curve
+        // between two of them was "no outline near", or an anchor three
+        // pixels along from it.
+        {
+            let j = (at + 1) % points.len();
+            let dist = |t: f32| {
+                let p = cubic_at(points[at], hs[at], points[j], hs[j], t);
+                (p[0] - lx).powi(2) + (p[1] - ly).powi(2)
+            };
+            let mut step = 1.0 / STEPS as f32;
+            for _ in 0..24 {
+                step *= 0.5;
+                for t in [best_t - step, best_t + step] {
+                    let t = t.clamp(0.0, 1.0);
+                    let d = dist(t);
+                    if d < best {
+                        (best, best_t) = (d, t);
+                    }
+                }
+            }
+        }
         if best.sqrt() > within.max(0.0) {
             return Err(EngineError::BadCommand("no outline near that point".into()));
         }
@@ -7453,7 +7507,15 @@ impl Session {
         // inside out past the page's edge, an ellipse touching it, edges
         // along edges an earlier combine nudged — each was once said to be
         // uncombinable, or answered with the wrong region.
-        let traced = chitrakar_render::boolean::combine_or_nudge(&want, &have, op)
+        // Outlines of tens of thousands of points — a wand's region on a
+        // photograph — go straight to the page's pixels, where they were
+        // drawn from: the outlines' combine was far from linear, and a
+        // shift-click on a 12-megapixel sky held the page a minute and a
+        // half.
+        let points: usize = want.iter().chain(have.iter()).map(|r| r.len()).sum();
+        let traced = (points <= 20_000)
+            .then(|| chitrakar_render::boolean::combine_or_nudge(&want, &have, op))
+            .flatten()
             .filter(|rings| chitrakar_render::boolean::agrees(&want, &have, rings, op));
         let combined = match traced {
             Some(rings) => rings,
@@ -8904,27 +8966,45 @@ impl Session {
             Some(id) => Some(self.layer_inside(id)?),
             None => None,
         };
-        let mut rgba = Vec::with_capacity((mw * mh * 4) as usize);
+        // Laid over the page smoothly, at up to 4096 pixels along its
+        // longer side: kept at the model's 320 and read nearest, the edge
+        // was a staircase of blocks five to nineteen pixels wide, with a
+        // fringe along every step.
+        let k = (4096.0 / w.max(h) as f32).min(1.0);
+        let (tw, th) = (
+            ((w as f32 * k).round() as u32).max(1),
+            ((h as f32 * k).round() as u32).max(1),
+        );
+        let at = |x: i64, y: i64| {
+            let (x, y) = (x.clamp(0, mw as i64 - 1), y.clamp(0, mh as i64 - 1));
+            matte[(y as u32 * mw + x as u32) as usize] as f32
+        };
+        let mut rgba = Vec::with_capacity((tw * th * 4) as usize);
         let mut any = false;
-        for j in 0..mh {
-            for i in 0..mw {
-                let mut v = matte[(j * mw + i) as usize];
+        for j in 0..th {
+            let fy = (j as f32 + 0.5) * mh as f32 / th as f32 - 0.5;
+            let (y0, ty) = (fy.floor() as i64, fy - fy.floor());
+            for i in 0..tw {
+                let fx = (i as f32 + 0.5) * mw as f32 / tw as f32 - 0.5;
+                let (x0, tx) = (fx.floor() as i64, fx - fx.floor());
+                let top = at(x0, y0) * (1.0 - tx) + at(x0 + 1, y0) * tx;
+                let bottom = at(x0, y0 + 1) * (1.0 - tx) + at(x0 + 1, y0 + 1) * tx;
+                let mut v = (top * (1.0 - ty) + bottom * ty) / 255.0;
                 if let Some(hold) = &hold {
-                    // The matte's own grid against the page's: nearest,
-                    // since this is a coverage and not a picture, and a
-                    // blend between covered and not is neither.
-                    let x = ((i as f32 + 0.5) * w as f32 / mw as f32) as u32;
-                    let y = ((j as f32 + 0.5) * h as f32 / mh as f32) as u32;
+                    let x = ((i as f32 + 0.5) * w as f32 / tw as f32) as u32;
+                    let y = ((j as f32 + 0.5) * h as f32 / th as f32) as u32;
                     if x >= w || y >= h || !hold[(y * w + x) as usize] {
-                        v = 0;
+                        v = 0.0;
                     }
                 }
-                if v >= 128 {
+                if v >= 0.5 {
                     any = true;
                 }
-                // Coverage is luminance times alpha, so the grey carries
-                // it and the alpha stays out of the way.
-                rgba.extend_from_slice(&[v, v, v, 255]);
+                // Coverage is read as linear luminance, so the matte's
+                // fraction is stored encoded, as a PSD's mask is: stored as
+                // it came, a soft edge at half showed a fifth.
+                let g = chitrakar_color::linear_to_srgb8(v.clamp(0.0, 1.0));
+                rgba.extend_from_slice(&[g, g, g, 255]);
             }
         }
         if !any {
@@ -8932,6 +9012,7 @@ impl Session {
                 "that matte picks out nothing on the page".into(),
             ));
         }
+        let (mw, mh) = (tw, th);
         let resource_id = self.doc.add_resource(mw, mh, rgba);
         let mask = chitrakar_doc::Mask {
             kind: chitrakar_doc::MaskKind::Raster {
@@ -12017,10 +12098,42 @@ impl Session {
         find(&self.doc, self.doc.root())
     }
 
+    /// How the photograph among `ids` (each and what is inside it) was
+    /// taken: for an export of what is picked, which carried the camera
+    /// of the bottom photograph on the page, picked or not. None where
+    /// nothing picked holds a photograph that said.
+    pub fn capture_among(&self, ids: &[NodeId]) -> Option<chitrakar_doc::Capture> {
+        fn find(doc: &Document, id: NodeId) -> Option<chitrakar_doc::Capture> {
+            let node = doc.node(id).ok()?;
+            if !node.visible {
+                return None;
+            }
+            if let NodeKind::Raster(r) = &node.kind {
+                if let Some(c) = doc
+                    .resource(&r.resource_id)
+                    .and_then(|res| res.capture.clone())
+                {
+                    return Some(c);
+                }
+            }
+            doc.children_of(id).ok()?.iter().find_map(|&c| find(doc, c))
+        }
+        ids.iter().find_map(|&id| find(&self.doc, id))
+    }
+
     /// A JPEG made from the page, carrying how its photograph was taken
     /// (`capture`) as its EXIF; as it was where there is none to carry.
     pub fn jpeg_with_capture(&self, jpeg: &[u8]) -> Vec<u8> {
         match self.capture() {
+            Some(c) => chitrakar_codecs::exif::with_capture(jpeg, &c),
+            None => jpeg.to_vec(),
+        }
+    }
+
+    /// `jpeg_with_capture` for an export of what is picked: the camera
+    /// of the photograph among `ids` (`capture_among`), or none.
+    pub fn jpeg_with_capture_of(&self, jpeg: &[u8], ids: &[NodeId]) -> Vec<u8> {
+        match self.capture_among(ids) {
             Some(c) => chitrakar_codecs::exif::with_capture(jpeg, &c),
             None => jpeg.to_vec(),
         }
@@ -12757,7 +12870,8 @@ impl Session {
         // page takes the picture's own size. Nothing is disturbed by it,
         // since there was nothing there — which is exactly the condition
         // being asked, rather than "the page looks empty".
-        let opening = index == 0 && self.undo.is_empty() && (width, height) != (pw, ph);
+        let opening =
+            index == 0 && self.undo.is_empty() && !self.page_kept && (width, height) != (pw, ph);
         // A picture larger than a page can be — a hundred-megapixel
         // camera's — opens on the largest page that can, in its own
         // proportions, taken down to fill it, and says so. It opened on
@@ -12888,7 +13002,8 @@ impl Session {
             imported.width.round() as u32,
             imported.height.round() as u32,
         );
-        let opening = index == 0 && self.undo.is_empty() && width > 0 && height > 0;
+        let opening =
+            index == 0 && self.undo.is_empty() && !self.page_kept && width > 0 && height > 0;
         // A drawing larger than a page can be is taken down to the
         // largest page that holds it, as a picture is, and the open says
         // so: it opened on the page there was, mostly off it, without a
@@ -12981,8 +13096,10 @@ impl Session {
         let root = self.doc.root();
         let index = self.doc.children_of(root)?.len();
         let (pw, ph) = (self.doc.meta.width, self.doc.meta.height);
-        let opening =
-            index == 0 && self.undo.is_empty() && chitrakar_doc::canvas_fits(width, height);
+        let opening = index == 0
+            && self.undo.is_empty()
+            && !self.page_kept
+            && chitrakar_doc::canvas_fits(width, height);
         let first = self.doc.peek_next_id();
         let mut cmds = Vec::new();
         if opening {
@@ -13318,9 +13435,19 @@ impl Session {
         // it. Cut to the tight box of what the layer draws, grown by as
         // far as any effect in the document reaches (both hold all of
         // it, so what they share does).
+        // Only under a turned group, and never round text, whose letters
+        // hang past the box they are set in: cut to it, the hook of a j
+        // was cut off an export of what is picked.
+        let turned = {
+            let t = chitrakar_render::ancestor_space(&self.doc, id);
+            t.b.abs() > 1e-6 || t.c.abs() > 1e-6
+        };
+        let tight = turned && !self.holds_text(id);
         let bounds = match (
             bounds,
-            chitrakar_render::node_visual_bounds(&self.doc, id).ok(),
+            tight
+                .then(|| chitrakar_render::node_visual_bounds(&self.doc, id).ok())
+                .flatten(),
         ) {
             (Bounds::Rect(a0, b0, a1, b1), Some(Bounds::Rect(x0, y0, x1, y1))) => {
                 let t = chitrakar_render::ancestor_space(&self.doc, id)
@@ -13361,6 +13488,18 @@ impl Session {
             ]),
             Bounds::Rect(x0, y0, x1, y1) => Some([x0, y0, x1 - x0, y1 - y0]),
         }
+    }
+
+    /// Whether a layer is text, or holds some.
+    fn holds_text(&self, id: NodeId) -> bool {
+        let Ok(node) = self.doc.node(id) else {
+            return false;
+        };
+        matches!(node.kind, NodeKind::Text(_))
+            || self
+                .doc
+                .children_of(id)
+                .is_ok_and(|c| c.iter().any(|&k| self.holds_text(k)))
     }
 
     /// The transform carrying a node's parent space into document space —
@@ -16633,6 +16772,104 @@ mod tests {
         assert_eq!(held.document().node(rect).unwrap().transform.e, 0.0);
         // And the session itself still shows the drag.
         assert_eq!(s.document().node(rect).unwrap().transform.e, 90.0);
+    }
+
+    /// A press exactly on a curve, between the points it is sampled at,
+    /// adds an anchor there and nowhere else.
+    #[test]
+    fn an_anchor_goes_where_the_curve_is_pressed() {
+        let mut s = Session::new(400, 400, chitrakar_color::ColorMode::Rgb);
+        let root = s.document().root();
+        let (a, b) = ([20.0f32, 250.0], [380.0f32, 250.0]);
+        let (ha, hb) = ([0.0f32, 0.0, 80.0, -240.0], [-80.0f32, -240.0, 0.0, 0.0]);
+        let node = chitrakar_doc::Node::vector(
+            "curve",
+            VectorShape::Path {
+                points: vec![a, b],
+                closed: false,
+                smooth: false,
+                handles: vec![ha, hb],
+                subpaths: Vec::new(),
+            },
+        );
+        s.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(node),
+        })
+        .unwrap();
+        let id = s.document().children_of(root).unwrap()[0];
+        for t in [0.1f32, 0.3, 0.45] {
+            let p = cubic_at(a, ha, b, hb, t);
+            let at = s.insert_anchor(id, p[0], p[1], 1.0).unwrap();
+            let node = s.document().node(id).unwrap();
+            let NodeKind::Vector {
+                shape: VectorShape::Path { points, .. },
+                ..
+            } = &node.kind
+            else {
+                unreachable!()
+            };
+            // Where it is on the page: the points are kept from the path's
+            // own corner, the transform carrying them there.
+            let (l, m) = (points[at], node.transform);
+            let q = [m.a * l[0] + m.c * l[1] + m.e, m.b * l[0] + m.d * l[1] + m.f];
+            assert!(
+                (q[0] - p[0]).hypot(q[1] - p[1]) < 0.05,
+                "at {t}: {q:?} for {p:?}"
+            );
+            assert!(s.undo().unwrap());
+        }
+    }
+
+    /// A page made in the New window at a size the person chose keeps
+    /// that size when the first photograph is placed on it, where the
+    /// page the editor starts with opens the photograph at its own.
+    #[test]
+    fn a_chosen_page_keeps_its_size_under_the_first_picture() {
+        let png = chitrakar_codecs::encode_png(40, 30, &vec![200u8; 40 * 30 * 4]).unwrap();
+        let mut chosen = Session::new(248, 350, chitrakar_color::ColorMode::Rgb);
+        chosen.keep_page();
+        chosen.place_image(&png, "photo.png").unwrap();
+        assert_eq!(
+            (chosen.document().meta.width, chosen.document().meta.height),
+            (248, 350)
+        );
+        assert_eq!(chosen.history_labels().0, vec!["Add photo.png".to_string()]);
+        let mut first = Session::new(248, 350, chitrakar_color::ColorMode::Rgb);
+        first.place_image(&png, "photo.png").unwrap();
+        assert_eq!(
+            (first.document().meta.width, first.document().meta.height),
+            (40, 30)
+        );
+    }
+
+    /// A step taken back leaves the redo list as it found it: Escape on
+    /// the first stroke of a paint layer took the layer back and left
+    /// nothing to redo where the step undone before it had been.
+    #[test]
+    fn a_step_taken_back_gives_the_redo_list_back() {
+        let mut s = Session::new(100, 100, chitrakar_color::ColorMode::Rgb);
+        add_rect(&mut s, "A", 10.0, 10.0);
+        assert!(s.undo().unwrap());
+        let (_, future) = s.history_labels();
+        assert_eq!(future.len(), 1);
+        add_rect(&mut s, "B", 10.0, 10.0);
+        assert!(
+            s.history_labels().1.is_empty(),
+            "a new step clears what was undone"
+        );
+        assert!(s.take_back().unwrap());
+        assert_eq!(
+            s.history_labels().1,
+            future,
+            "and taking it back puts it back"
+        );
+        assert!(s.redo().unwrap());
+        // A plain undo of a new step leaves only that step to redo.
+        add_rect(&mut s, "C", 10.0, 10.0);
+        assert!(s.undo().unwrap());
+        assert_eq!(s.history_labels().1.len(), 1);
     }
 
     /// A layer standing upright inside a turned group is exported (and
@@ -28168,6 +28405,44 @@ mod tests {
             .is_empty());
         many.redo().unwrap();
         assert_eq!(many.transform_of(first).unwrap().e, 1.0);
+    }
+
+    /// A model's small matte is laid over the page smoothly and kept as
+    /// the coverage it says: read nearest at its own 320 pixels the edge
+    /// was a staircase, and its greys read as encoded made a half a fifth.
+    #[test]
+    fn a_matte_is_smooth_over_the_page_and_a_half_is_a_half() {
+        let mut session = Session::new(400, 300, ColorMode::Rgb);
+        // Left half picked, right half not, and a half-grey column between.
+        let matte = [255u8, 128, 0, 255, 128, 0];
+        session
+            .pick_matte(&matte, 3, 2, None, 0.0, "replace")
+            .unwrap();
+        let sel = session.document().selection().unwrap().clone();
+        let chitrakar_doc::MaskKind::Raster {
+            resource_id,
+            width,
+            height,
+            ..
+        } = sel.kind
+        else {
+            panic!("a raster mask")
+        };
+        assert_eq!((width, height), (400, 300), "at the page's own size");
+        let res = session.document().resource(&resource_id).unwrap();
+        let grey = |x: u32| res.rgba8[((150 * width + x) * 4) as usize];
+        let middle = chitrakar_color::srgb_to_linear(grey(200) as f32 / 255.0);
+        assert!(
+            (middle - 128.0 / 255.0).abs() < 0.02,
+            "half is half: {middle}"
+        );
+        // And smooth: no step in coverage of more than a few hundredths
+        // between neighbours (the model's own pixels are 133 apart here).
+        let lin = |x: u32| chitrakar_color::srgb_to_linear(grey(x) as f32 / 255.0);
+        let step = (1..399)
+            .map(|x| (lin(x) - lin(x - 1)).abs())
+            .fold(0.0f32, f32::max);
+        assert!(step < 0.02, "a step of {step} between neighbours");
     }
 
     /// A matte handed in by something that looked at the picture.

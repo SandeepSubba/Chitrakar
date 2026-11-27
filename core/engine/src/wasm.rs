@@ -1185,23 +1185,29 @@ impl WasmSession {
         self.inner.jpeg_with_capture(jpeg)
     }
 
+    /// The page is one the person chose in the New window: the first
+    /// picture placed on it is placed, not opened in its place.
+    pub fn keep_page(&mut self) {
+        self.inner.keep_page();
+    }
+
+    /// `jpeg_with_capture` for an export of what is picked: the camera
+    /// of the photograph among the layers `ids`, or none.
+    pub fn jpeg_with_capture_of(&self, jpeg: &[u8], ids: &[f64]) -> Vec<u8> {
+        let ids: Vec<NodeId> = ids.iter().map(|&i| NodeId(i as u64)).collect();
+        self.inner.jpeg_with_capture_of(jpeg, &ids)
+    }
+
+    /// `capture_summary` among the layers `ids`.
+    pub fn capture_summary_of(&self, ids: &[f64]) -> String {
+        let ids: Vec<NodeId> = ids.iter().map(|&i| NodeId(i as u64)).collect();
+        summary(self.inner.capture_among(&ids))
+    }
+
     /// The camera and lens the page's photograph was taken with, for the
     /// export window to say what it will carry; empty where none.
     pub fn capture_summary(&self) -> String {
-        self.inner.capture().map_or(String::new(), |c| {
-            // "Canon · Canon EOS 6D" says the make twice.
-            let make = if c.model.starts_with(&c.make) {
-                ""
-            } else {
-                c.make.as_str()
-            };
-            [make, c.model.as_str(), c.lens_model.as_str()]
-                .iter()
-                .filter(|s| !s.is_empty())
-                .copied()
-                .collect::<Vec<_>>()
-                .join(" · ")
-        })
+        summary(self.inner.capture())
     }
 
     pub fn comp_jpeg(&mut self, index: usize, scale: f32, quality: u8) -> Result<Vec<u8>, JsError> {
@@ -2121,4 +2127,22 @@ fn from_page<T: serde::de::DeserializeOwned>(json: &str) -> Result<T, String> {
         return Err("a number in it is past what the editor can hold".into());
     }
     serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
+/// A camera and lens said in a line, as the export window shows it.
+fn summary(capture: Option<chitrakar_doc::Capture>) -> String {
+    capture.map_or(String::new(), |c| {
+        // "Canon · Canon EOS 6D" says the make twice.
+        let make = if c.model.starts_with(&c.make) {
+            ""
+        } else {
+            c.make.as_str()
+        };
+        [make, c.model.as_str(), c.lens_model.as_str()]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    })
 }
