@@ -2007,58 +2007,115 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
                 } else {
                     w + 2.0 * track
                 };
+            let end = pos + word.len();
+            let width = |from: usize, to: usize| {
+                shape_line_in(&paragraph[from..to], para_at + from, spec, scale, way).1
+            };
+            // Where a line may end inside this word: between letters,
+            // beside a Chinese, Japanese or Korean character, as a browser
+            // breaks them, and not where their punctuation forbids it.
+            let cut_at = |i: usize| {
+                let (before, after) = (&paragraph[..i], &paragraph[i..]);
+                (before.chars().next_back().is_some_and(ideographic)
+                    || after.chars().next().is_some_and(ideographic))
+                    && may_break_before(before, after)
+                    && !after.chars().next().is_some_and(no_line_start)
+                    && !before.chars().next_back().is_some_and(no_line_end)
+            };
+            // How much of the word from `from` goes in `room`: all of it,
+            // or up to the furthest place it may end that fits, read off
+            // a stretch of the word about twice as long as fits rather
+            // than the whole rest of it — measured to its end at every
+            // line, a paragraph of ten thousand characters took seconds.
+            let fill = |from: usize, room: f32| -> Fill {
+                let mut n = 16usize;
+                let to = loop {
+                    let to = paragraph[from..end]
+                        .char_indices()
+                        .nth(n)
+                        .map_or(end, |(i, _)| from + i);
+                    let wide = width(from, to) > room;
+                    if !wide && to == end {
+                        return Fill::All;
+                    }
+                    if wide || to == end {
+                        break to;
+                    }
+                    n *= 2;
+                };
+                let mut cuts: Vec<usize> = paragraph[from..to]
+                    .char_indices()
+                    .skip(1)
+                    .map(|(i, _)| from + i)
+                    .chain((to < end).then_some(to))
+                    .filter(|&i| cut_at(i))
+                    .collect();
+                if cuts.is_empty() {
+                    // None in reach: the first there is, past it, for a
+                    // line that has to hold at least one piece.
+                    cuts.extend(
+                        paragraph[to..end]
+                            .char_indices()
+                            .skip(1)
+                            .map(|(i, _)| to + i)
+                            .find(|&i| cut_at(i)),
+                    );
+                    return cuts.first().map_or(Fill::Nowhere, |&c| Fill::Over(c));
+                }
+                // The furthest that fits, found by halving.
+                let (mut lo, mut hi) = (0usize, cuts.len());
+                while lo < hi {
+                    let mid = (lo + hi).div_ceil(2);
+                    if width(from, cuts[mid - 1]) <= room {
+                        lo = mid;
+                    } else {
+                        hi = mid - 1;
+                    }
+                }
+                if lo == 0 {
+                    Fill::Over(cuts[0])
+                } else {
+                    Fill::At(cuts[lo - 1])
+                }
+            };
             if first {
                 used = w;
                 first = false;
             } else if used + joined <= limit {
                 used += joined;
             } else {
-                out.push((paragraph[start..pos - 1].to_string(), para_at + start));
-                start = pos;
-                used = w;
+                // A word with places to end a line in it fills what is
+                // left of this one first, as a browser's does: "Hello"
+                // and then a run of Chinese left the rest of the line
+                // empty.
+                let room = limit - used - space - 2.0 * track;
+                match (room > 0.0).then(|| fill(pos, room)) {
+                    Some(Fill::At(c)) => {
+                        out.push((paragraph[start..c].to_string(), para_at + start));
+                        start = c;
+                    }
+                    _ => {
+                        out.push((paragraph[start..pos - 1].to_string(), para_at + start));
+                        start = pos;
+                    }
+                }
+                used = width(start, end);
             }
             // A word wider than the line on a line of its own is broken
-            // where it fills it, beside a Chinese, Japanese or Korean
-            // character, as a browser breaks them: written without spaces,
-            // a paragraph of them was one word, and ran off the block as a
-            // single line however narrow it was. A long Latin word still
-            // runs past the edge, as it does in a browser.
-            let end = pos + word.len();
-            if start == pos && used > limit {
-                let width = |from: usize, to: usize| {
-                    shape_line_in(&paragraph[from..to], para_at + from, spec, scale, way).1
-                };
-                while start < end && width(start, end) > limit {
-                    // The places a line may end inside the word: between
-                    // letters, never inside a cluster.
-                    let cuts: Vec<usize> = paragraph[start..end]
-                        .char_indices()
-                        .skip(1)
-                        .map(|(i, _)| start + i)
-                        .filter(|&i| {
-                            let (before, after) = (&paragraph[..i], &paragraph[i..]);
-                            (before.chars().next_back().is_some_and(ideographic)
-                                || after.chars().next().is_some_and(ideographic))
-                                && may_break_before(before, after)
-                        })
-                        .collect();
-                    if cuts.is_empty() {
-                        break;
-                    }
-                    // The furthest that fits, found by halving; at least
-                    // one letter a line, however narrow the block.
-                    let (mut lo, mut hi) = (0usize, cuts.len());
-                    while lo < hi {
-                        let mid = (lo + hi).div_ceil(2);
-                        if width(start, cuts[mid - 1]) <= limit {
-                            lo = mid;
-                        } else {
-                            hi = mid - 1;
+            // where it fills it: written without spaces, a paragraph of
+            // Chinese was one word, and ran off the block as a single
+            // line however narrow it was. A long Latin word still runs
+            // past the edge, as it does in a browser.
+            if start >= pos && used > limit {
+                loop {
+                    match fill(start, limit) {
+                        Fill::All | Fill::Nowhere => break,
+                        // At least one piece a line, however narrow.
+                        Fill::At(c) | Fill::Over(c) => {
+                            out.push((paragraph[start..c].to_string(), para_at + start));
+                            start = c;
                         }
                     }
-                    let cut = cuts[lo.max(1) - 1];
-                    out.push((paragraph[start..cut].to_string(), para_at + start));
-                    start = cut;
                 }
                 used = width(start, end);
             }
@@ -2068,6 +2125,98 @@ fn lines_of(spec: &TextSpec, scale: f32) -> Vec<(String, usize)> {
         para_at += paragraph.len() + 1;
     }
     out
+}
+
+/// How much of a word goes on a line (`lines_of`).
+enum Fill {
+    /// All of what is left of it.
+    All,
+    /// Up to this place, the furthest it may end that fits.
+    At(usize),
+    /// Not even its first piece fits; this is where that piece ends.
+    Over(usize),
+    /// It has nowhere to end inside it.
+    Nowhere,
+}
+
+/// Punctuation a line does not begin with in Chinese or Japanese: the
+/// closing brackets and stops (kinsoku shori), which a browser keeps on
+/// the line before.
+fn no_line_start(c: char) -> bool {
+    matches!(
+        c,
+        '、' | '。'
+            | '，'
+            | '．'
+            | '・'
+            | '：'
+            | '；'
+            | '？'
+            | '！'
+            | '‼'
+            | '⁇'
+            | '⁈'
+            | '⁉'
+            | '」'
+            | '』'
+            | '）'
+            | '】'
+            | '〕'
+            | '〉'
+            | '》'
+            | '〙'
+            | '〗'
+            | '〟'
+            | '］'
+            | '｝'
+            | '｠'
+            | '｣'
+            | '’'
+            | '”'
+            | '〜'
+            | '゠'
+            | '…'
+            | '‥'
+            | '!'
+            | '?'
+            | ','
+            | '.'
+            | ')'
+            | ']'
+            | '}'
+            | ':'
+            | ';'
+            | '%'
+            | '％'
+            | '°'
+            | '℃'
+    )
+}
+
+/// Punctuation a line does not end with: the opening brackets, which a
+/// browser carries over to the line after with what they open.
+fn no_line_end(c: char) -> bool {
+    matches!(
+        c,
+        '「' | '『'
+            | '（'
+            | '【'
+            | '〔'
+            | '〈'
+            | '《'
+            | '〘'
+            | '〖'
+            | '〝'
+            | '［'
+            | '｛'
+            | '｟'
+            | '｢'
+            | '‘'
+            | '“'
+            | '('
+            | '['
+            | '{'
+    )
 }
 
 /// Whether a character is one a line may break beside with no space:
@@ -3145,6 +3294,73 @@ mod tests {
         assert_eq!(joined, text, "every character on one line or another");
         for (line, at) in &lines {
             assert_eq!(&text[*at..*at + line.len()], line.as_str());
+        }
+    }
+
+    /// A line neither begins with a closing stop or bracket nor ends
+    /// with an opening one, as a browser keeps them (kinsoku shori), at
+    /// every width.
+    #[test]
+    fn chinese_and_japanese_punctuation_keeps_its_side_of_a_break() {
+        let text = "東京都は「日本」の首都です。（参考）日本語の文章です、そうです。";
+        for width in [40.0, 60.0, 80.0, 100.0, 140.0] {
+            let mut cjk = spec(text, 20.0);
+            cjk.width = width;
+            let lines = lines_of(&cjk, 1.0);
+            let joined: String = lines.iter().map(|(l, _)| l.as_str()).collect();
+            assert_eq!(joined, text);
+            for (i, (line, _)) in lines.iter().enumerate() {
+                if i > 0 {
+                    assert!(
+                        !line.chars().next().is_some_and(no_line_start),
+                        "at {width}, a line starts with {line:?}: {lines:?}"
+                    );
+                }
+                if i + 1 < lines.len() {
+                    assert!(
+                        !line.chars().next_back().is_some_and(no_line_end),
+                        "at {width}, a line ends with {line:?}: {lines:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Chinese after a Latin word fills the rest of that word's line, as
+    /// a browser's does, rather than starting a line of its own.
+    #[test]
+    fn ideographs_after_a_word_fill_its_line() {
+        let text = "Hi 日本語の文章です日本語の文章です";
+        let mut cjk = spec(text, 20.0);
+        let (one, _) = measure(&spec("Hi 日本語", 20.0));
+        cjk.width = one + 1.0;
+        let lines = lines_of(&cjk, 1.0);
+        assert!(lines[0].0.starts_with("Hi 日"), "{lines:?}");
+        let joined: String = lines.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            joined.replacen("Hi ", "Hi", 1),
+            text.replacen("Hi ", "Hi", 1)
+        );
+    }
+
+    /// A long paragraph without spaces is wrapped a line at a time from
+    /// what is near the line, and every line but the last is full: the
+    /// same lines as measuring the whole rest of it each time gave.
+    #[test]
+    fn a_long_paragraph_of_ideographs_wraps_line_by_line() {
+        let text: String = "日本語の文章です。".repeat(300);
+        let mut cjk = spec(&text, 20.0);
+        cjk.width = 200.0;
+        let lines = lines_of(&cjk, 1.0);
+        let joined: String = lines.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(joined, text);
+        let (one, _) = measure(&spec("日", 20.0));
+        for (line, at) in &lines[..lines.len() - 1] {
+            let w = line_width(line, *at, &cjk, 1.0);
+            assert!(
+                w <= 200.0 + 0.01 && w > 200.0 - 3.0 * one,
+                "{line:?} is {w} wide"
+            );
         }
     }
 

@@ -12286,6 +12286,18 @@ impl Session {
     ) -> Result<RawInfo, EngineError> {
         let mut photo = chitrakar_codecs::raw::unpack(packed)
             .map_err(|e| EngineError::BadCommand(e.to_string()))?;
+        // Room for what developing and placing it takes, asked for before
+        // any of it is made: the development, its pixels carried in from
+        // the develop worker, the picture kept and the frames drawn from
+        // it, some sixteen bytes a pixel. A seventh 61-megapixel raw
+        // placed beside six stopped the engine; refused here, it is said.
+        let (w, h) = photo.size();
+        Self::room_for(
+            (w as usize).saturating_mul(h as usize).saturating_mul(16),
+            &format!(
+                "a photograph of {w} × {h} beside what this document holds; place it in a document of its own, or remove some layers"
+            ),
+        )?;
         // A file that carries no corrections of its own (a Canon's) gets
         // its lens's from a profile, where there is one for it.
         let lens_profile = match photo.shot() {

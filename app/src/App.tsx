@@ -55,6 +55,7 @@ import {
   browserKeeps,
   firesWhileTyping,
   onAMac,
+  macWords,
   type CommandId,
 } from "./commands";
 import { ExportDialog } from "./ExportDialog";
@@ -177,6 +178,15 @@ function mixAuthored(
   // between a named colour and another was a copy of the first, and the
   // ramp changed when it should not have.
   [a, b] = [flatColor(a), flatColor(b)];
+  // An ink beside a screen colour is mixed as the screen shows the ink:
+  // the stop lands between the two rather than on a copy of the first.
+  if ("Srgb" in a !== "Srgb" in b) {
+    const shown = (c: AuthoredColor) => {
+      const f = flatColor(c);
+      return "Srgb" in f ? f : hexColor(colorToHex(f).slice(0, 7), f.Cmyk.a);
+    };
+    [a, b] = [shown(a), shown(b)];
+  }
   if ("Srgb" in a && "Srgb" in b) {
     return {
       Srgb: {
@@ -199,6 +209,24 @@ function mixAuthored(
     };
   }
   return a;
+}
+
+/** `next` with the alpha `was` had. A colour well knows only the
+ * colour, so recolouring a translucent fill, stroke or stop through one
+ * made it opaque: a 40% red picked to green came back a solid green. */
+function alphaKept(
+  next: AuthoredColor,
+  was: AuthoredColor | null | undefined,
+): AuthoredColor {
+  if (!was) return next;
+  const w = flatColor(was);
+  const a = "Srgb" in w ? w.Srgb.a : w.Cmyk.a;
+  if (a === 1) return next;
+  if ("Named" in next)
+    return { Named: { ...next.Named, means: alphaKept(next.Named.means, was) } };
+  return "Srgb" in next
+    ? { Srgb: { ...next.Srgb, a } }
+    : { Cmyk: { ...next.Cmyk, a } };
 }
 
 /** `outer` applied after `inner` — the nesting rule, matching the engine's
@@ -2730,6 +2758,9 @@ export function App() {
   const [collapsed, setCollapsed] = useState<number[]>([]);
   // Folded groups are a document's: another one's ids are other layers.
   useEffect(() => setCollapsed([]), [session]);
+  // So is the palette entry the colour in hand came from: another
+  // document's "Swatch 1" is another colour.
+  useEffect(() => setInkFrom(null), [session]);
   /** The document's palette, re-read whenever the document changes. */
   const [swatches, setSwatches] = useState<Swatch[]>([]);
   /** The looks kept by name in the document, beside the palette. */
@@ -3267,9 +3298,15 @@ export function App() {
           // A face that will not load is simply not offered.
         }
       }),
-    ).then(() =>
-      setFontNames(JSON.parse(WasmSession.font_names()) as string[]),
-    );
+    ).then(() => {
+      setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      // A document opened before the faces arrived is drawn in them.
+      const now = liveSession.current;
+      if (now) {
+        now.invalidate();
+        refresh(now);
+      }
+    });
   }, [session]);
 
   /** Alignment guides drawn while a drag is snapped to something. */
@@ -4481,12 +4518,31 @@ export function App() {
   /** The text block being typed was added from the menus, so the focus
    * goes to its row when the typing is done. */
   const textFromKeys = useRef(false);
+  /** Whether the last thing the person did was press a key rather than
+   * a pointer: the menus are reached both ways, and only a block made
+   * from the keyboard hands its focus to its row — made with the mouse,
+   * the arrows went on nudging it. */
+  const keyedLast = useRef(false);
+  useEffect(() => {
+    const key = () => {
+      keyedLast.current = true;
+    };
+    const point = () => {
+      keyedLast.current = false;
+    };
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("pointerdown", point, true);
+    return () => {
+      window.removeEventListener("keydown", key, true);
+      window.removeEventListener("pointerdown", point, true);
+    };
+  }, []);
   const addInView = (kind: "Rect" | "Ellipse" | "Line" | "Text" | "Frame") => {
     if (!session || !canvasRef.current) return;
     const r = canvasRef.current.getBoundingClientRect();
     const [cx, cy] = docPoint({ clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 });
     if (kind === "Text") {
-      textFromKeys.current = true;
+      textFromKeys.current = keyedLast.current;
       dropText(cx, cy);
       return;
     }
@@ -6445,6 +6501,13 @@ export function App() {
     trackTouch(e);
     if (pinchRef.current) return; // the second finger, or a third
     if (!session || isPanTrigger(e) || e.button !== 0) return;
+    // A Mac's Ctrl-click is its right-click: the press is the menu's, which
+    // the contextmenu after it opens. Taken as a press, it began a drag
+    // the menu then read as a second button mid-drag, and cancelled.
+    if (e.ctrlKey && !e.metaKey && e.pointerType === "mouse" && onAMac()) {
+      e.stopPropagation();
+      return;
+    }
     e.stopPropagation();
     // Text being typed into is finished by a press anywhere else on the
     // canvas, before that press starts anything of its own: the press
@@ -6723,7 +6786,7 @@ export function App() {
         return;
       }
       if (cloneFrom === null) {
-        alert("Alt-click the place to clone from first.");
+        alert(macWords("Alt-click the place to clone from first."));
         return;
       }
       strokeMade.current = false;
@@ -8436,7 +8499,10 @@ export function App() {
     // axis is the one the corner has to land exactly on, and the other
     // follows from the shape rather than from the cursor.
     const caught = [false, false];
-    if (drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey)) {
+    // A side catches lines by its middle, below, not by the pointer: on
+    // a turned layer the pointer can run along a guide while the side
+    // is nowhere near it, and the side stood still on the guide.
+    if (drag.snapX && drag.snapY && !(e.ctrlKey || e.metaKey) && !side) {
       const tol = prefs.snap / view.zoom;
       const sx = snapAxis([px], drag.snapX, tol);
       const sy = snapAxis([py], drag.snapY, tol);
@@ -8567,17 +8633,31 @@ export function App() {
       // page as a corner's is: read in a turned layer's own axes, a side
       // dragged to a guide stopped fifty pixels short of it.
       const sideOnLine = (() => {
-        if (!side || !pageOf || !(caught[0] || caught[1])) return null;
+        if (!side || !pageOf || !drag.snapX || !drag.snapY || e.ctrlKey || e.metaKey) return null;
         const [mx, my] = [(x0 + x1) / 2, (y0 + y1) / 2];
         const pf = pageOf(across ? fx : mx, across ? my : fy);
         const pc = pageOf(across ? (west ? x0 : x1) : mx, across ? my : north ? y0 : y1);
-        const k =
-          caught[0] && Math.abs(pc[0] - pf[0]) > 1e-6
-            ? (px - pf[0]) / (pc[0] - pf[0])
-            : caught[1] && Math.abs(pc[1] - pf[1]) > 1e-6
-              ? (py - pf[1]) / (pc[1] - pf[1])
-              : NaN;
-        return Number.isFinite(k) && k > 0 ? Math.max(MIN_SIZE / Math.max(w0, h0), k) : null;
+        const [dx, dy] = [pc[0] - pf[0], pc[1] - pf[1]];
+        // Where the pointer puts the side's middle, and whether a line
+        // is near it there.
+        const k0 = across ? span(lx, fx) / w0 : span(ly, fy) / h0;
+        const m = [pf[0] + k0 * dx, pf[1] + k0 * dy];
+        const tol = prefs.snap / view.zoom;
+        const gx = Math.abs(dx) > 1e-6 ? snapAxis([m[0]], drag.snapX, tol) : null;
+        const gy = Math.abs(dy) > 1e-6 ? snapAxis([m[1]], drag.snapY, tol) : null;
+        // The nearer of the two lines, if both are in reach.
+        const useX =
+          gx?.guide != null &&
+          (gy?.guide == null || Math.abs(gx.delta) <= Math.abs(gy.delta));
+        const k = useX
+          ? (m[0] + gx!.delta - pf[0]) / dx
+          : gy?.guide != null
+            ? (m[1] + gy.delta - pf[1]) / dy
+            : NaN;
+        if (!(Number.isFinite(k) && k > 0)) return null;
+        const shown: Guides = useX ? { x: [gx!.guide!], y: [] } : { x: [], y: [gy!.guide!] };
+        setGuides((g) => (g.x[0] === shown.x[0] && g.y[0] === shown.y[0] ? g : shown));
+        return Math.max(MIN_SIZE / Math.max(w0, h0), k);
       })();
       const sx = along ? 1 : free ? (across ? sideOnLine : null) ?? span(lx, fx) / w0 : s;
       const sy = across ? 1 : free ? (along ? sideOnLine : null) ?? span(ly, fy) / h0 : s;
@@ -11562,7 +11642,11 @@ export function App() {
 
   const currentInk = (): AuthoredColor => {
     const flat = inkOf(fill);
-    return inkFrom ? { Named: { name: inkFrom, means: flat } } : flat;
+    // Only while the palette still has the entry: one taken out (or
+    // never in this document) leaves the colour a colour.
+    return inkFrom && swatches.some((w) => w.name === inkFrom)
+      ? { Named: { name: inkFrom, means: flat } }
+      : flat;
   };
 
   /** The palette entry the picked layer's colour stands for, if it stands
@@ -13078,6 +13162,13 @@ export function App() {
           was,
         );
         rawDone.current += 1;
+        // Dropped on an empty page, the raw opens it, and the document
+        // is named after it as a picture's is: it saved as untitled.
+        const past = (JSON.parse(session.history_json()) as { past?: string[] }).past ?? [];
+        if (past.length === 1 && past[0] === `Open ${d.name}`) {
+          const named = d.name.replace(/\.[a-z0-9]+$/i, "");
+          if (named) setDocName((n) => (n === "untitled" ? named : n));
+        }
       } else {
         if (got) session.redevelop_pixels(d.layer, got.rgba, got.width, got.height, json);
         else session.redevelop(d.layer, json);
@@ -13361,6 +13452,20 @@ export function App() {
       try {
         await initEngine();
       } catch {
+        return;
+      }
+      // And for the document to be made: the engine can be ready a
+      // moment before the page has a document, and a picture dropped
+      // then went nowhere without a word.
+      if (!session) {
+        const until = Date.now() + 15000;
+        while (!liveSession.current && Date.now() < until) await nextPaint();
+        if (!liveSession.current) {
+          alert(`${files.map((f) => f.name).join(", ")} could not be taken: the editor did not finish starting.`);
+          return;
+        }
+        await nextPaint();
+        takeFilesRef.current(files);
         return;
       }
       // And for the raws in hand to be developed and placed: the window
@@ -13821,6 +13926,10 @@ export function App() {
         return;
       }
       setFontNames(JSON.parse(WasmSession.font_names()) as string[]);
+      // Text already set in that name, picked or not, is drawn in it now:
+      // the canvas kept the boxes of the missing face until a zoom.
+      session.invalidate();
+      refresh(session);
       if (
         selectedKind &&
         typeof selectedKind === "object" &&
@@ -14124,7 +14233,8 @@ export function App() {
           "trash",
           "Delete",
           () => (aboutRegion() ? maskFromSelection(true) : deleteSelected()),
-          "Del",
+          // A Mac's key for it is ⌫ (it sends Backspace, which deletes).
+          onAMac() ? "⌫" : "Del",
         ),
         SEP,
         // What a selection is filled or outlined with, as Photoshop's
@@ -15831,11 +15941,15 @@ export function App() {
                 }
                 if (e.key !== "Enter") return;
                 featherTyped.current = false;
+                // What Escape goes back to from here: what was applied,
+                // not what the box held when it took the focus.
+                featherWasTyped.current = selectionFeather;
                 if (session?.feather_selection(selectionFeather)) refresh(session);
               }}
               onBlur={() => {
                 if (!featherTyped.current) return;
                 featherTyped.current = false;
+                featherWasTyped.current = selectionFeather;
                 if (session?.feather_selection(selectionFeather)) refresh(session);
               }}
             />
@@ -15850,7 +15964,7 @@ export function App() {
                 <button
                   key={i}
                   className="kept"
-                  title={`${name} — shift adds it, alt takes it away, ctrl-click (or Delete) forgets it`}
+                  title={macWords(`${name} — shift adds it, alt takes it away, ctrl-click (or Delete) forgets it`)}
                   aria-label={`Kept region ${name}`}
                   onKeyDown={chipKeys(() => forgetRegion(i))}
                   onClick={(e) => {
@@ -17723,10 +17837,10 @@ export function App() {
                 disabled={selectionSet.length === 0 || !groupable}
                 title={
                   groupable
-                    ? "Group selected layers (ctrl-click to select several)"
+                    ? macWords("Group selected layers (ctrl-click to select several)")
                     : "Layers in different groups cannot be grouped together"
                 }
-                aria-label="Group selected layers (ctrl-click to select several)"
+                aria-label={macWords("Group selected layers (ctrl-click to select several)")}
               >
                 <Icon name="group" size={16} />
               </button>
@@ -17786,7 +17900,7 @@ export function App() {
                 dir="auto"
                 aria-pressed={c.showing}
                 aria-label={`Comp ${c.name}`}
-                title={`${c.name} — shift-click keeps the page as it is now under this name, double-click (or F2) renames, ctrl-click (or Delete) forgets`}
+                title={macWords(`${c.name} — shift-click keeps the page as it is now under this name, double-click (or F2) renames, ctrl-click (or Delete) forgets`)}
                 onKeyDown={chipKeys(
                   () => {
                     if (!session) return;
@@ -18006,7 +18120,7 @@ export function App() {
                   title={
                     solo === l.id
                       ? "Shown on its own — alt-click to show the page again"
-                      : `${l.visible ? "Hide" : "Show"} layer (alt-click to see it on its own)`
+                      : macWords(`${l.visible ? "Hide" : "Show"} layer (alt-click to see it on its own)`)
                   }
                 >
                   <Icon name={l.visible ? "eye" : "eyeOff"} size={15} />
@@ -18650,7 +18764,10 @@ export function App() {
                               tuneEffect(
                                 at,
                                 {
-                                  [field]: inkOf(e.target.value),
+                                  [field]: alphaKept(
+                                    inkOf(e.target.value),
+                                    (effect as never)[kind][field] as AuthoredColor,
+                                  ),
                                 },
                                 true,
                               )
@@ -19214,7 +19331,11 @@ function KeysDialog({
   nudge: [number, number];
   onClose: () => void;
 }) {
-  const KEY_HELP = keyHelp(hint, chordOf, own, nudge);
+  // On a Mac, the sheet's words for the keys are the Mac's own: "Ctrl-click"
+  // said literally there is a right-click.
+  const KEY_HELP = keyHelp(hint, chordOf, own, nudge).map(
+    ([group, rows]) => [group, rows.map(([what, how]) => [macWords(what), macWords(how)])] as [string, [string, string][]],
+  );
   // The key that opened the sheet puts it away again. The editor's own
   // handler stands down while a window is up, so it only ever opened it.
   useEffect(() => {
@@ -22428,7 +22549,9 @@ function StopList({
           <input
             type="color"
             value={colorToHex(stop.color)}
-            onChange={(e) => set(i, { color: authored(e.target.value) })}
+            onChange={(e) =>
+              set(i, { color: alphaKept(authored(e.target.value), stop.color) })
+            }
             onBlur={onGestureEnd}
             aria-label={`${name} ${i + 1}`}
           />
@@ -22897,7 +23020,10 @@ function KindProps({
               type="color"
               value={colorToHex(p.color)}
               onChange={(e) =>
-                onEdit(wrap({ PhotoFilter: { ...p, color: authoredOf(e.target.value) } }), true)
+                onEdit(
+                  wrap({ PhotoFilter: { ...p, color: alphaKept(authoredOf(e.target.value), p.color) } }),
+                  true,
+                )
               }
               onBlur={onGestureEnd}
               aria-label="Filter colour"
@@ -23740,7 +23866,7 @@ function KindProps({
             type="color"
             value={colorToHex(t.fill)}
             onChange={(e) =>
-              onEdit(styled({ fill: inkOf(e.target.value) }), true)
+              onEdit(styled({ fill: alphaKept(inkOf(e.target.value), t.fill) }), true)
             }
             onBlur={onGestureEnd}
             aria-label="Text color"
@@ -23818,7 +23944,7 @@ function KindProps({
             value={colorToHex(f.background ?? hexColor("#ffffff"))}
             onChange={(e) =>
               onEdit(
-                ground(inkOf(e.target.value)),
+                ground(alphaKept(inkOf(e.target.value), f.background)),
                 true,
               )
             }
@@ -24050,7 +24176,7 @@ function KindProps({
               type="color"
               value={colorToHex(v.fill)}
               onChange={(e) =>
-                onEdit(patch({ fill: authored(e.target.value) }), true)
+                onEdit(patch({ fill: alphaKept(authored(e.target.value), v.fill) }), true)
               }
               onBlur={onGestureEnd}
               aria-label="Fill color"
@@ -24109,7 +24235,10 @@ function KindProps({
               onChange={(e) =>
                 onEdit(
                   patch({
-                    stroke: { ...v.stroke!, color: authored(e.target.value) },
+                    stroke: {
+                      ...v.stroke!,
+                      color: alphaKept(authored(e.target.value), v.stroke!.color),
+                    },
                   }),
                   true,
                 )

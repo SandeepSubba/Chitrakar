@@ -177,6 +177,10 @@ without reading anything else.*
      The fifty-fifth: sixty group masks stopping the engine, a 104-byte
      PSD stopping it, a face added late not showing, Chinese never
      wrapping, submenus switching under a diagonal pointer.
+     The fifty-sixth: posters refused by the mask budget, Chinese lines
+     starting with a stop, a PDF gradient fading through black, the
+     ants invisible on a white page, a seventh large raw stopping the
+     engine, a clipped sky coming back magenta.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13105,6 +13109,73 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-sixth audit (November 2026).** Its check of round 55: the
+  PSD budget for masks refused posters of small layers with untouched
+  masks that opened before, counting any mask that showed as the page
+  (counted as the reader builds it: one pixel mask, over the layer's box
+  and its own, none for an untouched "reveal all", which is no mask and
+  had been built from the page's corner to the layer); a turned layer's
+  side stood still while the pointer ran along a guide (a side catches
+  lines by its middle, not by the pointer); Escape after Enter in the
+  feather box showed a value never applied (it goes back to what was
+  applied); a picture dropped before the page had a document went
+  nowhere without a word (it waits for one); a face added by File › Add
+  font… showed only on the picked block until a zoom (the canvas is
+  drawn anew); a text block made from the menus by mouse took the focus
+  to its row (only from the keyboard); Chinese and Japanese lines began
+  with 。 and 」 and ended with 「 (kept on their side, kinsoku), a
+  paragraph of ten thousand characters took seconds a key, measured to
+  its end at every line (a line at a time, from what is near it), and a
+  run of them after a Latin word started a line of its own (it fills the
+  line first). Limits: a 24-megapixel grainy region of 250,000 rings
+  pans in seconds; whether fine dashes are drawn solid ignores the zoom,
+  and SVG and PDF still write them dashed; Copy as image takes Export's
+  margin for effects on every side; a dozen page-sized 24-megapixel
+  layers with masks are refused that opened in 2.8 GB.
+  Its files pass, camera raws and the develop window: a seventh
+  61-megapixel raw placed beside six stopped the engine (room for its
+  development is asked for when it is opened, and refused in words); a
+  white sky clipped in green and blue but not red came back magenta,
+  worst darkened (each colour's standing measured only where nothing
+  round it clipped); a DNG whose colour matrix or black level held a
+  number over nought developed a black photograph without a word (a
+  matrix with no number in it is no matrix, such a level none); a raw
+  dropped on an empty page left the document untitled (named after it,
+  as a picture is). Limits: a sky just short of where red clips (about
+  1.9 times green's clip) still comes back faintly warm, darkened;
+  Develop and export raws… cannot write a raw
+  over about 65 megapixels at full size and its advice is to remove
+  layers it does not have; a damaged original is said as missing, and
+  pasting a style onto its layer does not name the layer; Place all
+  says a reader's panic in its own words; a linear DNG with one black
+  level for three samples is refused; a vignette in list 3 brightens
+  the photograph a tenth against list 2's; OpcodeList1 is not applied;
+  a lensfun vignette of 10³⁰ blacks out the edges; Remove chromatic
+  aberration does not reach a fringe as wide as 0.8%.
+  Its colour pass: a PDF's gradient faded a clear stop through black,
+  where the page fades red to clear red (its ramp read as the page
+  reads it); a palette colour in hand from one document was drawn as
+  another's "Swatch 1" (let go of with its document, and named only
+  while the palette has it); Add stop between a screen colour and an
+  ink copied the first (mixed as the screen shows the ink); a colour
+  well made a translucent fill, stroke, stop or effect opaque (the
+  alpha is kept). Limits: a pasted layer's "Swatch 1" takes this
+  document's meaning when the names collide; a style kept from a
+  gradient shape carries its hidden solid fill; an incremental frame
+  paints one row past the page at some zooms; Same fill colour does not
+  take an sRGB colour and an ink that look alike as one; the CMYK
+  eyedropper drifts more than written; a gradient map can differ
+  between an incremental frame and a full one by up to eighteen levels.
+  Its interface pass, a Mac with a trackpad and a high-contrast setting:
+  the marching ants were white on a white page (black dashes with a
+  white halo); tooltips, the keys sheet and alerts said Ctrl and Alt on
+  a Mac (Cmd and Option); Ctrl-click on a Mac drew on the canvas rather
+  than leaving it to the menu; Option with a digit was not read as that
+  digit's chord; field borders were faint with more contrast asked for
+  (stronger under prefers-contrast). Limits: the preferences pane
+  scrolls sideways at 640×400 at the largest size; Cmd+Shift+[ and ]
+  are the browser's on macOS; Safari's gesture events are not read, so
+  a pinch there is the wheel's.
   **A fifty-fifth audit (November 2026).** Its check of round 54: a thick band dashed by
   single pixels round a page-sized shape, dashed again by round 54's
   looser rule, took half a minute a zoom (drawn solid past a few hundred

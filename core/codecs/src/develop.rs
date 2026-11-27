@@ -1110,9 +1110,9 @@ impl RawPhoto {
                 .collect();
             (!means.is_empty()).then(|| means.iter().sum::<f32>() / means.len() as f32)
         };
-        // The clipped sites, and the places beside them.
+        // The clipped sites, and which pixels hold one.
         let mut todo = Vec::new();
-        let mut beside = vec![false; w * h];
+        let mut hit = vec![0u32; w * h];
         for (i, _) in self.data.iter().enumerate().filter(|(_, v)| **v >= clipped) {
             let (p, c) = (
                 i / cpp,
@@ -1122,25 +1122,24 @@ impl RawPhoto {
                     i % 3
                 },
             );
-            let (y, x) = (p / w, p % w);
-            todo.push((y, x, c, i));
-            // Two sites round: the nearest of its own colour in a Bayer
-            // filter are two away.
-            for yy in y.saturating_sub(2)..(y + 3).min(h) {
-                beside[yy * w + x.saturating_sub(2)..yy * w + (x + 3).min(w)].fill(true);
-            }
+            todo.push((p / w, p % w, c, i));
+            hit[p] = 1;
         }
-        // How far each colour stands from the others, at the unclipped
-        // edges of what clipped.
+        // How far each colour stands from the others, measured near what
+        // clipped (within four sites) where nothing round the site did:
+        // measured at the very edge, the colours a site was compared with
+        // reached into the highlight, whose unclipped red in a white sky
+        // said green and blue stood far below it, and the sky came back
+        // magenta.
+        let near = boxed(&hit, w, h, 4);
+        let round = boxed(&hit, w, h, 2);
         let (mut off, mut count) = ([0f32; 3], [0u32; 3]);
-        for (p, _) in beside.iter().enumerate().filter(|(_, b)| **b) {
+        for p in (0..w * h).filter(|&p| near[p] > 0 && round[p] == 0) {
             let (y, x) = (p / w, p % w);
             for (c, i) in sites(y, x) {
-                if self.data[i] < clipped {
-                    if let Some(o) = opposed(y, x, c, true) {
-                        off[c] += balanced(i, c).cbrt() - o;
-                        count[c] += 1;
-                    }
+                if let Some(o) = opposed(y, x, c, true) {
+                    off[c] += balanced(i, c).cbrt() - o;
+                    count[c] += 1;
                 }
             }
         }
@@ -3294,6 +3293,40 @@ pub mod sample {
     }
 }
 
+/// How many of `mask`'s pixels are set in the square of radius `r`
+/// round each pixel: two passes of running sums, so the cost does not
+/// grow with the square.
+fn boxed(mask: &[u32], w: usize, h: usize, r: usize) -> Vec<u32> {
+    let mut rows = vec![0u32; w * h];
+    for y in 0..h {
+        let line = &mask[y * w..(y + 1) * w];
+        let mut sum: u32 = line[..(r + 1).min(w)].iter().sum();
+        for x in 0..w {
+            rows[y * w + x] = sum;
+            if x + r + 1 < w {
+                sum += line[x + r + 1];
+            }
+            if x >= r {
+                sum -= line[x - r];
+            }
+        }
+    }
+    let mut out = vec![0u32; w * h];
+    for x in 0..w {
+        let mut sum: u32 = (0..(r + 1).min(h)).map(|y| rows[y * w + x]).sum();
+        for y in 0..h {
+            out[y * w + x] = sum;
+            if y + r + 1 < h {
+                sum += rows[(y + r + 1) * w + x];
+            }
+            if y >= r {
+                sum -= rows[(y - r) * w + x];
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4016,6 +4049,47 @@ mod tests {
         );
         let bright = px(&photo.develop(&RawDevelop::default()), 30, 15);
         assert_eq!(bright, [255, 255, 255]);
+    }
+
+    /// A white sky past where green and blue clip, red not, over darker
+    /// ground: rebuilt grey, as it was, where measured at the very edge
+    /// of the sky the colours were judged against its own red and it came
+    /// back magenta, darkened or not.
+    #[test]
+    fn a_white_sky_clipped_in_green_and_blue_comes_back_white() {
+        let photo = clipped_photo(60, 40, [2.0, 1.0, 1.54], |y, _| {
+            if y < 20 {
+                [1.6; 3]
+            } else {
+                [0.35; 3]
+            }
+        });
+        let mut got = Vec::new();
+        photo.region(
+            (0, 40, 0, 60),
+            &photo.as_shot.clone(),
+            &mut Planes::default(),
+            &mut got,
+        );
+        for (y, x) in [(5usize, 30usize), (10, 10), (15, 50)] {
+            let p = got[y * 60 + x];
+            assert!(
+                p[0] / p[1] < 1.15 && p[2] / p[1] < 1.15 && p[1] / p[0] < 1.15,
+                "the sky at ({x}, {y}) is {p:?}"
+            );
+        }
+        for exposure in [-1.0, 0.0] {
+            let img = photo.develop(&RawDevelop {
+                exposure,
+                highlights: if exposure < 0.0 { 0.0 } else { -100.0 },
+                ..Default::default()
+            });
+            let p = px(&img, 30, 5);
+            assert!(
+                p[0].abs_diff(p[1]) <= 12 && p[2].abs_diff(p[1]) <= 12,
+                "developed at {exposure}, the sky is {p:?}"
+            );
+        }
     }
 
     #[test]

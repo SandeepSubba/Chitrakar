@@ -2008,7 +2008,9 @@ impl Page {
             .map(|s| {
                 (
                     s.offset,
-                    chitrakar_render::resolve_color(&self.doc, &s.color),
+                    // As the renderer reads a stop: a clear one keeps its
+                    // colour, so red fading to clear red is red throughout.
+                    chitrakar_render::resolve_stop(&self.doc, &s.color, 1.0),
                 )
             })
             .collect();
@@ -6682,6 +6684,71 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A stop with no alpha left keeps its colour in the file as on the
+    /// page: red fading to a clear red is red all the way along, not a
+    /// band of black — the shading's samples are read straight out of the
+    /// file, so this runs without ghostscript.
+    #[test]
+    fn a_clear_stop_fades_its_own_colour_in_a_pdf() {
+        let stop = |offset: f32, a: f32| chitrakar_doc::GradientStop {
+            offset,
+            color: AuthoredColor::Srgb {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a,
+            },
+        };
+        let mut doc = Document::new(64, 40, chitrakar_color::ColorMode::Rgb);
+        let mut band = shape(
+            "band",
+            VectorShape::Rect {
+                width: 40.0,
+                height: 16.0,
+                radius: 0.0,
+            },
+            Some(RED),
+        );
+        if let NodeKind::Vector { gradient, .. } = &mut band.kind {
+            *gradient = Some(chitrakar_doc::Gradient::Linear {
+                from: [0.0, 0.5],
+                to: [1.0, 0.5],
+                stops: vec![stop(0.0, 1.0), stop(1.0, 0.0)],
+                spread: Default::default(),
+            });
+        }
+        add(&mut doc, band, [2.0, 2.0]);
+        let pdf = export_pdf_document(&doc).unwrap();
+        let find = |from: usize, what: &[u8]| {
+            pdf[from..]
+                .windows(what.len())
+                .position(|w| w == what)
+                .map(|at| at + from)
+        };
+        let mut colours = None;
+        let mut from = 0;
+        while let Some(at) = find(from, b"/FunctionType 0") {
+            let start = find(at, b"stream\n").unwrap() + 7;
+            let end = find(start, b"\nendstream").unwrap();
+            let mut data = Vec::new();
+            ZlibDecoder::new(&pdf[start..end])
+                .read_to_end(&mut data)
+                .unwrap();
+            if data.len() == 256 * 3 {
+                colours = Some(data);
+                break;
+            }
+            from = end;
+        }
+        let colours = colours.expect("the ramp's colours");
+        for (i, px) in colours.chunks(3).enumerate().take(255) {
+            assert!(
+                px[0] >= 250 && px[1] <= 4 && px[2] <= 4,
+                "sample {i} of the ramp is {px:?}, not red"
+            );
         }
     }
 

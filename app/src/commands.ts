@@ -161,7 +161,9 @@ export function chordFromEvent(e: KeyboardEvent): string {
   // A letter on a keyboard that does not write Latin ones (Cyrillic,
   // Greek) is read by where it is: Ctrl+Я is the key Ctrl+Z is, and on
   // those layouts no chord answered at all.
-  const latin = /^Key([A-Z])$/.exec(e.code);
+  // And a digit the same, which a Mac's Option turns into a sign of its
+  // own: Cmd+Opt+1 was recorded as Cmd+Opt+¡.
+  const latin = /^Key([A-Z])$/.exec(e.code) ?? /^Digit([0-9])$/.exec(e.code);
   const typed = e.key.length === 1 ? e.key.toLowerCase() : "";
   const letter = latin && typed && !/^[\x20-\x7e]$/.test(typed) ? latin[1].toLowerCase() : typed;
   const key = sign ?? printed[e.code] ?? letter;
@@ -178,6 +180,18 @@ export function chordLabel(chord: string, mac = onAMac()): string {
   const named: Record<string, string> = { mod: mac ? "Cmd" : "Ctrl", alt: mac ? "Opt" : "Alt", shift: "Shift" };
   // Space is a key with a name, not a blank ("Ctrl+ ").
   return [...parts.map((p) => named[p] ?? p), key === " " ? "Space" : key.toUpperCase()].join("+");
+}
+
+/** Words that name Ctrl and Alt, as a Mac's keyboard prints them: ⌘
+ * where the editor reads Ctrl as the command key, Option for Alt. On a
+ * Mac, "Ctrl-click" said literally is a right-click. */
+export function macWords(text: string, mac = onAMac()): string {
+  if (!mac) return text;
+  return text
+    .replace(/\bCtrl\b/g, "Cmd")
+    .replace(/\bctrl\b/g, "cmd")
+    .replace(/\bAlt\b/g, "Option")
+    .replace(/\balt\b/g, "option");
 }
 
 export function onAMac(): boolean {

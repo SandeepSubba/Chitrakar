@@ -598,6 +598,63 @@ fn fill_knots(
 /// gigabytes: what a page can spare beside the surfaces it draws on.
 const LAYERS_READ: u64 = 400_000_000;
 
+/// Where a layer's pixel mask is built, before any feather's margin:
+/// the layer's box and the mask's own together, and for a group's mask
+/// whose default shows, the page as well (a group's record has no box of
+/// its own, and Photoshop trims a mask to where it was painted, so the
+/// group was hidden everywhere outside its brushed box). `None` where
+/// none is built: no mask, one switched off, one without pixels, or an
+/// untouched "reveal all" — an empty box showing everywhere, which is
+/// no mask at all, and which built from the page's corner to the layer
+/// was a page-sized mask for every small layer of a poster.
+fn mask_box_of(
+    rec: &Record,
+    mask: Option<(i32, i32, i32, i32, u8, bool)>,
+    page: (i32, i32, i32, i32),
+    has_pixels: bool,
+) -> Option<(i32, i32, i32, i32)> {
+    let (t, l, b, rr, default, off) = mask?;
+    if off || !has_pixels {
+        return None;
+    }
+    let empty = b <= t || rr <= l;
+    if empty && default == 255 {
+        return None;
+    }
+    let group = !matches!(rec.section, Section::Pixels);
+    let (mut x0, mut y0, mut x1, mut y1) = if empty {
+        (rec.left, rec.top, rec.right, rec.bottom)
+    } else {
+        (
+            rec.left.min(l),
+            rec.top.min(t),
+            rec.right.max(rr),
+            rec.bottom.max(b),
+        )
+    };
+    if group && default > 0 {
+        x0 = x0.min(page.0);
+        y0 = y0.min(page.1);
+        x1 = x1.max(page.2);
+        y1 = y1.max(page.3);
+    }
+    Some((x0, y0, x1, y1))
+}
+
+/// The pixel mask the reader builds for `rec` and where (`mask_box_of`),
+/// from which of its channels the file has.
+fn mask_box(
+    rec: &Record,
+    page: (i32, i32, i32, i32),
+    has_real: bool,
+    has_mask: bool,
+) -> Option<(i32, i32, i32, i32)> {
+    match (rec.real_mask, has_real) {
+        (Some(m), true) => mask_box_of(rec, Some(m), page, true),
+        _ => mask_box_of(rec, rec.mask, page, has_mask),
+    }
+}
+
 fn read_layers(
     r: &mut R,
     h: &Header,
@@ -623,30 +680,31 @@ fn read_layers(
         .iter()
         .map(|rec| {
             let own = side(rec.left, rec.right) * side(rec.top, rec.bottom);
-            // A mask as it is built: over the layer's box and its own
-            // together, or the whole page for one that shows outside its
-            // box (a group's usual "reveal all"). Counted as a quarter of
-            // its own box, sixty such group masks on an A3 page stopped
-            // the engine.
-            let page = h.width as u64 * h.height as u64;
-            let built = |m: Option<(i32, i32, i32, i32, u8, bool)>| {
-                m.map_or(0, |(t, l, b, rr, default, _)| {
-                    let area = if default != 0 {
-                        page
-                    } else {
-                        side(l.min(rec.left), rr.max(rec.right))
-                            * side(t.min(rec.top), b.max(rec.bottom))
-                    };
-                    // A group's mask is the only thing built for it;
-                    // a layer's is built beside its picture and held
-                    // with it, twice the cost (measured: forty group
-                    // masks on an A3 page opened, three page-sized
-                    // layers with page-sized masks did not).
-                    let weight = if own == 0 { 1 } else { 2 };
-                    weight * area.min(page.max(1) * 4)
-                })
-            };
-            own + built(rec.mask) + built(rec.real_mask)
+            // Each mask as the reader below will build it (`mask_box`):
+            // the one pixel mask it reads, over the layer's box and its
+            // own together, the page for a group's that shows outside
+            // its box, and none for one that is off, has no pixels, or
+            // is an untouched "reveal all". Counted as the page for any
+            // that showed, ordinary posters of small layers with
+            // untouched masks were refused.
+            let page = (0, 0, h.width as i32, h.height as i32);
+            let has = |id: i16| rec.channels.iter().any(|c| c.0 == id);
+            let area = |(x0, y0, x1, y1): (i32, i32, i32, i32)| side(x0, x1) * side(y0, y1);
+            let pixel = mask_box(rec, page, has(-3), has(-2));
+            let vector = (pixel.is_none() && rec.vector.is_some()).then_some(
+                if matches!(rec.section, Section::Pixels) {
+                    (rec.left, rec.top, rec.right, rec.bottom)
+                } else {
+                    page
+                },
+            );
+            let built = pixel.or(vector).map_or(0, area);
+            // A group's mask is the only thing built for it; a layer's
+            // is built beside its picture and held with it, twice the
+            // cost (measured: forty group masks on an A3 page opened,
+            // three page-sized layers with page-sized masks did not).
+            let weight = if own == 0 { 1 } else { 2 };
+            own + weight * built.min(area(page).max(1) * 4)
         })
         .sum();
     if pixels_in > LAYERS_READ || with_masks > 2 * LAYERS_READ {
@@ -710,6 +768,8 @@ fn read_layers(
             (Some(m), true) => (Some(m), -3),
             _ => (rec.mask, -2),
         };
+        let page = (0, 0, h.width as i32, h.height as i32);
+        let built_box = mask_box_of(rec, mask_box, page, get(mask_id).is_some());
         // A mask switched off draws nothing in Photoshop either, but it is
         // kept there to be switched on: said, where it went without a word.
         if matches!(mask_box, Some((_, _, _, _, _, true))) && get(mask_id).is_some() {
@@ -735,21 +795,8 @@ fn read_layers(
         let margin = (2.0 * feathered).ceil().min(4000.0) as i32;
         // The pixel mask as coverage over its box: the union of the layer
         // and the mask's own, the mask's default where it says nothing.
-        let mut cover = match mask_box {
-            Some((t, l, b, rr, default, false)) if get(mask_id).is_some() => {
-                let (mut x0, mut y0) = (rec.left.min(l), rec.top.min(t));
-                let (mut x1, mut y1) = (rec.right.max(rr), rec.bottom.max(b));
-                // A group's record has no box of its own, and Photoshop
-                // trims a mask to where it was painted: a group's mask
-                // whose default is to show (white) reaches the whole page,
-                // or the group was hidden everywhere outside its brushed
-                // box. Over the page, then, where the default shows.
-                if !matches!(rec.section, Section::Pixels) && default > 0 {
-                    x0 = x0.min(0);
-                    y0 = y0.min(0);
-                    x1 = x1.max(h.width as i32);
-                    y1 = y1.max(h.height as i32);
-                }
+        let mut cover = match (mask_box, built_box) {
+            (Some((t, l, b, rr, default, _)), Some((mut x0, mut y0, mut x1, mut y1))) => {
                 if default > 0 {
                     (x0, y0, x1, y1) = (x0 - margin, y0 - margin, x1 + margin, y1 + margin);
                 }

@@ -5267,6 +5267,33 @@ assert(
     (await names()).join() === beforeSvg.join() && (await canvasPixel(30, 25))[3] === 0,
     "one undo takes the whole drawing back",
   );
+  // A translucent fill stays translucent when its well picks another
+  // colour: the well knows only the colour, and the fill came back
+  // opaque.
+  const veil = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="100">
+    <rect id="veil" x="10" y="10" width="40" height="30" fill="#ff0000" fill-opacity="0.4"/></svg>`;
+  await page.setInputFiles('input[accept^="image/*,"]', {
+    name: "veil.svg",
+    mimeType: "image/svg+xml",
+    buffer: Buffer.from(veil),
+  });
+  await page.waitForTimeout(400);
+  await page.locator(".panel ul li", { hasText: /^veil(?!\.)/ }).first().click();
+  await page.waitForTimeout(200);
+  const veilBefore = await canvasPixel(30, 25);
+  await setColor("Fill color", "#00ff00");
+  await page.waitForTimeout(350);
+  const veilAfter = await canvasPixel(30, 25);
+  assert(
+    veilBefore[3] > 80 && veilBefore[3] < 130 && veilAfter[1] > 200 &&
+      Math.abs(veilAfter[3] - veilBefore[3]) <= 2,
+    `a 40% fill recoloured in its well is still 40% (${veilBefore} then ${veilAfter})`,
+  );
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(150);
+  await page.keyboard.press("Control+z");
+  await page.waitForTimeout(200);
+  assert((await names()).join() === beforeSvg.join(), "and two undos take it all back");
   // A pattern fill is painted rather than dropped: the tile repeated
   // across the shape, seen only through its outline, as one picture
   // layer named after the shape.
@@ -12351,6 +12378,15 @@ assert(
   assert(
     (await page.locator(".history li").count()) === featherSteps + 1,
     "typing a feather of 10 is one step of history",
+  );
+  // Escape after Enter shows what was applied, not what the box held
+  // when it took the focus: it said 0 over a region softened by 10.
+  await soften.press("Escape");
+  await page.waitForTimeout(150);
+  assert(
+    (await soften.inputValue()) === "10" &&
+      (await page.locator(".history li").count()) === featherSteps + 1,
+    `Escape after Enter leaves the box at what was applied (${await soften.inputValue()})`,
   );
   await page.waitForTimeout(400);
 
@@ -21801,6 +21837,19 @@ assert(
   const bytes = await readFile(await shot.path());
   const [w, h] = [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
   assert(w === 60 && h === 120, `what is picked goes out as far as the page goes (${w} × ${h}, want 60 × 120)`);
+  // The fifty-sixth: a region's ants were white dashes, nothing at all on
+  // a white page; they are dark, with a pale halo.
+  await page.keyboard.press("Escape");
+  await pickTool("Select");
+  await page.mouse.move(s.x + 20, s.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(s.x + 120, s.y + 90, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  const antStroke = await page.$eval(".ants polygon", (el) => getComputedStyle(el).stroke);
+  assert(antStroke === "rgb(0, 0, 0)", `the ants are dark on a white page (${antStroke})`);
+  await page.keyboard.press("Control+d");
+  await pickTool("Move");
   await page.keyboard.press("Control+Shift+E");
   await page.waitForSelector('[role=dialog][aria-label="Export"]');
   await page.selectOption('select[aria-label="Area"]', "page");

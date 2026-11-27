@@ -78,6 +78,10 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // alone is used as it is. (rawler keeps them in a hash map, and
     // taking "whichever comes first" had a Xiaomi's daylight and
     // tungsten matrices swap from one run to the next.)
+    // A matrix with a number in it that is no number (an entry n/0 or
+    // 0/0) is as good as none: kept, it developed a black photograph.
+    raw.color_matrix
+        .retain(|_, m| !m.is_empty() && m.iter().all(|v| v.is_finite()));
     let blended = as_shot_matrix(&raw.color_matrix, &raw.wb_coeffs);
     let matrix = blended.as_ref().or_else(|| {
         raw.color_matrix
@@ -191,13 +195,23 @@ pub fn read(bytes: &[u8]) -> Result<Vec<u8>, String> {
     // site of it; the develop takes one a colour.
     let mut black = [0f32; 4];
     let levels = &raw.blacklevel;
+    // A level that is no number (a rational over nought) is no level:
+    // taken as it was, it blacked out the photograph without a word.
+    let level_of = |l: &rawler::formats::tiff::Rational| {
+        let v = l.as_f32();
+        if v.is_finite() && v >= 0.0 {
+            v
+        } else {
+            0.0
+        }
+    };
     if let Some(first) = levels.levels.first() {
-        black = [first.as_f32(); 4];
+        black = [level_of(first); 4];
         let (pw, ph, cpp) = (levels.width.max(1), levels.height.max(1), levels.cpp.max(1));
         for row in 0..ph {
             for col in 0..pw {
                 if let Some(level) = levels.levels.get((row * pw + col) * cpp) {
-                    black[color_at(row, col).min(3)] = level.as_f32();
+                    black[color_at(row, col).min(3)] = level_of(level);
                 }
             }
         }

@@ -40,6 +40,7 @@ const keyEvent = (key, code, altGraph) => ({
 });
 check(chordFromEvent(keyEvent("ę", "KeyE", true)) === "", "AltGr+E is a letter, not a chord");
 check(chordFromEvent(keyEvent("e", "KeyE", false)) === "mod+alt+e", "Ctrl+Alt+E is still a chord");
+check(chordFromEvent(keyEvent("¡", "Digit1", false)) === "mod+alt+1", "Cmd+Opt+1 on a Mac is the digit, not ¡");
 
 // What may be given: a letter alone is a tool's, with shift a tool
 // family's, a bracket alone the brush's; with ctrl or alt anything is.

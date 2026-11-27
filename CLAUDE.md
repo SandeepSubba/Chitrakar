@@ -301,7 +301,9 @@ the same idea for the *commands* — save, group, undo, send to the back:
 one table of chords (`mod+shift+e`, modifiers in a fixed order) that the
 two keydown handlers, the menus and the preferences' Keys page all read,
 with `boundChords(prefs.commandKeys, prefs.menuKeys)` laying a person's
-rebindings over the defaults. Any other menu row can be given a chord
+rebindings over the defaults. Words for keys written anywhere in the
+interface (tooltips, the keys sheet, alerts) go through `macWords`, which
+says Cmd and Option on a Mac. Any other menu row can be given a chord
 too (`prefs.menuKeys`, by the row's id; `giveChord` in commands.ts
 moves a chord between commands and rows, `claimable` keeps a bare
 letter for the tools), run through the same `findEntry` the system
