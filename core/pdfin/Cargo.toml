@@ -27,3 +27,4 @@ wasm-bindgen = "0.2"
 [dev-dependencies]
 chitrakar-codecs.workspace = true
 chitrakar-color.workspace = true
+chitrakar-doc.workspace = true

@@ -275,6 +275,71 @@ mod tests {
         );
     }
 
+    /// A live copy wearing a shadow of its own keeps it in the PDF when
+    /// what it copies draws an effect too (an outline on a layer of the
+    /// original): the copy's shadow was on the page and in the PNG and
+    /// SVG, and not in the PDF.
+    #[test]
+    fn a_copys_own_shadow_reaches_the_pdf() {
+        use chitrakar_doc::{Command, Document, Effect, Node, NodeKind, Transform, VectorShape};
+        let srgb =
+            |r: f32, g: f32, b: f32| chitrakar_color::AuthoredColor::Srgb { r, g, b, a: 1.0 };
+        let mut doc = Document::new(300, 220, chitrakar_color::ColorMode::Rgb);
+        let root = doc.root();
+        let group = doc.peek_next_id();
+        let mut g = Node::group("logo");
+        g.transform = Transform::translation(20.0, 20.0);
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 0,
+            node: Box::new(g),
+        })
+        .unwrap();
+        let mut disc = Node::vector("disc", VectorShape::Ellipse { rx: 30.0, ry: 30.0 });
+        if let NodeKind::Vector { fill, .. } = &mut disc.kind {
+            *fill = Some(srgb(0.9, 0.1, 0.1));
+        }
+        disc.effects = vec![Effect::Outline {
+            width: 2.0,
+            color: srgb(0.0, 0.0, 0.0),
+            opacity: 1.0,
+        }];
+        doc.apply(Command::AddNode {
+            parent: group,
+            index: 0,
+            node: Box::new(disc),
+        })
+        .unwrap();
+        let mut c = Node::instance("copy", group);
+        c.transform = Transform::translation(150.0, 60.0);
+        c.effects = vec![Effect::DropShadow {
+            dx: 8.0,
+            dy: 4.0,
+            blur: 0.0,
+            color: srgb(0.1, 0.7, 0.2),
+            opacity: 1.0,
+            spread: 0.0,
+        }];
+        doc.apply(Command::AddNode {
+            parent: root,
+            index: 1,
+            node: Box::new(c),
+        })
+        .unwrap();
+        let bytes = chitrakar_codecs::export_pdf_document(&doc).unwrap();
+        let page = render_pdf_page(&bytes, 0, 72.0).unwrap();
+        let at = |x: u32, y: u32| {
+            let i = ((y * page.width + x) * 4) as usize;
+            [page.rgba8[i], page.rgba8[i + 1], page.rgba8[i + 2]]
+        };
+        // The shadow peeks out past the copy's disc, lower right.
+        let shadow = at(188, 122);
+        assert!(
+            shadow[1] > 150 && shadow[0] < 80,
+            "the copy's shadow: {shadow:?}"
+        );
+    }
+
     #[test]
     fn what_is_not_a_pdf_is_said_so() {
         assert!(pdf_page_sizes(b"hello").is_err());

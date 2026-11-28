@@ -3154,7 +3154,7 @@ export function App() {
    * them out, as it does in every editor with a pen. */
   const [penHandles, setPenHandles] = useState<[number, number, number, number][]>([]);
   /** The anchor a pen drag is pulling handles out of, and where it is. */
-  const penDragRef = useRef<{ index: number; x: number; y: number } | null>(null);
+  const penDragRef = useRef<{ index: number; x: number; y: number; pulled?: boolean } | null>(null);
   /** The line from the last anchor to the pointer, moved by hand rather
    * than through state so a pointer crossing the canvas does not draw
    * the whole editor again at every step. */
@@ -4430,6 +4430,56 @@ export function App() {
     gradDragRef.current !== null ||
     maskDragRef.current !== null ||
     gradMaskRef.current !== null;
+
+  /** A pen's or a finger's press on a handle, a side, an anchor or a
+   * knob holds still until it has really moved: a nib drifts a pixel or
+   * two on a tap, a finger more, and each tap on a corner scaled the
+   * layer and left a step, each tap on an anchor moved it. Moves inside
+   * the wobble are kept from the drag (in the window's capture phase,
+   * before anything hears them); past it, every move goes through. The
+   * layer's body has its own (`TOUCH_SLOP`), and a brush, a lasso or the
+   * Pen is not held back: a small mark is meant. */
+  const handleWobble = useRef<{ id: number; x: number; y: number; free: boolean } | null>(null);
+  const handleHeldRef = useRef<() => boolean>(() => false);
+  handleHeldRef.current = () =>
+    handleDragRef.current !== null ||
+    anchorDragRef.current !== null ||
+    curveDragRef.current !== null ||
+    rotateDragRef.current !== null ||
+    gradDragRef.current !== null ||
+    maskDragRef.current !== null ||
+    gradMaskRef.current !== null ||
+    warpDragRef.current !== null ||
+    cropEditRef.current !== null;
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      handleWobble.current =
+        e.pointerType === "mouse" ? null : { id: e.pointerId, x: e.clientX, y: e.clientY, free: false };
+    };
+    const move = (e: PointerEvent) => {
+      const w = handleWobble.current;
+      if (!w || w.free || e.pointerId !== w.id) return;
+      const wobble = e.pointerType === "touch" ? TOUCH_SLOP : 4;
+      if (Math.hypot(e.clientX - w.x, e.clientY - w.y) > wobble) {
+        w.free = true;
+        return;
+      }
+      if (handleHeldRef.current()) e.stopPropagation();
+    };
+    const up = (e: PointerEvent) => {
+      if (handleWobble.current?.id === e.pointerId) handleWobble.current = null;
+    };
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("pointermove", move, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("pointermove", move, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+    };
+  }, []);
 
   /** Let go of whatever is in flight, and say whether anything was. */
   const cancelGesture = useCallback((keepWork = false): boolean => {
@@ -7560,8 +7610,14 @@ export function App() {
       if (pull) {
         // Dragged further than a wobble, the anchor becomes smooth: the
         // handle out follows the pointer and the one in mirrors it.
+        // How far is a wobble depends on what pressed: a finger rolls
+        // five pixels on a tap, a nib a couple, and three pixels made
+        // every tablet tap a smooth anchor with stubs of handles. Once
+        // pulled past it, the handle follows all the way back in.
         const [ox, oy] = [x - pull.x, y - pull.y];
-        if (Math.hypot(ox, oy) * view.zoom > 3) {
+        const wobble = e.pointerType === "touch" ? 12 : e.pointerType === "pen" ? 6 : 3;
+        if (pull.pulled || Math.hypot(ox, oy) * view.zoom > wobble) {
+          pull.pulled = true;
           setPenHandles((hs) =>
             hs.map((h, i) => (i === pull.index ? [-ox, -oy, ox, oy] : h)),
           );
@@ -10225,9 +10281,18 @@ export function App() {
         // On a layer's row the keyboard has reached but not picked, Delete
         // is that layer's, as Shift+F10 there is: it deleted the one
         // picked elsewhere.
+        // Nor one inside a picked group, which goes with its group: after
+        // Select all, Delete on a row in a group took that one layer.
         const row = from?.matches(".layer-list li[data-id]") ? from : null;
         const rowId = row ? Number(row.getAttribute("data-id")) : NaN;
-        if (row && Number.isFinite(rowId) && !selectionSet.includes(rowId as NodeId)) {
+        const pickedWithin = (id: NodeId) => {
+          for (let at: NodeId | undefined = id, n = 0; at !== undefined && n < 300; n++) {
+            if (selectionSet.includes(at)) return true;
+            at = layers.find((l) => l.id === at)?.parent;
+          }
+          return false;
+        };
+        if (row && Number.isFinite(rowId) && !pickedWithin(rowId as NodeId)) {
           deleteSelected(rowId as NodeId);
           return;
         }
@@ -10819,10 +10884,13 @@ export function App() {
     // an alert box saying so was a window to dismiss for a no-op.
     if (layers.find((l) => l.id === selected)?.kind !== "group") return;
     if (!copiesAllow([selected], "ungrouping", true)) return;
+    // What was in it stays picked, as Group leaves the group picked: with
+    // nothing picked, the Duplicate or Delete that came next did nothing.
+    const freed = layers.filter((l) => l.parent === selected).map((l) => l.id);
     try {
       session.ungroup_node(selected);
-      setSelected(null);
-      setMultiSel([]);
+      setSelected(freed[0] ?? null);
+      setMultiSel(freed.slice(1));
       refresh(session);
     } catch (err) {
       alert(`Ungroup: ${said(err)}`);
@@ -11559,6 +11627,13 @@ export function App() {
           own: boolean;
         }[])
       : [];
+  /** A picked copy whose own layers are not drawn, its original being
+   * drawn whole (an opacity, blend, mask or effects given after). */
+  const setAside =
+    !!session &&
+    !!selectedLayer &&
+    selectedLayer.copies !== 0 &&
+    session.stand_ins_set_aside(selectedLayer.id);
   // Pinning is only a question inside a frame; a layer on the page has
   // no edges to be measured from.
   const inFrame =
@@ -15287,13 +15362,14 @@ export function App() {
         <label className="zoom-field">
           <input
             type="number"
-            // A least of 5, which the browser's own stepping (the wheel's)
-            // starts from: from 1 it went 100 to 101, and with none it
-            // stepped from wherever the view was, 247 to 252. A smaller
-            // zoom can still be typed; the view holds its own least.
-            min={5}
+            // Any zoom is a zoom: a step of 5 made every view between
+            // fives (76%) an invalid value, which is what a screen reader
+            // said of the box. The arrows go to the next five (below); the
+            // least is the view's own (1%): a large page fitted at 3% read
+            // as out of range as well.
+            min={Math.round(MIN_ZOOM * 100)}
             max={Math.round(MAX_ZOOM * 100)}
-            step={5}
+            step="any"
             // Keyed by what the view actually is, so wheeling or fitting
             // re-reads rather than leaving a stale draft in the field.
             key={Math.round(view.zoom * 1000)}
@@ -15858,6 +15934,18 @@ export function App() {
           className={floating ? "toolbar floating" : "toolbar"}
           onPointerDownCapture={(e) => {
             railPressed.current = e.currentTarget.scrollTop;
+            // Held only for the press it was taken on: a press that picked
+            // no tool (the handle, a gap) left it standing, and the next
+            // tool picked by its key put the rail back where it had been
+            // before a scroll. A tool a click picks is picked by then.
+            const taken = railPressed.current;
+            const letGo = () => {
+              window.setTimeout(() => {
+                if (railPressed.current === taken) railPressed.current = null;
+              }, 0);
+            };
+            window.addEventListener("click", letGo, { once: true, capture: true });
+            window.addEventListener("pointercancel", letGo, { once: true, capture: true });
           }}
           aria-label="Tools"
           // As tall as the window leaves below where it was put: held to
@@ -18536,11 +18624,19 @@ export function App() {
                   with a way to give this copy one of its own instead. */}
               {selectedLayer.copies !== 0 && overridable.length > 0 && (
                 <div className="overrides" aria-label="Follows the original in">
+                  {setAside && (
+                    <p className="hint" role="note">
+                      Its own layers are set aside while the original has an
+                      opacity, blend, mask or effects of its own: the original
+                      is drawn whole. Follow again to let them go.
+                    </p>
+                  )}
                   {overridable.map((row, i) => (
                     <label key={i} className="row">
                       <span>{row.name}</span>
                       <button
                         type="button"
+                        disabled={setAside && !row.own}
                         onClick={() => {
                           if (!session || selected === null) return;
                           try {
@@ -22625,6 +22721,20 @@ function CurveEditor({
           />
         ))}
       </svg>
+      {/* What the keys are moving, said: the picked point and where it
+          is, in levels. The curve's points were drawn and never told —
+          a screen reader heard the keys work and nothing of what they
+          did. */}
+      <span className="said-only" aria-live="polite">
+        {keying && points.length > 0
+          ? (() => {
+              const pts = sorted(points);
+              const at = Math.min(keyed, pts.length - 1);
+              const [x, y] = pts[at];
+              return `Point ${at + 1} of ${pts.length}: in ${Math.round(x * 255)}, out ${Math.round(y * 255)}`;
+            })()
+          : ""}
+      </span>
       <button
         type="button"
         className="mask-button curve-reset"
@@ -24552,7 +24662,11 @@ function KindProps({
               "Path" in v.shape ||
               (key === "cap"
                 ? (v.stroke!.dash ?? []).length > 0
-                : "Polygon" in v.shape || ("Rect" in v.shape && v.shape.Rect.radius <= 0)),
+                : "Polygon" in v.shape ||
+                  // A rect's plain border is drawn as a distance from its
+                  // edge, round at every outer corner whatever is asked;
+                  // its dashes are lines, and turn as they are told.
+                  ("Rect" in v.shape && v.shape.Rect.radius <= 0 && (v.stroke!.dash ?? []).length > 0)),
             )
             .map(([label, key, choices]) => (
             <label className="row" key={key}>

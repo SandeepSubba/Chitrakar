@@ -1870,9 +1870,48 @@ impl TextSpec {
     /// separately, and copying the whole block's text once per piece is
     /// the sort of thing that makes wrapping a long block slow.
     pub fn styling_under(&self, run: Option<&StyleRun>) -> TextSpec {
-        let mut spec = self.clone();
-        spec.text = String::new();
-        spec.runs = Vec::new();
+        // Field by field, not `self.clone()` with the text and runs then
+        // emptied: that copied both first, once a piece, and a block of
+        // 20,000 letters in 800 runs copied them thousands of times a lay
+        // out. Every field is named, so a new one cannot be missed.
+        let TextSpec {
+            text: _,
+            size,
+            fill,
+            align,
+            line_height,
+            letter_spacing,
+            paragraph_spacing,
+            width,
+            font,
+            italic,
+            bold,
+            underline,
+            strike,
+            along,
+            along_offset,
+            runs: _,
+            list,
+        } = self;
+        let mut spec = TextSpec {
+            text: String::new(),
+            size: *size,
+            fill: fill.clone(),
+            align: *align,
+            line_height: *line_height,
+            letter_spacing: *letter_spacing,
+            paragraph_spacing: *paragraph_spacing,
+            width: *width,
+            font: font.clone(),
+            italic: *italic,
+            bold: *bold,
+            underline: *underline,
+            strike: *strike,
+            along: along.clone(),
+            along_offset: *along_offset,
+            runs: Vec::new(),
+            list: *list,
+        };
         let Some(run) = run else {
             return spec;
         };

@@ -13289,26 +13289,16 @@ pub fn artboard_pixels(
         0
     };
     let (w, h) = (pw as u32, ph as u32);
-    // Only where the room for it can be had: asked for blind, the margin
-    // on a frame ten thousand pixels square with a shadow stopped the
-    // engine, where without it the frame had exported. Asked in pieces,
-    // since one request past 2 GB is refused on 32-bit WebAssembly.
-    if past > 0 {
-        let bytes = ((w + 2 * past) as usize)
-            .saturating_mul((h + 2 * past) as usize)
-            .saturating_mul(std::mem::size_of::<chitrakar_color::LinearRgba>() * 2);
-        let mut held: Vec<Vec<u8>> = Vec::new();
-        let mut left = bytes;
-        while left > 0 {
-            let take = left.min(1 << 30);
-            let mut piece: Vec<u8> = Vec::new();
-            if piece.try_reserve_exact(take).is_err() {
-                past = 0;
-                break;
-            }
-            held.push(piece);
-            left -= take;
-        }
+    // Only on a frame of a size whose margin is cheap. Asked for blind,
+    // the margin on a frame ten thousand pixels square with a shadow
+    // stopped the engine; and asking first whether there was room grew
+    // the engine's memory to its ceiling to find out — memory a
+    // WebAssembly page never gives back — so the drawing after it found
+    // none, and frames of eight thousand that had exported stopped it.
+    // Past this many pixels a frame is drawn to its edge, as it was.
+    const MARGIN_MOST: u64 = 48_000_000;
+    if (w as u64 + 2 * past as u64) * (h as u64 + 2 * past as u64) > MARGIN_MOST {
+        past = 0;
     }
     let fit = Transform {
         a: pw / width,
@@ -14132,7 +14122,14 @@ pub fn effect_pixels(
     }
     let scale = scale.max(1e-3);
     // The layer's box grown by its effects' reach, in the space it sits in.
-    let Bounds::Rect(x0, y0, x1, y1) = bounds_in_parent_space(doc, id)? else {
+    // A live copy whose original wears an effect is said to reach
+    // everywhere, and its own shadow was left out of every PDF; what it
+    // draws is its own box and as far as any effect reaches past it.
+    let bounds = match bounds_in_parent_space(doc, id)? {
+        Bounds::Everything => drawn_bounds_in_parent_space(doc, id)?,
+        b => b,
+    };
+    let Bounds::Rect(x0, y0, x1, y1) = bounds else {
         return Ok(None);
     };
     let (x0, y0) = (x0.floor(), y0.floor());

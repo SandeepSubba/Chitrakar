@@ -133,6 +133,12 @@ struct Clipboard {
     /// other layer, and a copy is only taken to follow the one there
     /// that is this one (a document saved and opened again).
     followed: std::collections::HashMap<NodeId, String>,
+    /// The look of every style a copied layer followed, by name, as it
+    /// was when copied: pasted back, a layer follows the style kept
+    /// under that name only if it is still that look. A style forgotten
+    /// and another kept under its name (the panel names them alike) is
+    /// another look, and the pasted layer was restyled by it.
+    styles: std::collections::HashMap<String, String>,
 }
 
 #[derive(Clone)]
@@ -1694,11 +1700,15 @@ impl Session {
             if spare.iter().map(|(_, n)| n).sum::<usize>() <= HISTORY_PICTURES_MOST {
                 return;
             }
-            // Pictures no step still standing names go first.
+            // Pictures no step still standing names go first — and the
+            // redo list a step cleared is still standing: taken back, the
+            // step gives it back (`take_back`), and freed from under it,
+            // five photographs redone came back empty.
             let said: Vec<String> = self
                 .undo
                 .iter()
                 .chain(self.redo.iter())
+                .chain(self.cleared_redo.iter().flat_map(|(_, list)| list.iter()))
                 .map(|e| serde_json::to_string(&e.inverse).unwrap_or_default())
                 .collect();
             let mut freed = false;
@@ -1709,6 +1719,11 @@ impl Session {
                 }
             }
             if freed {
+                continue;
+            }
+            // Then the redo list a step cleared, which only a step taken
+            // back would give back — before any step that can be undone.
+            if self.cleared_redo.take().is_some() {
                 continue;
             }
             // Then the oldest step, and round again.
@@ -3171,6 +3186,10 @@ impl Session {
             let mut outline = node.clone();
             outline.kind = outline_kind;
             outline.transform = node.transform.compose(Transform::translation(x0, y0));
+            // The outline is a fill now, no longer the look a style gave
+            // the line: still following, a style kept again gave the ring
+            // the style's fill and a fresh stroke.
+            outline.style = None;
             cmds.push(Command::AddNode {
                 parent,
                 index,
@@ -3196,6 +3215,10 @@ impl Session {
             plain.locked = false;
             plain.clipped = false;
             plain.visible = true;
+            // The group follows the style, as text turned to outlines
+            // does; its two pieces are not the look any more, and kept
+            // again it restyled both.
+            plain.style = None;
             let mut filled = plain.clone();
             filled.name = format!("{} fill", node.name);
             if let NodeKind::Vector { stroke, .. } = &mut filled.kind {
@@ -4901,6 +4924,19 @@ impl Session {
         )
     }
 
+    /// Whether a copy has layers of its own that are not drawn: its
+    /// original was given an opacity, a blend, a mask or effects after
+    /// they were made, and is drawn as a whole. They came back with
+    /// none of that, and the panel had nothing to say about them.
+    pub fn stand_ins_set_aside(&self, instance: NodeId) -> bool {
+        match self.doc.node(instance).map(|n| &n.kind) {
+            Ok(NodeKind::Instance { of, replaces }) => {
+                !replaces.is_empty() && !chitrakar_render::takes_stand_ins(&self.doc, *of)
+            }
+            _ => false,
+        }
+    }
+
     /// The layers of the original a copy could stand in for, as
     /// `(name, whether this copy already does)`. What the panel lists.
     pub fn overridable(&self, instance: NodeId) -> Vec<(String, bool)> {
@@ -4910,7 +4946,10 @@ impl Session {
         let NodeKind::Instance { of, replaces } = &node.kind else {
             return Vec::new();
         };
-        if !chitrakar_render::takes_stand_ins(&self.doc, *of) {
+        // A copy whose stand-ins are set aside (`stand_ins_set_aside`)
+        // still lists them, so each can be given back; one with none
+        // has nothing it can stand in for.
+        if !chitrakar_render::takes_stand_ins(&self.doc, *of) && replaces.is_empty() {
             return Vec::new();
         }
         self.doc
@@ -6748,6 +6787,10 @@ impl Session {
         for root in &roots {
             self.collect_followed(root, &mut followed);
         }
+        let mut styles = std::collections::HashMap::new();
+        for root in &roots {
+            self.collect_styles(root, &mut styles);
+        }
         CLIPBOARD.with(|c| {
             *c.borrow_mut() = Some(Clipboard {
                 roots,
@@ -6755,6 +6798,7 @@ impl Session {
                 originals,
                 from: self.origin,
                 followed,
+                styles,
             })
         });
     }
@@ -6796,6 +6840,21 @@ impl Session {
         })
     }
 
+    /// The look of each style a copied layer follows, as text, by name.
+    fn collect_styles(&self, clip: &ClipNode, out: &mut std::collections::HashMap<String, String>) {
+        if let Some(name) = &clip.node.style {
+            if let Some(kept) = self.doc.styles().iter().find(|k| &k.name == name) {
+                out.insert(
+                    name.clone(),
+                    serde_json::to_string(&kept.look).unwrap_or_default(),
+                );
+            }
+        }
+        for child in &clip.children {
+            self.collect_styles(child, out);
+        }
+    }
+
     /// What every layer a copied live copy follows is, as text.
     fn collect_followed(
         &self,
@@ -6803,13 +6862,38 @@ impl Session {
         out: &mut std::collections::HashMap<NodeId, String>,
     ) {
         if let NodeKind::Instance { of, .. } = &clip.node.kind {
-            if let Ok(node) = self.doc.node(*of) {
-                out.insert(*of, serde_json::to_string(&node.kind).unwrap_or_default());
+            if self.doc.node(*of).is_ok() {
+                out.insert(*of, self.followed_print(*of));
             }
         }
         for child in &clip.children {
             self.collect_followed(child, out);
         }
+    }
+
+    /// What a live copy follows, as text: the layer's kind and, for a
+    /// group or a frame, every layer inside it the same way. A group's
+    /// kind alone is "Group", so a copy pasted alone into another
+    /// document took up whatever group there had its original's id and
+    /// drew that.
+    fn followed_print(&self, id: NodeId) -> String {
+        let mut out = String::new();
+        let mut stack = vec![(id, 0usize)];
+        while let Some((at, depth)) = stack.pop() {
+            let Ok(node) = self.doc.node(at) else {
+                continue;
+            };
+            out.push_str(&depth.to_string());
+            out.push(':');
+            out.push_str(&serde_json::to_string(&node.kind).unwrap_or_default());
+            out.push('\n');
+            if depth < chitrakar_doc::MAX_DEPTH {
+                if let Ok(children) = self.doc.children_of(at) {
+                    stack.extend(children.iter().rev().map(|c| (*c, depth + 1)));
+                }
+            }
+        }
+        out
     }
 
     fn collect_resources(
@@ -6952,16 +7036,30 @@ impl Session {
         // here under the same name (every document numbers its styles
         // alike) is another look — left linked, the next time it was kept
         // again the pasted layers were restyled without a word.
+        // And in this document, one whose style was forgotten and
+        // another kept under its name follows nothing: that is another
+        // look (`Clipboard::styles`).
         let foreign = clip.from != self.origin;
-        let kept: std::collections::HashSet<&str> =
-            self.doc.styles().iter().map(|s| s.name.as_str()).collect();
+        let kept: std::collections::HashMap<&str, String> = self
+            .doc
+            .styles()
+            .iter()
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    serde_json::to_string(&s.look).unwrap_or_default(),
+                )
+            })
+            .collect();
         for cmd in &mut cmds {
             if let Command::AddNode { node, .. } = cmd {
-                if node
-                    .style
-                    .as_deref()
-                    .is_some_and(|s| foreign || !kept.contains(s))
-                {
+                if node.style.as_deref().is_some_and(|s| {
+                    foreign
+                        || match (kept.get(s), clip.styles.get(s)) {
+                            (Some(now), Some(was)) => now != was,
+                            _ => true,
+                        }
+                }) {
                     node.style = None;
                 }
             }
@@ -7055,9 +7153,10 @@ impl Session {
                 || match self.doc.node(*of) {
                     Err(_) => false,
                     Ok(_) if board.from == self.origin => true,
-                    Ok(node) => board.followed.get(of).is_some_and(|was| {
-                        serde_json::to_string(&node.kind).is_ok_and(|now| &now == was)
-                    }),
+                    Ok(_) => board
+                        .followed
+                        .get(of)
+                        .is_some_and(|was| self.followed_print(*of) == *was),
                 };
             if !here {
                 return Some(clip.node.name.clone());
@@ -13063,6 +13162,27 @@ impl Session {
                 ..Default::default()
             };
         }
+        // Placed rather than opened, a drawing stands where the file drew
+        // it, in the page's own units — unless it is larger than the page,
+        // when it is taken down to fit and centred, as a picture, a PDF
+        // page or a Photoshop file is: on a page chosen in the New window
+        // a drawing four times its size went in at the corner and mostly
+        // off it.
+        let (pw, ph) = (self.doc.meta.width as f32, self.doc.meta.height as f32);
+        if !opening
+            && imported.width > 0.0
+            && imported.height > 0.0
+            && (imported.width > pw || imported.height > ph)
+        {
+            let fit = (pw / imported.width).min(ph / imported.height).min(1.0);
+            holder.transform = Transform {
+                a: fit,
+                d: fit,
+                e: ((pw - imported.width * fit) / 2.0).round(),
+                f: ((ph - imported.height * fit) / 2.0).round(),
+                ..Default::default()
+            };
+        }
         cmds.push(Command::AddNode {
             parent: root,
             index,
@@ -16870,6 +16990,44 @@ mod tests {
         add_rect(&mut s, "C", 10.0, 10.0);
         assert!(s.undo().unwrap());
         assert_eq!(s.history_labels().1.len(), 1);
+    }
+
+    /// The redo list a step cleared is given back whole or not at all:
+    /// its pictures are kept while it is, and past the history's budget
+    /// the list goes before any step that can be undone. Its pictures
+    /// were freed with the list kept, and five photographs redone came
+    /// back empty.
+    #[test]
+    fn a_redo_list_given_back_keeps_its_pictures() {
+        let run = |count: u8| {
+            let mut s = Session::new(64, 64, chitrakar_color::ColorMode::Rgb);
+            // Each a megabyte, against the test build's four-megabyte budget.
+            let side = 512u32;
+            for k in 0..count {
+                let px: Vec<u8> = (0..side * side)
+                    .flat_map(|i| [k * 40, (i % 251) as u8, 7, 255])
+                    .collect();
+                s.place_rendered(side, side, px, &format!("photo{k}"))
+                    .unwrap();
+            }
+            for _ in 0..count {
+                assert!(s.undo().unwrap());
+            }
+            add_rect(&mut s, "stroke", 4.0, 4.0);
+            assert!(s.take_back().unwrap(), "the new step can be taken back");
+            let mut redone = 0;
+            while s.redo().unwrap() {
+                redone += 1;
+            }
+            assert!(
+                s.missing_pictures().is_empty(),
+                "{:?}",
+                s.missing_pictures()
+            );
+            redone
+        };
+        assert_eq!(run(3), 3, "within the budget, all of it is given back");
+        assert_eq!(run(5), 0, "past it, none of it, rather than empty pictures");
     }
 
     /// A layer standing upright inside a turned group is exported (and
@@ -24476,6 +24634,60 @@ mod tests {
         check(&mut s, "the base moved over it");
     }
 
+    /// A style follower turned to shapes: the pieces are not the look
+    /// any more and follow nothing; the group (with a fill) or the ring
+    /// (without one) is what is left. Still following, keeping the style
+    /// again gave the stroke's ring the style's fill and a fresh stroke.
+    #[test]
+    fn a_followers_stroke_turned_to_shapes_lets_the_pieces_go() {
+        let mut session = Session::new(100, 100, ColorMode::Rgb);
+        let button = add_rect(&mut session, "button", 40.0, 20.0);
+        let stroke = chitrakar_doc::Stroke {
+            color: AuthoredColor::Srgb {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+            width: 4.0,
+            widths: Vec::new(),
+            cap: chitrakar_doc::StrokeCap::Round,
+            join: chitrakar_doc::StrokeJoin::Miter,
+            dash: Vec::new(),
+            dash_offset: 0.0,
+            align: None,
+            start_marker: Default::default(),
+            end_marker: Default::default(),
+        };
+        session
+            .apply(Command::SetKind {
+                id: button,
+                kind: Box::new(NodeKind::Vector {
+                    shape: VectorShape::Rect {
+                        width: 40.0,
+                        height: 20.0,
+                        radius: 0.0,
+                    },
+                    fill: Some(AuthoredColor::Srgb {
+                        r: 1.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    stroke: Some(stroke),
+                    gradient: None,
+                }),
+            })
+            .unwrap();
+        session.keep_style("Button", button).unwrap();
+        let group = session.outline_stroke(button).unwrap();
+        let doc = session.document();
+        assert_eq!(doc.node(group).unwrap().style.as_deref(), Some("Button"));
+        for piece in doc.children_of(group).unwrap() {
+            assert_eq!(doc.node(*piece).unwrap().style, None, "{piece:?}");
+        }
+    }
+
     /// A live copy pasted alone into another document is refused there,
     /// though a layer there has the id of the one it copies: an id means
     /// nothing outside the document it was made in.
@@ -24508,6 +24720,22 @@ mod tests {
         assert!(refused.contains("copy that layer too"), "{refused}");
         // Back in its own document it pastes as it always did.
         assert_eq!(a.paste(None).unwrap().len(), 1);
+
+        // A copy of a group, where the other document has a group of
+        // other things at that id: a group's kind is only "Group", so
+        // this one was taken for it and drew the other's layers.
+        let mut a = Session::new(40, 20, ColorMode::Rgb);
+        let red = add_rect(&mut a, "red", 10.0, 10.0);
+        let logo = a.group_nodes(&[red], "Logo").unwrap();
+        let copy = a.make_instance(logo).unwrap();
+        a.copy_node(copy).unwrap();
+        let mut b = Session::new(40, 20, ColorMode::Rgb);
+        let bar = add_rect(&mut b, "bar", 30.0, 4.0);
+        let footer = b.group_nodes(&[bar], "Footer").unwrap();
+        assert_eq!(footer, logo, "the same id in both");
+        let refused = b.paste(None).unwrap_err().to_string();
+        assert!(refused.contains("copy that layer too"), "{refused}");
+        assert_eq!(a.paste(None).unwrap().len(), 1);
     }
 
     /// A layer pasted into a document without the style it follows
@@ -24526,6 +24754,21 @@ mod tests {
             a.document().node(back).unwrap().style.as_deref(),
             Some("Style 1")
         );
+
+        // In its own document, with the style forgotten and another look
+        // kept under its name, it follows nothing: the name is all the
+        // two share.
+        a.copy_node(rect).unwrap();
+        a.forget_style("Style 1").unwrap();
+        let other = add_rect(&mut a, "other", 5.0, 5.0);
+        a.apply(Command::SetOpacity {
+            id: other,
+            opacity: 0.5,
+        })
+        .unwrap();
+        a.keep_style("Style 1", other).unwrap();
+        let again = a.paste(None).unwrap()[0];
+        assert_eq!(a.document().node(again).unwrap().style, None);
     }
 
     /// A style given to layers already wearing it, and kept again as it
@@ -32947,6 +33190,34 @@ mod tests {
     /// the copy silently stopped drawing one of the original's layers and
     /// started overriding another. Nothing said so; the file was written
     /// that way too.
+    /// A copy's own layers set aside by an opacity given to its original
+    /// are said to be (`stand_ins_set_aside`), still listed so each can
+    /// be given back, and come back when the opacity goes.
+    #[test]
+    fn stand_ins_set_aside_by_the_originals_opacity_are_said_to_be() {
+        let mut session = Session::new(100, 50, ColorMode::Rgb);
+        let mark = add_rect(&mut session, "mark", 10.0, 10.0);
+        let logo = session.group_nodes(&[mark], "Logo").unwrap();
+        let copy = session.make_instance(logo).unwrap();
+        session.override_child(copy, 0).unwrap();
+        assert!(!session.stand_ins_set_aside(copy));
+        session
+            .apply(Command::SetOpacity {
+                id: logo,
+                opacity: 0.9,
+            })
+            .unwrap();
+        assert!(session.stand_ins_set_aside(copy));
+        assert_eq!(session.overridable(copy), vec![("mark".to_string(), true)]);
+        // Given back: the copy is plain again, and nothing is set aside.
+        session.clear_override(copy, 0).unwrap();
+        assert!(!session.stand_ins_set_aside(copy));
+        assert!(session.overridable(copy).is_empty());
+        session.undo().unwrap();
+        session.undo().unwrap();
+        assert!(!session.stand_ins_set_aside(copy), "the opacity undone");
+    }
+
     #[test]
     fn a_stand_in_holds_to_its_layer_when_the_originals_are_shuffled() {
         let mut session = Session::new(200, 100, ColorMode::Rgb);

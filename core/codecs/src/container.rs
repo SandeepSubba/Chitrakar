@@ -323,8 +323,17 @@ fn write_chitra(
     let mut zip = ZipWriter::new(Cursor::new(Vec::with_capacity(size)));
     zip.start_file(MANIFEST_PATH, SimpleFileOptions::default())?;
     zip.write_all(json.as_bytes())?;
+    // A draft (`whole` false) is written after every edit, and its fonts
+    // never change between two: deflated each time, four faces held the
+    // page half a second after every pause (two at a phone's speed).
+    // Stored, they are copied. A file saved is written once, and smaller.
+    let font_options = if whole {
+        SimpleFileOptions::default()
+    } else {
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)
+    };
     for (entry, (_, bytes)) in manifest.fonts.iter().zip(fonts) {
-        zip.start_file(&entry.file, SimpleFileOptions::default())?;
+        zip.start_file(&entry.file, font_options)?;
         zip.write_all(bytes)?;
     }
     for (id, png) in &pictures {
@@ -668,6 +677,25 @@ mod tests {
         // The document itself still holds them: undo may want them back.
         assert_eq!(doc.resources().count(), 3);
         assert_eq!(doc.originals().count(), 2);
+    }
+
+    /// A draft's fonts are stored, not deflated — they are written after
+    /// every edit and never change between two — and open as they went
+    /// in; a file saved still deflates them.
+    #[test]
+    fn a_drafts_fonts_are_stored_and_come_back() {
+        let doc = Document::new(16, 16, ColorMode::Rgb);
+        // A face's worth of bytes that deflate well, as a font's tables do.
+        let face: Vec<u8> = (0..200_000u32).map(|i| (i % 7) as u8).collect();
+        let fonts = [("Face", face.as_slice())];
+        let skeleton = save_chitra_skeleton(&doc, &fonts).unwrap();
+        let whole = save_chitra_with_fonts(&doc, &fonts).unwrap();
+        assert!(skeleton.len() > face.len(), "stored: {}", skeleton.len());
+        assert!(whole.len() < face.len() / 10, "deflated: {}", whole.len());
+        for bytes in [&skeleton, &whole] {
+            let opened = load_chitra_with_fonts(bytes).unwrap();
+            assert_eq!(opened.fonts, vec![("Face".to_string(), face.clone())]);
+        }
     }
 
     /// A draft is a skeleton and its parts: the skeleton holds neither the

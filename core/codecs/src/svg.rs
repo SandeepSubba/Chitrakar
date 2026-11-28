@@ -18,9 +18,15 @@ pub fn export_svg(doc: &Document) -> Result<String, DocError> {
     LAYER_IDS.with(|ids| ids.borrow_mut().clear());
     WITHIN.with(|w| w.borrow_mut().clear());
     let mut out = String::new();
+    // Text is set at our own advances, its underlines and strikes drawn
+    // as rects at our positions and its lines pinned where they start; a
+    // browser asked for nothing rounds every advance to a whole pixel
+    // (Chromium on Linux), and a heading's strike began seven pixels
+    // short of its words. Asked for geometric precision it sets them as
+    // we do.
     let _ = write!(
         out,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" text-rendering="geometricPrecision">"#,
         w = doc.meta.width,
         h = doc.meta.height
     );
@@ -98,6 +104,10 @@ fn carried_faces(doc: &Document) -> String {
         if !drawn(*id) {
             continue;
         }
+        // What a reader may ask of a face is asked of the block's whole
+        // text, so once a face is enough: asked once a run, 1,600 styled
+        // runs on 40,000 letters shaped them all 1,600 times (23 s).
+        let mut asked: std::collections::HashSet<(usize, String)> = Default::default();
         for run in chitrakar_render::text::placed(spec).runs {
             let key = (
                 run.family.clone(),
@@ -110,12 +120,14 @@ fn carried_faces(doc: &Document) -> String {
                 .or_insert_with(|| (run.face.bytes, Default::default()));
             entry.1.extend(run.glyphs.iter().map(|g| g.id));
             // And what a browser may ask of the face that this did not set.
-            entry
-                .1
-                .extend(chitrakar_render::text::glyphs_a_reader_may_ask(
-                    run.face.bytes,
-                    &spec.text,
-                ));
+            if asked.insert((run.face.bytes.as_ptr() as usize, run.face.name.clone())) {
+                entry
+                    .1
+                    .extend(chitrakar_render::text::glyphs_a_reader_may_ask(
+                        run.face.bytes,
+                        &spec.text,
+                    ));
+            }
         }
     }
     let mut css = String::new();
@@ -4138,6 +4150,14 @@ mod tests {
 
         let svg = export_svg(&doc).unwrap();
         assert!(svg.starts_with("<svg "), "root element");
+        // Text set at our advances, not a browser's whole pixels.
+        assert!(
+            svg.lines()
+                .next()
+                .unwrap()
+                .contains(r#"text-rendering="geometricPrecision""#),
+            "the root asks for exact text"
+        );
         assert!(svg.contains(r#"viewBox="0 0 320 200""#));
         assert!(svg.contains(
             r##"<rect width="40" height="30" id="r" transform="matrix(1 0 0 1 10 20)" fill="#ff0000""##

@@ -1760,9 +1760,17 @@ impl Page {
                                     chitrakar_doc::StrokeCap::Round => 1,
                                     chitrakar_doc::StrokeCap::Square => 2,
                                 };
-                                let join = match align {
-                                    chitrakar_doc::StrokeAlign::Inside => 0,
-                                    _ => 1,
+                                // Dashed, the dashes turn the corners as
+                                // the line is told to (the renderer draws
+                                // them as lines); the PDF kept its own
+                                // join and Corners changed only the page.
+                                let dashed = stroke.dash.iter().any(|d| *d > 0.0);
+                                let join = match (dashed, stroke.join, align) {
+                                    (true, chitrakar_doc::StrokeJoin::Miter, _) => 0,
+                                    (true, chitrakar_doc::StrokeJoin::Round, _) => 1,
+                                    (true, chitrakar_doc::StrokeJoin::Bevel, _) => 2,
+                                    (false, _, chitrakar_doc::StrokeAlign::Inside) => 0,
+                                    (false, _, _) => 1,
                                 };
                                 let _ = writeln!(self.content, "{cap} J {join} j");
                                 let w = num(stroke.width);

@@ -188,6 +188,10 @@ without reading anything else.*
      half, the subject's matte a staircase, a filled shape's border not
      its own, a pen's double-click doubling an anchor, typed text pushed
      off a phone.
+     The fifty-ninth: Illustrator's symbols missing from its SVGs, a
+     lone live copy drawing another document's group, a copy's shadow
+     left out of the PDF, a styled article seconds a keystroke, every
+     tablet tap on a corner a step.
      ⬜ until a broad pass finds nothing.
   2. *The release pipeline has never run.* `release.yml` is on this
      branch only — GitHub registers a workflow from the default branch —
@@ -13116,6 +13120,83 @@ without reading anything else.*
   of a few pixels develop unlike their preview; a long edge far smaller
   than the picture writes a resolution of a few dpi; kept export setups
   are named without their area.
+  **A fifty-ninth audit (November 2026).** Its check of round 58: the room past a
+  frame's edge was asked for by reserving it first, which grew the
+  engine's memory to its ceiling — memory a page never gets back — and
+  frames of eight and nine thousand pixels that had exported stopped the
+  engine (the margin only on frames up to 48 megapixels, the rest drawn
+  to the edge as before); the redo list a step cleared kept naming
+  pictures the history freed past its budget, and five photographs
+  redone after Escape came back empty (its pictures kept while it is,
+  and the list let go of before any step that can be undone); Corners
+  was offered on a plain sharp rect, whose border is round at every
+  outer corner whatever is asked (offered when it is dashed, and a
+  dashed rect's PDF turns its corners as told); a press on the rail that
+  picked no tool left the rail's scroll held, and the next tool picked
+  by key put it back (held for its own press only); a drawing larger
+  than a page chosen in New went in at the corner (taken down to fit and
+  centred). Limits: a long line typed on a phone runs off its side once
+  it is wider than the canvas, and the block is lifted further than it
+  needs; an export of what is picked with a region over a photograph
+  carries the camera of the photograph under the region's first layer;
+  an anchor added on a turned curve moves its edge's antialiasing.
+  Its files pass, a designer handing work out and taking it back: our
+  SVG reader cut a `<use>` of a `<symbol>` by the symbol's viewport laid
+  without the use's own transform (usvg gives that group its parent's
+  placement), so a moved symbol showed a corner and Illustrator's
+  instances, placed by a matrix, nothing (placed where its child, the
+  use itself, stands); the crash draft deflated every carried font after
+  each edit, half a second with four faces and two at a phone's speed
+  (a draft stores them); a block of text in many styled runs cost runs
+  times length — every word and line sorted all the runs again and
+  copied the whole text once a piece (800 runs on 20,000 letters: a
+  fifth of a second to lay out natively, now 27 ms), and the SVG writer
+  shaped the whole text once a run (23 s for 1,600; once a face); a
+  pattern whose tile was not a whole number of pixels showed seams
+  (drawn to fill its pixels); text in our SVGs drifted from its own
+  underlines in a browser rounding advances (the root asks for
+  geometric precision). Limits: a bold the face lacks is thickened by
+  us and synthesised wider by a browser; SVG and PDF exports say nothing
+  of what they turn into pictures; a WOFF face in an SVG's `@font-face`
+  is not read; a span with a glyph its face lacks comes back in the
+  fallback face whole; `currentColor` from a `:root` rule reads black;
+  PDF font names carry no subset tag; a missing glyph copies out of the
+  PDF as another character; frame, region and page export names are
+  spelled three ways; a .chitra carries whole faces.
+  Its editing pass, a design system built for reuse: a live copy of a
+  group pasted alone into another document drew whatever group there had
+  its original's id, a group's kind being only "Group" (what a copy
+  follows is told by its whole subtree); a copy's own layers were set
+  aside without a word once its original was given an opacity, blend,
+  mask or effects (said in the panel, and each can be given back); a
+  copy's own shadow was left out of the PDF when its original wore an
+  effect, its box taken as everything (its own box and what effects
+  reach); Stroke to shape on a style follower left both pieces following
+  (the group follows); a follower pasted after its style was forgotten
+  and another kept under the name followed the new look (only the look
+  it was copied with). Limits: a filter below a turned shape changes its
+  edge's antialiasing by up to a quarter; a style's source follows the
+  palette and its other followers keep the flat copy; effect colours and
+  any gradient stop past the first take no palette entry; there is no
+  way to detach a whole copy into a group; blend steps between two ends
+  of one palette entry are flat; outlined text's pieces do not follow a
+  text style; Offset path's contour follows the style.
+  Its interface pass, a keyboard alone, a tablet with a pen and a slow
+  laptop: a pen's or finger's tap on a handle, side, anchor or knob
+  drifted a pixel and scaled or moved it, a step each (held still within
+  a nib's or a finger's wobble); Pen taps on a tablet made smooth
+  anchors with stubs of handles (a wobble by what pressed); Ungroup left
+  nothing picked (what it held stays picked); Select all then Delete on a
+  row inside a group took that one layer (it goes with its group); the
+  curve's picked point was never said (said as it is moved); the zoom box
+  was invalid at any zoom between fives. Limits: the keyboard cannot put
+  a layer into a group or take it out; guides come only from the rulers;
+  a heavy document at a slow laptop's speed freezes for seconds a zoom
+  with nothing said; a one-finger pan stops when a pen hovers; a pen's
+  eraser end does nothing; some touch targets are under 24 pixels; a
+  rail flyout closes on the arrows; the layer list stops at 45% of the
+  height; the lists are unnamed to a screen reader and nothing is said
+  after undo.
   **A fifty-eighth audit (November 2026).** Its check of round 57: a
   frame ten thousand pixels square with a shadow stopped the engine on
   export, its room past the edge asked for blind (only where it can be

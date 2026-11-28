@@ -1451,7 +1451,27 @@ fn rect_of(rings: &[Vec<[f32; 2]>]) -> Option<[f32; 4]> {
 /// all resolved by then as well; a clip *on* the clip path narrows it,
 /// which is an intersection like any other.
 fn clip_rings(group: &usvg::Group) -> Option<Vec<Vec<[f32; 2]>>> {
-    clip_region(group.clip_path()?, group.abs_transform())
+    clip_region(group.clip_path()?, clip_placement(group))
+}
+
+/// Where a clipped group truly stands. The group usvg makes for a
+/// `<use>` of a `<symbol>` — the symbol's viewport as a clip — carries
+/// the `<use>`'s transform but is given its parent's absolute transform,
+/// so the viewport was laid unmoved by it: a symbol placed with a
+/// translate showed a corner, and Illustrator's instances (placed by a
+/// matrix on the `<use>`) showed nothing. Its one child is the `<use>`
+/// itself, transform reset and placed right, so that child's absolute
+/// transform is the group's. Anywhere else a child of no transform of
+/// its own stands where its group does, so this is the same answer.
+fn clip_placement(group: &usvg::Group) -> usvg::Transform {
+    group
+        .children()
+        .iter()
+        .find_map(|c| match c {
+            usvg::Node::Group(g) if g.transform().is_identity() => Some(g.abs_transform()),
+            _ => None,
+        })
+        .unwrap_or_else(|| group.abs_transform())
 }
 
 /// One clip path's region placed by `at`, the referring group's
@@ -3047,6 +3067,12 @@ fn pattern_picture(
     if (tw as f32) * (th as f32) > PATTERN_MOST {
         return None;
     }
+    // Drawn to fill its whole pixels: a tile 22.6 pixels across, drawn
+    // at its own scale into 23, left its last column part clear, and
+    // every repeat of it showed as a seam. Stretched by that fraction
+    // here and shrunk by it again where it is laid, it lands where it
+    // was meant to.
+    let (sx, sy) = (tw as f32 / rect.width(), th as f32 / rect.height());
     let tile = draw_tile(pattern.root(), tw, th, sx, sy)?;
     // Page → tile pixels: the inverse of where the tile's pixels land.
     let place = seen
@@ -5024,6 +5050,85 @@ mod tests {
         let cmds = imported.into_commands(&mut out, root, 0, first);
         out.apply(Command::Batch(cmds)).unwrap();
         out
+    }
+
+    /// A pattern whose tile is not a whole number of pixels shows no seams:
+    /// a tile wholly covered stays wholly covered. Seen at 200/53, a
+    /// six-unit tile is 22.6 pixels, and was drawn into 23 with its last
+    /// column part clear, a grid of lines at two-thirds alpha.
+    #[test]
+    fn a_pattern_of_part_pixels_has_no_seams() {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 53 53"><defs><pattern id="p" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#1a5fb4"/></pattern></defs><rect width="53" height="53" fill="url(#p)"/></svg>"##;
+        let doc = brought_in(svg, 200, 200);
+        let px = chitrakar_render::render(&doc).unwrap();
+        // Inside the page by a pixel, where the shape's own edge is not.
+        let thin = (1..199)
+            .flat_map(|y| (1..199).map(move |x| (x, y)))
+            .filter(|&(x, y)| px.pixels[(y * 200 + x) as usize].a < 0.99)
+            .count();
+        assert_eq!(thin, 0, "pixels short of opaque inside the pattern");
+    }
+
+    /// A `<use>` of a `<symbol>` is cut by the symbol's viewport where the
+    /// `<use>` puts it: moved, scaled or placed by Illustrator's matrix,
+    /// the whole circle shows. The viewport was laid without the use's
+    /// own transform, so a moved symbol showed a corner and Illustrator's
+    /// instances nothing.
+    #[test]
+    fn a_symbol_used_is_cut_where_it_is_put() {
+        let covered = |svg: &str, w: u32, h: u32| {
+            let doc = brought_in(svg, w, h);
+            let px = chitrakar_render::render(&doc).unwrap();
+            px.pixels.iter().filter(|p| p.a > 0.5).count()
+        };
+        let head = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="200" height="200">"#;
+        let circle = r#"<symbol id="B" viewBox="0 0 40 40"><circle cx="20" cy="20" r="20" fill="red"/></symbol>"#;
+        let area = std::f32::consts::PI * 400.0;
+        let moved = covered(
+            &format!(
+                r##"{head}{circle}<use xlink:href="#B" width="40" height="40" transform="translate(25 25)"/></svg>"##
+            ),
+            200,
+            200,
+        );
+        assert!((moved as f32 - area).abs() < 40.0, "moved: {moved}");
+        let scaled = covered(
+            &format!(
+                r##"{head}{circle}<use xlink:href="#B" width="40" height="40" transform="scale(1.5)"/></svg>"##
+            ),
+            200,
+            200,
+        );
+        assert!(
+            (scaled as f32 - area * 2.25).abs() < 80.0,
+            "scaled: {scaled}"
+        );
+        // Illustrator's own form: the viewBox about the middle, the use
+        // offset by half and placed by a matrix.
+        let illustrator = covered(
+            &format!(
+                r##"{head}<symbol id="B" viewBox="-20 -20 40 40"><circle r="20" fill="red"/></symbol><use xlink:href="#B" width="40" height="40" x="-20" y="-20" transform="matrix(1 0 0 1 45 45)" style="overflow:visible;"/></svg>"##
+            ),
+            200,
+            200,
+        );
+        assert!(
+            (illustrator as f32 - area).abs() < 40.0,
+            "Illustrator's: {illustrator}"
+        );
+        // Still cut by the viewport: a circle reaching past it is not
+        // shown past it.
+        let cut = covered(
+            &format!(
+                r##"{head}<symbol id="B" viewBox="0 0 40 40"><circle cx="40" cy="40" r="20" fill="red"/></symbol><use xlink:href="#B" width="40" height="40" transform="translate(25 25)"/></svg>"##
+            ),
+            200,
+            200,
+        );
+        assert!(
+            (cut as f32 - area / 4.0).abs() < 30.0,
+            "cut to a quarter: {cut}"
+        );
     }
 
     /// One blended layer inside an isolated group blends with nothing but

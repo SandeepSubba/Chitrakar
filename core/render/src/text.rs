@@ -634,15 +634,67 @@ fn pieces_in(spec: &TextSpec, at: usize, len: usize) -> Vec<(usize, usize, Optio
     if spec.runs.is_empty() {
         return vec![(0, len, None)];
     }
-    spec.pieces()
-        .into_iter()
-        .filter_map(|(s, e, r)| {
+    let all = block_pieces(spec);
+    // The pieces are in order and do not overlap: the first one that ends
+    // past `at` is where this stretch begins.
+    let first = all.partition_point(|&(_, e, _)| e <= at);
+    all[first..]
+        .iter()
+        .take_while(|&&(s, _, _)| s < at + len)
+        .filter_map(|&(s, e, r)| {
             let (s, e) = (s.max(at), e.min(at + len));
             // Lazily: a piece that ends before this stretch begins would
             // subtract its way past zero on the way to being discarded.
             (s < e).then(|| (s - at, e - at, r))
         })
         .collect()
+}
+
+/// The block's pieces (`TextSpec::pieces`), kept from the last block
+/// asked about. Setting a block asks for a stretch of it once a word and
+/// once a line, and every answer sorted all of its runs again: 800
+/// styled runs on 20,000 letters took a fifth of a second to lay out
+/// natively, a keystroke seconds on the page. They depend on the runs'
+/// ends and the text's length alone wherever every end is a character
+/// boundary of the text — which is when they are kept and when they are
+/// taken again.
+fn block_pieces(spec: &TextSpec) -> std::rc::Rc<Vec<(usize, usize, Option<usize>)>> {
+    type Kept = (
+        Vec<(usize, usize)>,
+        usize,
+        std::rc::Rc<Vec<(usize, usize, Option<usize>)>>,
+    );
+    thread_local! {
+        static KEPT: std::cell::RefCell<Option<Kept>> = const { std::cell::RefCell::new(None) };
+    }
+    let len = spec.text.len();
+    let whole = spec.runs.iter().all(|r| {
+        spec.text.is_char_boundary(r.start.min(len)) && spec.text.is_char_boundary(r.end.min(len))
+    });
+    if !whole {
+        return std::rc::Rc::new(spec.pieces());
+    }
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if let Some((ends, n, pieces)) = kept.as_ref() {
+            if *n == len
+                && ends.len() == spec.runs.len()
+                && ends
+                    .iter()
+                    .zip(&spec.runs)
+                    .all(|(&(s, e), r)| s == r.start && e == r.end)
+            {
+                return pieces.clone();
+            }
+        }
+        let pieces = std::rc::Rc::new(spec.pieces());
+        *kept = Some((
+            spec.runs.iter().map(|r| (r.start, r.end)).collect(),
+            len,
+            pieces.clone(),
+        ));
+        pieces
+    })
 }
 
 /// Shape one stretch set in one styling, carrying the pen on from

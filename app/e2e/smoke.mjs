@@ -1011,6 +1011,17 @@ assert(after[1] > before[1], `editing exposure brightened pixel (g ${before[1]} 
     (await page.locator('[aria-label="Tone curve"] .ghost').count()) === 1,
     "the channel that has a curve is drawn behind the one in hand",
   );
+  // From the keyboard, the picked point is said: which, and where.
+  await page.locator('[aria-label="Tone curve"]').focus();
+  await page.keyboard.press("]");
+  await page.waitForTimeout(100);
+  const sayCurve = await page.locator(".curve-row .said-only").first().textContent();
+  assert(
+    /^Point 2 of \d+: in \d+, out \d+$/.test(sayCurve ?? ""),
+    `the picked point is said (${sayCurve})`,
+  );
+  await page.keyboard.press("[");
+  await page.locator('[aria-label="Tone curve"]').blur();
   await page.click('button[aria-label="Red channel"]');
   await page.waitForTimeout(500);
   assert(
@@ -1985,6 +1996,13 @@ assert(
   (await page.locator(".panel ul li", { hasText: "Group 1" }).count()) === 0 &&
     (await page.locator(".panel ul li", { hasText: "Path" }).count()) === 2,
   "ungroup dissolved the group",
+);
+// And what was in it stays picked, as Group leaves the group picked: with
+// nothing picked, a Duplicate or Delete straight after did nothing.
+assert(
+  (await page.locator(".panel ul li.selected", { hasText: "Path" }).count()) === 1 &&
+    (await page.locator(".panel ul li.multi", { hasText: "Path" }).count()) === 1,
+  "the layers it held are picked",
 );
 
 // 8s. History panel: jump to the first edit and back to the newest.

@@ -329,6 +329,7 @@ version = "0.1.0"
 dependencies = [
  "chitrakar-codecs",
  "chitrakar-color",
+ "chitrakar-doc",
  "hayro",
  "serde_json",
  "wasm-bindgen",

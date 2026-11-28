@@ -466,6 +466,12 @@ impl WasmSession {
             .map_err(to_js)
     }
 
+    /// Whether a copy's own layers are set aside, its original drawn as a
+    /// whole (`Session::stand_ins_set_aside`).
+    pub fn stand_ins_set_aside(&self, instance: f64) -> bool {
+        self.inner.stand_ins_set_aside(NodeId(instance as u64))
+    }
+
     /// The original's layers a copy could stand in for, as JSON: an
     /// array of `{name, own}`, `own` saying whether it already does.
     pub fn overridable_json(&self, instance: f64) -> String {
