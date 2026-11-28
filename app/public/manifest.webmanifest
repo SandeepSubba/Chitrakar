@@ -1,0 +1,201 @@
+{
+  "name": "Chitrakar",
+  "short_name": "Chitrakar",
+  "description": "Non-destructive photo and vector editor",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1e1e22",
+  "theme_color": "#2a2a30",
+  "categories": [
+    "graphics",
+    "design",
+    "photo"
+  ],
+  "icons": [
+    {
+      "src": "icons/icon-256.png",
+      "sizes": "256x256",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "share_target": {
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "files": [
+        {
+          "name": "files",
+          "accept": [
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+            "image/bmp",
+            "image/svg+xml",
+            "application/x-chitrakar",
+            ".chitra",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".bmp",
+            ".svg",
+            "image/tiff",
+            "image/avif",
+            "image/heic",
+            "image/heif",
+            "image/vnd.adobe.photoshop",
+            "application/pdf",
+            "application/postscript",
+            "image/x-dcraw",
+            ".tif",
+            ".tiff",
+            ".avif",
+            ".heic",
+            ".heif",
+            ".psd",
+            ".psb",
+            ".pdf",
+            ".ai",
+            ".3fr",
+            ".ari",
+            ".arw",
+            ".bay",
+            ".cap",
+            ".cr2",
+            ".cr3",
+            ".crw",
+            ".dcr",
+            ".dcs",
+            ".dng",
+            ".drf",
+            ".eip",
+            ".erf",
+            ".fff",
+            ".iiq",
+            ".k25",
+            ".kdc",
+            ".mdc",
+            ".mef",
+            ".mos",
+            ".mrw",
+            ".nef",
+            ".nrw",
+            ".orf",
+            ".pef",
+            ".ptx",
+            ".raf",
+            ".raw",
+            ".rw2",
+            ".rwl",
+            ".sr2",
+            ".srf",
+            ".srw",
+            ".x3f"
+          ]
+        }
+      ]
+    }
+  },
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": {
+        "application/x-chitrakar": [
+          ".chitra"
+        ],
+        "image/png": [
+          ".png"
+        ],
+        "image/jpeg": [
+          ".jpg",
+          ".jpeg"
+        ],
+        "image/webp": [
+          ".webp"
+        ],
+        "image/gif": [
+          ".gif"
+        ],
+        "image/bmp": [
+          ".bmp"
+        ],
+        "image/svg+xml": [
+          ".svg"
+        ],
+        "image/tiff": [
+          ".tif",
+          ".tiff"
+        ],
+        "image/avif": [
+          ".avif"
+        ],
+        "image/heic": [
+          ".heic",
+          ".heif"
+        ],
+        "image/vnd.adobe.photoshop": [
+          ".psd",
+          ".psb"
+        ],
+        "application/pdf": [
+          ".pdf"
+        ],
+        "application/postscript": [
+          ".ai"
+        ],
+        "image/x-dcraw": [
+          ".3fr",
+          ".ari",
+          ".arw",
+          ".bay",
+          ".cap",
+          ".cr2",
+          ".cr3",
+          ".crw",
+          ".dcr",
+          ".dcs",
+          ".dng",
+          ".drf",
+          ".eip",
+          ".erf",
+          ".fff",
+          ".iiq",
+          ".k25",
+          ".kdc",
+          ".mdc",
+          ".mef",
+          ".mos",
+          ".mrw",
+          ".nef",
+          ".nrw",
+          ".orf",
+          ".pef",
+          ".ptx",
+          ".raf",
+          ".raw",
+          ".rw2",
+          ".rwl",
+          ".sr2",
+          ".srf",
+          ".srw",
+          ".x3f"
+        ]
+      }
+    }
+  ],
+  "launch_handler": {
+    "client_mode": "focus-existing"
+  }
+}

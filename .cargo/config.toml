@@ -1,0 +1,31 @@
+# WebAssembly is built with SIMD (`simd128`): the engine, the PDF reader
+# and the raw reader. The compiler then turns the per-pixel loops (PNG
+# filtering and deflate, compositing, demosaicing, levels) into four lanes
+# at a time, which a module without it cannot do at all.
+#
+# It needs Chrome/Edge 91+, Firefox 89+ or Safari 16.4+ (iOS 16.4+), and
+# the webviews built on them; a browser without it cannot compile the
+# module, and the page says so rather than staying blank
+# (`app/src/engine.ts`, `wasmSupported`). Natively nothing changes: these
+# flags are only the wasm targets'.
+#
+# A `RUSTFLAGS` set in the environment replaces these rather than adding
+# to them, so a build that sets one must carry `-C target-feature=+simd128`
+# itself.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
+
+[target.wasm32-wasip1]
+rustflags = ["-C", "target-feature=+simd128"]
+
+# The raw reader's threaded build (`npm run build:wasm-raw`): rawler
+# decodes Fuji's compressed RAF, Canon's CR2 and CR3 and others a strip
+# to a thread with rayon, which on this target runs on WASI threads the
+# reader's worker hosts (`app/src/rawWorker.ts`). Its memory is shared and
+# may grow to 4 GB (the target's default is less than a big file needs).
+# Built as a library it has no `_initialize`, so the two things that would
+# do are exported for the worker to call: `__wasi_init_tp`, the main
+# thread's own record (without it every lock spins on an owner that was
+# never set), and the constructors.
+[target.wasm32-wasip1-threads]
+rustflags = ["-C", "target-feature=+simd128", "-C", "link-arg=--max-memory=4294967296", "-C", "link-arg=--export=__wasm_call_ctors", "-C", "link-arg=--export=__wasi_init_tp"]
